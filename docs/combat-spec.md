@@ -3,7 +3,7 @@
 Status: ✅ the whole chain from an idle unit noticing an enemy to the enemy's corpse expiring is specified from the
 decompiles **and** checked against the disassembly where the decompiler was unreliable (argument lists, signedness,
 float order, the hidden `| GUN` in `get_damage`) · 🟡 a few branches from the decompile only (marked inline: `fight`'s
-chase/give-up, healing variants, attrition, corpse lifetimes) · ❓ open items in §11, chiefly the art-derived data
+chase/give-up, corpse lifetimes) · ❓ open items in §11, chiefly the art-derived data
 (release-event frames, animation lengths, muzzle offsets) and the spline math of rockets and missiles. Nothing is
 validated against a running game yet (no replay with combat exists on this Mac).
 
@@ -2639,67 +2639,181 @@ is an ally).
 
 ## 7. Healing, repair, regeneration, attrition
 
-### 7.1 Per-frame counters (`Unit::process` @610bc0) ✅
+Ported in `engine/sim/attrition.cpp` (2026-10-23). Everything below was re-read from the decompiles, with the short
+supply functions and the float code checked in the disassembly (the decompiler dropped their return values).
+Not yet compared with a recorded game.
+
+### 7.1 Per-frame counters and the attrition tick (`Unit::process` @610bc0) ✅
 
 At the top of `Unit::process`: `recharging` (+0xae), `full` (+0xac), `waiting` (+0xad) and `healing` (+0x38) are
-each decremented if non-zero. Every 16 frames (`(frame + o) % 16 == 0`, on-map units): `targeted` (+0x3d) =
-`targeted / 4` (decay of the "how many are shooting at me" counter used by target scoring, §2), then
-`process_cloak`; every 32 frames (`(frame + o) % 32 == 0`): `process_attrition` (sets `attrition` +0x9e, the
-attrition period). Then `if attrition != 0 and (frame + o) % attrition == 0`: `process_supply`; when not
-supplied, `suffer_attrition(1)`. `process_healing` runs every frame before that block. Decoys instead count
-`spell_time` up and close themselves after `decoy_time × (general_upgrade + 2) / 2` frames.
+each decremented if non-zero; then `process_healing` runs (on or off the map). For units on the map:
+`unit_masks2 &= ~HOLD_ANIM`; every 16 frames (`(frame + o) % 16 == 0`) `targeted` (+0x3d) = `targeted / 4` and
+`process_cloak`, and inside that, every 32 frames: clear `unit_masks2` ATTRITION_SAFE (0x40000), `process_attrition`,
+then the detected-mark toggle (`m2 & 2 ? m2 &= ~2 : m2 &= ~1`). After the 16-frame block:
 
-### 7.2 `Unit::process_healing` @5e0670 🟡
+```
+if attrition (+0x9e) != 0 and (frame + o) % attrition == 0:
+    if process_supply(): unit_masks2 |= ATTRITION_SAFE
+    else if suffer_attrition(show = 1) != 0: return            // the unit died
+```
 
-Captains only, never aircraft, only when `has_damage(1)` (any chain member damaged or dead). Garrisoned units
-(`inside_up >= 0`) inside a **building**: `rate = C.unit_heal_rate[leader.get_heal_level()]`; in a Red Fort or with
-the Red Fort wonder (`has_wonder(534) == 2`) `rate = rate·100/(red_fort_heal + 100)`; ships in a DOCK (432)
-`rate = (2·rate + 2)/3`; `rate >= 1`; on frames with `(o + frame) % rate == 0`, if the building produces this
-unit (`is(type.where)`) or is a city or fort (`type vslot 0xfc`) or is(TOWER 439): `repair_damage(1, 1, 1)`,
-clear UNIT_AZTEC_DAMAGE, `healing = max(healing, rate)`. On the map: ships with Citrus (good 26) heal
-1 hp every `unit_heal_rate[0]`; AIRCRAFTCARRIER (351, strict) likewise; Antipater/Wellington generals; conquest heroes;
-Iroquois (tribe 18) idle ground units in allied territory at `iroquois_heal_rate[heal_level]`; THEMONARCH,
-napoleon-type and THECEO generals with `french_supply_heal_rate`; supply wagons (`Supplies::find_supply`) at
-`supply_heal_rate` (French +`french_supply_heal_rate`, Versailles `(v + rate)/4`); civilians/caravans/merchants/
-FISHERMEN 317 at `civilian_heal_rate` in allied territory or at sea (`repair_damage(1, 0, 1)`). Each heal is 1 hp.
+Decoys visible to an enemy (`fog cell & ~ally_mask`) also call `suffer_attrition(frame % 7 == 0)` earlier in the
+function (decoys are not simulated).
+
+### 7.2 `Unit::process_healing` @5e0670 ✅ (garrisons and generals pending)
+
+Only captains (`o_up < 0`) that are not aircraft and have damage somewhere in the chain (`has_damage(1)` @609b50: a
+dead member, `damage` or `damage_frac` from this unit down `o_down`). "Heal" below is `repair_damage(1, show, 1)`
+(vslot 0x168) followed by `healing = max(healing, rate)`; the branches marked **A** also drop UNIT_AZTEC_DAMAGE
+(0x4000) when the captain has no damage left. `tick(r)` is `r != 0 && (frame + o) % r == 0`; `rate0` is
+`unit_heal_rate[0]`; "allied cell" is a W-cell owner `>= 0` that `is_ally`.
+
+**Garrisoned** (`inside_up >= 0`): the building it is in must be valid; `rate = unit_heal_rate[get_heal_level()]`,
+`rate·100/(red_fort_heal + 100)` in a Red Fort (type 0x216) or with `has_wonder(0x216) == 2`, `(2·rate + 2)/3` for a
+ship inside a DOCK-class building (`is(0x1b0)`), at least 1. On `tick(rate)`, if the building produces this unit
+(`is(type.where)`), is a city or fort (building `flags & 0x20` or type vslot 0xfc) or `is(0x1b7)`: heal, drop
+UNIT_AZTEC_DAMAGE, `healing = max(healing, rate)`. *Not ported: garrisons are not simulated.*
+
+**Ships** (domain 1): Citrus (rare good 26, own or conquest) heals every `rate0` unless the type has
+`unit_flags & 0x10`; then, only for an aircraft carrier itself (`is(0x15f, strict)`), heal every `rate0`. Return.
+
+**Land units**: supply units never heal. `rate = supply_heal_rate`. Then, in order:
+1. Antipater-type generals (leader owns type 0x169 or 0x170): every `antipater_heal_rate`, if `has_general(0, 0x169)`
+   or `(0, 0x170)`: heal **A**. `rate` is reset to `supply_heal_rate`.
+2. CtW hero type (`conquest_game.hero_type`, CtW only): every `rate0`, heal.
+3. Iroquois (tribe bonus 18): not BLOW_COVER (0x1000), not moving (vslot 0xd8 `is_moving`), ground; every
+   `iroquois_heal_rate[get_heal_level()]` on an allied cell: heal **A**.
+4. Every `french_supply_heal_rate` (`fr`): general 0x161 on an allied cell; general 0x163 on a neutral or allied cell;
+   general 0x165 unless the unit is suffering unsupplied attrition (`ATTRITION && !ATTRITION_SAFE && !is_supply`):
+   each heals **A** at `fr`.
+5. Supply: French (tribe bonus 10) `rate += fr`; Versailles (0x218) with `versailles_supply_heal_rate = v != 0`:
+   `rate = rate == 0 ? v : (v + rate)/4`. On `tick(rate)` with `Supplies::find_supply` in range: heal **A**.
+6. Civilians: on `tick(civilian_heal_rate)`, not UNDER_ATTACK (`unit_masks2 & 1`), workers, caravans, merchants or
+   FISHERMEN (0x13d), at sea or on an allied cell: `repair_damage(1, 0, 1)` and `healing = max(healing, rate)`.
+
+With the shipped rules `supply_heal_rate` is 0, so supply wagons heal only French units (20 frames) or with Versailles.
+*Not ported: the general branches (`has_general` returns -1 until heroes exist) and the CtW hero.*
 
 ### 7.3 `Unit::repair_damage(hp, show, conquest)` @60de10 — healing and member regeneration ✅
 
 ```
-if conquest and CTW conquest rules: hp = ((bonus_cards·100 + ctw_heal_bonus)/100)·hp
+if conquest and CtW and the leader's heal cards (LeaderData +0x68ff) != 0: hp = ((cards·100 + ctw_heal_bonus)/100)·hp
 left = hp − damage                                       // computed before the clamp
-(heal underlay graphic: internal_random, UI)
+(heal underlay on the map for the console's side or allies: internal_random, UI only)
 if damage != 0: damage = min(damage, hits()); damage = damage > hp ? damage − hp : 0; damage_frac = 0
 if left > 0:
     if o_down member alive: o_down.repair_damage(left, show, 0); return           // cascade down the chain
-    if curr_uber_size(0) < type.uber_size and (garrisoned or !(unit_masks & IN_COMBAT)):
-        regenerate a dead member: s = find_free(who, 0, 2000, &unit_mark, forced = o_down) (the dead member's
-        slot, kept at the chain tail); Unit::init(who, type, s, x, y) (vslot 0x8c: **Guy::init_real RNG per guy**);
-        restore its o_up/o_down; damage = hits()/uber_size (it starts at 0 hp); copy stance and unit_masks;
-        outside: UnitType::find_nearby_spot + add_move_order(QUEUE_NEW); inside: insert_inside;
-        re-add to the selection/group/hotkey groups (groups are sim state);
+    if curr_uber_size(from the captain) < type.uber_size and (garrisoned or !(unit_masks & IN_COMBAT)):
+        the dead member is the chain tail o_down (an error report if o_down < 0)
+        s = find_free(who, 0, 2000, forced = o_down); Unit::init(who, type, s, x, y) at this unit's position
+            (vslot 0x8c: one Guy::init_real game_random draw per guy, and the counted-unit bookkeeping of
+            set_type(INIT), which is **not** undone here, unlike Objects::init_unit for a new follower ❓)
+        restore the slot's o_up / o_down; damage = hits()/uber_size (the new member starts nearly dead);
+        stance and unit_masks copied from this unit
+        outside: UnitType::find_nearby_spot(r0 0, r1 −1, step 0, angle 0x55555555, FILTER_NOT_ME, the new
+                 member) + add_move_order(kind 1, QUEUE_NEW, orig −1, −1); inside: Object::insert_inside
+        the console's selection, this unit's Group and the hotkey groups that hold this unit: remove it and add
+        it again (Group vslots 0x10 then 0x0c), so the group picks up the whole chain
         new.repair_damage(left, show, 0)
 ```
 
 `Object::repair_damage` @646f90 (buildings, base): clamp damage to hits, `damage_frac = 0`, subtract.
+*Ported, except insert_inside (garrisons) and the selection / hotkey groups (console UI state).*
 
-### 7.4 Attrition (`Unit::process_attrition` @5e11a0, `suffer_attrition` @5e1a10, `get_attrition` @608fd0) 🟡
+### 7.4 Attrition, unit side ✅
 
-`process_attrition` (every 32 frames): clears UNIT_ATTRITION|SEVERE_ATTRITION and `attrition = 0`; returns early
-inside scenario attrition-free circles (`vector_dist <= r`), on own/allied/neutral-agreement tiles, for workers
-that are gathering, merchants, heroes, supply, unarmed or special units, spies, caravans, ships, when
-`neutral_attrition`/territory rules exempt it; otherwise it computes diplomacy state (war, ally-to-war grace
-`ally_to_war_grace`/`ally_to_war_delay` stamps `broke_alliance`/`made_peace`), may call `Leader::meet`, sets
-`unit_masks |= ATTRITION | SEVERE_ATTRITION` and `attrition = peace_attrition` or `assassin_attrition` (team
-style 2 non-targets), halved for aircraft; the war case continues with supply checks and `get_attrition(owner)`.
-`get_attrition(owner)` uses **float**: `(int)((float)base × leader.anti_att × 0.00390625f)` (base 0x100, or
-`0x6400/(100 − siege_attrition)` for siege), militia `base·100/(militia_attrition + 100)`, halved for merchants
-and aircraft, 0 for idle units with FORAGING_1, divided by `att × ((attrition_aged_up × age_gap + 100)·… + 99)/100`.
-The float multiply must be reproduced in single precision (❓ x87 vs SSE: check the asm before porting).
-`suffer_attrition(show)`: `take_damage(uber == 1 ? 1 : 0, uber == 1 ? 0 : (curr_uber_size == 3 ? 6 : 16/curr_uber), death 1, ammo −1, quiet 1, 0x55555555, −1, −1, 0)`,
-i.e. 1 hp per tick for single units, 6/16 or 16/n sixteenths per member for chains. A decoy-related branch also
-calls it from `Unit::process`. Buildings: `Wall::process` @640450 applies its own damage through `take_damage`
-(not specced here).
+`Unit::process_attrition` @5e11a0 (every 32 frames, on the map). `me` = the unit's leader, `owner` = the W-cell
+owner under it.
+
+```
+unit_masks &= ~(ATTRITION | SEVERE_ATTRITION); attrition = 0
+inside one of me's scenario attrition-free points (tile distance vector_dist(dy, dx) <= radius): return
+if owner < 0:
+    if neutral_attrition[me] == 0: return
+    if not a ship: attrition = neutral_attrition[me]          // the period
+    (the original goes on reading leaders[-1], memory before the array; taken as "not a live leader": return)
+if owner == me, owner not VALID|ACTIVE, both sides allied (diplos 2 both ways),
+   take_att_disabled[me] or give_att_disabled[owner]: return
+exemptions: gathering workers whose gather action has byte +0x25 set ❓(not traced);
+   for units that are not workers, merchants, heroes or supply: unarmed (attack 0), special, spy (is 0x3a),
+   caravan; ships; neutral_attrition[me] != 0; CtW conquest bonus 9 (CtW, team style != 2)
+if not enemies, or CtW with war not yet allowed:                       // peace
+    broke = an alliance broken (broke_alliance +0x2b0, either side) less than ally_to_war_delay frames ago
+    grace = broke and that was less than ally_to_war_grace frames ago,
+            or (not grace) a peace made (made_peace +0x2d0, either side) less than ally_to_war_delay ago
+    every 900 frames at most (leader stamp +0x1f4): the border messages and S_ATTRITION_WARNING (UI); the stamp is
+        set to `max(1, ally_to_war_grace + frame − 900)` during a broken-alliance grace, else to `frame`
+    Leader::meet(owner) if not met (treaty bit 1); unit_masks |= ATTRITION | SEVERE_ATTRITION
+    if grace: return
+    attrition = peace_attrition (halved for aircraft)
+else if team style 2 and owner is not my leader's target:               // assassin
+    the same warning, meet and masks; attrition = assassin_attrition (halved for aircraft)
+ground units only (domain 0):
+    if !SEVERE_ATTRITION and the unit is a supply unit: return
+    a = get_attrition(owner); if a != 0:
+        a = max(1, (attrition_constant · a) / 256 (signed))            // constants.attrition
+        attrition = attrition == 0 ? a : min(attrition, a); unit_masks |= ATTRITION; meet(owner) if not met
+```
+
+So at war a unit suffers only in the territory of a leader with attrition techs (`att != 0`, §7.6); at peace any
+foreign, non-allied territory gives the fast border attrition (`peace_attrition` = 8 frames) regardless of techs,
+and SEVERE_ATTRITION means no supply can stop it.
+
+`UnitData::get_attrition(owner)` @608fd0 (the period from the owner's `att` and my `anti_att`):
+
+```
+if att[owner] == 0 or constants.attrition == 0: return 0
+base = 0x100; siege (type vslot 0x10c): siege_attrition > 99 → 0, else base = 0x6400 / (100 − siege_attrition)
+if not militia (is 0x42):
+    v = (int)((float)base × anti_att[me] × 0.00390625f)       // SSE single: MULSS, MULSS, CVTTSS2SI
+    if me has FORAGING_1 and the unit is idle (no current order): return 0
+else: v = base·100 / (militia_attrition + 100)
+merchants (0x3d, 0x3e, 400): v /= 2; aircraft: v /= 2
+gap = ages[owner] − ages[me]; if gap >= 0: att = ((attrition_aged_up·gap + 100)·att + 99)/100
+return v / att
+```
+
+`Unit::process_supply` @5e0560 (supplied this tick): never with SEVERE_ATTRITION, never for supply units or militia;
+true when `Supplies::find_supply` finds one in range, or the leader owns a supplying general (types 0x16b, 0x176,
+0x16e, `num_units` > 0) and `has_general` finds it.
+
+`Unit::suffer_attrition(show)` @5e1a10: the first time a leader's unit suffers, stamp +0x1f8 (and, for the console's
+side outside allied land, the "attrition" / "build supply" messages and sound: UI). Then `take_damage(hp, frac,
+death 1, ammo −1, quiet 1, angle 0x55555555, −1, −1, 0)` with `(hp, frac) = (1, 0)` when `type.uber_size == 1`, else
+`(0, 6)` for a 3-member chain or `(0, 16/n)` sixteenths for n members (from the captain); `show` plays
+`UnitOut::suffer_graphic_attrition`. Returns take_damage's result (non-zero: died).
+
+Buildings: `Wall::process` @640450 applies its own territory attrition (`construct.cpp`, not in this section).
+
+### 7.5 Supplies (`supplies.obj`) ✅
+
+One `Supply` record (0x10 bytes: slot, unit slot, flags bit 0 live, who) per supply unit (`is_supply`:
+`unit_flags2 & 0x40`), per leader, with `supply_mark` (LeaderData +0x434) one past the highest live record.
+`Unit::init` registers (`init_supply`: the first dead record below the mark, else a new one), `Unit::close` releases
+(`close_supply`: clear it, then lower the mark past dead records), and `Unit::set_type` (normal mode, games newer than
+the expansion's release build) releases or registers when the type changes supply-ness. The record index is kept in
+the unit (+0x84). `find_supply(x, y, who)` returns the first live record whose unit is alive and on the map within
+`get_radius() × 192` (`vector_dist`), else −1; `SupplyData::get_radius` = `supply_radius + supply_radius_upgrade ×
+get_supply_upgrade() (+ terra_cotta_range with wonder 0x211)` tiles. `UnitData::in_supply(&s)` @609ef0 (siege reload,
+the HUD): true for non-ground units and on the unit's own cell, else `find_supply`.
+
+### 7.6 Attrition, leader side ✅
+
+Both run in `Leader::init` and `Leader::calc_unit_stats` (LEADER_CALC_UNIT_STATS; `gain_tech` sets it).
+`Leader::calc_attrition` @6cdea0 → `att` (+0x7f0): 0 with `give_att_disabled` (+0x7f8); else n = the number of
+consecutive ATTRITION1..4 techs (TypeIndex 0x2dd..0x2e0) held, `att = n ? attrition_upgrade[n + 3] : 0`, then the
+Colosseum (0x212), Russians (tribe bonus 13), the CtW attrition card (+0x6900) and the Kremlin (0x21a) each apply
+`att = (k + 100)·att/100` with a floor of 1. `Leader::calc_anti_attrition` @6cdcc0 → `anti_att` (float, +0x7f4):
+256.0f, or 0 with `take_att_disabled` (+0x7fc); then the Foraging level (FORAGING_3/2/1 = 0x300/0x2ff/0x2fe →
+`attrition_upgrade[2/1/0]`), the Statue of Liberty (0x219), Mongols (tribe bonus 17) and Titanium (rare good 36),
+in that order: `u > 99` → 0 and stop, else `anti = (anti × 100.0f) / (float)(100 − u)` (SSE single).
+`get_heal_level` @6e12e0 counts HEAL_FASTER_1..3 (0x2ef..0x2f1) and `get_supply_upgrade` @6e0880 counts
+SUPPLY_WAGONS_1..3 (0x2fb..0x2fd), each with `has_preq`.
+
+Scenario switches (`ScenarioFuncSet`, all return −1 except `set_attrition_free_point`): enable / disable
+`take_attrition` (+0x7fc) and `give_attrition` (+0x7f8) set the flag only (the values change at the next
+calc_unit_stats); `set_attrition_free_point(who, tx, ty, r)` (1 on success, −1 for a bad leader, tile or r < 1);
+`clear_attrition_free_points(who)`; `set_neutral_attrition` (+0x800, 0..1000).
 
 ## 8. Every `game_random` draw in combat, in call order
 

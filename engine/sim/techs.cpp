@@ -1215,7 +1215,8 @@ void calc_wall_stats(Game& g, int32_t who) {
 }
 
 void calc_unit_stats(Game& g, int32_t who) {
-	// TODO(combat-spec 10 step 7): calc_attrition, calc_anti_attrition.
+	leader_calc_attrition(g, who);
+	leader_calc_anti_attrition(g, who);
 	for (int32_t o = 0; o < g.objects[size_t(who)].unit_mark; o++) {
 		Unit* u = g.unit(who, o);
 		if (!u || !u->alive()) continue;

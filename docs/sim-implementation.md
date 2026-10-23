@@ -304,7 +304,8 @@ self-check and `--fog-check` OK (6 show combat activity from idle units engaging
 
 Stubbed / approximated (TODO in code, with spec references):
 - Leader-dependent stat terms (nation powers, heroes / generals, rares, wonders, techs; combat-spec 5.1, step 8) are
-  0, except the tower / fort base range bonuses. Healing, member regeneration and attrition (step 7) are not ported.
+  0, except the tower / fort base range bonuses. Healing, member regeneration, supply and attrition (step 7) are
+  ported: see "Healing and attrition".
 - Territory (`WData.who`) is not computed, so: citizens / militia deal half damage to every building, buildings never
   count as being in unfriendly territory, and `check_target` rejects every building without BUILDTYPE_OUTSIDE (no
   man's land) — idle units never auto-acquire buildings (explicit attacks work). Unsupplied siege fires 1.5× slower.
@@ -322,6 +323,30 @@ Stubbed / approximated (TODO in code, with spec references):
 - Building death leaves the footprint's grid tiles as they were (Build / Wall close are not ported beyond
   `Object::close`).
 
+
+## Healing and attrition
+
+`engine/sim/attrition.cpp` (combat-spec 7, economy-spec 7.2-7.3, 2026-10-23):
+- Leader side: `leader_calc_attrition` / `leader_calc_anti_attrition` (`att`, the float `anti_att`) run in
+  `Leader::init` (game load) and `calc_unit_stats`; `get_heal_level`, `get_supply_upgrade`.
+- Supplies: `supplies_init_supply` / `close_supply` / `find_supply` (`Game::supplies`, `Leader::supply_mark`),
+  registered from `unit_init`, `unit_close` and `unit_set_type`; `unit_in_supply` now drives the siege reload.
+- Unit side: `process_attrition` every 32 frames, the attrition tick in `unit_process` (`process_supply` or
+  `suffer_attrition`, ATTRITION_SAFE), `unit_get_attrition` (SSE single-precision multiply).
+- `process_healing` (ships with Citrus, carriers, Iroquois, supply wagons with the French bonus / Versailles,
+  civilians) and `unit_repair_damage` with dead-member regeneration (`find_free` on the dead tail slot, `unit_init`,
+  links restored, a walk-out move, the unit's Group refreshed). The scripted heals (`set_object_health`,
+  `heal_object`) now go through it too.
+- Scenario switches: enable / disable take and give attrition, set / clear attrition-free points.
+- `RON_ATTRITION_TRACE=1` prints every attrition decision on stderr.
+
+Checks: `europe.scx --no-scripts --move 0:42@33000,33000@1` (a Soviet tank crossing German land at peace): period 8,
+ATTRITION | SEVERE_ATTRITION, exactly 1 hp every 8 frames while inside, nothing on neutral land. All 156 stock
+scenarios run 600 frames with `--ai-every 8` and the self-check OK.
+
+Stubbed (TODO in code): garrison healing and `insert_inside` (no garrisons), generals and the CtW hero (`has_general`
+is -1), CtW heal and attrition cards, the assassin target (team style 2 counts as plain war), the gathering-worker
+exemption byte, the console selection / hotkey group refresh after a regeneration.
 ## Production (engine/sim production files, docs/production-spec.md)
 
 Ported from the spec, the decompiles and the disassembly (production-spec §13 steps 1-11). Entry points:
@@ -749,8 +774,8 @@ caravan repath of City::close.
 5. ~~Fog of war~~ done (see "Fog of war"); the renderer draws the shroud from `make_fog_view` and the view's
    `seen_by` / `now_seen_by` masks. Next fog work comes with combat (`valid_target_const`, `set_attacking`), territory
    and scripts.
-6. ~~Combat~~ steps 1–6 done (see "Combat"). Next: healing / regeneration / attrition (step 7), leader bonuses
-   (step 8), packers and ATTACK_GROUND, then compare with a real replay that contains fighting.
+6. ~~Combat~~ steps 1–7 done (see "Combat", "Healing and attrition"). Next: leader bonuses (step 8), packers and
+   ATTACK_GROUND, then compare with a real replay that contains fighting.
 7. ~~Production~~ done (see "Production"), territory included.
 8. ~~Economy~~ done (see "Economy"). Next: caravan roads (PathFinder::find_road), packers (merchants), the AI parts
    (strategy_all), then compare with replays that contain gathering, trading and market commands.

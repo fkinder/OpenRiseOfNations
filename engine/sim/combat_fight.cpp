@@ -1181,13 +1181,4 @@ int32_t build_do_attack(Game& g, Build& b) {
 	return 0;
 }
 
-// ---------------------------------------------------------------- healing
-
-void process_healing(Game& g, Unit& u) {
-	// Unit::process_healing @5e0670. TODO(combat-spec 7.2): garrison healing (garrisons are not built yet), citrus
-	// ships, carriers, generals, Iroquois, supply wagons and civilian healing all need leader / territory state;
-	// nothing heals yet.
-	(void)g, (void)u;
-}
-
 }  // namespace ron::sim

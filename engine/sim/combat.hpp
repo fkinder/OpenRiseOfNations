@@ -236,7 +236,24 @@ int32_t build_do_attack(Game& g, Build& b);           // Build::do_attack @6228f
 int32_t get_garrison_arrows(const Game& g, const Build& b);  // BuildData::get_garrison_arrows @62e3d0
 int32_t get_shot(const Game& g, const Object& b);     // BuildData::get_shot @62dd90
 
-// ---------------------------------------------------------------- per-frame unit counters (combat-spec 7.1)
-void process_healing(Game& g, Unit& u);                    // Unit::process_healing @5e0670 (TODO: most branches)
+// ---------------------------------------------------------------- healing, supply, attrition (combat-spec 7; attrition.cpp)
+void process_healing(Game& g, Unit& u);                    // Unit::process_healing @5e0670
+// Unit::repair_damage(hp, show, conquest) @60de10: heals the chain from u down and regenerates dead members.
+void unit_repair_damage(Game& g, Unit& u, int32_t hp, bool show, bool conquest);
+int32_t process_attrition(Game& g, Unit& u);              // Unit::process_attrition @5e11a0 (sets u.attrition)
+bool process_supply(Game& g, Unit& u);                     // Unit::process_supply @5e0560: supplied this tick
+int32_t suffer_attrition(Game& g, Unit& u, bool show);     // Unit::suffer_attrition @5e1a10: take_damage's result
+int32_t unit_get_attrition(const Game& g, const Unit& u, int32_t owner);  // UnitData::get_attrition @608fd0
+bool unit_in_supply(const Game& g, const Unit& u, int32_t* sup);         // UnitData::in_supply @609ef0
+bool unit_has_damage(const Game& g, const Unit& u, bool from_here);      // UnitData::has_damage @609b50
+void leader_calc_attrition(Game& g, int32_t who);          // Leader::calc_attrition @6cdea0
+void leader_calc_anti_attrition(Game& g, int32_t who);     // Leader::calc_anti_attrition @6cdcc0
+int32_t get_heal_level(const Game& g, int32_t who);        // LeaderData::get_heal_level @6e12e0: 0..3
+int32_t get_supply_upgrade(const Game& g, int32_t who);    // LeaderData::get_supply_upgrade @6e0880: 0..3
+// Supplies (economy-spec 7.2): init_supply @73ad40 / close_supply @73acc0 / find_supply @73aba0 (first live on-map
+// supply unit of `who` within its radius of (x, y), or -1).
+int32_t supplies_init_supply(Game& g, int32_t who, int32_t o);
+void supplies_close_supply(Game& g, int32_t who, int32_t s);
+int32_t supplies_find_supply(const Game& g, int32_t x, int32_t y, int32_t who);
 
 }  // namespace ron::sim

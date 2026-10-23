@@ -1,6 +1,6 @@
 # Project status and how to resume
 
-Last updated 2026-10-13 (script UI, audio, front end). Read this first when picking the work back up; then `CLAUDE.md`, `docs/systems-map.md`, and
+Last updated 2026-10-23 (healing, regeneration, supply and attrition). Read this first when picking the work back up; then `CLAUDE.md`, `docs/systems-map.md`, and
 the spec for whatever you touch.
 
 ## Where things stand
@@ -58,8 +58,9 @@ CITY_GATHER orders and handlers with every game_random draw, auto-gather, farms 
 BUY / SELL / TRIBUTE / ACCEPT / REJECT, fishermen, merchants and caravans (roads TODO); economy fields in LeaderView
 (rates, caps, prices), UnitView and BuildView; `ron-sim --gather/--buy/--sell/--econ-every/...`.
 
-1. **Combat leftovers**: healing, regeneration, attrition (combat-spec §10 step 7); leader bonuses once leaders have
-   techs/rares/wonders; garrisons, packing, aircraft.
+1. **Combat leftovers**: leader bonuses once leaders have techs/rares/wonders; garrisons (and their healing),
+   packing, aircraft. Healing, regeneration, supply and attrition are ported (2026-10-23, combat-spec §7,
+   sim-implementation "Healing and attrition").
 2. **Production leftovers** (sim-implementation "Production"): garrisons, aircraft, spells, capture, AI paths,
    terraforming.
 3. **Economy leftovers** (sim-implementation "Economy"): caravan roads (PathFinder::find_road), packers (merchants

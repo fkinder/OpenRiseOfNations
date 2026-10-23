@@ -111,6 +111,7 @@ void unit_close(Game& g, Unit& u, int32_t death, int32_t gpiece, float deg) {
 			u.unit_masks &= ~umask::kEntrenched;
 		}
 		if (who < 8) g.leaders[size_t(who)].flags |= 0x800000u;  // LEADER_CALC_UNIT_STATS
+		if ((u.ptype->unit_flags2 & 0x40) && u.supply >= 0 && who < 8) supplies_close_supply(g, who, u.supply);
 		// TODO(economy / heroes): spies (Kremlin), governor hero respawn, carried production, planes leaving their
 		// carrier, gatherer doobers, Lakota / American recompute flags.
 		const int32_t t = u.type;

@@ -115,16 +115,11 @@ int32_t obj_hits_left(const Game& g, const Object& ob) {
 }
 
 int32_t unit_recharge(const Game& g, const Unit& u, int32_t* sup) {
-	// @60fdf0. TODO(combat-spec 4.3.12): in_supply needs territory (W-cell owner) and Supplies; with no territory
-	// every ground siege unit counts as unsupplied unless the cell is its own (WData.who == who).
+	// @60fdf0: siege units out of supply (UnitData::in_supply, attrition.cpp) reload slower.
 	if (sup) *sup = -1;
 	const int32_t r = u.ptype->recharge;
 	if (!type_is_siege(*u.ptype)) return r;
-	bool supplied = u.ptype->domain != kDomainGround;
-	if (!supplied) {
-		const int32_t wx = wcoord_of(u.x), wy = wcoord_of(u.y);
-		supplied = g.world.in_w(wx, wy) && g.world.w(wx, wy).who == u.who;
-	}
+	const bool supplied = unit_in_supply(g, u, sup);
 	if ((!RON_K(g, "artillery_under_attack_fires_slowly") || !(u.unit_masks2 & umask2::kUnderAttack)) && supplied)
 		return r;
 	if (type_is(*u.ptype, 267)) return r * 2;

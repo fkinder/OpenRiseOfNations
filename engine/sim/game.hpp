@@ -127,8 +127,16 @@ struct Leader {
 	        forts_built = 0, defense = 0;
 	std::array<int32_t, 6> gather_slots{}, gather_slots_high{};  // +0x8a4 / +0x8d4
 	int32_t attrition_stamp3 = 0, disable_building_attrition = 0, repair_stamp = 0;
-	int32_t take_att_disabled = 0;  // +0x7fc (disable_take_attrition; read by unit attrition, TODO(frame-spec 9))
-	int32_t neutral_attrition = 0;  // +0x800 (set_neutral_attrition; attrition in neutral territory)
+	// Attrition (combat-spec 7.4, economy-spec 7.3): att +0x7f0 (Leader::calc_attrition, the attrition this leader's
+	// territory gives), anti_att +0x7f4 (Leader::calc_anti_attrition, 256.0f = no resistance), give_att_disabled
+	// +0x7f8 (disable_give_attrition), take_att_disabled +0x7fc (disable_take_attrition), neutral_attrition +0x800
+	// (set_neutral_attrition; the attrition period in neutral territory), the warning stamps +0x1f4
+	// (process_attrition) / +0x1f8 (suffer_attrition), and supply_mark +0x434 (Supplies, highest live slot + 1).
+	int32_t att = 0;
+	float anti_att = 256.0f;
+	int32_t give_att_disabled = 0, take_att_disabled = 0, neutral_attrition = 0;
+	int32_t attrition_warn_stamp = 0, attrition_hit_stamp = 0;
+	int32_t supply_mark = 0;
 	int32_t nukes_used = 0, nukes_launched = 0, missiles_used = 0;
 	int32_t handicap = 0, difficulty = 0;  // +0x4c / +0x50 (scenario file values; difficulty = multi_diff)
 	int32_t wonderwin_timer = 0;           // +0x44c: wonder-victory clock running (flag; GameDaemon::process_victory)
@@ -475,6 +483,16 @@ public:
 	// scenario natives that set it are not ported (always 0).
 	std::array<uint8_t, 8> scen_diplomacy_setting{};
 	std::array<std::vector<RevealPoint>, 8> reveal_points{};  // ScenarioData::reveal_points (add_reveal_point)
+	// ScenarioData::attrition_free_points (set_attrition_free_point): no attrition within `radius` tiles.
+	std::array<std::vector<RevealPoint>, 8> attrition_free_points{};
+	// supplies.lists[who] (Supplies, economy-spec 7.2): one record per is_supply unit, reused by slot.
+	struct Supply {
+		int16_t o = -1;       // +0x0: this record's slot
+		int16_t unit = -1;    // +0x2: the supply unit's object slot
+		uint8_t flags = 0;    // +0x4: bit 0 live
+		int8_t who = -1;      // +0x5
+	};
+	std::array<std::vector<Supply>, 8> supplies{};
 
 	// ---- production state (docs/production-spec.md section 11)
 	std::array<std::vector<City>, 8> cities{};    // cities.lists[who]

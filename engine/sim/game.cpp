@@ -203,7 +203,11 @@ void Game::load(const GameFiles& files, const Scenario& s, const Rules& r, uint3
 		leaders[size_t(who)] = Leader();
 		leader_init_diplomacy(*this, who, -1);
 		leader_init_economy(*this, who, false);
+		leader_calc_attrition(*this, who);  // Leader::init (combat-spec 7.4)
+		leader_calc_anti_attrition(*this, who);
 	}
+	for (auto& v : supplies) v.clear();
+	for (auto& v : attrition_free_points) v.clear();
 	farms.clear();
 	hold_doobers.clear();
 	for (auto& c : caravans) c.clear();
@@ -230,6 +234,8 @@ void Game::load(const GameFiles& files, const Scenario& s, const Rules& r, uint3
 		leader_init_diplomacy(*this, p.who, p.tribe < 0 ? 0 : p.tribe);
 		leader_init_techs(*this, p.who);
 		leader_init_economy(*this, p.who, true);  // after the starting techs (type_avail of knowledge / metal / oil)
+		leader_calc_attrition(*this, p.who);
+		leader_calc_anti_attrition(*this, p.who);
 		// Leader::init's AI part (production script, personality draws; needs the human / co-op flags) before the
 		// file's child chunks (ai-spec 2.1, 2.2).
 		if (p.is_human) l.flags |= leaderflag::kHuman;

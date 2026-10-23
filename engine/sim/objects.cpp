@@ -359,7 +359,9 @@ void unit_init(Game& g, Unit& u, int32_t who, int32_t type, int32_t o, int32_t x
 		g.leaders[size_t(who)].active++;
 	}
 	if (u.ptype->unit_flags2 & 8) g.leaders[size_t(who)].caras++;
-	// Caravans::init_caravan for non-hero land caravans (economy-spec 6.1); TODO(heroes / supplies / specials).
+	// Supplies::init_supply for supply units (economy-spec 7.2).
+	if (who < 8 && (u.ptype->unit_flags2 & 0x40)) u.supply = int16_t(supplies_init_supply(g, who, o));
+	// Caravans::init_caravan for non-hero land caravans (economy-spec 6.1); TODO(heroes / specials).
 	if (who < 8 && !(u.ptype->unit_flags2 & 0x20) && (u.ptype->unit_flags2 & 8) && u.ptype->domain == 0)
 		u.cara = int16_t(caravans_init(g, who, o));
 	u.myhits = u.ptype->hits;
@@ -458,9 +460,21 @@ void unit_process(Game& g, Unit& u) {
 		// 5.
 		if ((g.frame + u.o) % 16 == 0) {
 			u.targeted = int8_t(u.targeted / 4);
-			// TODO(frame-spec 9): process_cloak, attrition every 32 frames, detected marks.
+			// TODO(frame-spec 9): process_cloak, detected marks.
+			if ((g.frame + u.o) % 32 == 0) {
+				u.unit_masks2 &= ~umask2::kAttritionSafe;
+				process_attrition(g, u);
+				// TODO(frame-spec 9): the detected-mark toggle (unit_masks2 bits 0 / 1) that follows.
+			}
 		}
-		// TODO(frame-spec 9): attrition / supply when u.attrition != 0.
+		// Attrition ticks (combat-spec 7.1): unsupplied units suffer; supplied ones are marked safe.
+		if (u.attrition != 0 && (g.frame + u.o) % u.attrition == 0) {
+			if (!process_supply(g, u)) {
+				if (suffer_attrition(g, u, true) != 0) return;
+			} else {
+				u.unit_masks2 |= umask2::kAttritionSafe;
+			}
+		}
 		work(g, u);
 		if (!u.alive()) return;
 		const int32_t squad = u.ptype->squad_size;

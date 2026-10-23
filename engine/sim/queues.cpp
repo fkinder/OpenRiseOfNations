@@ -228,7 +228,15 @@ void unit_set_type(Game& g, Unit& u, int32_t t, int32_t mode) {
 	}
 	if (mode != 0) return;
 	for (int32_t gi = 0; gi < u.guy_mark; gi++) guy_set_new_location(g, u, u.guys[size_t(gi)], u.x, u.y, true);
-	// TODO(supplies): the xpack supply registration follows unit_flags2 & 0x40.
+	// Supplies follow the new type (games newer than the expansion's release build, i.e. every Extended Edition
+	// game; the version gate is not modelled).
+	if (u.who >= 8) return;
+	const bool supply = (T.unit_flags2 & 0x40) != 0;
+	if (!supply && u.supply >= 0) {
+		supplies_close_supply(g, u.who, u.supply);
+		u.supply = -1;
+	}
+	if (supply && u.supply < 0) u.supply = int16_t(supplies_init_supply(g, u.who, u.o));
 }
 
 // ---------------------------------------------------------------- gates (6.2.4)

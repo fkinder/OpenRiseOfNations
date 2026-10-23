@@ -168,21 +168,7 @@ void leader_set_age(Game& g, int32_t w, int32_t n) {
 	calc_wall_stats(g, w);
 }
 
-// constants.ctw_heal_bonus with the leader's CTW healing cards (LeaderData +0x68ff; CTW cards are not kept: 0).
-int32_t cst_ctw_heal(const Game&) { return 0; }
 
-// Unit::repair_damage(amount, underlay, ctw) @60de10, the damage part: the CTW heal bonus, then the unit's damage
-// reduced (clamped to its hits). TODO(combat): the overflow that regenerates dead squad members (find_free + a new
-// follower) is not ported.
-void unit_repair_damage(Game& g, Unit& u, int32_t amount, bool ctw_bonus) {
-	if (ctw_bonus && g.ctw) amount = ((100 + cst_ctw_heal(g)) / 100) * amount;
-	if (u.damage != 0) {
-		const int32_t h = obj_hits(g, u);
-		if (h < u.damage) u.damage = h;
-		u.damage = amount < u.damage ? u.damage - amount : 0;
-		u.damage_frac = 0;
-	}
-}
 
 }  // namespace
 
@@ -582,7 +568,7 @@ void install_mutation_funcs(ScriptHost& h) {
 		const int32_t hits = obj_hits(g, *ob);
 		const int32_t d = obj_hits(g, *ob) - int32_t((float(pct) / 100.0f) * float(hits));
 		if (d < ob->damage) {
-			if (ob->is_unit) unit_repair_damage(g, *static_cast<Unit*>(ob), ob->damage - d, true);
+			if (ob->is_unit) unit_repair_damage(g, *static_cast<Unit*>(ob), ob->damage - d, false, true);
 			else {
 				ob->damage = std::min(ob->damage, hits);
 				ob->damage_frac = 0;
@@ -601,7 +587,7 @@ void install_mutation_funcs(ScriptHost& h) {
 		Object* ob = object_at(g, w, o);
 		const int32_t amount = int32_t((float(pct) / 100.0f) * float(obj_hits(g, *ob)));
 		if (ob->is_unit) {
-			unit_repair_damage(g, *static_cast<Unit*>(ob), amount, false);
+			unit_repair_damage(g, *static_cast<Unit*>(ob), amount, false, false);
 		} else {  // Build::repair_damage -> Object::repair_damage
 			const int32_t h0 = obj_hits(g, *ob);
 			if (h0 < ob->damage) ob->damage = h0;
@@ -1289,11 +1275,29 @@ void install_mutation_funcs(ScriptHost& h) {
 	def("building_costs_enable", flag_fn(&g.scen.buildings_free, false, false));
 	def("tech_costs_disable", flag_fn(&g.scen.techs_free, true, false));
 	def("tech_costs_enable", flag_fn(&g.scen.techs_free, false, false));
-	def("disable_take_attrition", [&g](NativeCall& c) {  // @a028c0: LeaderData +0x7fc = 1
+	// enable / disable_take_attrition @a02880 / @a028c0 (LeaderData +0x7fc) and enable / disable_give_attrition
+	// @a02900 / @a02940 (+0x7f8): the flag only (Leader::calc_attrition / calc_anti_attrition read it at the next
+	// LEADER_CALC_UNIT_STATS). Always -1.
+	auto att_flag = [&g](NativeCall& c, int32_t Leader::*field, int32_t v) {
 		const int32_t w = c.arg_int(0) - 1;
-		if (!live_leader(g, w)) return make_int(-1);
-		g.leaders[size_t(w)].take_att_disabled = 1;
+		if (live_leader(g, w)) g.leaders[size_t(w)].*field = v;
+		return make_int(-1);
+	};
+	def("enable_take_attrition", [att_flag](NativeCall& c) { return att_flag(c, &Leader::take_att_disabled, 0); });
+	def("disable_take_attrition", [att_flag](NativeCall& c) { return att_flag(c, &Leader::take_att_disabled, 1); });
+	def("enable_give_attrition", [att_flag](NativeCall& c) { return att_flag(c, &Leader::give_att_disabled, 0); });
+	def("disable_give_attrition", [att_flag](NativeCall& c) { return att_flag(c, &Leader::give_att_disabled, 1); });
+	def("set_attrition_free_point", [&g](NativeCall& c) {  // @a02aa0: tcoords, radius in tiles; 1 or -1
+		const int32_t w = c.arg_int(0) - 1;
+		const int32_t x = c.arg_int(1), y = c.arg_int(2), r = c.arg_int(3);
+		if (!live_leader(g, w) || !tile_ok(g, x, y) || r < 1) return make_int(-1);
+		g.attrition_free_points[size_t(w)].push_back(Game::RevealPoint{x, y, r});
 		return make_int(1);
+	});
+	def("clear_attrition_free_points", [&g](NativeCall& c) {  // @a02b60: always -1
+		const int32_t w = c.arg_int(0) - 1;
+		if (live_leader(g, w)) g.attrition_free_points[size_t(w)].clear();
+		return make_int(-1);
 	});
 	def("set_age_diff_penalty", [&g](NativeCall& c) {  // @a01520: Constants one_age_down .. five_ages_down
 		// The balance table was built from these at load (Balance::type_damage), so like the original this only changes
