@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 #include "sim/objects.hpp"
@@ -26,7 +27,12 @@ enum class Verb : uint8_t {
 	QueueUp = 24, Build = 25, BuildMask = 33, Unqueue = 48,
 	// economy (docs/economy-spec.md section 11)
 	Trade = 17, CityGather = 18, Gather = 19, Garrison = 20, EjectAll = 26, ClearTributes = 39, Accept = 41, Reject = 42, Tribute = 43,
-	DemandTribute = 44, Buy = 46, Sell = 47, LeaderOptions = 73
+	DemandTribute = 44, Buy = 46, Sell = 47, LeaderOptions = 73,
+	// console / turn control (docs/replay-spec.md section 9; commands_extra.cpp)
+	Hotkey = 34, ComeOut = 49, SpeedSet = 52, SpeedUp = 53, SpeedDown = 54,
+	CheatViewAll = 59, CheatGiveTechs = 60, CheatZeroTechs = 61, CheatAiSpeedIncrease = 62, CheatAiSpeedNormal = 63,
+	CheatAiToggle = 64, CheatIncreaseBuckets = 65, CheatZeroBuckets = 66, CheatInitUnit = 67,
+	Chat = 68, RenameCity = 75, Pause = 76
 };
 
 // One decoded command (the package payload of one verb).
@@ -67,6 +73,14 @@ struct Command {
 	int32_t shift = 0, ctrl = 0, alt = 0;
 	// SPELL (21): i32 ox, i32 whom, i32 type, i32 x, i32 y (`type` = the craft index; ox / whom / x / y above).
 	// TRANSPORT (1): no payload. SET_TRANSPORT (5): i32 flag (`flags` above). BOARD_SHIP (9): i32 ox (the ship), queued.
+	// HOTKEY (25): i32 group (leader * 18 + n), clear, valid, f32 x, y, i32 zoom (no GROUP of its own: the issuer sends one before when it
+	// assigns a group). COME_OUT (11): i32 who, i32 o (`ox`), i16 uid. SPEED_SET (5): i32 speed. CHEAT_* (5): i32 who; CHEAT_INIT_UNIT (17):
+	// i32 who, t (`type`), x, y. CHAT (19 + 2n): i32 bits, taunt, taunt_num, i32 n, n x u16 (`text`), u16 0. RENAME_CITY (53): i32 who,
+	// i32 o (`ox`), u16 name[22] (`text`). PAUSE (2): u8 state (`set`).
+	int32_t hk_group = 0, hk_clear = 0, hk_valid = 0, hk_zoom = 0;
+	float hk_x = 0.0f, hk_y = 0.0f;
+	int32_t speed = 0, chat_bits = -1, chat_taunt = 0, chat_taunt_num = -1;
+	std::u16string text;
 };
 
 // CommandPackage: the executor. `group` (the current group set by GROUP) persists across packages.
@@ -81,6 +95,10 @@ struct CommandPackage {
 	// CommandPackage::process (one command from seat `play`; `play_who` = GameInfo.player[play].who).
 	void process(Game& g, const Command& c, int32_t play, int32_t play_who);
 };
+
+// The console / turn-control verbs (commands_extra.cpp): true when `c` was one of them. unit_action_come_out is Unit::action_come_out @5e20b0.
+bool command_process_extra(Game& g, CommandPackage& pk, const Command& c, int32_t play, int32_t play_who);
+void unit_action_come_out(Game& g, Unit& u);
 
 // CommandManager: the local issuer. Commands are queued in the local package and executed by process_turn.
 class CommandManager {
@@ -171,6 +189,27 @@ public:
 	bool issue_respond(int32_t whom, bool accept);
 	// LEADER_OPTIONS: the auto-gather delay (peasants 0..5), the caravan delay and the building option.
 	bool issue_leader_options(int32_t peasants, int32_t peasants_wait, int32_t buildings, uint32_t flags);
+
+	// Console / turn control (commands_extra.cpp). HOTKEY: `n` 0..17 of the local leader. With `units` the selection is sent as GROUP first
+	// and the command copies it into the control group (HotKeyGroups::copy_group); with none it stores / clears the camera bookmark
+	// (x, y, zoom) or clears the group.
+	bool issue_hotkey(const Game& g, const std::vector<int32_t>& objs, int32_t n, bool clear = false);
+	bool issue_hotkey_bookmark(int32_t n, float x, float y, int32_t zoom);
+	// COME_OUT: unit `o` of leader `who` leaves its building / carrier (UnitOut::issue_come_out; the uid guards a reused slot).
+	bool issue_come_out(const Game& g, int32_t who, int32_t o);
+	// TurnControl::issue_speed_set / _up / _down.
+	bool issue_speed_set(int32_t speed);
+	bool issue_speed_up();
+	bool issue_speed_down();
+	// CHAT: `bits` the recipient leaders (-1 all), `taunt` a sound id (0 none), `taunt_num` a taunt (-1 none). Text is cut to 255 chars.
+	bool issue_chat(const std::u16string& text, int32_t bits = -1, int32_t taunt = 0, int32_t taunt_num = -1);
+	// RENAME_CITY (a city building of the local leader; at most 20 characters). PAUSE: state 1 pauses, 0 resumes.
+	bool issue_rename_city(const Game& g, int32_t o, const std::u16string& name);
+	bool issue_pause(bool state);
+	// CHEAT_*: view_all / give_techs / zero_techs / increase_buckets / zero_buckets for the local leader; the AI toggles; init_unit
+	// (who < 0: one per valid leader).
+	bool issue_cheat(Verb v, int32_t who = -1);
+	bool issue_cheat_init_unit(int32_t who, int32_t type, int32_t x, int32_t y);
 
 	// CommandManager::process_turn @93ef10 (solo): execute the local package in order and record it.
 	void process_turn(Game& g);

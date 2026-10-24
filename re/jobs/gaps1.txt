@@ -1,0 +1,14 @@
+re/decomp/gaps
+CommandPackage::process_(hotkey|come_out|chat|chat_set|speed_up|speed_down|speed_set|pause|rename_city|cheat_.*)
+CommandManager::issue_(hotkey|come_out|chat|rename_city|speed_.*|pause|cheat_.*)
+Game::action_cheat_.*
+HotKeyGroups::.*
+UnitOut::issue_come_out
+Unit::(update_patrol_order|add_attack_ground_order|do_attack_ground|action_come_out|come_out)
+Group::(action_attack_ground|action_come_out)
+GroupData::(get_loc|get_loc_to)
+TurnControl::(set_new_target_time|speed_set|process_pause|issue_.*)
+Leader::(receive_chat|receive_taunt)
+Unit::detect_boat_collision
+UnitData::(is_busy|is_entering_or_exiting)
+SpellType::cast_paradrop

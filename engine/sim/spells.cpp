@@ -835,8 +835,6 @@ void cast_create_decoy(Game& g, int32_t o, int32_t who) {
 
 void spell_cast(Game& g, int32_t sp, int32_t o, int32_t who, int32_t p3, int32_t p4) {
 	// @676ce0
-	(void)p3;
-	(void)p4;
 	if (spell_is_castable(g, sp, o, who, 1) != 3) {
 		if (getenv("RON_HERO_TRACE")) fprintf(stderr, "[spell] f%d cast %x by %d:%d not castable (%d)\n", g.frame, sp, who, o, spell_is_castable(g, sp, o, who, 1));
 		return;
@@ -873,6 +871,9 @@ void spell_cast(Game& g, int32_t sp, int32_t o, int32_t who, int32_t p3, int32_t
 	case 0x280:
 	case 0x281:
 		cast_sabotage(g, sp, o, who, p3, p4);
+		return;
+	case 0x284:  // PARADROP (aircraft-spec 9): the target point is (p3, p4)
+		cast_paradrop(g, o, who, p3, p4);
 		return;
 	case 0x285:  // RESEARCH PROJECT (dead): +50 knowledge
 		g.leaders[size_t(who)].bucket[ptype::kKnowledge] += 50;
@@ -911,8 +912,7 @@ void spell_cast(Game& g, int32_t sp, int32_t o, int32_t who, int32_t p3, int32_t
 		}
 		return;
 	default:
-		// Dead crafts without a cast body: PILFER 0x276, ASSIMILATE 0x278, RALLY 0x279, JAM RADAR 0x283, PARADROP 0x284
-		// (aircraft-spec 9), LOCK / UNLOCK GATE 0x288 / 9 (never castable). TODO(spells): their bodies (spells-spec 4.6).
+		// Dead crafts without a cast body: PILFER 0x276, ASSIMILATE 0x278, RALLY 0x279, JAM RADAR 0x283, LOCK / UNLOCK GATE 0x288 / 9 (never castable). TODO(spells): their bodies (spells-spec 4.6).
 		return;
 	}
 }
@@ -977,7 +977,10 @@ void group_action_spell(Game& g, Group& gr, int32_t sp, int32_t ox, int32_t whom
 			}
 		}
 	}
-	if (is_unit_type(sp) && g.type(sp).domain == 2) return;  // TODO(spells): the aircraft carrier's queue (BUILDAIR, aircraft-spec 7)
+	if (is_unit_type(sp) && g.type(sp).domain == 2) {  // an aircraft type as the "spell": BUILDAIR (aircraft-spec 7)
+		group_action_buildair(g, gr);
+		return;
+	}
 	if (sp == spell::kTransport) {
 		for (int32_t i = 0; i < gr.num; i++) {
 			Unit* m = g.unit(who, gr.list[size_t(i)]);

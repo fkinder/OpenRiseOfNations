@@ -1,0 +1,4 @@
+re/decomp/gaps/dis
+UnitTypeData::can_attack_ground
+Unit::do_patrol
+Unit::do_attack_ground

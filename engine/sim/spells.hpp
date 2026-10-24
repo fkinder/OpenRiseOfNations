@@ -55,6 +55,7 @@ void cast_counterintel(Game& g, int32_t o, int32_t who, int32_t to, int32_t tw);
 void cast_double_agent(Game& g, int32_t o, int32_t who, int32_t to, int32_t tw);                  // @673a80
 void cast_sabotage(Game& g, int32_t spell, int32_t o, int32_t who, int32_t to, int32_t tw);       // @6720e0
 void cast_depopulate(Game& g, int32_t spell, int32_t o, int32_t who);                            // @671e50
+void cast_paradrop(Game& g, int32_t o, int32_t who, int32_t x, int32_t y);                   // @671f80 (aircraft-spec 9)
 void cast_disband(Game& g, int32_t o, int32_t who);                                              // @671ed0
 void cast_civilian(Game& g, int32_t o, int32_t who);                                             // @6704a0
 void cast_to_arms(Game& g, int32_t o, int32_t who);                                              // @670880

@@ -1,9 +1,8 @@
 // Control groups through the command layer (replay-spec verb 34 HOTKEY: i32 group, i32 clear, i32 valid, f32 x, f32 y, i32 zoom;
-// HotKeyGroups::copy_group). CommandManager (sim/commands.*) has no HOTKEY verb yet, so the record lives here: `issue` sends the
-// selection as a GROUP command through CommandManager::issue_group (what the original sends before it) and queues the HOTKEY
-// record, `process` applies the queued records in issue order when the turn is processed (CommandManager::process_turn). Not yet
-// in the recorded / replayed / networked command stream: that needs the verb in CommandPackage (the gap is listed in
-// docs/ui-port.md 12.5).
+// HotKeyGroups::copy_group). The verb lives in sim/commands_extra.cpp: `issue` sends the selection as GROUP and then the HOTKEY
+// command through CommandManager (issue_hotkey / issue_hotkey_bookmark), so a control group is recorded, replayed and networked like
+// every other order; the group table is Game::ctl.hotkeys (sim/control.hpp), 18 groups per leader (digits 0-9 -> 0..9, F1-F8 ->
+// 10..17). `slot` reads the table back for the HUD (recall, centre, add to the selection).
 #pragma once
 
 #include <array>
@@ -17,8 +16,8 @@ namespace hotkeys {
 
 using ObjectList = std::vector<std::pair<int32_t, int32_t>>;  // (leader, object)
 
-// The payload of HOTKEY (25 bytes): group 0..9; clear drops it; valid = the group holds the selection, else it is a camera
-// bookmark (x, y, zoom).
+// The payload of HOTKEY: group 0..17 of `play`; clear drops it; valid = the verb stores a camera bookmark (x, y, zoom) instead of the
+// selection (clear == 1 and valid == 1), as CommandManager::issue_hotkey sends it.
 struct Command {
 	int play = 0;
 	int group = 0, clear = 0, valid = 0;
@@ -35,28 +34,24 @@ struct Slot {
 
 class Groups {
 public:
-	// Queues `c` for the turn. For a valid group the selected units are first sent as GROUP (issue_group); `units` / `builds`
-	// are what the group will hold. Returns false for an invalid group number.
+	// Makes the game whose table `slot` reads (call when a game starts and whenever it is replaced).
+	void attach(const ron::sim::Game& g) { game_ = &g; }
+	// Queues the command in `cm` (nothing is executed here: the caller runs CommandManager::process_turn, or the multiplayer sink hands
+	// it to the session). Assign (clear == 0, valid == 1): the units (else the buildings) of the local leader become the group; a
+	// bookmark (clear == 0, valid == 0, no selection) stores the camera x / y / zoom; clear erases. False for a bad group number.
 	bool issue(ron::sim::CommandManager& cm, const ron::sim::Game& g, const Command& c, const ObjectList& units, const ObjectList& builds);
-	// Applies the queued commands (CommandPackage::process for verb 34).
-	void process();
-	const Slot& slot(int play, int group) const { return slots_[size_t(play & 7)][size_t(group % 10)]; }
-	Slot& mut_slot(int play, int group) { return slots_[size_t(play & 7)][size_t(group % 10)]; }
-	void clear() {
-		slots_ = {};
-		pending_.clear();
-		log_.clear();
-	}
+	// Kept for the callers that applied the queued records themselves: the verb now runs in CommandPackage, so there is nothing left.
+	void process() {}
+	// The group as the simulation holds it (members are not checked for life: the caller filters).
+	Slot slot(int play, int group) const;
+	Slot& mut_slot(int, int) { return scratch_; }  // a throw-away copy: the table is the simulation's
+	void clear() { log_.clear(), game_ = nullptr; }
 	// Everything issued, in order (the HOTKEY records a replay would carry).
 	const std::vector<Command>& log() const { return log_; }
 
 private:
-	struct Pending {
-		Command c;
-		ObjectList units, builds;
-	};
-	std::array<std::array<Slot, 10>, 8> slots_{};
-	std::vector<Pending> pending_;
+	const ron::sim::Game* game_ = nullptr;
+	Slot scratch_;
 	std::vector<Command> log_;
 };
 

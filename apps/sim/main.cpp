@@ -92,6 +92,7 @@
 #include <unistd.h>
 
 #include "assets/scenario.hpp"
+#include "assets/strings.hpp"
 #include "sim/aircraft.hpp"
 #include "sim/anim_assets.hpp"
 #include "sim/combat.hpp"
@@ -119,13 +120,16 @@ using namespace ron::sim;
 struct Script {
 	enum Kind { Move, Halt, Form, Attack, Build, Queue, Rally, Swarm, Disband, Unqueue, Gather, CityGather, Buy, Sell,
 		        Tribute, Respond, Peasants, Select, Option, Garrison, EjectAll, Transport, SetTransport, Board, Cast, Flight,
-		        AirPatrol, LaunchPatrol, AttackGround, Scramble, Recall, Kill, Stock, Teleport } kind = Move;
+		        AirPatrol, LaunchPatrol, AttackGround, Scramble, Recall, Kill, Stock, Teleport,
+		        Hotkey, ComeOut, Speed, Chat, Pause, Rename, Cheat } kind = Move;
 	int32_t who = 0;
 	std::vector<int32_t> objs;
 	int32_t x = 0, y = 0, frame = 0, form = -1, queue = 2, rotate = 0;
 	int32_t twho = -1, to = -1;
 	std::string type;  // production: a type name (TYPENAME / NAME, case-insensitive) or a TypeIndex number
 	int32_t num = 1, action = 0, order = 6;
+	std::string text;  // --chat / --rename-city: the text; --cheat: the cheat's name
+	float fx = -1.0f, fy = -1.0f;  // --hotkey bookmark
 };
 
 std::vector<int32_t> parse_list(const std::string& s) {
@@ -398,7 +402,90 @@ Script parse_cast(const std::string& a) {
 	else if (name == "CIVILIAN") s.to = 0x293;
 	else if (name == "TOARMS") s.to = 0x294;
 	else if (name == "DISBAND") s.to = 0x29a;
+	else if (name == "PARADROP") s.to = 0x284;
 	else s.to = int32_t(std::strtol(name.c_str(), nullptr, 0));
+	return s;
+}
+
+
+// The console / turn-control verbs (commands_extra.cpp):
+// --hotkey WHO:o1,o2@N[@FRAME][/clear|/mark:X,Y,ZOOM]  control group N (0..17): GROUP + HOTKEY; /clear erases it, /mark stores the camera bookmark
+// --come-out WHO:o1,o2[@FRAME]                         COME_OUT per unit        --pause 0|1[@FRAME]            PAUSE
+// --speed N|up|down[@FRAME]                            SPEED_SET / UP / DOWN    --chat FRAME:WHO:text           CHAT to everybody
+// --rename-city WHO:o@NAME[@FRAME]                     RENAME_CITY              --cheat NAME[:WHO|:T:X:Y][@FRAME]  NAME: viewall givetechs zerotechs buckets zerobuckets aispeed aispeednormal aitoggle unit
+std::vector<std::string> split(const std::string& s, char c);
+Script parse_console(Script::Kind kind, const std::string& a, const char* name) {
+	Script s;
+	s.kind = kind;
+	std::string t = a;
+	auto frame_suffix = [&](std::string& str) {
+		const size_t at = str.rfind('@');
+		if (at != std::string::npos && at + 1 < str.size() && std::isdigit(static_cast<unsigned char>(str[at + 1]))) {
+			bool all = true;
+			for (size_t i = at + 1; i < str.size(); i++) all &= std::isdigit(static_cast<unsigned char>(str[i])) != 0;
+			if (all) {
+				s.frame = int32_t(std::strtol(str.c_str() + at + 1, nullptr, 0));
+				str = str.substr(0, at);
+			}
+		}
+	};
+	if (kind == Script::Chat) {  // FRAME:WHO:text
+		const size_t c1 = t.find(':'), c2 = c1 == std::string::npos ? c1 : t.find(':', c1 + 1);
+		if (c2 == std::string::npos) throw std::runtime_error(std::string("bad --") + name + " (FRAME:WHO:text) " + a);
+		s.frame = int32_t(std::strtol(t.c_str(), nullptr, 0));
+		s.who = int32_t(std::strtol(t.c_str() + c1 + 1, nullptr, 0));
+		s.text = t.substr(c2 + 1);
+		return s;
+	}
+	if (kind == Script::Speed || kind == Script::Pause) {
+		frame_suffix(t);
+		s.num = t == "up" ? -100 : t == "down" ? -101 : int32_t(std::strtol(t.c_str(), nullptr, 0));
+		return s;
+	}
+	if (kind == Script::Cheat) {
+		frame_suffix(t);
+		const std::vector<std::string> p = split(t, ':');
+		s.text = p.at(0);
+		s.who = p.size() > 1 ? int32_t(std::strtol(p[1].c_str(), nullptr, 0)) : 0;
+		if (s.text == "unit") {  // unit:WHO:T:X:Y (WHO -1 = every leader)
+			if (p.size() < 5) throw std::runtime_error("bad --cheat unit:WHO:T:X:Y");
+			s.num = int32_t(std::strtol(p[2].c_str(), nullptr, 0));
+			s.x = int32_t(std::strtol(p[3].c_str(), nullptr, 0));
+			s.y = int32_t(std::strtol(p[4].c_str(), nullptr, 0));
+		}
+		return s;
+	}
+	// WHO:o1,o2@... forms
+	const size_t slash = t.find('/');
+	std::string flag;
+	if (slash != std::string::npos) {
+		flag = t.substr(slash + 1);
+		t = t.substr(0, slash);
+	}
+	const size_t colon = t.find(':');
+	if (colon == std::string::npos) throw std::runtime_error(std::string("bad --") + name + " " + a);
+	s.who = int32_t(std::strtol(t.substr(0, colon).c_str(), nullptr, 0));
+	const std::vector<std::string> parts = split(t.substr(colon + 1), '@');
+	s.objs = parse_list(parts.empty() ? std::string() : parts[0]);
+	if (kind == Script::Hotkey) {
+		if (parts.size() < 2) throw std::runtime_error("bad --hotkey WHO:o..@N");
+		s.num = int32_t(std::strtol(parts[1].c_str(), nullptr, 0));
+		if (parts.size() > 2) s.frame = int32_t(std::strtol(parts[2].c_str(), nullptr, 0));
+		if (flag == "clear") s.action = 1;
+		else if (flag.rfind("mark:", 0) == 0) {
+			const std::vector<std::string> m = split(flag.substr(5), ',');
+			s.action = 2;
+			s.fx = m.size() > 0 ? float(std::atof(m[0].c_str())) : 0.0f;
+			s.fy = m.size() > 1 ? float(std::atof(m[1].c_str())) : 0.0f;
+			s.x = m.size() > 2 ? int32_t(std::strtol(m[2].c_str(), nullptr, 0)) : 0;
+		}
+	} else if (kind == Script::Rename) {
+		if (parts.size() < 2) throw std::runtime_error("bad --rename-city WHO:o@NAME");
+		s.text = parts[1];
+		if (parts.size() > 2) s.frame = int32_t(std::strtol(parts[2].c_str(), nullptr, 0));
+	} else {  // ComeOut
+		if (parts.size() > 1) s.frame = int32_t(std::strtol(parts[1].c_str(), nullptr, 0));
+	}
 	return s;
 }
 
@@ -1965,6 +2052,41 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 				cm.issue_attack_ground(*g, s.objs, s.x, s.y, QueuePos(s.queue));
 				if (print) std::printf("  f%-5d ATTACK_GROUND %d:%d%s -> (%d,%d)\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0],
 				                       s.objs.size() > 1 ? "+" : "", s.x, s.y);
+			} else if (s.kind == Script::Hotkey) {
+				if (s.action == 2) cm.issue_hotkey_bookmark(s.num, s.fx, s.fy, s.x);
+				else cm.issue_hotkey(*g, s.objs, s.num, s.action == 1);
+				if (print) std::printf("  f%-5d HOTKEY %d group %d%s\n", g->frame, s.who, s.num, s.action == 1 ? " clear" : s.action == 2 ? " bookmark" : "");
+			} else if (s.kind == Script::ComeOut) {
+				for (int32_t o : s.objs) cm.issue_come_out(*g, s.who, o);
+				if (print) std::printf("  f%-5d COME_OUT %d:%d%s\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0], s.objs.size() > 1 ? "+" : "");
+			} else if (s.kind == Script::Speed) {
+				if (s.num == -100) cm.issue_speed_up();
+				else if (s.num == -101) cm.issue_speed_down();
+				else cm.issue_speed_set(s.num);
+				if (print) std::printf("  f%-5d SPEED %s\n", g->frame, s.num == -100 ? "up" : s.num == -101 ? "down" : std::to_string(s.num).c_str());
+			} else if (s.kind == Script::Pause) {
+				cm.issue_pause(s.num != 0);
+				if (print) std::printf("  f%-5d PAUSE %d\n", g->frame, s.num != 0);
+			} else if (s.kind == Script::Chat) {
+				const std::u16string tx = ron::utf8_to_utf16(s.text);
+				cm.issue_chat(tx);
+				if (print) std::printf("  f%-5d CHAT from %d: %s\n", g->frame, s.who, s.text.c_str());
+			} else if (s.kind == Script::Rename) {
+				for (int32_t o : s.objs) cm.issue_rename_city(*g, o, ron::utf8_to_utf16(s.text));
+				if (print) std::printf("  f%-5d RENAME_CITY %d:%d -> %s\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0], s.text.c_str());
+			} else if (s.kind == Script::Cheat) {
+				const std::string& n = s.text;
+				if (n == "viewall") cm.issue_cheat(Verb::CheatViewAll, s.who);
+				else if (n == "givetechs") cm.issue_cheat(Verb::CheatGiveTechs, s.who);
+				else if (n == "zerotechs") cm.issue_cheat(Verb::CheatZeroTechs, s.who);
+				else if (n == "buckets") cm.issue_cheat(Verb::CheatIncreaseBuckets, s.who);
+				else if (n == "zerobuckets") cm.issue_cheat(Verb::CheatZeroBuckets, s.who);
+				else if (n == "aispeed") cm.issue_cheat(Verb::CheatAiSpeedIncrease, s.who);
+				else if (n == "aispeednormal") cm.issue_cheat(Verb::CheatAiSpeedNormal, s.who);
+				else if (n == "aitoggle") cm.issue_cheat(Verb::CheatAiToggle, s.who);
+				else if (n == "unit") cm.issue_cheat_init_unit(s.who, s.num, s.x, s.y);
+				else throw std::runtime_error("unknown --cheat " + n);
+				if (print) std::printf("  f%-5d CHEAT %s (%d)\n", g->frame, n.c_str(), s.who);
 			} else if (s.kind == Script::Scramble) {
 				cm.issue_scramble(*g, s.objs);
 				if (print) std::printf("  f%-5d SCRAMBLE %d:%d%s\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0], s.objs.size() > 1 ? "+" : "");
@@ -2135,6 +2257,30 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 			print_production(*g, true);
 			print_new_units(*g, rr.initial_uids);
 		}
+		{
+			const ControlState& cs = g->ctl;
+			bool any = cs.speed != 2 || cs.paused || cs.view_all || !cs.chat.empty() || g->ai_off || g->ai_speed != 1;
+			for (const HotKeyGroup& h : cs.hotkeys) any |= h.used != 0;
+			for (int32_t v : cs.accum_cheated) any |= v != 0;
+			if (any) {
+				std::printf("console: speed %d (%d ms, %d changes) paused %d view_all %d ai_off %d ai_speed %d; control groups:", cs.speed,
+				            cs.target_frame_time, cs.speed_changes, cs.paused, cs.view_all, g->ai_off, g->ai_speed);
+				for (size_t k = 0; k < cs.hotkeys.size(); k++) {
+					const HotKeyGroup& h = cs.hotkeys[k];
+					if (!h.used) continue;
+					if (h.bookmark) std::printf(" [%zu bookmark %.0f,%.0f z%d]", k, double(h.x), double(h.y), h.zoom);
+					else {
+						std::printf(" [%zu L%d%s f%d:", k, int(h.who), h.buildings ? " builds" : "", h.stamp);
+						for (int16_t o : h.list) std::printf(" %d", o);
+						std::printf("]");
+					}
+				}
+				std::printf("\n");
+				for (const ControlState::ChatLine& l : cs.chat) std::printf("  chat f%d from L%d mask %08x: %s\n", l.frame, l.from, l.bits, l.text.c_str());
+				for (size_t w = 0; w < cs.accum_cheated.size(); w++)
+					if (cs.accum_cheated[w]) std::printf("  cheats by L%zu: %d\n", w, cs.accum_cheated[w]);
+			}
+		}
 		std::printf("final frame %d tick %d rng %08x digest %016llx\n", g->frame, g->tick, g->rng.seed(),
 		            (unsigned long long)rr.digests.back());
 		if (fo.fog_check) {
@@ -2247,7 +2393,8 @@ int main(int argc, char** argv) {
 			else if (std::strcmp(argv[i], "--attack") == 0) scripts.push_back(parse_attack(argv[i + 1]));
 			else if (std::strcmp(argv[i], "--garrison") == 0) scripts.push_back(parse_garrison(argv[i + 1]));
 			else if (std::strcmp(argv[i], "--flight") == 0) scripts.push_back(parse_air(Script::Flight, argv[i + 1], "flight"));
-			else if (std::strcmp(argv[i], "--air-patrol") == 0) scripts.push_back(parse_air(Script::AirPatrol, argv[i + 1], "air-patrol"));
+			else if (std::strcmp(argv[i], "--air-patrol") == 0 || std::strcmp(argv[i], "--patrol") == 0)  // PATROL: planes fly it, ground groups walk it
+				scripts.push_back(parse_air(Script::AirPatrol, argv[i + 1], "patrol"));
 			else if (std::strcmp(argv[i], "--launch-patrol") == 0)
 				scripts.push_back(parse_air(Script::LaunchPatrol, argv[i + 1], "launch-patrol"));
 			else if (std::strcmp(argv[i], "--attack-ground") == 0)
@@ -2271,6 +2418,13 @@ int main(int argc, char** argv) {
 			else if (std::strcmp(argv[i], "--set-transport") == 0) scripts.push_back(parse_transport(argv[i + 1], Script::SetTransport));
 			else if (std::strcmp(argv[i], "--cast") == 0) scripts.push_back(parse_cast(argv[i + 1]));
 			else if (std::strcmp(argv[i], "--board") == 0) scripts.push_back(parse_transport(argv[i + 1], Script::Board));
+			else if (std::strcmp(argv[i], "--hotkey") == 0) scripts.push_back(parse_console(Script::Hotkey, argv[i + 1], "hotkey"));
+			else if (std::strcmp(argv[i], "--come-out") == 0) scripts.push_back(parse_console(Script::ComeOut, argv[i + 1], "come-out"));
+			else if (std::strcmp(argv[i], "--speed") == 0) scripts.push_back(parse_console(Script::Speed, argv[i + 1], "speed"));
+			else if (std::strcmp(argv[i], "--chat") == 0) scripts.push_back(parse_console(Script::Chat, argv[i + 1], "chat"));
+			else if (std::strcmp(argv[i], "--pause") == 0) scripts.push_back(parse_console(Script::Pause, argv[i + 1], "pause"));
+			else if (std::strcmp(argv[i], "--rename-city") == 0) scripts.push_back(parse_console(Script::Rename, argv[i + 1], "rename-city"));
+			else if (std::strcmp(argv[i], "--cheat") == 0) scripts.push_back(parse_console(Script::Cheat, argv[i + 1], "cheat"));
 			else if (std::strcmp(argv[i], "--build") == 0) scripts.push_back(parse_prod(Script::Build, argv[i + 1]));
 			else if (std::strcmp(argv[i], "--queue") == 0 || std::strcmp(argv[i], "--research") == 0)
 				scripts.push_back(parse_prod(Script::Queue, argv[i + 1]));
@@ -2285,6 +2439,19 @@ int main(int argc, char** argv) {
 			else if (std::strcmp(argv[i], "--tribute") == 0) scripts.push_back(parse_prod(Script::Tribute, argv[i + 1]));
 			else if (std::strcmp(argv[i], "--respond") == 0) scripts.push_back(parse_prod(Script::Respond, argv[i + 1]));
 			else if (std::strcmp(argv[i], "--peasants") == 0) scripts.push_back(parse_prod(Script::Peasants, argv[i + 1]));
+		}
+		// A test aid for --cast ...@PARADROP: the shipped craftrules give PARADROP "FROM none" (never castable, aircraft-spec 9), so the
+		// run gives it the Special Forces unit as its caster. The cast body is the original's; only the owner chain is patched.
+		for (const Script& s : scripts) {
+			if (s.kind != Script::Cast || s.to != 0x284) continue;
+			for (size_t i = 0; i < rules.types.size(); i++) {
+				const Type& t = rules.types[i];
+				std::string nm = to_utf8(t.type_name.empty() ? t.name : t.type_name), flat;
+				for (char c : nm)
+					if (c != ' ' && c != '_') flat += char(std::toupper(static_cast<unsigned char>(c)));
+				if (t.loaded && flat == "SPECIALFORCES") rules.types[0x284].from = int32_t(i);
+			}
+			break;
 		}
 		FogOpts fo;
 		for (int i = 3; i + 1 < argc; i++) {

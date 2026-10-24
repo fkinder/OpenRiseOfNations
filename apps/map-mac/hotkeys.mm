@@ -5,33 +5,37 @@
 namespace hotkeys {
 
 bool Groups::issue(ron::sim::CommandManager& cm, const ron::sim::Game& g, const Command& c, const ObjectList& units, const ObjectList& builds) {
-	if (c.group < 0 || c.group > 9) return false;
-	if (c.valid && !c.clear) {
-		// GROUP first (CommandManager::issue_group): the units the group will hold, as object slots of the local seat.
-		std::vector<int32_t> objs;
-		for (const auto& [who, o] : units) {
+	if (c.group < 0 || c.group >= ron::sim::kHotKeyGroupsPerLeader) return false;
+	attach(g);
+	bool ok;
+	if (c.clear && !c.valid) {
+		ok = cm.issue_hotkey(g, {}, c.group, true);  // Ctrl+Shift+N: erase
+	} else if (c.clear || (!c.valid && units.empty() && builds.empty())) {
+		ok = cm.issue_hotkey_bookmark(c.group, c.x, c.y, c.zoom);  // an empty selection bookmarks the camera
+	} else {
+		std::vector<int32_t> objs;  // GROUP first (CommandManager::issue_group): the captains the group will hold, as slots of the local seat
+		for (const auto& [who, o] : units.empty() ? builds : units) {
 			if (who == cm.play_who) objs.push_back(o);
 		}
-		if (!objs.empty()) cm.issue_group(g, objs);
+		ok = !objs.empty() && cm.issue_hotkey(g, objs, c.group, false);
 	}
-	pending_.push_back({c, units, builds});
-	log_.push_back(c);
-	return true;
+	if (ok) log_.push_back(c);
+	return ok;
 }
 
-void Groups::process() {
-	for (const Pending& p : pending_) {
-		Slot& s = mut_slot(p.c.play, p.c.group);
-		s = Slot{};
-		if (p.c.clear) continue;
-		s.used = true;
-		if (p.c.valid) {
-			s.units = p.units, s.builds = p.builds;
-		} else {
-			s.bookmark = true, s.x = p.c.x, s.y = p.c.y, s.zoom = p.c.zoom;
-		}
+Slot Groups::slot(int play, int group) const {
+	Slot s;
+	if (!game_ || play < 0 || play >= 9 || group < 0 || group >= ron::sim::kHotKeyGroupsPerLeader) return s;
+	const ron::sim::HotKeyGroup& h = game_->ctl.hotkeys[size_t(play * ron::sim::kHotKeyGroupsPerLeader + group)];
+	if (!h.used) return s;
+	s.used = true;
+	if (h.bookmark) {
+		s.bookmark = true, s.x = h.x, s.y = h.y, s.zoom = h.zoom;
+		return s;
 	}
-	pending_.clear();
+	ObjectList& dst = h.buildings ? s.builds : s.units;
+	for (int16_t o : h.list) dst.push_back({int32_t(h.who), int32_t(o)});
+	return s;
 }
 
 }  // namespace hotkeys

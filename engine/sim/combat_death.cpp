@@ -105,6 +105,7 @@ void unit_die(Game& g, Unit& u, int32_t dt) { object_die(g, u, dt, -1, 0.0f); }
 
 void build_close(Game& g, Build& b, int32_t death) {
 	// Build::close @628980 -> Wall::close -> Object::close (production.hpp: queues, gather tiles, cities, wonders).
+	hotkey_groups_kill(g, b.who, b.o);  // HotKeyGroups::kill
 	build_close_production(g, b, death);
 }
 
@@ -113,6 +114,7 @@ void unit_close(Game& g, Unit& u, int32_t death, int32_t gpiece, float deg) {
 	bool blocked_merchant = false;
 	const int32_t who = u.who;
 	if (u.alive()) {
+		hotkey_groups_kill(g, who, u.o);  // HotKeyGroups::kill (control groups; no simulation reads them)
 		if (who < 9) g.total_units--;
 		if (u.unit_masks & umask::kEntrenched) {
 			u.unit_masks2 &= ~(umask2::kMarineEntrench | umask2::kAntipaterEntr);

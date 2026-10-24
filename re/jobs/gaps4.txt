@@ -1,0 +1,4 @@
+re/decomp/gaps
+CommandPackage::process_leader_options
+Unit::set_stance
+CommandManager::issue_leader_options

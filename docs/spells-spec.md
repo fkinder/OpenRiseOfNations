@@ -343,8 +343,8 @@ Idle auto-unpack and PACKER_NEVER gating in `think_attack`: combat-spec §4 step
 `Group::action_attack` / `Group::action_garrison` have packer branches I only partly traced ❓: a member that `is_packing_or_unpacking` with `QUEUE_NEW` keeps its cast;
 an unpacked-needed member whose target is in range gets `add_cast_order(0x28c)` before the attack; a packing member gets `add_cast_order(0x28b, QUEUE_NEW)` and a MOVE at `QUEUE_LAST`;
 garrisoning packers re-queue as `QUEUE_FIRST` / `QUEUE_LAST` / `QUEUE_NEW` depending on `is_packing` / `is_unpacking` (@700a00..700b60).
-**Collision**: `detect_boat_collision` @5fa8b0 (a mover shoving an own / allied blocker aside) refuses to push a blocker that is a packer (`unit_flags & 4`) unless it is PACKED, refuses
-when it `is_unpacking`, is entrenched (0x2000000) or cargo. The generic soft rule in `collision.cpp` (a mover waits only for a non-pack CAST order, `spell_is_pack`) is already ported;
+**Collision** (✅ ported 2026-10-24, collision.cpp, sim-implementation.md "Orders and commands, second pass"): `detect_boat_collision` @5fa8b0 (a mover shoving an own / allied blocker aside) refuses to push a blocker that is a packer (`unit_flags & 4`) unless it is PACKED, refuses
+when it `is_unpacking`, is entrenched (0x2000000) or a tank (the asm calls the type's vslot +0x110; the doc's "cargo" was the unit's `is_cargo`, which the function does not test). The generic soft rule in `collision.cpp` (a mover waits only for a non-pack CAST order, `spell_is_pack`) is already ported;
 the remaining packer rule is exactly those two tests in the shove (`collision.cpp` has no `detect_boat_collision` port yet: add them there).
 
 ## 6. City, conversion and bookkeeping casts

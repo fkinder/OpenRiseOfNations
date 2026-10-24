@@ -204,10 +204,10 @@ void install_order_funcs(ScriptHost& h) {
 		}
 		return make_int(gr.num);
 	});
-	families("group_patrol_order", [&g, &h](NativeCall& c, Group& gr) {  // @9fb3f0
+	families("group_patrol_order", [&g](NativeCall& c, Group& gr) {  // @9fb1d0 -> Group::action_patrol (orders_patrol.cpp, aircraft_cmd.cpp)
 		const int32_t x = c.arg_int(1), y = c.arg_int(2);
 		if (!tile_ok(g, x, y)) return make_int(-1);
-		if (gr.num != 0) h.todo_calls["group_patrol_order: Group::action_patrol"]++;  // TODO(orders): PATROL
+		if (gr.num != 0) group_action_patrol(g, gr, tile_centre(x), tile_centre(y), kQueueNew);
 		return make_int(gr.num);
 	});
 
@@ -249,22 +249,29 @@ void install_order_funcs(ScriptHost& h) {
 	def("unit_flee_order", [move_one](NativeCall& c) { return move_one(c, kFleeTo, true); });
 	def("unit_waypoint_order", [move_one](NativeCall& c) { return move_one(c, kMoveTo, true); });
 	def("unit_attack_to_order", [move_one](NativeCall& c) { return move_one(c, kAttackTo, false); });
-	auto ground_one = [&g, &h, one](NativeCall& c, const char* what) {
+	auto ground_one = [&g, one](NativeCall& c, bool patrol) {
 		// unit_attack_ground_order @9f7db0 / unit_patrol_order @9f7fd0: a valid unit, the tile, orders dropped (not
-		// planes), set_group(-1), pushed; then Group::action_attack_ground / action_patrol (or the air variants).
+		// planes), set_group(-1), pushed; then Group::action_air_attack_ground (a plane or a missile) / action_attack_ground, or
+		// action_air_patrol / action_patrol. (ScenarioData::ignore_orders is 0 around the call; that prelude is not modelled.)
 		const int32_t w = c.arg_int(0) - 1, o = c.arg_int(1);
 		const int32_t x = c.arg_int(2), y = c.arg_int(3);
 		Unit* u = valid_unit(g, w, o);
 		if (!u || x < 0 || y < 0 || x >= g.world.tile_xs || y >= g.world.tile_ys) return make_int(-1);
 		if (!is_plane_unit(*u)) clear_orders(g, *u);
-		one(w, o);
-		h.todo_calls[what]++;  // TODO(orders): ATTACK_GROUND / PATROL actions (and the air variants) are not ported
+		Group& gr = one(w, o);
+		const bool plane = is_plane_unit(*u);
+		if (patrol) {
+			if (plane) group_action_air_patrol(g, gr, tile_centre(x), tile_centre(y), kQueueNew);
+			else group_action_patrol(g, gr, tile_centre(x), tile_centre(y), kQueueNew);
+		} else if (plane || (uint32_t(u->ptype->obj_masks) & 0x8000000u)) {
+			group_action_air_attack_ground(g, gr, tile_centre(x), tile_centre(y), kQueueNew);
+		} else {
+			group_action_attack_ground(g, gr, tile_centre(x), tile_centre(y), kQueueNew);
+		}
 		return make_int(1);
 	};
-	def("unit_attack_ground_order", [ground_one](NativeCall& c) {
-		return ground_one(c, "unit_attack_ground_order: Group::action_attack_ground");
-	});
-	def("unit_patrol_order", [ground_one](NativeCall& c) { return ground_one(c, "unit_patrol_order: Group::action_patrol"); });
+	def("unit_attack_ground_order", [ground_one](NativeCall& c) { return ground_one(c, false); });
+	def("unit_patrol_order", [ground_one](NativeCall& c) { return ground_one(c, true); });
 	def("unit_clear_orders", [&g](NativeCall& c) {  // @9f77e0
 		const int32_t w = c.arg_int(0) - 1, o = c.arg_int(1);
 		if (!active_unit_slot(g, w, o) || !valid_unit(g, w, o)) return make_int(-1);

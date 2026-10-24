@@ -1,0 +1,2 @@
+re/decomp/gaps
+ScenarioFuncSet::(group_patrol_order|unit_attack_ground_order|unit_patrol_order|group_attack_ground_order)

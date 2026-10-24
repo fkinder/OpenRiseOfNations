@@ -18,8 +18,9 @@
 namespace ron::net {
 
 // Which commands the instance executes. The verbs the engine has a Command for are `all_engine`; `sav_compatible` leaves out the
-// aircraft verbs (ATTACK_GROUND, PATROL, LAUNCH_PATROL, FLIGHT, RECALL, SCRAMBLE) that apps/sav/main.cpp's --replay does not feed,
-// so that `ron-net replay` gives the numbers of `ron-sav --replay`.
+// aircraft verbs (ATTACK_GROUND, PATROL, LAUNCH_PATROL, FLIGHT, RECALL, SCRAMBLE) and the console verbs (HOTKEY, COME_OUT, SPEED_*,
+// CHEAT_*, CHAT, RENAME_CITY, PAUSE: sim/commands_extra.cpp) that apps/sav/main.cpp's --replay does not feed, so that
+// `ron-net replay` gives the numbers of `ron-sav --replay` (`--all-verbs` runs them all).
 struct ExecPolicy {
 	std::array<bool, 128> allow{};
 	bool execute = true;

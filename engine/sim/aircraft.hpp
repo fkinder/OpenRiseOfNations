@@ -130,8 +130,12 @@ void group_action_attack_ground(Game& g, Group& gr, int32_t x, int32_t y, QueueP
 // Group::action_scramble @7111c0 (SCRAMBLE), Group::action_recall @6fa7e0 (RECALL; planes: action_return @6fad40).
 void group_action_scramble(Game& g, Group& gr);
 void group_action_recall(Game& g, Group& gr);
-// Unit::action_unqueue(1) @5e1f20 (the carrier's queued-plane counter; UNQUEUE of a unit).
+// Unit::action_unqueue(1) @5e1f20 (UNQUEUE of a unit: one queued plane off a carrier, with the counters and the refund).
 void unit_action_unqueue(Game& g, Unit& u);
+// Group::action_spell, aircraft branch: BUILDAIR (queue the current FIGHTERBOMBER on the group's carriers); the carrier's
+// production step of Unit::process @611158 (called from unit_process).
+void group_action_buildair(Game& g, Group& gr);
+void unit_process_air_queue(Game& g, Unit& u);
 // Unit::close of a carrier @60ee50: the patrols based on it get absolute waypoints.
 void carrier_closed(Game& g, Unit& carrier);
 // Build::clear_gather / add_gather_point on an airbase (aircraft-spec 8): its planes go home / re-issue their patrols.

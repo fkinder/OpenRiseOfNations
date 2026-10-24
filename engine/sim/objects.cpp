@@ -468,9 +468,9 @@ void unit_process(Game& g, Unit& u) {
 	if (u.waiting) u.waiting--;
 	if (u.healing) u.healing--;
 	// 2. aircraft fuel and healing in a base (sim/aircraft.cpp); decoys, spell casters (Caster::process_spells, mana).
-	// TODO(frame-spec 9): the carrier's aircraft queue (Unit +0xa0).
 	unit_process_air(g, u);
 	if (!unit_process_casters(g, u)) return;
+	unit_process_air_queue(g, u);  // 3. the carrier's aircraft queue (Unit +0xa0, aircraft-spec 7)
 	// 4.
 	process_healing(g, u);
 	if (u.on_map()) {

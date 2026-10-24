@@ -9,6 +9,7 @@
 namespace ron::sim {
 
 class Game;
+struct Group;
 
 // Unit::add_move_facing_order @5e55c0: (ux, uy) in UCoords (the target snaps to the cell centre). kind: 1 MOVE_TO,
 // 2 ATTACK_TO, 3 EXPLORE_TO, 4 FLEE_TO (anything else MOVE_TO). Returns the new order.
@@ -45,6 +46,18 @@ Order* add_guard_order(Game& g, Unit& u, int32_t ox, int32_t whom, int32_t dx, i
 Order* update_guard_order(Game& g, Unit& u, int32_t ox, int32_t whom);                                  // Unit::update_guard_order @5e3220
 void do_follow(Game& g, Unit& u, Order& f);                                                             // Unit::do_follow @5e65d0
 void do_guard(Game& g, Unit& u, Order& gd);                                                             // Unit::do_guard @5e5c70
+
+// Ground PATROL (GROUP_PATROL) and ATTACK_GROUND (orders_patrol.cpp; aircraft_cmd.cpp dispatches the commands).
+bool type_can_attack_ground(const Game& g, const Type& t);  // UnitTypeData::can_attack_ground @61db20
+Order* update_patrol_order(Unit& u, int32_t id);            // Unit::update_patrol_order @5e35e0 (id -1: any)
+Order* add_group_patrol_order(Game& g, Unit& u, int32_t ux0, int32_t uy0, int32_t ux1, int32_t uy1, int32_t id, int32_t index,
+                              int32_t leader_o, int32_t leader_who, QueuePos q);  // Unit::add_patrol_order @5e4560 (ucoords)
+void do_patrol(Game& g, Unit& u, Order& p);                 // Unit::do_patrol @5f1910
+void group_action_ground_patrol(Game& g, Group& gr, int32_t x, int32_t y, QueuePos q);  // Group::action_patrol @7030c0, ground branch
+void group_redo_patrol_order(Game& g, Group& gr, const Order& saved);                   // Group::redo_patrol_order @706d90
+void add_attack_ground_order(Game& g, Unit& u, int32_t x, int32_t y, QueuePos q, bool expl, int32_t attack_unit, int32_t accuracy);  // @5e4290
+void do_attack_ground(Game& g, Unit& u, Order& a);          // Unit::do_attack_ground @5f1410
+void group_action_ground_attack_ground(Game& g, Group& gr, int32_t x, int32_t y, QueuePos q);  // Group::action_attack_ground, ground branch
 
 void work(Game& g, Unit& u);                           // Unit::work @60d180
 int32_t do_job(Game& g, Unit& u, OrderType t, Order* o);  // Unit::do_job @617a10

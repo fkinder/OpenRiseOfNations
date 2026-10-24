@@ -276,6 +276,18 @@ public:
 	// The piece of IFACEMAINBASE named `name` (AnimNotice icons from TEX_ALERTS), invalid when absent.
 	ron::IfacePiece base_piece(const std::string& name) const;
 
+	// The chat line (OPTION_CHAT / _ALL / _ALLIES / _ENEMIES): a one-line edit box above the bar. mode 0 everybody, 1 allies, 2 enemies.
+	// The window feeds it keys; Return sends the text as a CHAT command (CommandManager::issue_chat).
+	bool chat_active() const { return chat_mode_ >= 0; }
+	void chat_open(int mode) { chat_mode_ = mode, chat_text_.clear(); }
+	void chat_close() { chat_mode_ = -1, chat_text_.clear(); }
+	int chat_mode() const { return chat_mode_; }
+	const std::string& chat_text() const { return chat_text_; }
+	void chat_append(const std::string& utf8) {
+		if (chat_text_.size() + utf8.size() <= 250) chat_text_ += utf8;
+	}
+	void chat_backspace();  // one UTF-8 character
+
 	// World <-> minimap (UI pixels), the closed form of WorldMap::init_camera (2:1 diamond, 45 degree yaw).
 	bool minimap_to_world(int x, int y, const State& s, float& wx, float& wy) const;
 	void world_to_minimap(float wx, float wy, const State& s, float& x, float& y) const;
@@ -299,6 +311,7 @@ private:
 	void draw_progress(ron::metal::UiRenderer& ui, const State& s);
 	void draw_library(ron::metal::UiRenderer& ui, const State& s);
 	void draw_garrison(ron::metal::UiRenderer& ui, const State& s);
+	void draw_chat(ron::metal::UiRenderer& ui, const State& s);
 	void draw_market_button(ron::metal::UiRenderer& ui, const Option& o, const ron::IfaceRect& r, int factor);
 	ron::IfaceRect garrison_rect() const;
 	int garrison_index_at(int x, int y, const State& s, ron::IfaceRect* cell = nullptr) const;
@@ -317,6 +330,8 @@ private:
 	const ron::IfaceLayout* layout_ = nullptr;
 	const ron::XmlElement *base_el_ = nullptr, *res_el_ = nullptr, *sel_el_ = nullptr, *opt_el_ = nullptr, *mini_el_ = nullptr,
 	                      *rm_el_ = nullptr, *btn_el_ = nullptr;
+	int chat_mode_ = -1;      // the chat line: -1 closed
+	std::string chat_text_;
 	std::vector<OptionInfo> option_info_;  // options.xml, by OptionIndex
 	int ui_w_ = 0, ui_h_ = 0;
 	// Screen rects (UI pixels).

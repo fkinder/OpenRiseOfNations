@@ -483,6 +483,12 @@ int32_t do_job(Game& g, Unit& u, OrderType t, Order* o) {
 	case kGuard:
 		do_guard(g, u, *o);  // Unit::do_guard @5e5c70 (orders_guard.cpp)
 		return 0;
+	case kGroupPatrol:
+		do_patrol(g, u, *o);  // Unit::do_patrol @5f1910 (orders_patrol.cpp)
+		return 0;
+	case kAttackGround:
+		do_attack_ground(g, u, *o);  // Unit::do_attack_ground @5f1410 (orders_patrol.cpp)
+		return 0;
 	case kSpecialAnim:
 		do_spec_anim(g, u, *o);  // Unit::do_spec_anim @5e5880 (aircraft-spec 6): landing, take-off, the walk-out
 		return 0;

@@ -329,6 +329,30 @@ void Hud::draw(UiRenderer& ui, const State& s) {
 	draw_timers(ui, s);
 	draw_rares(ui, s);
 	draw_progress(ui, s);
+	draw_chat(ui, s);
+}
+
+void Hud::chat_backspace() {
+	while (!chat_text_.empty()) {
+		const bool cont = (static_cast<unsigned char>(chat_text_.back()) & 0xC0) == 0x80;
+		chat_text_.pop_back();
+		if (!cont) break;
+	}
+}
+
+// The chat line: "Say to <everybody|allies|enemies>: text_" in a dark box just above the interface, white with a black shadow.
+void Hud::draw_chat(UiRenderer& ui, const State& s) {
+	if (chat_mode_ < 0) return;
+	static const char* const to[3] = {"everybody", "allies", "enemies"};
+	const int f = ui.font_tag("clock_size");
+	const ron::FontMetrics* m = ui.font_metrics(f);
+	const float h = (m ? float(m->font_height) : 14.0f) + 8.0f;
+	const float w = float(std::min(ui_w_ - 20, 640));
+	const float x = 10.0f, y = std::max(4.0f, float(base_.t) - h - 8.0f);
+	ui.fill(x - 1, y - 1, w + 2, h + 2, kBlack, UiType::Normal);
+	ui.fill(x, y, w, h, 0xFF1C1C1C, UiType::Normal);
+	const std::string line = std::string("Say to ") + to[std::clamp(chat_mode_, 0, 2)] + ": " + chat_text_ + ((s.graphic_tick & 8) ? "" : "_");
+	ui.text(f, line, x + 4, y + 4, kWhite, kBlack);
 }
 
 // IFaceMainBase::on_redraw @00811600 and on_window_redraw @00811b60. Opened: the full bar. Streamlined: the bar only over the

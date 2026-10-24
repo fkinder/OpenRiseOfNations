@@ -17,6 +17,7 @@
 #include <string>
 
 #include "sim/ai.hpp"
+#include "sim/animals.hpp"
 #include "sim/combat.hpp"
 #include "sim/combat_internal.hpp"
 #include "sim/compass.hpp"
@@ -722,11 +723,13 @@ int32_t do_air_physics(Game& g, Unit& u, Order& A, int32_t x, int32_t y) {
 	const bool heli = is_heli_type(T);
 	// 1. every 8 frames the cruising altitude is rerolled (the draw is simulation state).
 	if ((u.o + g.frame) % 8 == 0) {
-		if (!type_is(T, airtype::kBomber, false) && !heli) {
+		const bool animal = is_animal_who(u.who);  // vslot 0x30 is_animal (the gaia birds)
+		if (!type_is(T, airtype::kBomber, false) && (!animal || u.type == 0x193) && !heli) {
 			const int32_t r = g.rng.get(0, 0xffff);
 			A.cruising_alt = (r % 7 + 13) * 100;
 		} else {
 			A.cruising_alt = 0x640;
+			if (animal) A.cruising_alt += u.type == 0x192 ? 200 : -200;
 		}
 	}
 	// 2. fuel; the path stack is the 1-point scratch of the goal.
@@ -1423,7 +1426,7 @@ void do_air_patrol(Game& g, Unit& u, Order& P) {
 		gy = P.wp[size_t(P.wp_index)][1];
 		if (P.oxx >= 0 && P.whose >= 0) {
 			const Unit* home = g.unit(P.whose, P.oxx);
-			if (home && home->alive()) {  // a live unit (a carrier): the waypoints are offsets from it
+			if (home && home->alive() && !is_animal_who(u.who)) {  // a live unit (a carrier): the waypoints are offsets from it
 				gx += home->x;
 				gy += home->y;
 				restrict_point(g, gx, gy);
@@ -1431,6 +1434,10 @@ void do_air_patrol(Game& g, Unit& u, Order& P) {
 		}
 	}
 	if (!do_air_physics(g, u, P, gx, gy)) return;
+	if (is_animal_who(u.who)) {  // a bird: no targeting, spell_time marks "airborne"
+		if (u.spell_time == 0) u.spell_time = 1;
+		return;
+	}
 	if (P.returning == 0) {
 		if (vector_dist(u.y - gy, u.x - gx) < 0x240) {
 			if (P.wp_index < int32_t(P.wp.size()) - 1) {
@@ -1964,7 +1971,7 @@ int32_t build_train_air(Game& g, Build& B, Unit& U) {
 }
 
 void carrier_new_wing(Game& g, Unit& C) {
-	unit_action_unqueue(g, C);  // (a no-op while nothing queues planes on a carrier)
+	unit_action_unqueue(g, C);  // Unit::action_unqueue(1): a new carrier has no queue, so a no-op
 	const uint32_t seed0 = g.rng.seed();
 	const int32_t f = current_upgrade(g, C.who, ptype::kFighterBomber);
 	int32_t made = 0;
@@ -1985,8 +1992,12 @@ void carrier_new_wing(Game& g, Unit& C) {
 }
 
 void carrier_closed(Game& g, Unit& C) {
-	// Unit::close @60ee50: a carrier that closes turns the carrier-relative waypoints of the patrols based on it into
-	// absolute ones (the planes keep flying them).
+	// Unit::close @60ee50: the planes still queued on the carrier leave the leader's counters (no refund); a carrier that
+	// closes turns the carrier-relative waypoints of the patrols based on it into absolute ones (the planes keep flying them).
+	if (C.num_queued != 0) {
+		track_queued(g, C.who, current_upgrade(g, C.who, airtype::kFighterBomber), -C.num_queued);
+		C.num_queued = 0;
+	}
 	if (!type_is(*C.ptype, airtype::kCarrier, false)) return;
 	const int32_t n = g.objects[size_t(C.who)].unit_mark;
 	for (int32_t o = 0; o < n; o++) {

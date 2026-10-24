@@ -1,0 +1,3 @@
+re/decomp/gaps
+Group::(finish_insert|redo_patrol_order|action_air_attack_ground)
+UnitTypeData::can_attack_ground

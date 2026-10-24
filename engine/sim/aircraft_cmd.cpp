@@ -22,6 +22,7 @@
 #include "sim/orders.hpp"
 #include "sim/pathfinder.hpp"
 #include "sim/production.hpp"
+#include "sim/spells.hpp"
 #include "sim/trig.hpp"
 
 namespace ron::sim {
@@ -38,12 +39,8 @@ constexpr uint32_t kMissileMask = 0x8000000u;
 bool is_missile(const Unit& u) { return (uint32_t(u.ptype->obj_masks) & kMissileMask) != 0; }
 bool is_heli(const Unit& u) { return (u.ptype->unit_flags & utflag::kHelicopter) != 0; }
 
-// UnitData::is_busy @60a370: a pack / unpack cast (not modelled for aircraft) or is_entering_or_exiting @60a6f0: the front
-// order is a SPECIAL_ANIM of type 0 (landing) or 1 (walking out of a building).
-bool busy(const Unit& u) {
-	const Order* f = u.front();
-	return f && f->type == kSpecialAnim && (f->sa_type == 0 || f->sa_type == 1);
-}
+// UnitData::is_busy @60a370 / is_entering_or_exiting @60a6f0 (packers.cpp): a pack / unpack cast, or a SPECIAL_ANIM of type 0 / 1.
+bool busy(const Unit& u) { return cast_is_busy(u); }
 
 // GroupData::member(o, who, 1).
 bool in_group(const Game& g, const Group& gr, int32_t o, int32_t who) {
@@ -94,17 +91,56 @@ int32_t quarter(int32_t v) { return (v + ((v >> 31) & 3)) >> 2; }
 // ---------------------------------------------------------------- Unit::action_unqueue @5e1f20
 
 void unit_action_unqueue(Game& g, Unit& u) {
-	// The queued-aircraft counter of a carrier. ❓ The counters of the leader at +0xa10..+0xa24 (keyed by the class of the
-	// queued plane) and the refund (type vslot 0xd8 with refund != 0) are not ported: nothing in the port queues planes on
-	// a carrier, so `num_queued` is always 0 and this returns at once, exactly like the original does for an empty queue.
+	// The queued-aircraft counter of a carrier (BUILDAIR, group_action_buildair): one plane less, the clock restarts when
+	// the queue empties, the leader's per-type and per-class counters (track_queued) and the price back at the current
+	// cost (Type::unpay_cost(who, -1, -1), the original's refund argument is 1 from both callers).
 	if (u.num_queued == 0) return;
 	u.num_queued--;
 	if (u.num_queued == 0) u.queue_time = 0;
-	const int32_t t = current_upgrade(g, u.who, airtype::kFighterBomber);
-	if (t >= 0) {
-		uint16_t& n = g.leaders[size_t(u.who)].num_queued[size_t(t)];
-		if (n != 0) n--;
+	const int32_t f = current_upgrade(g, u.who, airtype::kFighterBomber);
+	track_queued(g, u.who, f, -1);
+	if (f >= 0) unpay_cost(g, f, u.who, -1, -1);
+}
+
+// Group::action_spell @6fe1a0, the aircraft branch (a unit type of domain 2 as the "spell"): BUILDAIR queues the leader's
+// current FIGHTERBOMBER on every carrier of the group that may cast 0x295, up to 10 queued and the carrier's room. The
+// first plane that cannot be paid for ends the command (a `return`, not a `continue`).
+void group_action_buildair(Game& g, Group& gr) {
+	for (int32_t i = 0; i < gr.num; i++) {
+		Unit* u = g.unit(gr.who, gr.list[size_t(i)]);
+		if (!u || !u->alive() || !u->on_map()) continue;
+		if (spell_is_castable(g, 0x295, u->o, gr.who, 0) == 0) continue;
+		if (u->num_queued >= 10) continue;  // (message: queue full)
+		if (num_aircraft_here(g, *u, 0) >= num_aircraft_limit(g, *u)) continue;  // (message: carrier full)
+		const int32_t f = current_upgrade(g, gr.who, airtype::kFighterBomber);
+		if (can_pay_cost(g, f, gr.who, -1, -1, 1) == 0) return;
+		pay_cost(g, f, gr.who, -1, -1, 1, nullptr);
+		u->num_queued++;
+		track_queued(g, gr.who, f, 1);
 	}
+}
+
+// Unit::process @611158: a carrier with planes queued (and an active leader) builds one every train_time(f) frames of
+// accel_train (x ai_speed); a full population holds the clock back one step and counts a pop issue.
+void unit_process_air_queue(Game& g, Unit& u) {
+	if (u.num_queued == 0 || !(g.leaders[size_t(u.who)].flags & leaderflag::kActive)) return;
+	const int32_t f = current_upgrade(g, u.who, airtype::kFighterBomber);
+	const int32_t tt = train_time(g, u.o, u.who, f);
+	int32_t acc = RON_K(g, "accel_train");
+	if (g.ai_speed > 1) acc *= g.ai_speed;
+	u.queue_time += acc;
+	if (u.queue_time < tt) return;
+	Leader& L = g.leaders[size_t(u.who)];
+	if (L.pop_cap < g.type(f).control_cost + L.control) {
+		L.pop_issues++;  // (the pop-limit message and sound of the local player)
+		u.queue_time -= acc;
+		return;
+	}
+	u.num_queued--;
+	u.queue_time = 0;
+	track_queued(g, u.who, f, -1);
+	const int32_t a = init_unit(g, u.who, f, u.x, u.y, -1, -1, -1);
+	if (a >= 0) unit_go_inside(g, *g.unit(u.who, a), u.o, u.who);
 }
 
 // ---------------------------------------------------------------- FLIGHT: Group::action_flight @6fb260
@@ -391,7 +427,7 @@ void group_action_air_patrol(Game& g, Group& gr, int32_t x, int32_t y, QueuePos 
 }
 
 // Group::action_patrol @7030c0, the air half: a group with a plane (leader or member, COUNT_DOMAIN 4) patrols in the air.
-// ❓ The ground half (GroupPatrolOrder / Unit::add_patrol_order) is not ported: a purely ground group ignores PATROL.
+// The ground half (GroupPatrolOrder / Unit::add_patrol_order) is orders_patrol.cpp.
 void group_action_patrol(Game& g, Group& gr, int32_t x, int32_t y, QueuePos q) {
 	// TODO(scenarios): the ScenarioData::ignore_orders prelude.
 	gr.disband = 0;
@@ -409,6 +445,7 @@ void group_action_patrol(Game& g, Group& gr, int32_t x, int32_t y, QueuePos q) {
 		if (m && m->alive() && unit_is_plane(*m)) air = true;
 	}
 	if (air) group_action_air_patrol(g, gr, x, y, q2);
+	else group_action_ground_patrol(g, gr, x, y, q2);
 }
 
 // ---------------------------------------------------------------- LAUNCH_PATROL: Group::action_launch_patrol @703580
@@ -523,8 +560,8 @@ void group_action_air_attack_ground(Game& g, Group& gr, int32_t x, int32_t y, Qu
 }
 
 // Group::action_attack_ground (ATTACK_GROUND, verb 9) @704520, the air half: planes and missiles (or the contents of
-// airbases, carriers and silos) bomb the point. ❓ The ground half (Unit::add_attack_ground_order for artillery) is not
-// ported: a purely ground group ignores the command.
+// airbases, carriers and silos) bomb the point; a group of ground units gets Unit::add_attack_ground_order on the members
+// that can shoot at the ground (orders_patrol.cpp).
 void group_action_attack_ground(Game& g, Group& gr, int32_t x, int32_t y, QueuePos q) {
 	// TODO(scenarios): the ScenarioData::ignore_orders prelude.
 	gr.disband = 0;
@@ -540,7 +577,10 @@ void group_action_attack_ground(Game& g, Group& gr, int32_t x, int32_t y, QueueP
 		const Unit* LU = g.unit(gr.who, gr.list[size_t(li)]);
 		if (!L) return;
 		if (!can_carry_air(*L)) {
-			if (!LU || !unit_is_plane(*LU)) return;  // the ground half
+			if (!LU || !unit_is_plane(*LU)) {  // the ground half
+				group_action_ground_attack_ground(g, gr, x, y, q);
+				return;
+			}
 			group_action_air_attack_ground(g, gr, x, y, q);
 			return;
 		}

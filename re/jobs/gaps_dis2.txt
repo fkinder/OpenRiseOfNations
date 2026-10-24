@@ -1,0 +1,3 @@
+re/decomp/gaps/dis
+Game::current_age
+Game::war_allowed

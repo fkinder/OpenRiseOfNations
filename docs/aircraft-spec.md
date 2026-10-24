@@ -250,8 +250,8 @@ Called every frame from `Build::process` (airbases, silos) and `Unit::work` (car
 ## 9. Paradrop (craft 0x284)
 
 `SpellType::cast_paradrop(o, who, x, y)` @671f80 (**Special Forces** ability, craftrules "Paradrop": FLAGS `dlm` (area, doesn't blow cloak, group), MANA 500, JOB_TIME 25, RES_TIME 300; range `PARADROP_RANGE` 64
-tiles is checked by `is_castable`, not here). It involves no aircraft: `UnitType::find_nearby_spot(caster type, x, y, &nx, &ny, min 0x600?, 0xc0, 0x55555555, FILTER_NOT_ME, ...)` (radius ring 0xc0..0x600; ❓ argument
-order of the two radii), found -> sound S_SPECIAL_FORCES_COMPLETE (own) and `Unit::set_new_location(caster, nx, ny, 1, 1)` (**teleport**, the unit reappears there with no flight). Not found -> feedback string 0x10ab8 +
+tiles is checked by `is_castable`, not here). It involves no aircraft: `UnitType::find_nearby_spot(caster type, x, y, &nx, &ny, r0 = 0, r1 = 0x600, step = 0xc0, 0x55555555, FILTER_NOT_ME, ...)` around the target point
+(✅ the radii order read off the disassembly 2026-10-24: 0, 0x600, 0xc0; ported in `spells_cast.cpp`), found -> sound S_SPECIAL_FORCES_COMPLETE (own) and `Unit::set_new_location(caster, nx, ny, 1, 1)` (**teleport**, the unit reappears there with no flight). Not found -> feedback string 0x10ab8 +
 S_UNIT_PLACEMENT_BLOCKED (own) and `vslot +0xd8` (refund), `mana_burn -= min(mana_burn, spell.mana)`. No `game_random` draw.
 
 ## 10. Randomness (in call order of one frame's air logic)

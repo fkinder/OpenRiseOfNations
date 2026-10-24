@@ -16,7 +16,9 @@
 #include "sim/game.hpp"
 #include "sim/heroes.hpp"
 #include "sim/compass.hpp"
+#include "sim/guys.hpp"
 #include "sim/production.hpp"
+#include "sim/search.hpp"
 #include "sim/spells.hpp"
 #include "sim/trig.hpp"
 
@@ -195,6 +197,21 @@ void cast_sabotage(Game& g, int32_t sp, int32_t o, int32_t who, int32_t to, int3
 }
 
 // ---------------------------------------------------------------- DISBAND / DEPOPULATE (spells-spec 6.1)
+
+// SpellType::cast_paradrop @671f80 (Special Forces, craft 0x284): the caster reappears on the nearest free spot around the
+// target point (rings 0..0x600 every 0xc0, filter NOT_ME, no game_random). No spot: the cost and the mana come back
+// (vslot +0xd8 and mana_burn -= min(mana_burn, MANA) = unpay_cast_costs). (The sounds / feedback of the local player are
+// presentation.)
+void cast_paradrop(Game& g, int32_t o, int32_t who, int32_t x, int32_t y) {
+	Unit* u = g.unit(who, o);
+	if (!u) return;
+	int32_t nx = 0, ny = 0;
+	if (find_nearby_spot(g, *u->ptype, x, y, &nx, &ny, 0, 0x600, 0xc0, 0x55555555, kFilterNotMe, o, who, 0, 0, -1, 0, -1) == 0) {
+		unit_set_new_location(g, *u, nx, ny, true, true);
+		return;
+	}
+	refund(g, 0x284, o, who);
+}
 
 void cast_disband(Game& g, int32_t o, int32_t who) {
 	// @671ed0

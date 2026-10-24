@@ -296,6 +296,10 @@ leader (`Player.who`) indices. `play` is a player slot. Coordinates (`x`, `y`, `
 | 80 | UNGRACEFUL_PLAYER_DROP | 3 | u8 play, u8 state | | DropControl::process_drop |
 | 81 | MARWAN | 2 | u8 start | | log only |
 
+Engine status (2026-10-24): the engine has a `Command` for opcodes 0 2 3 4 6 7 9-15 17-26 28 30 31 33-36 39 41-44 46-49 52-54 59-68 73 75 76 (`replay_to_engine` / `engine_to_wire`; HOTKEY, COME_OUT, SPEED_*, the cheats, CHAT, RENAME_CITY and PAUSE since the second
+orders pass; RENAME_CITY keeps the 22 name units as sent, the bytes after the NUL are the sender's stack garbage). The rest (BEGIN, SIEGE_ATTACK, MOVE_NEAR, REPAIR, ALARM, STOP_SPELL, UNITMASK, TREATY ...,
+CHECK_SUMS, TURN_DATA, CAMERA, PLAYER_SPEED, CHAT_SET, SPLINE, PING ...) stays raw bytes. In the 95-replay corpus 105,256 commands round-trip (6 more kinds than before: +689 commands), 6,691,081 stay raw.
+
 Other issuers: `GroupOut::issue_*` (duplicates of the CommandManager versions), `Options::do_stance / do_alarm /
 do_back_to_work / scramble_aircraft / recall_aircraft / set_air_repeat / picked_spot` (FLIGHT), `Console::on_key_down`
 (HOTKEY), `IFaceDiploBase::on_key_click` (PAUSE), `TurnControl::issue_speed_* / issue_toggle_pause`, `UnitOut::issue_come_out`,

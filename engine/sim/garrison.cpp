@@ -487,7 +487,7 @@ void group_action_garrison(Game& g, Group& gr, int32_t ox, int32_t whom, QueuePo
 		Unit* m = g.unit(gr.who, gr.list[size_t(i)]);
 		if (!m || !m->alive() || !m->on_map()) continue;
 		if (m->ptype->domain == kDomainAir && !unit_is_helicopter(*m)) continue;
-		// UnitData::is_entering_or_exiting: boarding / unboarding a ship (transports are not simulated).
+		if (cast_is_entering_or_exiting(*m)) continue;  // UnitData::is_entering_or_exiting @60a6f0 (garrison-spec 5)
 		if (action_type(*m) == kGarrison) {
 			repath(g, *m);
 			kill_current_order(g, *m, false);

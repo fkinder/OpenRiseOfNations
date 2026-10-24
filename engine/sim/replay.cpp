@@ -86,6 +86,8 @@ bool replay_has_engine_verb(int opcode) {
 	case 0: case 2: case 3: case 4: case 6: case 7: case 9: case 10: case 11: case 12: case 13: case 14: case 15: case 17: case 18:
 	case 19: case 20: case 21: case 22: case 23: case 24: case 25: case 26: case 28: case 30: case 31: case 33: case 35: case 36: case 39: case 41:
 	case 42: case 43: case 44: case 46: case 47: case 48: case 73:
+	case 34: case 49: case 52: case 53: case 54: case 59: case 60: case 61: case 62: case 63: case 64: case 65: case 66: case 67:  // console verbs
+	case 68: case 75: case 76:
 		return true;
 	default:
 		return false;
@@ -670,6 +672,12 @@ struct Args {
 	uint32_t u32() { return uint32_t(i32()); }
 	int8_t i8() { return int8_t(p[o++]); }
 	int16_t i16() { const int16_t v = ld16(p + o); o += 2; return v; }
+	float f32() {
+		const uint32_t v = u32();
+		float f;
+		std::memcpy(&f, &v, 4);
+		return f;
+	}
 };
 
 }  // namespace
@@ -739,6 +747,34 @@ bool replay_to_engine(const uint8_t* cmd, size_t len, Command& out) {
 	case 46: m.verb = Verb::Buy; m.who = a.i32(); m.good = a.i32(); m.flags = a.i32(); break;
 	case 47: m.verb = Verb::Sell; m.who = a.i32(); m.good = a.i32(); m.flags = a.i32(); break;
 	case 48: m.verb = Verb::Unqueue; m.who = a.i32(); m.ox = a.i32(); m.num = a.i32(); m.uid = uint16_t(a.i16()); break;
+	case 34: m.verb = Verb::Hotkey; m.hk_group = a.i32(); m.hk_clear = a.i32(); m.hk_valid = a.i32(); m.hk_x = a.f32(); m.hk_y = a.f32(); m.hk_zoom = a.i32(); break;
+	case 49: m.verb = Verb::ComeOut; m.who = a.i32(); m.ox = a.i32(); m.uid = uint16_t(a.i16()); break;
+	case 52: m.verb = Verb::SpeedSet; m.speed = a.i32(); break;
+	case 53: m.verb = Verb::SpeedUp; break;
+	case 54: m.verb = Verb::SpeedDown; break;
+	case 59: m.verb = Verb::CheatViewAll; m.who = a.i32(); break;
+	case 60: m.verb = Verb::CheatGiveTechs; m.who = a.i32(); break;
+	case 61: m.verb = Verb::CheatZeroTechs; m.who = a.i32(); break;
+	case 62: m.verb = Verb::CheatAiSpeedIncrease; break;
+	case 63: m.verb = Verb::CheatAiSpeedNormal; break;
+	case 64: m.verb = Verb::CheatAiToggle; break;
+	case 65: m.verb = Verb::CheatIncreaseBuckets; m.who = a.i32(); break;
+	case 66: m.verb = Verb::CheatZeroBuckets; m.who = a.i32(); break;
+	case 67: m.verb = Verb::CheatInitUnit; m.who = a.i32(); m.type = a.i32(); m.x = a.i32(); m.y = a.i32(); break;
+	case 68: {  // CHAT: bits, taunt, taunt_num, n, n x u16, u16 0
+		m.verb = Verb::Chat;
+		m.chat_bits = a.i32(); m.chat_taunt = a.i32(); m.chat_taunt_num = a.i32();
+		const int32_t n = a.i32();
+		for (int32_t i = 0; i < n; ++i) m.text.push_back(char16_t(ldu16(cmd + a.o + 2 * size_t(i))));
+		break;
+	}
+	case 75: {  // RENAME_CITY: who, o, u16 name[22]; the name ends at its first 0 and the rest is the sender's stack garbage, kept so that the command re-encodes
+		m.verb = Verb::RenameCity;
+		m.who = a.i32(); m.ox = a.i32();
+		for (int i = 0; i < 22; ++i) m.text.push_back(char16_t(ldu16(cmd + a.o + 2 * size_t(i))));
+		break;
+	}
+	case 76: m.verb = Verb::Pause; m.set = cmd[1]; break;
 	case 73:
 		m.verb = Verb::LeaderOptions;
 		m.who = a.i32(); m.peasants = a.i32(); m.peasants_wait = a.i32(); m.buildings = a.i32();
@@ -804,6 +840,39 @@ bool engine_to_wire(const Command& c, std::vector<uint8_t>& out) {
 	case Verb::Buy: out.push_back(46); i32(c.who); i32(c.good); i32(c.flags); return true;
 	case Verb::Sell: out.push_back(47); i32(c.who); i32(c.good); i32(c.flags); return true;
 	case Verb::Unqueue: out.push_back(48); i32(c.who); i32(c.ox); i32(c.num); put16(out, c.uid); return true;
+	case Verb::Hotkey: {
+		out.push_back(34); i32(c.hk_group); i32(c.hk_clear); i32(c.hk_valid);
+		uint32_t bx, by;
+		std::memcpy(&bx, &c.hk_x, 4);
+		std::memcpy(&by, &c.hk_y, 4);
+		put32(out, bx); put32(out, by); i32(c.hk_zoom);
+		return true;
+	}
+	case Verb::ComeOut: out.push_back(49); i32(c.who); i32(c.ox); put16(out, c.uid); return true;
+	case Verb::SpeedSet: out.push_back(52); i32(c.speed); return true;
+	case Verb::SpeedUp: out.push_back(53); return true;
+	case Verb::SpeedDown: out.push_back(54); return true;
+	case Verb::CheatViewAll: out.push_back(59); i32(c.who); return true;
+	case Verb::CheatGiveTechs: out.push_back(60); i32(c.who); return true;
+	case Verb::CheatZeroTechs: out.push_back(61); i32(c.who); return true;
+	case Verb::CheatAiSpeedIncrease: out.push_back(62); return true;
+	case Verb::CheatAiSpeedNormal: out.push_back(63); return true;
+	case Verb::CheatAiToggle: out.push_back(64); return true;
+	case Verb::CheatIncreaseBuckets: out.push_back(65); i32(c.who); return true;
+	case Verb::CheatZeroBuckets: out.push_back(66); i32(c.who); return true;
+	case Verb::CheatInitUnit: out.push_back(67); i32(c.who); i32(c.type); i32(c.x); i32(c.y); return true;
+	case Verb::Chat:
+		if (c.text.size() > 240) return false;
+		out.push_back(68); i32(c.chat_bits); i32(c.chat_taunt); i32(c.chat_taunt_num); i32(int32_t(c.text.size()));
+		for (char16_t ch : c.text) put16(out, uint16_t(ch));
+		put16(out, 0);
+		return true;
+	case Verb::RenameCity: {
+		out.push_back(75); i32(c.who); i32(c.ox);
+		for (size_t i = 0; i < 22; ++i) put16(out, i < c.text.size() ? uint16_t(c.text[i]) : uint16_t(0));
+		return true;
+	}
+	case Verb::Pause: out.push_back(76); out.push_back(uint8_t(c.set)); return true;
 	case Verb::LeaderOptions:
 		out.push_back(73); i32(c.who); i32(c.peasants); i32(c.peasants_wait); i32(c.buildings);
 		i32(32); i32(4); i32(2);  // BitMask<32>: bits, size, and the word the corpus always has as 2; the value follows

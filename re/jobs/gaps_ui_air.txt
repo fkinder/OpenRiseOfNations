@@ -1,0 +1,2 @@
+re/decomp/ui_air
+IFaceAirGarrison::(init|on_redraw|on_button_clicked|on_button_right_clicked|on_button_move|on_spot_move|update_visibility)

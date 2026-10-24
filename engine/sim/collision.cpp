@@ -5,13 +5,16 @@
 // Collision blocks: World::coll_blocks / WData.block (sim/world.hpp). Snapshots for path searches: the PathFinder's
 // blocklist (sim/pathfinder.hpp), copied on first touch exactly like CollCheck::fill_slots does.
 #include <algorithm>
+#include <cstdlib>
 
 #include "sim/combat.hpp"
+#include "sim/compass.hpp"
 #include "sim/game.hpp"
 #include "sim/guys.hpp"
 #include "sim/movement.hpp"
 #include "sim/orders.hpp"
 #include "sim/pathfinder.hpp"
+#include "sim/search.hpp"
 #include "sim/spells.hpp"
 #include "sim/trig.hpp"
 
@@ -618,17 +621,161 @@ int32_t resolve_block(Game& g, Unit& u) {
 
 // ---------------------------------------------------------------- Unit::detect_boat_collision @5fa8b0
 
+namespace {
+
+// Objects::find_units @65a620 as detect_boat_collision calls it (search ALL, radius = the pusher's push_size, the same-tregion bit
+// 0x200, FILTER_NOT_ME, `sea` = the mover's domain is SEA): the on-map live units of leaders 0..7 (0..8 for a land mover) whose
+// tregion is the query point's. With at least as many units in the game as cells in the circle of the radius the wcoords of the
+// circle are scanned in table order (every unit in a cell qualifies, no distance test); otherwise the leaders' units in slot order,
+// within `radius` of the point once their own radius (push_size for ships, big_radius) is taken off.
+std::vector<std::pair<int32_t, int32_t>> find_push_candidates(Game& g, int32_t x, int32_t y, int32_t radius, int32_t o, int32_t who,
+                                                              bool sea) {
+	std::vector<std::pair<int32_t, int32_t>> out;
+	const World& w = g.world;
+	const int32_t tx = tcoord_of(x), ty = tcoord_of(y);
+	const int32_t region = w.in_t(tx, ty) ? w.get_tregion(tx, ty) : -1;
+	auto accept = [&](int32_t cw, int32_t co) -> const Unit* {
+		const Unit* c = g.unit(cw, co);
+		if (!c || !c->alive() || !c->on_map()) return nullptr;
+		const int32_t cx = tcoord_of(c->x), cy = tcoord_of(c->y);
+		if ((w.in_t(cx, cy) ? w.get_tregion(cx, cy) : -1) != region) return nullptr;
+		if (co == o && cw == who) return nullptr;  // FILTER_NOT_ME
+		return c;
+	};
+	const Circles& C = circles();
+	const int32_t k = (radius + 0x2ff) / 0x300;
+	if (radius >= 0 && k >= 0 && k <= 64 && C.radius[size_t(k)] <= g.total_units) {
+		const int32_t wx = wcoord_of(x), wy = wcoord_of(y);
+		for (int32_t i = 0; i < C.radius[size_t(k)]; i++) {
+			const int32_t cx = wx + C.x[size_t(i)], cy = wy + C.y[size_t(i)];
+			if (!w.in_w(cx, cy)) continue;
+			const WData& d = w.w(cx, cy);
+			int32_t co = d.down, cw = d.down_who;
+			while (co >= 0) {
+				const Object* ob = g.object(cw, co);
+				const int32_t no = ob ? ob->down : -1, nw = ob ? ob->down_who : 0;
+				if (cw < (sea ? 8 : 9) && accept(cw, co)) out.emplace_back(cw, co);
+				co = no;
+				cw = nw;
+			}
+		}
+		return out;
+	}
+	for (int32_t p = 0; p < 9 && (!sea || p < 8); p++) {
+		if (!(g.leaders[size_t(p)].flags & leaderflag::kValid)) continue;
+		const int32_t mark = g.objects[size_t(p)].unit_mark;
+		for (int32_t co = 0; co < mark; co++) {
+			const Unit* c = accept(p, co);
+			if (!c) continue;
+			const int32_t r = c->ptype->domain == 1 ? c->ptype->push_size : c->ptype->big_radius;
+			if (radius < 0 || vector_dist(c->x - x, c->y - y) - r <= radius) out.emplace_back(p, co);
+		}
+	}
+	return out;
+}
+
+}  // namespace
+
+// Unit::detect_boat_collision @5fa8b0 (docs/movement-spec.md 10.5; re/decomp/gaps/dis/): a pusher (ship, siege weapon, hero,
+// supply wagon) that would overlap other units shoves them aside instead of waiting. Each side is `push_circles` circles of radius
+// push_size / push_circles laid along guy 0's heading, centred on the unit; the overlap is (the other's circle size - the closest
+// centre distance + mine) / 2. Returns 1 when nothing blocked the move (everything overlapping was pushed, or could be ignored), 0
+// when a unit that cannot be pushed is in the way.
 int32_t detect_boat_collision(Game& g, Unit& u, int32_t x, int32_t y, bool mutual) {
-	(void)g;
-	(void)x;
-	(void)y;
-	(void)mutual;
-	if (u.who >= 8 || u.ptype->push_size == 0) return 1;
-	// TODO(pushers): Objects::find_units candidates, push_circles overlap, push or block (docs/movement-spec.md
-	// section 10.5; spells-spec 5: a blocker that is a packer is pushed only while PACKED and never while
-	// cast_is_unpacking, nor when entrenched or cargo). Until then a pusher with a push_size is never blocked by the push test and falls through to
-	// the ordinary footprint check.
-	return 0;
+	static const bool old_stub = std::getenv("RON_OLD_BOAT") != nullptr;  // developer aid: the pre-port stub (digest A/B runs)
+	if (old_stub) return (u.who >= 8 || u.ptype->push_size == 0) ? 1 : 0;
+	if (u.who >= 8) return 1;
+	const int32_t dom = u.ptype->domain;
+	const Order* act = get_action(u);
+	const int32_t act_type = act ? int32_t(act->type) : 0;
+	const int32_t push = u.ptype->push_size, circ = u.ptype->push_circles;
+	if (push == 0 || circ <= 0) return 1;
+	const bool flag10 = (u.ptype->unit_flags & 0x10) != 0;
+	const std::vector<std::pair<int32_t, int32_t>> cand = find_push_candidates(g, x, y, push, u.o, u.who, dom == 1);
+	if (cand.empty()) return 1;
+	const int32_t q_me = push / circ;
+	const uint32_t my_angle = u.guys.empty() ? 0u : u.guys[0].angle;
+	int32_t mx0 = x, my0 = y, msx = 0, msy = 0;
+	if (circ > 1) {
+		int32_t dx, dy;
+		project(0, 0, my_angle, q_me, &dx, &dy);
+		mx0 = x - (circ - 1) * dx;
+		my0 = y - (circ - 1) * dy;
+		msx = dx * 2;
+		msy = dy * 2;
+	}
+	for (const auto& [bw, bo] : cand) {
+		Unit* B = g.unit(bw, bo);
+		if (!B) continue;
+		if (dom != 0 && B->who >= 8) continue;
+		const Type& BT = *B->ptype;
+		if (BT.domain != dom) continue;
+		if (u.who == B->who && u.group == B->group && B->group != -1 && mutual && act_type != kAttack) continue;
+		if (u.collide_o == B->o && u.collide_who == B->who && u.collide_frame == g.frame) continue;
+		const int32_t bx = B->x, by = B->y;
+		const int32_t cB = BT.push_circles;
+		if (BT.push_size == 0 || cB <= 0) continue;
+		const int32_t qB = BT.push_size / cB;
+		int32_t bx0 = bx, by0 = by, bsx = 0, bsy = 0;
+		if (cB > 1) {
+			int32_t dx, dy;
+			project(0, 0, B->guys.empty() ? 0u : B->guys[0].angle, qB, &dx, &dy);
+			bx0 = bx - (cB - 1) * dx;
+			by0 = by - (cB - 1) * dy;
+			bsx = dx * 2;
+			bsy = dy * 2;
+		}
+		int32_t best = 0xfffffff;
+		for (int32_t i = 0; i < circ; i++) {
+			const int32_t mex = mx0 + i * msx, mey = my0 + i * msy;
+			for (int32_t j = 0; j < cB; j++) {
+				const int32_t d = vector_dist(mex - (bx0 + j * bsx), mey - (by0 + j * bsy));
+				if ((i == 0 && j == 0) || d < best) best = d;
+			}
+		}
+		const int32_t ov = (qB - best + q_me) / 2;
+		if (ov <= 0) continue;
+		if (flag10 && BT.attack != 0) return 0;  // a transport barge waits for armed units
+		if (B->who != u.who) {
+			// Only allies (both ways) are pushed, plus gaia's units.
+			if ((g.leaders[size_t(u.who)].diplos(B->who) != 2 || g.leaders[size_t(B->who)].diplos(u.who) != 2) && B->who < 8) return 0;
+		}
+		if (dom == 0) {
+			// A packer is shoved only while packed and never while it unpacks; entrenched units and tanks stay.
+			if (BT.unit_flags2 & utflag2::kPacker) {
+				if (!(B->unit_masks & umask::kPacked)) return 0;
+				if (cast_is_unpacking(*B)) return 0;
+			}
+			if (B->unit_masks & umask::kEntrenched) return 0;
+			if (type_is_tank(BT)) return 0;
+		}
+		const int32_t push_amt = std::min(ov, 0x30);
+		uint32_t ang = find_angle(bx - x, by - y);
+		if (!unit_is_moving(*B)) {
+			// An idle blocker is moved at least 45 degrees off my heading.
+			const uint32_t d = ang - my_angle;
+			if (d < 0x20000000u) ang = my_angle + 0x20000000u;
+			else if (d > 0xe0000000u) ang = my_angle + 0xe0000000u;
+		} else if ((ang - my_angle) + 0xe0000000u > 0xc0000000u) {
+			return 0;  // a moving blocker within 45 degrees of my heading blocks me
+		}
+		int32_t nx, ny;
+		project(bx, by, ang, push_amt, &nx, &ny);
+		if (unit_invalid_loc(g, *B, tcoord_of(nx), tcoord_of(ny), false, false, false, false, false) != 0) continue;
+		unit_set_new_location(g, *B, nx, ny, false, false);
+		if (mutual && (cB == 1 || dom == 0)) {
+			B->collide_o = u.o;
+			B->collide_who = int8_t(u.who);
+			if (B->orders.empty() && !B->guys.empty()) {
+				unit_set_angle(g, *B, ang, false);
+				uint32_t turned = 0;
+				guy_turn_angles(g, *B, B->guys[0], ang, &turned, true, true);
+				guy_do_turn(g, *B, B->guys[0], ang, turned, 1, true);
+			}
+		}
+		B->collide_frame = g.frame;
+	}
+	return 1;
 }
 
 }  // namespace ron::sim

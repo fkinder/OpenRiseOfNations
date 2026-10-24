@@ -147,15 +147,14 @@ wheel and pinch zoom one level toward the cursor (in to 6, out to 4); trackpad s
 
 ## 6. Not yet
 
-What is still missing after the second pass (section 12): the air garrison panel (IFaceAirGarrison: fighters / bombers /
-helicopters ready and fuelling on airbases and carriers), the library's final-techs ("jeopardy") view and the category
-column's clicks, single-unit ejection (OPTION_EJECT needs COME_OUT, verb 49) and ejecting one type, the HOTKEY verb in
-`CommandPackage` (control groups are a record in `apps/map-mac/hotkeys.*`: not in recorded, replayed or networked
-command streams), stances, formations, patrol, auto-explore, disband-all and `QUEUE` / `INFINITE` hotkeys (bound in the key
-map, no command for them yet), the group-by-type multi-selection (pref 0x20000), the speed change as a SPEED_UP / SPEED_DOWN
-command in multiplayer (the speed is a local pacing choice in single player), `Group::compute_form` for the drag preview
+What is still missing after the third pass (sections 12 and 12.8): the air garrison panel (IFaceAirGarrison: fighters / bombers /
+helicopters ready and fuelling on airbases and carriers; the options FIGHTERS / BOMBERS / HELIS / ALLAIR it sends are not decoded) and the
+library's final-techs ("jeopardy") view and the category column's clicks, ejecting by type from the garrison grid beyond "the first unit / every
+unit of the clicked type", stances, formations, patrol, auto-explore, disband-all and `QUEUE` / `INFINITE` hotkeys (bound in the key
+map, no HUD action for them yet; the commands exist), the group-by-type multi-selection (pref 0x20000), `Group::compute_form` for the drag preview
 (the slots are an approximation), localised option help for the literals the port writes itself (section 12.6 lists them),
-and the profile's other preferences (notification flags, the `Prefer Military` box filters).
+and the profile's other preferences (notification flags, the `Prefer Military` box filters). Done in the third pass: HOTKEY, COME_OUT, SPEED_* , PAUSE and CHAT
+as lockstep commands (12.8).
 
 ## 8. Script UI (2026-10-13)
 
@@ -701,13 +700,10 @@ six through the `Armies::emergency` call the original makes when a city or capit
 - **Speed**: `-` / `=` (and the numpad) step `game_speed` 0..4 (Very Slow, Slow, Normal, Fast, Hyper Fast = `TurnControl::timings` 200,
   125, 67, 50, 1 ms per frame; Hyper Fast runs up to 40 frames per display frame). The speed is presentation (the simulation does not read
   it): `ronmap` paces `Game::do_frame` by `kTimings[_speed]`; headless runs keep one virtual 67 ms step per frame. The clock shows the
-  rules' `game_speeds` word, a message announces the change. In multiplayer the keys send SPEED_UP / SPEED_DOWN (52-54) through the lockstep session and the speed follows it (section 10.3).
+  rules' `game_speeds` word, a message announces the change. In multiplayer the keys send SPEED_UP / SPEED_DOWN (52-54) through the lockstep session and the speed follows it (section 10.3); in single player they are the same commands through `CommandManager` (12.8) and stop at Fast, as `process_speed_up` does.
 - **HOTKEY** (`apps/map-mac/hotkeys.*`): replay-spec verb 34 is `i32 group, i32 clear, i32 valid, f32 x, f32 y, i32 zoom` and copies the
-  current command group (`HotKeyGroups::copy_group`). `CommandManager` has no such verb and `commands.*` belongs to another task this
-  round, so `hotkeys::Groups::issue` sends the selection as GROUP (`issue_group`, which the original sends before it) and queues a
-  `hotkeys::Command` record; `process` applies the queue in issue order right after `CommandManager::process_turn` (and at once for a
-  key press, so a paused game still assigns). **Gap**: the record is not in the recorded / replayed / networked command stream; the
-  verb belongs in `CommandPackage::process` (`Command::Verb`) with the group table in the walked state.
+  current command group (`HotKeyGroups::copy_group`). Since the third pass (12.8) it is a real command (`CommandManager::issue_hotkey`, executed
+  by `CommandPackage::process`, table `Game::ctl.hotkeys`); `hotkeys::Groups` only issues it and reads the table back.
 - **Profile** (`NSUserDefaults`, interactive window only): resource panel flags, mini library open, help verbosity, progress buttons and
   game speed are read when the window opens and written when one changes.
 
@@ -724,7 +720,15 @@ the German help text).
 
 ### 12.7 Gaps this pass leaves (also section 6)
 
-Air garrison panel; library final techs and category buttons; COME_OUT (per-unit and per-type ejection); the HOTKEY verb in the command
-layer; SPEED_UP / SPEED_DOWN as commands; `Group::compute_form` for the preview; the group-by-type multi-selection; the options' help for the
+Air garrison panel; library final techs and category buttons; `Group::compute_form` for the preview; the group-by-type multi-selection; the options' help for the
 orders the card does not offer yet; `type vslot 0x104` in the do_damage threshold. The Market's row-head and arrow positions and the
 library's overlay choice (owned = `*_overlay1`) are inferred from the art, not decoded.
+
+### 12.8 The command verbs of the HUD (third pass, 2026-10-24; engine side in sim-implementation.md "Orders and commands, second pass")
+
+- **Control groups**: Ctrl+N issues GROUP + HOTKEY (`CommandManager::issue_hotkey`, an empty selection a camera bookmark `issue_hotkey_bookmark`, Ctrl+Shift+N clear); the verb runs in `CommandPackage` and fills `Game::ctl.hotkeys[leader * 18 + n]`
+  (digits 0..9 here; F1..F8 = 10..17 are in the table, not bound yet); N reads the table (`hotkeys::Groups::slot`). The group is therefore recorded, replayed and networked; a dying unit or building leaves its groups (`HotKeyGroups::kill`).
+- **Game speed and pause**: `-` / `=` and the pause key issue SPEED_DOWN / SPEED_UP / PAUSE as commands in single player (multiplayer sends the same verbs through the session); `ronmap` reads the resulting `Game::ctl.speed` (the keys reach Fast; Hyper Fast comes from `--speed 4` / the profile).
+- **Garrison grid**: a click issues COME_OUT (verb 49) for the first own unit of the clicked type, a right click for every unit of that type (`IFaceGarrison::on_button_clicked / _right_clicked` @805f30 / @805e50 -> `OPTION_EJECT` -> `UnitOut::issue_come_out`).
+- **Chat line**: Enter / Shift+Enter (everybody), Ctrl+Enter (allies), Alt+Enter (enemies), or the bar's chat button, open a one-line edit box above the bar (`Hud::draw_chat`); Return sends a CHAT command to the recipient mask, Esc drops it; the received line appears through the script
+  presentation's chat plate (`ScriptEvent::kChat`) on the machines whose seat is a recipient. `ronmap --chat "TEXT@FRAME"` / `--chat-draft "TEXT@FRAME"` type and send / leave open (the line reads "Say to everybody: hello there_" with a blinking cursor).

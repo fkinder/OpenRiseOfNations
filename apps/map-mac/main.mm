@@ -1410,7 +1410,11 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 // The pause key: alone it flips the flag; in a multiplayer game it is a PAUSE command every machine runs at the same turn.
 - (void)togglePause {
 	if (_mp) _mp->toggle_pause();
-	else _paused = !_paused;
+	else if (_game) {  // PAUSE 76 is a command too: it runs at once even while the game is paused (process_turn does not wait for a frame)
+		_cm.issue_pause(!_paused);
+		_cm.process_turn(*_game);
+		_paused = _game->ctl.paused;
+	} else _paused = !_paused;
 }
 
 // This game is one machine of a lockstep session: the local seat, the session's frame wrapper and its answer to an out-of-sync repair.
@@ -2481,6 +2485,10 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		[self gameMenuKey:event];
 		return;
 	}
+	if (_hud.chat_active()) {  // the chat line takes every key until Return or Esc
+		[self chatKey:event];
+		return;
+	}
 	if (event.keyCode == 109 && !_inPopup) {  // F10: the game menu
 		[self openGameMenu:1];
 		return;
@@ -2546,6 +2554,56 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		default: break;
 	}
 	[self updateTitle];
+}
+
+// The chat line (hud.mm): Return sends the text as a CHAT command to everybody / the allies / the enemies, Esc drops it.
+- (void)chatKey:(NSEvent*)e {
+	if (e.keyCode == 53) {  // Esc
+		_hud.chat_close();
+		return;
+	}
+	if (e.keyCode == 36 || e.keyCode == 76) {  // Return / keypad Enter
+		[self chatSend];
+		return;
+	}
+	if (e.keyCode == 51) {  // Delete
+		_hud.chat_backspace();
+		return;
+	}
+	if (e.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl)) return;
+	NSString* chars = e.characters;
+	for (NSUInteger i = 0; i < chars.length; i++) {
+		const unichar c = [chars characterAtIndex:i];
+		if (c >= 0x20 && c != 0x7f && !(c >= 0xF700 && c <= 0xF8FF)) _hud.chat_append(std::string([[NSString stringWithCharacters:&c length:1] UTF8String]));
+	}
+}
+
+// CommandManager::issue_chat: the recipients are a mask of leaders (-1 everybody); the sender is always among them.
+- (void)chatSend {
+	const std::string text = _hud.chat_text();
+	const int mode = _hud.chat_mode();
+	_hud.chat_close();
+	if (!_game || text.empty()) return;
+	const int me = [self localPlayer];
+	int32_t bits = -1;
+	if (mode != 0) {
+		bits = 1 << me;
+		for (int i = 0; i < 8; i++) {
+			if (i == me || !(_game->leaders[size_t(i)].flags & ron::sim::leaderflag::kValid)) continue;
+			const bool ally = _game->leaders[size_t(me)].diplos(i) == 2 && _game->leaders[size_t(i)].diplos(me) == 2;
+			if ((mode == 1) == ally) bits |= 1 << i;
+		}
+	}
+	const std::u16string tx = ron::utf8_to_utf16(text);
+	[self issueAs:me block:^bool { return _cm.issue_chat(tx, bits); }];
+}
+
+// --chat / --chat-draft: Enter, the text typed, and (--chat) Return.
+- (void)chatScript:(const std::string&)text send:(bool)send {
+	if (!_game) return;
+	[self execKeyOption:"OPTION_CHAT" param:-1 modifiers:0];
+	_hud.chat_append(text);
+	if (send) [self chatSend];
 }
 
 - (void)updateTitle {
@@ -4414,12 +4472,21 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		return 1;
 	}
 	if (o == "OPTION_SLOWER" || o == "OPTION_FASTER") {
-		// TurnControl::issue_speed_down / _up (SPEED_DOWN 54 / SPEED_UP 53): one step of game_speed, 0 Very Slow .. 4 Hyper Fast.
-		const int to = std::clamp(_speed + (o == "OPTION_FASTER" ? 1 : -1), 0, 4);
-		if (to != _speed) {
-			_speed = to;
+		// TurnControl::issue_speed_down / _up: SPEED_DOWN 54 / SPEED_UP 53 are commands (recorded, replayed, networked); the speed
+		// they leave in Game::ctl is the one the frame pacing reads. The keys step 0 Very Slow .. 3 Fast (process_speed_up stops
+		// there); Hyper Fast comes from SPEED_SET (--speed 4, the profile).
+		_game->ctl.speed = _speed, _game->ctl.target_frame_time = int32_t(kTimings[std::clamp(_speed, 0, 4)]);  // the pacing the window already uses
+		if (o == "OPTION_FASTER") _cm.issue_speed_up();
+		else _cm.issue_speed_down();
+		_cm.process_turn(*_game);
+		if (_game->ctl.speed != _speed) {
+			_speed = _game->ctl.speed;
 			[self say:uistr::tr("Game Speed:") + " " + [self speedName]];
 		}
+		return 1;
+	}
+	if (o == "OPTION_CHAT" || o == "OPTION_CHAT_ALL" || o == "OPTION_CHAT_ALLIES" || o == "OPTION_CHAT_ENEMIES") {
+		_hud.chat_open(o == "OPTION_CHAT_ALLIES" ? 1 : o == "OPTION_CHAT_ENEMIES" ? 2 : 0);  // the chat line (hud.mm); Return sends CHAT
 		return 1;
 	}
 	if (o == "OPTION_MENU") {
@@ -4603,17 +4670,21 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 			break;
 		}
 		case hud::ActionKind::GarrisonEject: {
-			// IFaceGarrison::on_button_clicked / _right_clicked: OPTION_EJECT for the clicked group (a right click: every unit of
-			// the type). EJECTALL names the container and the owner; a single unit (COME_OUT, verb 49) has no command yet, so
-			// both clicks send out the owner's garrison.
+			// IFaceGarrison::on_button_clicked / _right_clicked: OPTION_EJECT = UnitOut::issue_come_out (COME_OUT, verb 49) for the first
+			// own unit of the clicked type (a right click: every unit of the type).
 			const hud::Garrison& gar = _hudState.garrison;
 			if (!gar.active || a.index < 0 || a.index >= int(gar.units.size())) break;
 			const hud::GarrisonUnit& gu = gar.units[size_t(a.index)];
-			if (!gu.own) break;
-			const std::vector<int32_t> objs = {gar.building};
+			if (!gu.own || gu.objects.empty()) break;
+			std::vector<int32_t> picks = gu.objects;
+			if (!a.all) picks.resize(1);
 			const int me = [self localPlayer];
-			const int32_t owner = gu.who, container = gar.building, cwho = gar.owner;
-			[self issueAs:me block:^bool { return _cm.issue_eject_all(*_game, objs, false, owner, container, cwho); }];
+			const int32_t owner = gu.who;
+			[self issueAs:me block:^bool {
+				bool any = false;
+				for (int32_t o : picks) any |= _cm.issue_come_out(*_game, owner, o);
+				return any;
+			}];
 			break;
 		}
 		case hud::ActionKind::Progress: {
@@ -5085,13 +5156,14 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 // the group to the selection.
 - (BOOL)controlGroup:(int)n ctrl:(bool)ctrl shift:(bool)shift {
 	if (!_game) return YES;
+	_hotkeys.attach(*_game);  // the group table is the simulation's (HOTKEY command, sim/commands_extra.cpp)
 	const int play = _cm.play;
 	hotkeys::Command cmd;
 	cmd.play = play, cmd.group = n;
 	if (ctrl && shift) {
 		cmd.clear = 1;  // HOTKEY with clear: Ctrl+Shift erases the group
 		_hotkeys.issue(_cm, *_game, cmd, {}, {});
-		_hotkeys.process();
+		_cm.process_turn(*_game);  // runs at once in single player; the multiplayer sink hands it to the session
 		std::printf("HOTKEY group %d cleared\n", n);
 	} else if (ctrl) {
 		if (_selected.empty() && _selectedBuilds.empty()) {
@@ -5101,7 +5173,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 			cmd.valid = 1;
 			_hotkeys.issue(_cm, *_game, cmd, _selected, _selectedBuilds);
 		}
-		_hotkeys.process();
+		_cm.process_turn(*_game);
 		std::printf("HOTKEY group %d %s (%zu units, %zu buildings)\n", n, cmd.valid ? "assigned" : "bookmarked", _selected.size(), _selectedBuilds.size());
 	} else if ([self pres] && [self pres]->hotkey_selection_disabled) {
 		// hotkey_selection_disable: control groups do not recall
@@ -6226,6 +6298,7 @@ int main(int argc, const char* argv[]) {
 		int panel_flags = -1, help_level = 0;
 		bool streamlined = false;
 		std::vector<std::string> timed_keys;
+		std::vector<std::pair<std::string, bool>> timed_chats;  // --chat / --chat-draft "TEXT@FRAME": the chat line typed (and sent)
 		struct TimedZoom {
 			int level = 5, frame = 0;
 		};
@@ -6435,6 +6508,8 @@ int main(int argc, const char* argv[]) {
 				help_level = std::atoi(argv[++i]);
 			} else if (a == "--key" && more) {  // "KEYS@FRAME" (e.g. "Alt+M@10"): a hotkey as the key map resolves it
 				timed_keys.push_back(argv[++i]);
+			} else if ((a == "--chat" || a == "--chat-draft") && more) {  // "TEXT@FRAME": typed into the chat line (--chat sends it)
+				timed_chats.push_back({argv[++i], a == "--chat"});
 			} else if (a == "--script-log") {
 				script_log = true;
 			} else if ((a == "--select" || a == "--select-build") && more) {
@@ -6843,6 +6918,10 @@ int main(int argc, const char* argv[]) {
 			for (const std::string& k : timed_keys) {
 				const size_t at = k.find('@');
 				if ((at == std::string::npos ? 0 : std::atoi(k.c_str() + at + 1)) == f) [r runKeyString:k.substr(0, at)];
+			}
+			for (const auto& [k, send] : timed_chats) {
+				const size_t at = k.rfind('@');
+				if ((at == std::string::npos ? 0 : std::atoi(k.c_str() + at + 1)) == f) [r chatScript:k.substr(0, at) send:send];
 			}
 			if (f < sim_frames) [r stepSimulation:1];
 		}

@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "sim/aircraft.hpp"
 #include "sim/game.hpp"
 #include "sim/garrison.hpp"
 #include "sim/guys.hpp"
@@ -549,8 +550,7 @@ void group_action_halt(Game& g, Group& gr, int32_t p) {
 	for (int32_t i = 0; i < gr.num; i++) {
 		Unit* u = action_member(g, gr, i);
 		if (!u) continue;
-		// UnitData::is_entering_or_exiting: front SPECIAL_ANIM of type 0/1 (TODO: the anim type is not modelled).
-		if (u->order_type() == kSpecialAnim) continue;
+		if (cast_is_entering_or_exiting(*u)) continue;  // UnitData::is_entering_or_exiting @60a6f0: front SPECIAL_ANIM of type 0 / 1
 		if ((p & 4) && (u->ptype->unit_flags & 0x20000)) continue;  // is_siege (assumed for type vfunc +0x10c)
 		if ((p & 2) && (u->ptype->unit_flags2 & 0x10)) continue;    // is_special
 		if ((p & 1) && unit_is(g, *u, 0x3a)) continue;
@@ -931,6 +931,12 @@ void group_finish_insert(Game& g, Group& gr, std::vector<Order>& saved) {
 		case kGroupAttackTo:
 			if (has_orig) group_action_move_near(g, gr, o.orig_x, o.orig_y, o.tolerance, kQueueLast, true, o.angle, kAttackTo, 1, -1, -1, 0);
 			else group_action_move_near(g, gr, o.x, o.y, o.tolerance, kQueueLast, true, o.angle, kAttackTo, 1, -1, -1, 0);
+			break;
+		case kGroupPatrol:
+			group_redo_patrol_order(g, gr, o);  // Group::redo_patrol_order @706d90 (orders_patrol.cpp)
+			break;
+		case kAttackGround:
+			group_action_attack_ground(g, gr, o.x, o.y, kQueueLast);  // @704520
 			break;
 		case kAttack:
 			// 🟡 re-issued as a QUEUE_LAST group attack on the same target (mandatory as saved).

@@ -8,9 +8,91 @@
 #include "sim/groups.hpp"
 #include "sim/spells.hpp"
 #include "sim/transport.hpp"
+#include "sim/placement.hpp"
 #include "sim/production.hpp"
 
 namespace ron::sim {
+
+namespace {
+
+// Unit::set_stance @605310 (param_2 = 0): the stance goes to the unit's captain and down its chain.
+void unit_set_stance(Game& g, Unit& u, int32_t v) {
+	Unit* c = &u;
+	for (int guard = 0; c->o_up >= 0 && guard < kUnitLimit; guard++) {
+		Unit* up = g.unit(c->who, c->o_up);
+		if (!up) break;
+		c = up;
+	}
+	for (int guard = 0; c && guard < kUnitLimit; guard++) {
+		c->stance = int8_t(v);
+		Unit* d = c->o_down >= 0 ? g.unit(c->who, c->o_down) : nullptr;
+		if (!d || !d->alive()) break;
+		c = d;
+	}
+}
+
+// CommandPackage::process_leader_options @9441d0: the new options replace the leader's; a changed citizens' stance (+4) is applied
+// to the citizens (types 0x32 / 0x33) and to the buildings of stance type 1, the military stance (+0xc, `opt_buildings`) to
+// stance-type-0 units and buildings, the option bits to marines (bit 1), packers (bit 3) and casters (bit 4).
+void process_leader_options(Game& g, const Command& c) {
+	const int32_t who = c.who;
+	Leader& l = g.leaders[size_t(who)];
+	const int32_t old_peasants = l.opt_peasants, old_buildings = l.opt_buildings;
+	const uint32_t old_flags = l.options_flags;
+	l.opt_peasants = c.peasants;
+	l.opt_peasants_wait = c.peasants_wait;
+	l.opt_buildings = c.buildings;
+	l.options_flags = c.option_flags;
+	const int32_t nu = g.objects[size_t(who)].unit_mark, nb = g.objects[size_t(who)].build_mark;
+	auto each_unit = [&](auto fn) {
+		for (int32_t o = 0; o < nu; o++) {
+			Unit* u = g.unit(who, o);
+			if (u && u->alive()) fn(*u);
+		}
+	};
+	auto each_build = [&](auto fn) {
+		for (int32_t o = kBuildBase; o < nb; o++) {
+			Build* b = g.build(who, o);
+			if (b && b->alive()) fn(*b);
+		}
+	};
+	if (old_peasants != l.opt_peasants) {
+		each_unit([&](Unit& u) {
+			if (u.type == 0x32 || u.type == 0x33) unit_set_stance(g, u, l.opt_peasants);
+		});
+		each_build([&](Build& b) {
+			if (build_stance_type(g, b.type) == 1) b.stance = int8_t(l.opt_peasants);
+		});
+	}
+	if (old_buildings != l.opt_buildings) {
+		each_unit([&](Unit& u) {
+			if (unit_stance_type(*u.ptype) == 0) u.stance = int8_t(l.opt_buildings);
+		});
+		each_build([&](Build& b) {
+			if (build_stance_type(g, b.type) == 0) b.stance = int8_t(l.opt_buildings);
+		});
+	}
+	if (((old_flags >> 1) & 1) != ((l.options_flags >> 1) & 1)) {
+		each_unit([&](Unit& u) {
+			if (!type_is(*u.ptype, 0x45, false)) return;
+			if (!(l.options_flags & 2)) u.unit_masks &= ~0x800000u;
+			else if (l.flags & 0x700u) u.unit_masks |= 0x800000u;
+		});
+	}
+	for (int bit : {3, 4}) {
+		if (((old_flags >> bit) & 1) == ((l.options_flags >> bit) & 1)) continue;
+		const int32_t st = bit == 3 ? 3 : 2;
+		const bool on = (l.options_flags >> bit) & 1;
+		each_unit([&](Unit& u) {
+			if (unit_stance_type(*u.ptype) == st) unit_set_stance(g, u, on ? 0 : 1);
+		});
+		each_build([&](Build& b) {
+			if (build_stance_type(g, b.type) == st) b.stance = on ? 0 : 1;
+		});
+	}
+}
+
+}  // namespace
 
 // ---------------------------------------------------------------- executor
 
@@ -205,14 +287,7 @@ void CommandPackage::process(Game& g, const Command& c, int32_t play, int32_t pl
 			action_respond(g, c.who, c.whom, g.leaders[size_t(c.who)].dip[size_t(c.whom)].agree == 1 ? 0 : 2);
 		return;
 	case Verb::LeaderOptions:
-		// TODO(spec): process_leader_options also applies stances (Unit::set_stance); only the options are kept.
-		if (c.who >= 0 && c.who < kNumLeaders) {
-			Leader& l = g.leaders[size_t(c.who)];
-			l.opt_peasants = c.peasants;
-			l.opt_peasants_wait = c.peasants_wait;
-			l.opt_buildings = c.buildings;
-			l.options_flags = c.option_flags;
-		}
+		if (c.who >= 0 && c.who < kNumLeaders) process_leader_options(g, c);  // @9441d0
 		return;
 	case Verb::Unqueue: {
 		// process_unqueue @9466f0: object (who, o) alive with the matching uid; buildings -> Build::action_unqueue.
@@ -222,6 +297,12 @@ void CommandPackage::process(Game& g, const Command& c, int32_t play, int32_t pl
 		else build_action_unqueue(g, static_cast<Build&>(*ob), c.num);
 		return;
 	}
+	case Verb::Hotkey: case Verb::ComeOut: case Verb::SpeedSet: case Verb::SpeedUp: case Verb::SpeedDown:
+	case Verb::CheatViewAll: case Verb::CheatGiveTechs: case Verb::CheatZeroTechs: case Verb::CheatAiSpeedIncrease:
+	case Verb::CheatAiSpeedNormal: case Verb::CheatAiToggle: case Verb::CheatIncreaseBuckets: case Verb::CheatZeroBuckets:
+	case Verb::CheatInitUnit: case Verb::Chat: case Verb::RenameCity: case Verb::Pause:
+		command_process_extra(g, *this, c, play, play_who);  // commands_extra.cpp
+		return;
 	}
 }
 

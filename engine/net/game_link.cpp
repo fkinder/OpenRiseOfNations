@@ -12,10 +12,13 @@ namespace ron::net {
 
 namespace {
 bool is_aircraft_verb(int op) { return op == 9 || op == 10 || op == 11 || op == 28 || op == 35 || op == 36; }
+// The console / turn-control verbs ron-sav does not feed (sim/commands_extra.cpp): HOTKEY, COME_OUT, SPEED_*, the cheats, CHAT, RENAME_CITY, PAUSE.
+bool is_console_verb(int op) {
+	return op == 34 || op == 49 || (op >= 52 && op <= 54) || (op >= 59 && op <= 68) || op == 75 || op == 76;
+}
 // Commands the instance never counts as unsupported: the lockstep layer's own and presentation (apps/sav/main.cpp's list).
 bool is_quiet_verb(int op) {
-	return op == sim::op::kTurnData || op == sim::op::kCamera || op == sim::op::kCheckSums || op == sim::op::kPlayerSpeed ||
-	       op == sim::op::kPause || op == sim::op::kHotkey;
+	return op == sim::op::kTurnData || op == sim::op::kCamera || op == sim::op::kCheckSums || op == sim::op::kPlayerSpeed;
 }
 }  // namespace
 
@@ -30,7 +33,7 @@ ExecPolicy ExecPolicy::sav_compatible() {
 	ExecPolicy p = all_engine();
 	p.player_exit = false;
 	for (int op = 0; op < 128; ++op)
-		if (is_aircraft_verb(op)) p.allow[size_t(op)] = false;
+		if (is_aircraft_verb(op) || is_console_verb(op)) p.allow[size_t(op)] = false;
 	return p;
 }
 
@@ -95,6 +98,7 @@ void GameHooks::execute(int slot, const uint8_t* cmd, size_t len) {
 		return;
 	}
 	if (is_quiet_verb(op)) return;
+	if ((op == sim::op::kPause || op == sim::op::kHotkey) && !policy_.allow[size_t(op & 127)]) return;  // presentation for ron-sav
 	sim::Command c;
 	if (!policy_.execute || !policy_.allow[size_t(op & 127)] || !sim::replay_to_engine(cmd, len, c)) {
 		++unsupported[op];
