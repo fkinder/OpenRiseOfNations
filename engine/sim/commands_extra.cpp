@@ -57,21 +57,14 @@ std::string utf8_of(const std::u16string& s) { return to_utf8(s); }
 
 void hotkey_groups_kill(Game& g, int32_t who, int32_t o) {
 	if (who < 0 || who >= 9) return;
-	auto drop = [o](HotKeyGroup& hg) {
-		if (!hg.used || hg.bookmark) return;
+	for (int n = 0; n < kHotKeyGroupsPerLeader; n++) {
+		HotKeyGroup& hg = g.ctl.hotkeys[size_t(who * kHotKeyGroupsPerLeader + n)];
+		if (!hg.used || hg.bookmark) continue;
 		auto it = std::find(hg.list.begin(), hg.list.end(), int16_t(o));
-		if (it == hg.list.end()) return;
+		if (it == hg.list.end()) continue;
 		hg.list.erase(it);
 		if (hg.list.empty()) hg.used = 0;
-	};
-	for (int n = 0; n < kHotKeyGroupsPerLeader; n++) drop(g.ctl.hotkeys[size_t(who * kHotKeyGroupsPerLeader + n)]);
-	for (int n = 0; n < kNamedGroupsPerLeader; n++) drop(g.ctl.named[size_t(who * kNamedGroupsPerLeader + n)]);
-}
-
-// The HOTKEY group index of slot `n` of leader `who`: 0..17 the original's table, 18..25 the named army groups.
-static int32_t hotkey_index(int32_t who, int32_t n) {
-	if (n < 0 || n >= kHotKeyGroupsPerLeader + kNamedGroupsPerLeader || who < 0 || who >= 9) return -1;
-	return n < kHotKeyGroupsPerLeader ? who * kHotKeyGroupsPerLeader + n : kNamedGroupBase + who * kNamedGroupsPerLeader + (n - kHotKeyGroupsPerLeader);
+	}
 }
 
 // Unit::action_come_out @5e20b0: the unit drops its orders and leaves the building / carrier it is in. A scholar leaving a University
@@ -111,15 +104,14 @@ void unit_action_come_out(Game& g, Unit& u) {
 
 bool command_process_extra(Game& g, CommandPackage& pk, const Command& c, int32_t play, int32_t play_who) {
 	switch (c.verb) {
-	case Verb::Hotkey: {  // process_hotkey @9474d0 (group >= kNamedGroupBase: a named army group, the port's second table)
-		const bool named = c.hk_group >= kNamedGroupBase && c.hk_group < kNamedGroupBase + kNamedGroupCount;
-		if (c.hk_group < 0 || (c.hk_group >= kHotKeyGroupCount && !named)) return true;
-		HotKeyGroup& hg = named ? g.ctl.named[size_t(c.hk_group - kNamedGroupBase)] : g.ctl.hotkeys[size_t(c.hk_group)];
+	case Verb::Hotkey: {  // process_hotkey @9474d0
+		if (c.hk_group < 0 || c.hk_group >= kHotKeyGroupCount) return true;
+		HotKeyGroup& hg = g.ctl.hotkeys[size_t(c.hk_group)];
 		if (c.hk_clear == 0) {
 			if (pk.group >= 0) hotkey_assign(g, hg, g.groups.g[size_t(pk.group)]);
 		} else {
 			hg = HotKeyGroup();
-			hg.who = int8_t(named ? (c.hk_group - kNamedGroupBase) / kNamedGroupsPerLeader : c.hk_group / kHotKeyGroupsPerLeader);
+			hg.who = int8_t(c.hk_group / kHotKeyGroupsPerLeader);
 			if (c.hk_valid != 0) {
 				hg.used = 1;
 				hg.bookmark = 1;
@@ -241,11 +233,10 @@ bool command_process_extra(Game& g, CommandPackage& pk, const Command& c, int32_
 // ---------------------------------------------------------------- the issuers
 
 bool CommandManager::issue_hotkey(const Game& g, const std::vector<int32_t>& objs, int32_t n, bool clear) {
-	const int32_t index = hotkey_index(play_who, n);
-	if (index < 0) return false;
+	if (n < 0 || n >= kHotKeyGroupsPerLeader || play_who < 0 || play_who >= 9) return false;
 	Command c;
 	c.verb = Verb::Hotkey;
-	c.hk_group = index;
+	c.hk_group = play_who * kHotKeyGroupsPerLeader + n;
 	c.hk_x = c.hk_y = -1.0f;
 	if (clear || objs.empty()) {
 		c.hk_clear = 1;  // CommandManager::issue_hotkey(null group): erase
@@ -257,11 +248,10 @@ bool CommandManager::issue_hotkey(const Game& g, const std::vector<int32_t>& obj
 }
 
 bool CommandManager::issue_hotkey_bookmark(int32_t n, float x, float y, int32_t zoom) {
-	const int32_t index = hotkey_index(play_who, n);
-	if (index < 0) return false;
+	if (n < 0 || n >= kHotKeyGroupsPerLeader || play_who < 0 || play_who >= 9) return false;
 	Command c;
 	c.verb = Verb::Hotkey;
-	c.hk_group = index;
+	c.hk_group = play_who * kHotKeyGroupsPerLeader + n;
 	c.hk_clear = 1;
 	c.hk_valid = 1;
 	c.hk_x = x;

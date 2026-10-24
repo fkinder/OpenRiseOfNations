@@ -432,7 +432,7 @@ enum : int {
 	kOptDisband = 15, kOptStance = 17, kOptForm = 19, kOptHalt = 25, kOptGarrison = 26, kOptAlarmPeasant = 27,
 	kOptBackToWork = 30, kOptEjectAll = 31, kOptAutoExplore = 33, kOptTrain = 47, kOptResearch = 48, kOptGather = 51,
 	kOptCancel = 67,
-	kOptGroup = 900,  // a port addition (docs/ui-port.md section 14): name the selected soldiers as an army group / regroup it
+	kOptGroup = 900,  // a port addition (docs/ui-port.md section 14): name the selected soldiers as a control group / regroup it
 };
 
 }  // namespace hud

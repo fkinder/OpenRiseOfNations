@@ -890,39 +890,41 @@ Speed guards (`engine/net/lockstep.cpp` vs `engine/sim/commands_extra.cpp`): `pr
 verbs do nothing when `Game::multiplayer && (info.flags & 0x100)`. The session accepted `SpeedUp` up to Hyper Fast (4), so its clock could run at 1 ms while the game's `ctl.speed` stayed at
 3, and it ignored the lock. Now `kSpeedUp` needs `speed_ < 3`, `kSpeedDown` `speed_ != 0`, and `SessionConfig::speed_locked` (set by `Runtime::ready` from the game's flags) makes `set_speed` a no-op.
 
-## 14. Named army groups (2026-10-24)
+## 14. Army groups (2026-10-24)
 
-The player's complaint: armies scatter. `ronmap` now has named groups of soldiers with a HUD button each and a regroup order.
+The player's complaint: armies scatter. `ronmap`'s control groups 0..9 now carry a name, a HUD button each and a regroup order; nothing
+new was added to the simulation (an earlier draft kept named groups in a second HOTKEY table, `Game::ctl.named`; it was removed when
+the two were unified, so the original's 9 x 18 `hotkey_groups` layout and the replay encoding are exactly the original's).
 
-- **Making one**: with soldiers selected (own units that are not citizens, scholars, caravans, merchants or aircraft; buildings and
-  civilians in the selection are left out, nothing military selected does nothing) **G** opens a small dialog (`drawGroupNameDialog`)
-  prefilled with "Grupo n"; the keys go to its text field (Return confirms, Esc cancels, Delete edits, up to 24 characters), the mouse is
-  ignored and the single-player simulation pauses like the other modal windows. Confirming issues the selection as GROUP + **HOTKEY slot
-  18 + n** through `hotkeys::Groups::issue` / `CommandManager::issue_hotkey`, so the group is a command like a numbered control group:
-  recorded in replays, networked in lockstep, pruned by `HotKeyGroups::kill` when a member dies.
-- **Where it lives** (`engine/sim/control.hpp`): the original's `hotkey_groups` table keeps its 9 x 18 layout and the wire encoding
-  `group = leader * 18 + n`; the named groups are a second table `Game::ctl.named` (8 per leader) addressed by `group = 162 + leader * 8 + n`
-  (`kNamedGroupBase`), values the original's `process_hotkey` ignored, so no recorded game carries one and existing replays decode as before.
-  The issuer numbers the slots 18..25 (`hotkeys::kNumSlots` = 26). The **names** are presentation data in the window
-  (`_groupNames`); the port's save does not store the control-group tables (the original's does: `docs/state-spec.md`), so neither the
-  members nor the names survive a save / load yet (the gap noted in sim-implementation.md applies to both tables).
-- **Panel** (`drawGroupPanel`, `UiRenderer` quads and the 14-point font): one 150 x 22 button per named group down the right edge
-  under the top strip (y 150, 10 px from the edge): the name on the left, the living member count on the right; the selected group's
-  button is orange and a **Reagrupar** button follows the list. Left click recalls the living members as the selection (as a numbered
-  group's key does); a second click within 500 ms, or a click while the group is already the selection, also centres the camera on
-  the members' centroid. Shift+click opens the rename dialog. Right click deletes the group (HOTKEY clear, the name dropped). A group whose members all died disappears.
-  G with a named group selected (the selection equals its living members) opens the dialog as a rename.
-- **Command card**: with soldiers selected the card's slot (2, 0) is a text button, **Agrupar** (opens the name dialog) or
-  **Reagrupar** when the selection is a named group (`hud::kOptGroup`, a port option index outside the original's enum).
-- **Regroup** (`regroupNamed`, the panel button, the card's Reagrupar or **Shift+G** with the group selected): one `issue_move_to` for the whole group to the
-  centroid of its living members. `Group::action_move_near` lays the members out in their formation around that point
-  (`docs/movement-spec.md` section 11) and they walk there as one group move. A right-click move of a named group is the same group
+- **Making one**: Ctrl+n as before (section 12.8), or with soldiers selected (own units that are not citizens, scholars, caravans,
+  merchants or aircraft; buildings and civilians in the selection are left out, nothing military selected does nothing) **G** opens a
+  small dialog (`drawGroupNameDialog`) for the first free number (1..9, then 0), prefilled with "Grupo n"; the keys go to its text field
+  (Return confirms, Esc cancels, Delete edits, up to 24 characters), the mouse is ignored and the single-player simulation pauses like
+  the other modal windows. Confirming issues the selection as GROUP + **HOTKEY slot n** through `hotkeys::Groups::issue` /
+  `CommandManager::issue_hotkey`, exactly what Ctrl+n sends, so the group answers to its number key, is recorded in replays, networked
+  in lockstep and pruned by `HotKeyGroups::kill` when a member dies. The card's **Agrupar** button (below) does the same as G.
+- **Names** are presentation data in the window (`_groupNames[10]`): a Ctrl+n group shows as "Grupo n" until renamed; assigning
+  another army to a number drops its old name, erasing the group too. The port's save does not store the control-group table (the
+  original's does: `docs/state-spec.md`), so neither the members nor the names survive a save / load yet.
+- **Panel** (`drawGroupPanel`, `UiRenderer` quads and the 14-point font): one 150 x 22 button per control group that holds units (not
+  bookmarks or building groups) down the right edge under the top strip (y 150, 10 px from the edge), in key order 1..9, 0: "n  name"
+  on the left, the living captain count on the right; the selected group's button is orange and a **Reagrupar** button follows the
+  list. Left click recalls the living members as the selection (as the number key does); a second click within 500 ms, or a click
+  while the group is already the selection, also centres the camera on the members' centroid. Shift+click opens the rename dialog.
+  Right click erases the group (HOTKEY clear, the name dropped). A group whose members all died disappears. G with a group selected
+  (the selection's captains equal its living captains) opens the dialog as a rename.
+- **Command card**: with soldiers selected the card's slot (2, 0) is the army-group button (`hud::kOptGroup`, a port option index
+  outside the original's enum) with the icon `apps/map-mac/resources/group-icon.tga` (61 x 39, found like the menu logo: the bundle's
+  Resources, next to a dev build, or this source tree; `UiRenderer::file_texture` accepts such an absolute path), its tooltip
+  "Agrupar: ..." (G) or "Reagrupar: ..." (Shift+G) when the selection is a group; without the file it is a text button.
+- **Regroup** (`regroupGroup`, the panel button, the card button or **Shift+G** with the group selected): one `issue_move_to` for the
+  whole group to the centroid of its living members. `Group::action_move_near` lays the members out in their formation around that
+  point (`docs/movement-spec.md` section 11) and they walk there as one group move. A right-click move of a group is the same group
   order (`commandMoveAt` -> one MOVE_TO per owner), so the formation and the group speed apply: `Unit::do_group_move` already holds
-  `Group::speed` / `new_speed` to the slowest member (`gr.march`, the general's march speed) in `engine/sim/groups.cpp`, so nothing was
-  added there.
+  `Group::speed` / `new_speed` to the slowest member (`gr.march`, the general's march speed) in `engine/sim/groups.cpp`.
 - **Keys taken**: G (OPTION_GARRISON's key in the key map) now opens the dialog whenever soldiers are selected; the garrison order
-  stays on the card. Shift+G (STANCE_STANDGROUND) regroups only while a named group is the selection; otherwise it reaches the key map.
-- **Harness**: `--group NAME@FRAME` (the dialog confirmed with NAME), `--recall-group N@FRAME`, `--regroup N@FRAME` (N 0-based); the
-  console lines `named group N "..." assigned / recalled / regroups / deleted` report what ran. Snapshots in `re/previews/`:
+  stays on the card. Shift+G (STANCE_STANDGROUND) regroups only while a group is the selection; otherwise it reaches the key map.
+- **Harness**: `--group NAME@FRAME` (the dialog confirmed with NAME), `--recall-group N@FRAME`, `--regroup N@FRAME` (N the key
+  number); the console lines `group N "..." assigned / recalled / regroups / erased` report what ran. Snapshots in `re/previews/`:
   `groups_panel.png` (the panel with a group selected), `groups_dialog.png` (the dialog), `groups_scattered.png` /
-  `groups_regrouped.png` (before and after the regroup).
+  `groups_regrouped.png` (before and after the regroup), `card_reagrupar.png` (the card button).

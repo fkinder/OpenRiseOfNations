@@ -29,9 +29,9 @@
 //   list clears); --option N[:MENU[:TYPE]]@FRAME clicks command-card option N (OptionIndex: 9 Move, 0 / 1 / 2 the build
 //   menus, -1 cancels), MENU opens a build page, TYPE starts placing that building; --cursor X,Y@FRAME puts the mouse
 //   over world point X,Y; --look / --zoom-at move the camera as the player would; --script-log prints the
-//   presentation queue as it is consumed. Named army groups (docs/ui-port.md section 14): --group NAME@FRAME names the selected
-//   soldiers as G + the name + Enter would, --recall-group N@FRAME clicks group N's panel button (0-based), --regroup N@FRAME its
-//   regroup button.
+//   presentation queue as it is consumed. Army groups (docs/ui-port.md section 14): --group NAME@FRAME names the selected
+//   soldiers as G + the name + Enter would (the first free number 1..9), --recall-group N@FRAME clicks group N's panel button,
+//   --regroup N@FRAME its regroup button.
 //
 //   Save / load (engine/sim/save.hpp, docs/save-format.md): F5 quick-saves and F9 quick-loads the one save slot
 //   ~/Library/Application Support/OpenRiseOfNations/Saves/quicksave.ronsave (the game menu has Save Game / Load Game
@@ -48,8 +48,9 @@
 // Controls (docs/ui-spec.md 4): click select (Shift adds, Ctrl/Cmd toggles, double click = same type on screen), drag a
 //           box (units before buildings, 128 max); right-click: move / attack / rally point; minimap: click or drag to
 //           look, right-click to order; Ctrl+0..9 stores a control group (no selection: a camera bookmark), 0..9 recalls,
-//           twice centres; G names the selected soldiers as an army group (a panel button per group: click recalls, again
-//           centres, Shift+click renames, right-click deletes; G with the group selected renames), Shift+G / the panel's button regroups it; edge scrolling (2 px), mouse wheel / pinch zoom toward the cursor, trackpad scroll pans;
+//           twice centres; G names the selected soldiers as a control group (the first free number; a panel button per group:
+//           click recalls, again centres, Shift+click renames, right-click erases; G with the group selected renames), Shift+G /
+//           the panel's button / the card's Reagrupar regroups it; edge scrolling (2 px), mouse wheel / pinch zoom toward the cursor, trackpad scroll pans;
 //           arrows scroll   + - zoom level   P pause   F fog   B bloom   H HUD   Esc cancel / clear / game menu   F10 game menu
 //           (Resume, Save Game, Load Game, Return to Main Menu, Quit)   F5 quick save   F9 quick load; the game-over
 //           screen offers Return to Main Menu.
@@ -495,8 +496,8 @@ static bool debug_skip(const char* pass) {
 - (void)runKeyString:(const std::string&)keys;
 // Named army groups (docs/ui-port.md section 14): name the selected soldiers (G, the name, Enter), the panel's buttons.
 - (void)nameGroupScript:(const std::string&)name;
-- (void)recallNamedGroup:(int)slot;
-- (BOOL)regroupNamed:(int)slot;
+- (void)recallGroup:(int)slot;
+- (BOOL)regroupGroup:(int)slot;
 // Leaving the game from the game menu or the game-over screen: quit = NO returns to the Main Menu. Nil: Quit only.
 @property(nonatomic, copy) void (^onExit)(BOOL quit);
 // Conquer the World battle only: called once with the result (1 won, 0 lost, 2 left the battle) a few seconds after the game
@@ -713,10 +714,13 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	hotkeys::Groups _hotkeys;
 	int _lastGroupKey;
 	double _lastGroupMs;
-	// Named army groups (docs/ui-port.md section 14): HOTKEY slots 18..25 (Game::ctl.named); the names are this window's.
-	std::array<std::string, ron::sim::kNamedGroupsPerLeader> _groupNames;
-	int _gnameSlot;  // the name dialog: the slot being named or renamed, -1 closed
+	// Army groups (docs/ui-port.md section 14): the control groups 0..9 with a name each (this window's) and a panel.
+	std::array<std::string, 10> _groupNames;
+	int _gnameSlot;  // the name dialog: the group being named or renamed, -1 closed
+	BOOL _gnameRename;
 	std::string _gnameText;
+	std::string _groupIconId;  // the card's Agrupar / Reagrupar icon (UiRenderer id), "" when missing
+	BOOL _groupIconChecked;
 	std::vector<std::pair<int, ron::IfaceRect>> _groupRects;  // the panel's buttons this frame (slot, rect)
 	ron::IfaceRect _regroupRect;
 	int _regroupSlot;  // the slot the regroup button acts on, -1 no button
@@ -791,7 +795,7 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	_fogOn = YES;
 	_uiScale = 1;
 	_targeting = -1, _buildPage = -1, _placeType = -1, _lastGroupKey = -1;
-	_gnameSlot = -1, _regroupSlot = -1, _lastNamedSlot = -1, _lastNamedMs = 0;
+	_gnameSlot = -1, _regroupSlot = -1, _lastNamedSlot = -1, _lastNamedMs = 0, _gnameRename = NO, _groupIconChecked = NO;
 	_gmHover = _gmPress = -1, _overMs = -1;
 	_verbosity = 2, _terrFrame = -100000, _hoverTick = 0;
 	_simSeed = seed;
@@ -3273,9 +3277,11 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		}
 		opt(hud::kOptMoveTo, 0, 0, own);
 		opt(hud::kOptAttackTo, 1, 0, false);  // TODO(sim): the ATTACK_TO verb (attack-move) is not ported
-		if (own && ![self militarySelection].empty()) {  // named army groups: "Agrupar" (the G dialog) or "Reagrupar" with a named group selected
+		if (own && ![self militarySelection].empty()) {  // army groups: "Agrupar" (the G dialog) or "Reagrupar" with a group selected
 			hud::Option* o = opt(hud::kOptGroup, 2, 0, true);
-			o->label = [self selectedNamedGroup] >= 0 ? "Reagrupar" : "Agrupar";
+			o->tex_id = [self groupIconId];
+			o->tex_x = o->tex_y = 0;
+			if (o->tex_id.empty()) o->label = [self selectedGroup] >= 0 ? "Reagrupar" : "Agrupar";
 		}
 		if (citizens) {
 			opt(hud::kOptBuild, 0, 1, own);
@@ -3986,6 +3992,12 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 				lines(key, secs);
 				if (tip.info.empty() && !T.desc.empty()) tip.info.push_back(ron::sim::to_utf8(T.desc));
 			} else {
+				if (h.a == hud::kOptGroup) {  // the port's army-group button
+					const bool re = [self selectedGroup] >= 0;
+					tip.first = re ? "Reagrupar: reúne o grupo em formação" : "Agrupar: dá nome a um grupo de exército (1-9)";
+					tip.hotkey = re ? "Shift+G" : "G";
+					break;
+				}
 				// Plain buttons: "Name: description" (verbosity 2 and up; the name alone below), the hotkey, the help text.
 				const std::string name = _hud.option_name(h.a), desc = _hud.option_desc(h.a);
 				tip.first = v >= 2 && !desc.empty() ? (name.empty() ? desc : name + ": " + desc) : (name.empty() ? desc : name);
@@ -4679,7 +4691,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	const int me = [self localPlayer];
 	switch (option) {
 		case hud::kOptMoveTo: case hud::kOptGarrison: _targeting = option; break;
-		case hud::kOptGroup: [self groupKey:[self selectedNamedGroup] >= 0]; break;  // Agrupar: the name dialog; Reagrupar: the group move
+		case hud::kOptGroup: [self groupKey:[self selectedGroup] >= 0]; break;  // Agrupar: the name dialog; Reagrupar: the group move
 		case hud::kOptHalt: {
 			const std::vector<int32_t> objs = [self ownSelectedUnits];
 			[self issueAs:me block:^bool { return _cm.issue_halt(*_game, objs); }];
@@ -5532,8 +5544,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		cmd.clear = 1;  // HOTKEY with clear: Ctrl+Shift erases the group
 		_hotkeys.issue(_cm, *_game, cmd, {}, {});
 		_cm.process_turn(*_game);  // runs at once in single player; the multiplayer sink hands it to the session
+		if (n >= 0 && n < 10) _groupNames[size_t(n)].clear();
 		std::printf("HOTKEY group %d cleared\n", n);
 	} else if (ctrl) {
+		if (n >= 0 && n < 10 && [self selectedGroup] != n) _groupNames[size_t(n)].clear();  // another army takes the number: its name goes
 		if (_selected.empty() && _selectedBuilds.empty()) {
 			cmd.x = _lookAt.x, cmd.y = _lookAt.y, cmd.zoom = _zoom;  // an empty selection bookmarks the camera
 			_hotkeys.issue(_cm, *_game, cmd, {}, {});
@@ -5583,14 +5597,18 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	return YES;
 }
 
-// ---------------------------------------------------------------- named army groups (docs/ui-port.md section 14)
+// ---------------------------------------------------------------- army groups (docs/ui-port.md section 14)
 //
-// G with soldiers selected opens a name dialog; Enter stores the members as HOTKEY slot 18 + n of the local leader (sim/control.hpp
-// Game::ctl.named: a command, so it is recorded, replayed and networked like a numbered control group) and the name here. The panel
-// (drawGroupPanel) shows a button per group: click recalls the living members, a second click centres, right-click deletes; with
-// the group selected G renames and Shift+G / the panel's button regroups (one MOVE_TO of the whole group to its centroid: the
-// engine's formation code places the members together and they walk as one group move). Names are not saved (the port's save
-// leaves the control-group tables out too, sim/control.hpp).
+// The control groups 0..9 (Ctrl+n assigns, n recalls: controlGroup above, HOTKEY slots of the local leader) with a name each, a HUD
+// panel and a regroup order. G with soldiers selected opens a name dialog; Enter stores the members in the first free number (1..9,
+// then 0) through HOTKEY, so the group answers to its key exactly like one made with Ctrl+n, and keeps the name here (a Ctrl+n group
+// shows as "Grupo n" until renamed). The panel lists every unit group: click recalls (as the key does), a second click centres,
+// Shift+click renames, right-click erases; with the group selected G renames, and Shift+G, the panel's button or the card's
+// Reagrupar regroup it: one MOVE_TO of the whole group to its centroid, so the engine's formation code places the members together
+// and they walk there as one group move. Names are not saved (the port's save leaves the control-group table out too, sim/control.hpp).
+
+static constexpr int kGroupKeys = 10;
+static int group_key_order(int i) { return (i + 1) % kGroupKeys; }  // panel / free-slot order: 1..9, then 0
 
 // The own soldiers of the selection: alive, not citizens / scholars / caravans / merchants, not aircraft.
 - (hotkeys::ObjectList)militarySelection {
@@ -5610,16 +5628,22 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	return out;
 }
 
-// The living members of named group `slot`, as the simulation's table holds them.
-- (hotkeys::ObjectList)namedGroupMembers:(int)slot {
+// The living unit members of control group `slot` (0..9) as the simulation's table holds them (none for a bookmark or buildings).
+- (hotkeys::ObjectList)groupMembers:(int)slot {
 	hotkeys::ObjectList out;
-	if (!_game || slot < 0 || slot >= ron::sim::kNamedGroupsPerLeader) return out;
+	if (!_game || slot < 0 || slot >= kGroupKeys) return out;
 	_hotkeys.attach(*_game);
-	for (const auto& k : _hotkeys.slot([self localPlayer], ron::sim::kHotKeyGroupsPerLeader + slot).units) {
+	const hotkeys::Slot g = _hotkeys.slot([self localPlayer], slot);
+	if (g.bookmark) return out;
+	for (const auto& k : g.units) {
 		const ron::sim::UnitView* u = [self unitView:k.first o:k.second];
 		if (u && u->alive) out.push_back(k);
 	}
 	return out;
+}
+
+- (std::string)groupName:(int)slot {
+	return _groupNames[size_t(slot)].empty() ? "Grupo " + std::to_string(slot) : _groupNames[size_t(slot)];
 }
 
 // The captains of a list (the table and a recall hold followers too; the player counts and boxes captains).
@@ -5632,13 +5656,12 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	return out;
 }
 
-// The named group whose living captains are exactly the selection's (-1 none).
-- (int)selectedNamedGroup {
+// The control group whose living captains are exactly the selection's (-1 none).
+- (int)selectedGroup {
 	if (_selected.empty() || !_selectedBuilds.empty()) return -1;
 	const hotkeys::ObjectList sel = [self captainsOf:_selected];
-	for (int s = 0; s < ron::sim::kNamedGroupsPerLeader; s++) {
-		if (_groupNames[size_t(s)].empty()) continue;
-		const hotkeys::ObjectList m = [self captainsOf:[self namedGroupMembers:s]];
+	for (int s = 0; s < kGroupKeys; s++) {
+		const hotkeys::ObjectList m = [self captainsOf:[self groupMembers:s]];
 		if (m.empty() || m.size() != sel.size()) continue;
 		bool same = true;
 		for (const auto& k : sel) same = same && std::find(m.begin(), m.end(), k) != m.end();
@@ -5647,27 +5670,34 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	return -1;
 }
 
-// G (shift = NO): the name dialog for a new group of the selected soldiers, or for the selected named group (rename); Shift+G:
-// regroup the selected named group. Returns NO when the key meant nothing here (it then goes to the key map).
+- (void)openGroupDialog:(int)slot rename:(BOOL)rename {
+	_gnameSlot = slot, _gnameRename = rename;
+	_gnameText = rename ? [self groupName:slot] : "Grupo " + std::to_string(slot);
+	_pressing = _boxing = _hudPress = _rightPress = NO;
+}
+
+// G (shift = NO): the name dialog for a new group of the selected soldiers, or for the selected group (rename); Shift+G: regroup
+// the selected group. Returns NO when the key meant nothing here (it then goes to the key map).
 - (BOOL)groupKey:(BOOL)shift {
 	if (!_game || _inPopup) return NO;
-	const int cur = [self selectedNamedGroup];
-	if (shift) return cur >= 0 && [self regroupNamed:cur];
+	const int cur = [self selectedGroup];
+	if (shift) return cur >= 0 && [self regroupGroup:cur];
 	if (cur >= 0) {
-		_gnameSlot = cur, _gnameText = _groupNames[size_t(cur)];
+		[self openGroupDialog:cur rename:YES];
 		return YES;
 	}
 	if ([self militarySelection].empty()) return NO;
+	_hotkeys.attach(*_game);
 	int slot = -1;
-	for (int s = 0; s < ron::sim::kNamedGroupsPerLeader && slot < 0; s++) {
-		if (_groupNames[size_t(s)].empty()) slot = s;
+	for (int i = 0; i < kGroupKeys && slot < 0; i++) {
+		const int s = group_key_order(i);
+		if (!_hotkeys.slot([self localPlayer], s).used) slot = s;
 	}
 	if (slot < 0) {
-		[self say:"Limite de 8 grupos nomeados"];
+		[self say:"Os 10 grupos (0-9) estão em uso"];
 		return YES;
 	}
-	_gnameSlot = slot, _gnameText = "Grupo " + std::to_string(slot + 1);
-	_pressing = _boxing = _hudPress = _rightPress = NO;
+	[self openGroupDialog:slot rename:NO];
 	return YES;
 }
 
@@ -5696,7 +5726,8 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	}
 }
 
-// Enter: a new group stores the selected soldiers through HOTKEY slot 18 + n; a rename only changes the name.
+// Enter: a new group stores the selected soldiers through HOTKEY slot n (GROUP + the verb, as Ctrl+n does); a rename only changes
+// the name.
 - (void)confirmGroupName {
 	const int slot = _gnameSlot;
 	_gnameSlot = -1;
@@ -5704,16 +5735,15 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	std::string name = _gnameText;
 	while (!name.empty() && name.back() == ' ') name.pop_back();
 	while (!name.empty() && name.front() == ' ') name.erase(name.begin());
-	if (name.empty()) name = "Grupo " + std::to_string(slot + 1);
-	if (!_groupNames[size_t(slot)].empty()) {  // an existing group: rename only (G with it selected, Shift+click on its button)
-		_groupNames[size_t(slot)] = name;
-		std::printf("named group %d renamed \"%s\"\n", slot, name.c_str());
+	if (_gnameRename) {
+		_groupNames[size_t(slot)] = name;  // empty: back to "Grupo n"
+		std::printf("group %d renamed \"%s\"\n", slot, [self groupName:slot].c_str());
 		return;
 	}
 	const hotkeys::ObjectList members = [self militarySelection];
 	if (members.empty()) return;
 	hotkeys::Command cmd;
-	cmd.play = [self localPlayer], cmd.group = ron::sim::kHotKeyGroupsPerLeader + slot, cmd.valid = 1;
+	cmd.play = [self localPlayer], cmd.group = slot, cmd.valid = 1;
 	_hotkeys.attach(*_game);
 	__block bool ok = false;
 	[self issueAs:cmd.play block:^bool { return ok = _hotkeys.issue(_cm, *_game, cmd, members, {}); }];
@@ -5721,12 +5751,12 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	_groupNames[size_t(slot)] = name;
 	_selected = members, _selectedBuilds.clear();
 	[self selectionChanged];
-	std::printf("named group %d \"%s\" assigned (%zu units) at frame %d\n", slot, name.c_str(), members.size(), _game->frame);
+	std::printf("group %d \"%s\" assigned (%zu units) at frame %d\n", slot, [self groupName:slot].c_str(), members.size(), _game->frame);
 }
 
 - (void)nameGroupScript:(const std::string&)name {
 	if (![self groupKey:NO] || _gnameSlot < 0) {
-		std::fprintf(stderr, "--group: no soldiers selected (or no free slot)\n");
+		std::fprintf(stderr, "--group: no soldiers selected (or no free group)\n");
 		return;
 	}
 	_gnameText = name;
@@ -5741,12 +5771,12 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	return c > 0 ? simd_make_float2(sx / c, sy / c) : simd_make_float2(-1, -1);
 }
 
-// The panel button: the living members become the selection; clicked again (within 500 ms, or with the group already selected)
-// the camera centres on them.
-- (void)recallNamedGroup:(int)slot {
-	const hotkeys::ObjectList m = [self namedGroupMembers:slot];
+// The panel button: the living members become the selection (as the number key does); clicked again (within 500 ms, or with the
+// group already selected) the camera centres on them.
+- (void)recallGroup:(int)slot {
+	const hotkeys::ObjectList m = [self groupMembers:slot];
 	if (m.empty()) return;
-	const bool again = [self selectedNamedGroup] == slot || (_lastNamedSlot == slot && _timeMs - _lastNamedMs < 500);
+	const bool again = [self selectedGroup] == slot || (_lastNamedSlot == slot && _timeMs - _lastNamedMs < 500);
 	_selected = m, _selectedBuilds.clear();
 	[self syncSimBuildings];
 	[self selectionChanged];
@@ -5755,26 +5785,26 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		if (c.x >= 0) [self lookAtX:c.x y:c.y];
 	}
 	_lastNamedSlot = slot, _lastNamedMs = _timeMs;
-	std::printf("named group %d \"%s\" recalled (%zu units)%s\n", slot, _groupNames[size_t(slot)].c_str(), m.size(), again ? ", centred" : "");
+	std::printf("group %d \"%s\" recalled (%zu units)%s\n", slot, [self groupName:slot].c_str(), m.size(), again ? ", centred" : "");
 }
 
-// Right click on the button: HOTKEY clear, and the name goes.
-- (void)deleteNamedGroup:(int)slot {
-	if (!_game || slot < 0 || slot >= ron::sim::kNamedGroupsPerLeader) return;
+// Right click on the button: HOTKEY clear (as Ctrl+Shift+n), and the name goes.
+- (void)deleteGroup:(int)slot {
+	if (!_game || slot < 0 || slot >= kGroupKeys) return;
 	hotkeys::Command cmd;
-	cmd.play = [self localPlayer], cmd.group = ron::sim::kHotKeyGroupsPerLeader + slot, cmd.clear = 1;
+	cmd.play = [self localPlayer], cmd.group = slot, cmd.clear = 1;
 	_hotkeys.attach(*_game);
 	[self issueAs:cmd.play block:^bool { return _hotkeys.issue(_cm, *_game, cmd, {}, {}); }];
-	std::printf("named group %d \"%s\" deleted\n", slot, _groupNames[size_t(slot)].c_str());
+	std::printf("group %d \"%s\" erased\n", slot, [self groupName:slot].c_str());
 	_groupNames[size_t(slot)].clear();
 }
 
 // Regroup: one MOVE_TO for the whole group to its centroid. Group::action_move_near lays the members out in their formation
 // around that point (docs/movement-spec.md section 11) and they go there as one group move, at the leader's speed (march speed
 // with a general), so the body re-forms instead of each unit walking alone.
-- (BOOL)regroupNamed:(int)slot {
+- (BOOL)regroupGroup:(int)slot {
 	if (!_game) return NO;
-	const hotkeys::ObjectList m = [self namedGroupMembers:slot];
+	const hotkeys::ObjectList m = [self groupMembers:slot];
 	if (m.size() < 2) return NO;
 	const simd_float2 c = [self centroidOf:m];
 	const int32_t ix = int32_t(std::lround(std::clamp(c.x, 0.0f, _mesh.width - 1))), iy = int32_t(std::lround(std::clamp(c.y, 0.0f, _mesh.height - 1)));
@@ -5782,33 +5812,52 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	for (const auto& k : m) objs.push_back(k.second);
 	__block bool ok = false;
 	[self issueAs:[self localPlayer] block:^bool { return ok = _cm.issue_move_to(*_game, objs, ix, iy); }];
-	if (ok) std::printf("named group %d \"%s\" regroups at (%d, %d), %zu units, frame %d\n", slot, _groupNames[size_t(slot)].c_str(), ix, iy, m.size(), _game->frame);
+	if (ok) std::printf("group %d \"%s\" regroups at (%d, %d), %zu units, frame %d\n", slot, [self groupName:slot].c_str(), ix, iy, m.size(), _game->frame);
 	return ok;
 }
 
-// A press on the panel: left recalls / regroups, Shift+left renames, right deletes. NO when the point is not on the panel.
+// A press on the panel: left recalls / regroups, Shift+left renames, right erases. NO when the point is not on the panel.
 - (BOOL)groupPanelClick:(CGPoint)p right:(BOOL)right rename:(BOOL)rename {
 	for (const auto& [slot, r] : _groupRects) {
 		if (!r.contains(int(p.x), int(p.y))) continue;
-		if (right) {
-			[self deleteNamedGroup:slot];
-		} else if (rename) {
-			_gnameSlot = slot, _gnameText = _groupNames[size_t(slot)];
-			_pressing = _boxing = _hudPress = _rightPress = NO;
-		} else {
-			[self recallNamedGroup:slot];
-		}
+		if (right) [self deleteGroup:slot];
+		else if (rename) [self openGroupDialog:slot rename:YES];
+		else [self recallGroup:slot];
 		return YES;
 	}
 	if (_regroupSlot >= 0 && _regroupRect.contains(int(p.x), int(p.y))) {
-		if (!right) [self regroupNamed:_regroupSlot];
+		if (!right) [self regroupGroup:_regroupSlot];
 		return YES;
 	}
 	return NO;
 }
 
-// The panel: a 150 x 22 button per named group (name, living count) down the right edge under the top strip, the selected
-// group's in orange with a "Reagrupar" button under the list. A group whose members all died disappears with its name.
+// The icon of the card's Agrupar / Reagrupar button: apps/map-mac/resources/group-icon.tga (the app bundle's Resources when
+// packaged), registered with the UI renderer under "file:<path>". Empty when missing (the button then shows its label).
+- (std::string)groupIconId {
+	if (_groupIconChecked) return _groupIconId;
+	_groupIconChecked = YES;
+	NSMutableArray<NSString*>* paths = [NSMutableArray array];
+	if (NSString* p = [NSBundle.mainBundle pathForResource:@"group-icon" ofType:@"tga"]) [paths addObject:p];
+	if (NSString* exeDir = NSBundle.mainBundle.executablePath.stringByDeletingLastPathComponent) {
+		[paths addObject:[exeDir stringByAppendingPathComponent:@"../Resources/group-icon.tga"]];
+		[paths addObject:[exeDir stringByAppendingPathComponent:@"../apps/map-mac/resources/group-icon.tga"]];
+		[paths addObject:[exeDir stringByAppendingPathComponent:@"resources/group-icon.tga"]];
+	}
+	[paths addObject:[@(__FILE__).stringByDeletingLastPathComponent stringByAppendingPathComponent:@"resources/group-icon.tga"]];
+	for (NSString* p in paths) {
+		if (![NSFileManager.defaultManager fileExistsAtPath:p]) continue;
+		std::string id;
+		if (_ui.file_texture(p.stringByStandardizingPath.UTF8String, &id)) {
+			_groupIconId = id;
+			break;
+		}
+	}
+	return _groupIconId;
+}
+
+// The panel: a 150 x 22 button per control group that holds units ("n  name", the captain count) down the right edge under the
+// top strip, the selected group's in orange with a "Reagrupar" button under the list. A group whose members all died disappears.
 - (void)drawGroupPanel {
 	_groupRects.clear();
 	_regroupSlot = -1;
@@ -5816,7 +5865,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	const int bw = 150, bh = 22, gap = 3, x = _uiW - bw - 10;
 	int y = 150;
 	const int f = _ui.font(14, -1);
-	const int sel = [self selectedNamedGroup];
+	const int sel = [self selectedGroup];
 	const bool mouse = _mouseInside && _gnameSlot < 0 && !_gameMenu;
 	bool any = false;
 	auto button = [&](const ron::IfaceRect& r, bool lit, const std::string& left, const std::string& right_text) {
@@ -5828,9 +5877,9 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		_ui.text(f, left, float(r.l) + 6, float(r.t) + 3, 0xFFFFFFFF, 0xFF000000);
 		if (!right_text.empty()) _ui.text(f, right_text, float(r.r) - 6 - float(_ui.text_width(f, right_text)), float(r.t) + 3, 0xFFFFE080, 0xFF000000);
 	};
-	for (int s = 0; s < ron::sim::kNamedGroupsPerLeader; s++) {
-		if (_groupNames[size_t(s)].empty()) continue;
-		const hotkeys::ObjectList m = [self namedGroupMembers:s];
+	for (int i = 0; i < kGroupKeys; i++) {
+		const int s = group_key_order(i);
+		const hotkeys::ObjectList m = [self groupMembers:s];
 		if (m.empty()) {
 			_groupNames[size_t(s)].clear();
 			continue;
@@ -5838,7 +5887,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		if (!any) _ui.next_window(), any = true;
 		const ron::IfaceRect r{x, x + bw, y, y + bh};
 		_groupRects.push_back({s, r});
-		button(r, s == sel, _groupNames[size_t(s)], std::to_string([self captainsOf:m].size()));
+		button(r, s == sel, std::to_string(s) + "  " + [self groupName:s], std::to_string([self captainsOf:m].size()));
 		y += bh + gap;
 	}
 	if (sel >= 0 && any) {
@@ -5859,8 +5908,8 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	_ui.fill(float(x), float(y), float(w), float(h), rm::argb(240, 39, 40, 43), rm::UiType::ColorBlend);
 	_ui.next_layer();
 	const int tf = _ui.font(18, -1), f = _ui.font(14, -1);
-	const bool renaming = !_groupNames[size_t(_gnameSlot)].empty();
-	_ui.text_centered(tf, renaming ? "Renomear grupo" : "Nome do grupo", {x, x + w, y + 8, y + 32}, 0xFFFFFFFF, 0xFF000000);
+	const std::string title = (_gnameRename ? "Renomear grupo " : "Nome do grupo ") + std::to_string(_gnameSlot);
+	_ui.text_centered(tf, title, {x, x + w, y + 8, y + 32}, 0xFFFFFFFF, 0xFF000000);
 	const ron::IfaceRect field{x + 16, x + w - 16, y + 42, y + 68};
 	_ui.fill(float(field.l) - 1, float(field.t) - 1, float(field.w()) + 2, float(field.h()) + 2, 0xFF000000, rm::UiType::Normal);
 	_ui.fill(float(field.l), float(field.t), float(field.w()), float(field.h()), 0xFF1C1C1C, rm::UiType::Normal);
@@ -7997,8 +8046,8 @@ int main(int argc, const char* argv[]) {
 				if ((at == std::string::npos ? 0 : std::atoi(spec.c_str() + at + 1)) != f) continue;
 				const std::string v = spec.substr(0, at);
 				if (opt == "--group") [r nameGroupScript:v];
-				else if (opt == "--recall-group") [r recallNamedGroup:std::atoi(v.c_str())];
-				else if (![r regroupNamed:std::atoi(v.c_str())]) std::fprintf(stderr, "--regroup %s issued nothing\n", v.c_str());
+				else if (opt == "--recall-group") [r recallGroup:std::atoi(v.c_str())];
+				else if (![r regroupGroup:std::atoi(v.c_str())]) std::fprintf(stderr, "--regroup %s issued nothing\n", v.c_str());
 			}
 			if (f < sim_frames) [r stepSimulation:1];
 		}

@@ -1,5 +1,7 @@
 #include "ui.hpp"
 
+#include <unistd.h>
+
 #import <CoreText/CoreText.h>
 
 #include <algorithm>
@@ -267,9 +269,11 @@ const UiTexture* UiRenderer::file_texture(const std::string& game_path, std::str
 	auto it = textures_.find(key);
 	if (it != textures_.end()) return it->second.tex ? &it->second : nullptr;
 	UiTexture t;
-	if (!files_->resolve(game_path).empty()) {
+	std::string path = files_->resolve(game_path);
+	if (path.empty() && !game_path.empty() && game_path[0] == '/' && access(game_path.c_str(), R_OK) == 0) path = game_path;  // the app's own resources
+	if (!path.empty()) {
 		try {
-			const Image img = parse_tga(read_file(files_->resolve(game_path)));
+			const Image img = parse_tga(read_file(path));
 			t = {make_rgba(device_, img.width, img.height, img.rgba.data()), img.width, img.height};
 		} catch (const std::exception& e) {
 			std::fprintf(stderr, "UI texture %s: %s\n", game_path.c_str(), e.what());
