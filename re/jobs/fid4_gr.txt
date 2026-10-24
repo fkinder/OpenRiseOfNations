@@ -1,0 +1,2 @@
+re/decomp/fidelity4/game_random_xrefs.txt
+game_random

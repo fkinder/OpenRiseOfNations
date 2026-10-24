@@ -1,0 +1,2 @@
+re/decomp/fidelity4/road_asm
+PathFinder::astar_caravan_road

@@ -1,0 +1,3 @@
+re/decomp/fidelity4/callers_walkgame.txt
+4
+WalkDataGame::walk_data

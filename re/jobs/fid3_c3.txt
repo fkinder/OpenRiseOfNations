@@ -1,0 +1,8 @@
+re/decomp/fidelity3/callers_fgt.txt
+4
+Build::find_gather_tiles
+Unit::do_non_flat_gather
+Dock::init
+Unit::come_out
+Guy::init_real
+Unit::close

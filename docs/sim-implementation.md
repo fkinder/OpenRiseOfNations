@@ -19,7 +19,7 @@ exists), so "ported" means "from the spec and the decompiles", not "verified". S
 | `orders.{hpp,cpp}` | order deque (front = current), `add_order`, `add_move_facing_order` (incl. the attack-move re-add), `add_move_order`, `kill_current_order`, `close_orders`, `clear_orders`, `kill_current_path`, `repath`, `update_action`/`get_action`, `work` (incl. `check_target_path`, `set_in_danger`), `do_job` (ATTACK, GROUP_ATTACK, GROUP_ATTACK_TO), `do_idle`, `check_idle`, `think` (combat part) | ported except caravan/packer/economy branches |
 | `pathfinder.{hpp,cpp}` | `find_wpath`/`find_tpath`/`find_upath`/`find_upath_restore`, `astar_path` (incl. time slicing into `Unit::openlist`), `calc_cost`, `valid_*`, `kill_lists`, `clear_partial_path` | ported; matches `re/tools/astar-ref.mjs` in a standalone self-test |
 | `movement.{hpp,cpp}` | `do_move` (incl. moving fire, the ranged stop / retarget rule, `find_new_target` after slow searches), `do_attack_to` (scan / pause), `do_explore_to`/`do_flee_to`, `find_path`, `go_around_building`, `move_step`, `update_speed`/`unit_speed`/`get_speed` | ported |
-| `collision.cpp` | `collide_here` (+fill_slots, fast-path stall quirk), `coll_move_unit`, corners, `detect_unit_collision`, `resolve_unit_collision`, `resolve_block` (stub 0), `detect_boat_collision` (stub) | ported except pushers |
+| `collision.cpp` | `collide_here` (+fill_slots, fast-path stall quirk), `coll_move_unit`, corners, `detect_unit_collision`, `resolve_unit_collision`, `resolve_block` (stub 0), `detect_boat_collision` (ported from the asm, see "Orders and commands, second pass") | ported |
 | `guys.{hpp,cpp}` | terrain z (float, as the original), `unit_set_new_location`, `unit_place_guys`, `unit_set_angle`, `unit_set_anim`, `guy_init_real`, turning, `guy_move`, `guy_process`, `guy_set_anim` (all RNG sites), `guy_inc_time`, graphics pieces (`unit_gpiece` = `get_unit_gpiece`, `guy_update_gpiece` incl. crew track offsets, `unit_update_gpiece`) | ported |
 | `anims.hpp`, `anim_assets.{hpp,cpp}` | `AnimSource` (piece loaded / packet / has / frames / time_ms / loops / track per graphics piece) and `AssetAnimSource` from `unit_graphics.xml`, `anim_graphics.xml` and the `.bha` first-node key times ([anim-spec.md](anim-spec.md)) | ported |
 | `groups.{hpp,cpp}` | Group/Groups slot logic, `push_group`, `get_open_slot`, `copy_group`, `groups_process`; actions `move_near`/`move_to`, `halt`, `form`, `stance`; `get_loc`/`get_loc_to`, `set_up_insert`/`finish_insert`; unit side `add_group_move_order`, `do_group_move`, `ungroup_move_order`, `kill_group_move` | ported (army / city / combat branches TODO) |
@@ -62,6 +62,8 @@ re/tools/sim-all.sh <game> [frames] [ron-sim args]    # every stock scenario (15
 ./build/ron-prod-check <game>    # == node re/tools/production-ref.mjs --examples, byte for byte
 ./build/ron-econ-check <game>    # == node re/tools/gather-ref.mjs --examples, byte for byte
 ```
+
+Order / command options added in the second orders pass (see "Orders and commands, second pass"): `--patrol` (an alias of `--air-patrol`: planes fly it, ground groups walk it; `/last` queues a waypoint), `--attack-ground` for ground groups too, `--cast WHO:o@PARADROP@TO:TWHO`, `--hotkey`, `--come-out`, `--speed`, `--pause`, `--chat`, `--rename-city`, `--cheat`; `RON_OLD_BOAT=1` runs the pre-port `detect_boat_collision` stub.
 
 Economy options: `--gather WHO:o..@B[@FRAME][%queue]` (GROUP + GATHER), `--city-gather WHO:c..@TYPE[@FRAME]`
 (CITY_GATHER, TYPE -1 = farm / woodcutter / mine), `--buy|--sell WHO:GOOD[*FLAGS][@FRAME]` (lots of 100; FLAGS 1 ×5, 4
@@ -349,7 +351,7 @@ capture.scx Light Horse into a Stable and out with cleared orders; a full Fortre
 12th; citizens of a Major City keep their gather orders and resume after `/1`; a destroyed Fortress ejects one chain
 per frame; a unit heals inside; all 156 stock scenarios 600 frames with the AI and the self-check OK.
 
-Stubbed (TODO in code): `is_entering_or_exiting`, aircraft (helicopters on carriers, airbase scramble), the militia disarm spell on leaving, the scenario ignore-orders
+Stubbed (TODO in code): aircraft (helicopters on carriers, airbase scramble), the militia disarm spell on leaving, the scenario ignore-orders
 prelude, the Lakota / American gather bonuses from the "inside" counters, fire rafts / aircraft ejecting a garrison.
 
 ## Transports
@@ -454,10 +456,10 @@ the airbase gather-point hooks and `air_describe`; `aircraft_cmd.cpp` the comman
   every one of them with an airbase, carrier or silo (13: `build_masks` 0x88 on the air containers from the start or when the
   AI's silo completes (central, f9); 5: planes inside bases, only the new aircraft digest block; 4 real divergences from AI
   launches: korea3 / korea4 (units f21, RNG f31), suez2 (f36 / f42), Tutorial6 (f587, RNG unchanged)).
-- **Not ported / ❓**: `Group::action_guard` (an ally target of FLIGHT sends the non-planes there), the ground halves of PATROL
-  and ATTACK_GROUND (`GroupPatrolOrder`, `Unit::add_attack_ground_order`), the counters and refund of `Unit::action_unqueue`
-  (nothing queues planes on a carrier), vslot 0x10 of the home object in the FLIGHT no-fuel check (read as "alive"), the
-  paradrop (spec 9), the strafing impact slide (combat_fight.cpp) and the carrier deck node position (render data).
+- **Not ported / ❓**: `Group::action_guard` (an ally target of FLIGHT sends the non-planes there), vslot 0x10 of the home object in
+  the FLIGHT no-fuel check (read as "alive"), the strafing impact slide (combat_fight.cpp) and the carrier deck node position (render
+  data). The ground halves of PATROL / ATTACK_GROUND, the paradrop, the carrier's BUILDAIR queue with the counters and refund of
+  `Unit::action_unqueue` were ported in the second pass (below).
 
 ## Healing and attrition
 
@@ -1026,12 +1028,85 @@ Everything the original does with `SpellType::cast_*` that is not TRANSPORT or a
   building before it activates the copy (@672d00; `check_capture` activates first); (7) `kill_current_order` refunds only while
   `game.playing && !loading`; (8) the spec's "two draws" of `think_spellcaster`: the spy path draws nothing, the special path draws once.
 - **Not ported / ❓**: `Unit::do_guard` (the GUARD order is not simulated: its idle auto-unpack and `Unit::think`'s guard use);
-  `detect_boat_collision`'s packer / `is_unpacking` shove tests (the shove itself is a stub, collision.cpp); `GroupOut::validate_spell`
-  beyond the UI messages (❓ 6); BUILDAIR / unit-type "spells" of the group verb (aircraft carrier queue, ❓ 12, aircraft-spec 7); the
-  "upgrade by casting" University walk (`do_cast` 3.3: set_type only); Unit `+0x14c` (-1 on pack / unpack, no reader) and the guys'
+  `GroupOut::validate_spell` beyond the UI messages (❓ 6); the "upgrade by casting" University walk (`do_cast` 3.3: set_type only); Unit `+0x14c` (-1 on pack / unpack, no reader) and the guys'
   `+0x74 / +0x78` Monarch clock (only the extra `spell_time` tick is simulated); `FILTER_SPELL_TARGET` for INFORMER (a building that is
   active with hits left, ❓ vslot +0x178); `unit_masks2` 0x60 decay (heroes.cpp); `units_bribed` fills the padding of `Leader` (a new
-  `int32` would change the size the save walk asserts) and is not saved; the radar UPGRADE and the dead crafts have no harness tests.
+  `int32` would change the size the save walk asserts) and is not saved; the radar UPGRADE and the dead crafts have no harness tests
+  (PARADROP does: `--cast WHO:o@PARADROP@TO:TWHO`, second pass; `detect_boat_collision`'s packer / `is_unpacking` tests are in the second pass too).
+
+
+## Orders and commands, second pass (2026-10-24; orders_patrol.cpp, commands_extra.cpp, control.hpp, collision.cpp)
+
+Closes the order / command gaps the aircraft, spells, transport, heroes and multiplayer rounds listed. Sources: the decompiles in
+`re/decomp/gaps/` (and `re/decomp/ui_air/`), re-checked against the disassembly where the C was garbled (`re/decomp/gaps/dis/`).
+
+**Ground PATROL** (`orders_patrol.cpp`; `Group::action_patrol` @7030c0 dispatches in `aircraft_cmd.cpp`). A group with no plane (`COUNT_DOMAIN 4 == 0`,
+leader not a plane) gives every member that is on the map, not a plane and not busy a GROUP_PATROL order (`Unit::add_patrol_order` @5e4560): two waypoints at
+cell centres (ucoord * 0x30 + 0x18) from the group's `get_loc` (`get_loc_to` with QUEUE_LAST) to the target, `oxx / whose` = the leader, `id` = `(group.id +
+frame * 10) * 100 + group.order_num`, `form_id` = the member's list index, explicit. A QUEUE_LAST command on a leader that already patrols appends the
+point to every member's `wp` (waypoints stay shared by position in the list); helicopters inside a container get a MOVE_TO instead. `Unit::do_patrol` @5f1910:
+the leader (`order.oxx == o`) advances `wp_index` and runs `Group::action_move_to(next waypoint, QUEUE_FIRST, ATTACK_TO)` for its whole group; the QUEUE_FIRST insert
+pattern (`set_up_insert` copies the explicit orders, `halt`, the move, `finish_insert`) gives every member its patrol back through `Group::redo_patrol_order`
+@706d90 (same id / leader / waypoints / `wp_index`, wired into `group_finish_insert`); a follower idles; a unit without a group walks alone with an ATTACK_TO
+move in front; a carrier on patrol scrambles its wing every call. The units attack what they meet because ATTACK_TO / GROUP_PATROL are "on duty" orders
+(combat-spec 2). Verified: `--patrol 0:2,10,13,5,0@9000,5352@5 --patrol ...@9000,9000@60/last` (5 units, a queued second waypoint), a lone Hoplite goes out and
+back every ~450 frames, `--roundtrip` mid-patrol identical, replays: 242 recorded PATROL commands now run (`ron-net replay --all-verbs`: 45 / 45 agree).
+**ATTACK_GROUND** (`Group::action_attack_ground` @704520, ground branch): every member on the map that is not a plane and whose type
+`can_attack_ground` (@61db20: `!war_allowed` rush rule, `max_range != 0`, not a fireship / submarine (`unit_flags & 0x102000`), OBJMASK explosive / siege / naval /
+bombard or type 0x7b) gets ATTACK_GROUND (`x / y` = the point, `Order::tolerance` = accuracy, `Order::attempts` = attack_unit; the DataWalk image maps them as
+`accuracy` / `attack_unit`). `Unit::do_attack_ground` @5f1410: peace test on the point's owner (attack_unit 0), `find_nearby_spot(point, ring = big_radius-corrected distance
+or max_range * 192 - 0x30 / min_range * 192 + 0x90, angle + 0x80000000, NOT_ME)` and a MOVE_TO in front when out of range; unpack a packed packer (cast 0x28c) first;
+`set_attack(-1,-1)`, the ATTACK1 / ATTACK2 animation (rocking attackers pick by side), `fire_ammo(-1, -1)` when the type fires directly, `recharging = recharge + 1`. The flag-0x80 bit marks
+"fired". Verified on Tyre's catapults (`--attack-ground 0:46,47,48@49000,31000@5`: unpack, the shots land at the clamped map edge). The scenario builtins `group_patrol_order`,
+`unit_patrol_order`, `unit_attack_ground_order` (script_funcs_order.cpp) now run the real actions (the air halves too: Tutorial 6's Luftwaffe).
+
+**PARADROP** (`cast_paradrop` @671f80, spells_cast.cpp). ❓ resolved by the disassembly: `find_nearby_spot(caster type, x, y, ..., r0 = 0, r1 = 0x600, step = 0xc0, angle
+0x55555555, NOT_ME, o, who, 0, 0, -1, 0, -1)` around the *target point* (not the caster); found: `unit_set_new_location(spot, true, true)` (a teleport, no draw); not found: the
+`unpay_cast_costs` refund (vslot +0xd8 and `mana_burn -= min(mana_burn, MANA)`). The craft is dead in the shipped data (`FROM none`), and an area cast with `ox = whom = -1` is killed by the unguarded
+`objects[whom][ox]` read (spells-spec 11 (13)), so `ron-sim --cast WHO:o@PARADROP@TO:TWHO` gives the craft the Special Forces unit as its FROM (test aid) and
+the target object's position as the point: central.scx `0:5@PARADROP@2000:0@5` teleports the Special Forces next to the Large City.
+
+**Carrier BUILDAIR queue** (`aircraft_cmd.cpp`, hook `unit_process_air_queue` in `unit_process`). `Group::action_spell` with an aircraft type (domain 2) queues the
+leader's current FIGHTERBOMBER on every carrier of the group that may cast 0x295 (`num_queued < 10`, room in the carrier, `can_pay_cost` else the
+whole command stops, `pay_cost`, `num_queued++`, `track_queued(f, +1)`); `Unit::process` step 3 @611158 builds one every `train_time(f)` frames of `accel_train`
+(* `ai_speed`), holds the clock (`pop_issues++`, `queue_time -= acc`) when the population is full, then `init_unit` (RNG draws per guy) + `go_inside`. `Unit::action_unqueue` @5e1f20 (the UNQUEUE
+verb on a unit): `num_queued--`, `queue_time = 0` when empty, `track_queued(f, -1)`, `unpay_cost(f, who, -1, -1)` (the current price); `Unit::close`
+drops the counters (`carrier_closed`). Verified on korea.scx: two planes killed, `--cast 0:113@0x134` twice, `--unqueue 0:113@-1@60`: one plane is built and goes inside at ~f300.
+
+**Console / turn-control verbs** (`commands_extra.cpp`, state in `sim/control.hpp` = `Game::ctl`, not in the checksums or the native save: the original saves its hotkey groups, the
+port does not; `save.cpp`'s `sizeof(Game)` guard grew by 9192). Verbs now in `Command` / `CommandPackage::process` / `replay_to_engine` / `engine_to_wire` / `GameHooks::execute` (so they are recorded, replayed and
+networked): HOTKEY 34 (18 groups per leader, `Game::ctl.hotkeys[who * 18 + n]`: a GROUP + `copy_group`, or a camera bookmark x / y / zoom, or clear; `hotkey_groups_kill` from `Unit::close` / `Build::close`
+= `HotKeyGroups::kill`), COME_OUT 49 (`Unit::action_come_out` @5e20b0: clear orders, the University scholar animation pass-along, `come_out(0)`), SPEED_SET / UP / DOWN 52-54
+(`TurnControl::speed_set` @9567d0: up only below Fast (3), down above 0, not when the multiplayer game locks the speed (`GameInfo.flags & 0x100`); `ctl.speed`, `ctl.target_frame_time` = timings[speed]), PAUSE 76
+(`ctl.paused`, per-seat count), CHAT 68 (the line is kept in `ctl.chat` and shown through a `ScriptEvent::kChat` for the local seat when it is a recipient; the cheat-string parse of the single-player chat
+is not modelled), RENAME_CITY 75 (the city's `name`; the wire keeps the sender's stack garbage after the NUL so the command re-encodes byte for byte), CHEAT_VIEW_ALL / GIVE_TECHS / ZERO_TECHS /
+AI_SPEED_INCREASE / AI_SPEED_NORMAL / AI_TOGGLE / INCREASE_BUCKETS / ZERO_BUCKETS / INIT_UNIT 59-67 (`Game::action_cheat_*`; each counts `accum_cheated`). `ron-sim`: `--hotkey WHO:o..@N[@FRAME][/clear|/mark:X,Y,Z]`,
+`--come-out`, `--speed N|up|down`, `--pause 0|1`, `--chat FRAME:WHO:text`, `--rename-city`, `--cheat NAME[:WHO]`, and a `console:` line at the end of a run that touched them.
+The HUD: `-` / `=` issue SPEED_DOWN / UP (single player; multiplayer already sent the same bytes through the session), the pause key issues PAUSE, the control-group keys go through `hotkeys::Groups::issue` (CommandManager) and read
+`Game::ctl.hotkeys`, a click in the garrison grid issues COME_OUT for the first own unit of the type (a right click: every unit of the type), Enter / Shift+Enter / Ctrl+Enter / Alt+Enter open the chat line
+(everybody / everybody / allies / enemies; `ronmap --chat "TEXT@FRAME"` / `--chat-draft`) and Return sends CHAT. `GameHooks`' sav-compatible policy leaves the console verbs out so `ron-net replay` keeps the numbers of `ron-sav --replay`; `--all-verbs` runs them.
+❓ `Session::lockstep_verb` (net/lockstep.cpp) steps the speed without the `speed < 3` / `speed != 0` guards of `process_speed_*`, so after a SPEED_UP at Fast the session says Hyper Fast and `Game::ctl.speed` stays Fast (pacing in multiplayer follows the session;
+a front end should read `Session::speed()`). The same holds for PAUSE: the session applies its per-player quota, `ctl.paused` does not.
+
+**`Unit::detect_boat_collision` @5fa8b0** (collision.cpp, replaces the stub that returned 0 for every pusher with a `push_size`). Ships, siege weapons, heroes and supply wagons shove allied blockers instead of waiting:
+candidates = `Objects::find_units` (dense: the wcoord circle of `ceil(push_size / 768)` rings when the game has at least that many units, else leaders 0..7 / 0..8 in slot order; on map, same tregion, not me),
+each side modelled as `push_circles` circles of radius `push_size / push_circles` along guy 0's heading, `d` = the smallest pair distance, overlap = `(qOther - d + qMe) / 2`, `> 0`: blocked (return 0) for armed units against a flag-0x10 barge, non-allies below leader 8, unpacked / unpacking packers, entrenched units and tanks;
+else the other is pushed `min(overlap, 0x30)` along `find_angle(other - query)` (an idle one at least 45 degrees off my heading, a moving one within 45 degrees blocks me), `invalid_loc` permitting, with `collide_o / collide_who / collide_frame` set and, for idle ones, a turn (`set_angle`, `Guy::turn_angles` + `do_turn`).
+`RON_OLD_BOAT=1` restores the old stub (A/B digest runs). Evidence: `ron-net replay` default mode: the first `units` boundary now matches in 3 replays that did not match before (21'50'35, 21'52'11, 22'06'..); the `groups` match-through frame improves in 7 replays and drops in 1, `builds` improves in 2 and drops in 2 (45 replays).
+**UnitData::is_busy / is_entering_or_exiting**: one implementation (`cast_is_busy` / `cast_is_entering_or_exiting`, packers.cpp: a PACK / UNPACK cast or a SPECIAL_ANIM of type 0 / 1); the stubs in construct.cpp, the group halt and the garrison member loop now use it.
+
+**Validation** (2026-10-24, scratch build with the build-mac.sh flags, zero warnings, all apps): `ron-check` 0 failures; `sim-all 600 --ai-every 8` 156 / 156 self-check OK and 156 / 156 `--roundtrip 200` identical;
+`ron-net selftest` 38 / 38; `ron-net replay` 45 / 45 agree (default and `--all-verbs`, final states identical, default outputs equal to the pre-change run except the 16 files whose fidelity lines moved with the boat port); `ron-net survey --codec`: engine commands re-encoded
+104,567 -> 105,256 (+689: HOTKEY 45, SPEED_SET 1, CHAT 93, RENAME_CITY 8, PAUSE 542), commands left raw 6,691,770 -> 6,691,081 (CAMERA, TURN_DATA, CHECK_SUMS, PLAYER_SPEED ...), the 2 LEADER_OPTIONS that differ are unchanged.
+Digests against the previous tree: with `RON_OLD_BOAT=1` the whole set matches the tree before the round except Tutorial 6 (its script now issues real air patrol / attack-ground orders); the boat port moves 59 digests: every one of them reaches the pusher
+candidate search (88 scenarios do; the 29 that never overlap are unchanged), ships / siege / heroes / supply wagons in the Alexander, Cold War, Napoleon, New World, Custom and Tutorial 2 scenarios. (Other agents' economy edits moved further digests in the same tree; they were separated with `RON_OLD_BOAT`.)
+**Add-ons (same pass)**: (a) gaia birds in `do_air_physics` / `do_air_patrol` (aircraft.cpp): the altitude reroll draws only for non-bomber, non-helicopter units that are not animals (or type 0x193); other animals take 0x640 (+200 for 0x192, -200 else); a bird's patrol skips the carrier-offset waypoint and, once `do_air_physics` returns, sets `spell_time = 1` and returns without targeting. Changes the RNG stream: 138 of 156 stock digests move (every scenario with birds); the 18 unchanged: barbariantactics, capturedarius, greece2, jhelum, pillage, sogdiana, thrace, thrace2, tyre, yemen, militia, porkchop, lowrationsruss, lowrationsturk, malta, newmontenotte, cegeneral3, capture. (b) `process_leader_options` @9441d0 (commands.cpp): a changed citizens' stance (+4) goes to the citizens (types 0x32 / 0x33, `Unit::set_stance` down the chain) and the buildings of stance type 1, the military stance (+0xc) to stance-type-0 units and buildings, the option bits 1 / 3 / 4 to marines, packers and casters; no stock digest changes (nothing sends it within 600 frames).
+
+❓ list of this pass: (1) `detect_boat_collision` reads the type vtable's slot +0x110 as `is_tank` (movement-spec 10.5 lists tanks; the UnitType vtable would not dump); (2) the diplomacy test compares with `leaders[me] +8`, taken as the leader's own index; (3) the sparse
+`find_units` distance is `vector_dist(unit - query)` minus the unit's own radius (push_size for ships, big_radius), the register arguments of the call were not visible; (4) `Unit::update_patrol_order(-1)` takes the first GROUP_PATROL in execution order (the original walks the circular
+list from `head->next`; a unit never holds two); (5) the `ScenarioData::ignore_orders` prelude of the patrol / attack-ground group actions is not modelled (as in the other group actions); (6) CHAT: the per-leader mute flags (`CHAT_SET`) and the single-player cheat-string parse are not modelled,
+the line is delivered to every recipient in the mask; (7) the control groups are not in the native save (the original saves them); (8) the GROUP_PATROL / ATTACK_GROUND orders reuse `Order` members (`wp`, `oxx / whose / id / form_id`, `tolerance`, `attempts`) so the save layout did not change.
+Not done: the air garrison panel (IFaceAirGarrison: 3 rows x 2 columns of ready / fuelling counts; the click options FIGHTERS / BOMBERS / HELIS / ALLAIR need `Options::exec` decoded) and the library's final-techs view.
 
 ## Random games (docs/randommap-spec.md section 1; engine/sim/newgame.{hpp,cpp}, mapgen*.cpp)
 
@@ -1161,7 +1236,7 @@ byte for byte). LAN: 2 processes 600 frames, 3 processes 1500 frames, scenario, 
 recovered, identical saves; `ronmap` 2 and 3 processes (`--host` / `--join`): identical saves, recordings replay to them, recovery, synchronized save and continuation of a saved game.
 
 Not done: the x86-64 / arm64 soak, the 14 corpus replays that start without an embedded save (only the turn clock covers them; recordings *of this port* without a save replay: the random setup is in the header),
-diplomacy / team reset of the DIPLOMACY and SURVIVAL drops in the engine, chat in a running game, saved games other than random maps. Build note: `build-mac.sh` has no `-ffp-contract=off` (multiplayer-spec §8.3).
+diplomacy / team reset of the DIPLOMACY and SURVIVAL drops in the engine, saved games other than random maps. (Chat in a running game, the speed / pause / control-group verbs and the other console verbs became engine commands in the second orders pass: see "Orders and commands, second pass".) Build note: `build-mac.sh` has no `-ffp-contract=off` (multiplayer-spec §8.3).
 
 
 ## Conquer the World (docs/ctw-spec.md; engine/sim/ctw*.cpp, script_funcs_ctw.cpp; 2026-10-24)
@@ -1406,3 +1481,38 @@ the decompiler lost `sinx` / `cosx` / `vector_dist` / `project` / `find_nearby_s
 **Checks** (scratch build of the working tree with the build-mac.sh flags, zero warnings in the files of this round): `ron-check` 0 failures; `ron-sim ... --frames 600 --ai-every 8` on the 156 stock scenarios
 156/156 self-check OK; `--roundtrip 200` 156/156 OK; `ron-sav --engine-roundtrip` 69/69 PASS (10 SVX + 59 embedded). **Digests**: none of the 156 final digests changed against a build of the same tree without the
 GUARD / FOLLOW execution and the Guard / Follow order mapping (the only sim-side change: nothing in the stock scenarios issues a guard or follow).
+
+### Fidelity log, third pass (2026-10-24, the draw deficit of the quiet segments)
+
+Method: callers of `Random::get` (re/decomp/fidelity3/xr_game_random.txt: every reader of `GameAccess::game_random` @c06184, `internal_random` @eb697c apart), per-site engine profile
+(`RON_RNG_PROFILE`, `RON_RNG_TRACE=N` prints every draw with frame and seed), 44-pair chain. Caller table: setup / editor / mapgen / Conquest / UI sites are not frame code;
+frame-time sites and where they stand: Guy::set_anim (idle 5dac68, attack 5db21d, bird walk 5db339) ported; Guy::init_real ported; Farms::inc_time ported; Animal::do_idle / think_bird /
+think_farm_animal / Herd::process ported; Unit::do_air_physics ported **but without the animal branch (see 15)**; Unit::think_scout, do_move, resolve_unit_collision, do_non_flat_gather, do_gather (rnd),
+find_gather_tiles, calc_market, Ammo::*, take_damage ported; Objects::add_flock stub (only group moves ending on forest edges and wall hits by siege); GameAccess::rnd only from fight / do_gather;
+Leader::* / Army::find_target are AI-only (no AI seat in the chain); GuyOut / Particle / Surf / GraphicEvents / Scene / Game::do_frame's test delay use internal_random.
+13. **Load side effects** (`original_post_load_effects`, docs/original-save.md 6.2): leader 9 init + pen animals. 14. **think_peasant reads leader_options +8** (peasants_wait), as think_caravan; the engine used
+`opt_peasants` (+4). Per `CommandPackage::process_leader_options` @9441d0 `peasants` (+4) is the citizens' *stance* (Unit::set_stance on change, not ported: commands.cpp), `peasants_wait` (+8) the idle delay (default 2 -> 12 frames).
+15. **Not fixed (aircraft.cpp is another owner's), sent to aircraft-port:** gaia birds run the aircraft code; the original returns right after do_air_physics for animals and does not draw the altitude for them.
+Scratch measurement of 13 + 15 (draw distance engine - original): `21'57'36` -307 -> +7, `21'53'58` -1698 -> -30, `22'01'46` -2357 -> -150, `21'52'11` -1214 -> -540, `22'00'17` -144 -> +156.
+**Not found:** the deficit of `21'23'34` (-228k, 12/frame) and `21'45'58` (-45k, 15/frame), and `21'50'35` (-6k). Ruled out by measurement: auto-explore scouts (none), farms (5 of 29 bare>=5 in both), idle caravan crews
+(the 0/3 crews are inside cities, clocks frozen in both), find_gather_tiles reshuffles (gather lists identical in the saves 18,345 / 21,118), pens, market, collisions (0.03/frame in the saves), Leader AI / diplomacy
+(human seats return first), per-frame engine rate from the truth state (14/frame at 18,344 vs the original's 33/frame average, but 17 vs 19 at 21,117).
+
+### Fidelity log, fourth pass (2026-10-24, the load path, the fish clock and the road searches)
+
+16. **`Leader::init(leaders[9], 9, -1, 9)` draws nothing** (it is the reset branch, @6e3930 returns at `param_2 < 0`): `original_post_load_effects` no longer runs `leader_init_ai`; it sets
+`flags = 0x2000000 | 7`, tribe 0, then the pens' animals (20 draws per pen). The full sequence is the table in docs/original-save.md 6.2. `21'23'34`: `builds` 50 -> 200, `guys` 14 -> 20, `world` 14 -> 26.
+17. **The fish clock** (`RON_FISH_TIMELINE`, `RON_INSERT`, `RON_ANIMCHK`; `g_idle_pick_hook` in guys.hpp): the saved idle variants of the 71-fish bursts give the original's generator position, in draws
+since the load, at the burst frames of the last ~400 frames before each save (docs/original-save.md 6.3). It validated the load path (first-frame burst of `21'57'16`: 40 draws in the original, 40
+in the engine, 7 pens) and located the deficit in time.
+18. **Road searches** (`engine/sim/roads.{hpp,cpp}`): `PathFinder::find_road` / `astar_caravan_road` (building variant) / `calc_road_cost` / `valid_roadcoord`, called from the REGEN_FORCE tail of
+`BuildType::place_roads` (`wall_mask_me`, `build_start` through `wall_start`'s `after_mask` callback, `Build::process`'s MAKE_ROAD) and the REGEN_TOTAL tail (MAKE_ROAD flag). One game_random draw per
+valid neighbour: 17,000 draws in the 2,773 frames of `21'45'58`, 21,000 + 2,300 in the 18,337 of `21'23'34`. The first six searches (frames 7 - 9 of `21'23'34`) are exact: `guys` 20 -> 200, `world` 26 -> 308.
+Also fixed: `construct.cpp` called `place_roads(world, type, x, y, who)`, i.e. `add = (who != 0)` and no city ring, for every MAKE_ROAD building. `RON_NO_ROAD_SEARCH=1` restores the old behaviour (A/B).
+**Digests**: 142 of the 156 scenario digests (`sim-all 600 --ai-every 8`) change: every scenario in which a building is started or a city re-flags its buildings during the run now lays roads
+and draws; the 14 unchanged ones have no construction. Self-check and `--roundtrip 200` stay 156/156.
+19. **Looked at, no change**: wild-bird top-up (`have` counts every type-0x192 animal: the `+0x30` slot is a `return 1` stub), `Objects::add_flock` (no call in the 18,337 frames of the first
+segment), `Farms::inc_time` (decompile identical), `Guy::set_anim` (three draw sites, all ported), `GameDaemon::process_all` / `calc_markets`, `Leaders::strategy_all` (human seats: `Leader::diplomacy` returns on
+flag 4), think_fish (AI-controlled boats only), caravan roads (one-shot probe: +4.2k draws in segment 1, 0 in segment 2).
+**Checks** (scratch build with the build-mac.sh flags, zero warnings): `ron-check` 0 failures; `sim-all 600 --ai-every 8` 156/156 self-check OK, `--roundtrip 200` 156/156; `ron-sav --engine-roundtrip` 69/69 PASS;
+`ron-net selftest` 38/38 and `ron-net replay` on `21'57'16`: the two instances agree.

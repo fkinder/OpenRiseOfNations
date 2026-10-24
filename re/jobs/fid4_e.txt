@@ -1,0 +1,5 @@
+re/decomp/fidelity4
+Objects::find_free
+Objects::close
+Unit::init
+Animal::init

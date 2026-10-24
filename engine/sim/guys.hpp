@@ -72,6 +72,9 @@ void guy_process(Game& g, Unit& u, Guy& gy);                                // G
 // Guy::set_anim @5da300. Callers pass p2 = 0 except the group idle (p2 = 1 skips the "same category, still
 // running" early-out); p3 = 1 lets DEFAULT pick idle variants and ATTACK2 pick attack variants.
 void guy_set_anim(Game& g, Unit& u, Guy& gy, int32_t anim, int32_t p2 = 0, int32_t p3 = 1);
+
+// Diagnostics only (apps/sav RON_FISH_TIMELINE): called right after the idle-variant draw of Guy::set_anim.
+inline void (*g_idle_pick_hook)(Game&, Unit&) = nullptr;
 void guy_inc_time(Game& g, Unit& u, Guy& gy);                               // Guy::inc_time @5d9e10
 
 }  // namespace ron::sim

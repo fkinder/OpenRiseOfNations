@@ -1,0 +1,7 @@
+re/decomp/fidelity3
+Unit::do_move
+Unit::do_group_move
+Unit::explore_goody
+Unit::think_fish
+Unit::close
+Unit::fight

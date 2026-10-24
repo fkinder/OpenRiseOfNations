@@ -1,0 +1,12 @@
+re/decomp/fidelity4/cc_endframe.txt
+9
+Leaders::end_process_all
+Achieve::capture_data
+Leader::process_event_frame
+Roads::scan_and_kill_stray_roads
+GraphicEvents::process
+OrdersMemManager::cycle
+TurnControl::check_cannon_time
+GameDaemon::process_all
+Leaders::process_all
+Armies::process_all

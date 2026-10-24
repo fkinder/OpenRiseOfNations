@@ -1,0 +1,4 @@
+re/decomp/fidelity3
+Leader::init
+Leader::random_personality
+Farms::add_animals

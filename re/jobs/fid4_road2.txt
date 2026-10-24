@@ -1,0 +1,8 @@
+re/decomp/fidelity4/road
+PathFinderData::valid_roadcoord
+WallData::tile_corner
+WallData::covers_tile
+BuildTypeData::tile_corner
+TerrainOut::find_tcoord_z
+WorldData::was_seen
+World::set_road_at

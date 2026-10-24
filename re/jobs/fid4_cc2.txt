@@ -1,0 +1,3 @@
+re/decomp/fidelity4/cc_load.txt
+10
+WalkDataGame::walk_data

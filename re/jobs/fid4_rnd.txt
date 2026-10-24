@@ -1,0 +1,3 @@
+re/decomp/fidelity4/rnd_callers.txt
+1
+GameAccess::rnd

@@ -1,0 +1,4 @@
+re/decomp/fidelity3/callers_random2.txt
+1
+::random
+Random::get

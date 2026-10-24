@@ -1,0 +1,8 @@
+re/decomp/fidelity4
+LoadGame::do_load
+LoadGame::load_game
+Game::run
+Game::run_oos_recovery
+Game::run_playback
+Game::run_solo
+AutoSave::restore

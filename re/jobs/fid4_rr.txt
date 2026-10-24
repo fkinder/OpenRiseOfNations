@@ -1,0 +1,6 @@
+re/decomp/fidelity4/regen_callers.txt
+3
+City::regen_roads
+BuildType::place_roads
+Wall::mask_me
+BuildType::mask_me

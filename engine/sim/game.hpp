@@ -24,6 +24,7 @@
 #include "sim/ai_types.hpp"
 #include "sim/anims.hpp"
 #include "sim/compass.hpp"
+#include "sim/control.hpp"
 #include "sim/fog.hpp"
 #include "sim/groups.hpp"
 #include "sim/objects.hpp"
@@ -579,6 +580,7 @@ public:
 	// back (written by the sim/ai.hpp finders; the movement searches do not model them).
 	mutable int32_t find_dist = 99999999, find_who = -1;
 	bool ai_off = false;  // *GameAccess::ai_off (cheat toggle)
+	ControlState ctl;     // TurnControl speed / pause, the control groups, cheat counters (sim/control.hpp; commands.cpp)
 	// True while Game::load creates the scenario's objects: the world loader has already applied the buildings'
 	// grid effects (start_me, mask_me, fog marks), so Build::init / Build::start skip them.
 	bool scenario_loading = false;

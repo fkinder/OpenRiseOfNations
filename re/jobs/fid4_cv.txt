@@ -1,0 +1,5 @@
+re/decomp/fidelity4/cv_callers.txt
+5
+World::compute_val
+PathFinder::calc_road_cost
+Ammo::init_crash

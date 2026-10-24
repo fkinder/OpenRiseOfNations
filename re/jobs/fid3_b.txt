@@ -1,0 +1,8 @@
+re/decomp/fidelity3
+Leaders::strategy_all
+Leaders::process_all
+Leader::plan_strategy
+Leader::diplomacy
+GameDaemon::process_all
+GameDaemon::calc_markets
+GameDaemon::calc_market

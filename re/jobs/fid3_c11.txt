@@ -1,0 +1,5 @@
+re/decomp/fidelity3/callers_li.txt
+1
+Leader::random_personality
+Leader::init
+Leaders::init

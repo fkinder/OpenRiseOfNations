@@ -6,6 +6,7 @@
 
 #include "sim/aircraft.hpp"
 #include "sim/heroes.hpp"
+#include "sim/roads.hpp"
 #include "sim/capture.hpp"
 #include "sim/combat.hpp"
 #include "sim/combat_internal.hpp"
@@ -47,12 +48,8 @@ bool group_on_map(Game& g, const Group& gr) {
 // UnitData::get_worker_stance (vslot 0xf8): the unit's stance if its type has the WORKER stance type, else 0.
 int32_t worker_stance(const Unit& u) { return unit_stance_type(*u.ptype) == kStanceWorker ? u.stance : 0; }
 
-// UnitData::is_busy @60a370: the current order is a PACK / UNPACK cast, or the unit is entering / leaving a building.
-// TODO(spells, garrison): neither state is simulated, so no unit is busy.
-bool unit_is_busy(const Unit& u) {
-	(void)u;
-	return false;
-}
+// UnitData::is_busy @60a370: the current order is a PACK / UNPACK cast, or the unit is entering / leaving a building (packers.cpp).
+bool unit_is_busy(const Unit& u) { return cast_is_busy(u); }
 
 bool is_peasant_type(int32_t t) { return t == ptype::kPeasants || t == ptype::kPeasantsKorean; }
 
@@ -836,7 +833,8 @@ void build_process(Game& g, Build& b) {
 	}
 	if ((b.build_masks & bmask::kMakeRoad) && (g.frame + b.o) % 16 == 0) {
 		b.build_masks &= ~bmask::kMakeRoad;
-		place_roads(g.world, *b.ptype, b.x, b.y, b.who);  // (REGEN_FORCE road to the city: not reproduced)
+		place_roads(g.world, *b.ptype, b.x, b.y, true, b.city >= 0);  // BuildType::place_roads(.., 1, REGEN_FORCE): the ring
+		place_roads_regen(g, b, true, Regen::Force);                   // and the road to the city centre
 	}
 }
 

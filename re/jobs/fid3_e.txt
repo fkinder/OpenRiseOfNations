@@ -1,0 +1,4 @@
+re/decomp/fidelity3
+Random::get
+Random::reseed
+::random

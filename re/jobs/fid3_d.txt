@@ -1,0 +1,4 @@
+re/decomp/fidelity3
+Build::find_gather_tiles
+Build::process
+Build::init

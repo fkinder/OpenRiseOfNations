@@ -585,7 +585,7 @@ idle frame, and unless NEW_THINK is set, think continues only when `(o + frame) 
 `LEADER_UNIT_AI_OFF` or `UNIT_AI_OFF`; only ACTIVE leaders reach `think_peasant` (after the military/merchant checks).
 
 `Unit::think_peasant(force)` @5f5760:
-1. Unless `force`: threshold `T` = 1 for AI-controlled units, else by the leader option `peasants` (LEADER_OPTIONS
+1. Unless `force`: threshold `T` = 1 for AI-controlled units, else by the leader option `peasants_wait` (+8; NOT `peasants`, which is the citizens' stance; LEADER_OPTIONS
    command, replay-spec op 73): 0 → 2, 1 → 7, 2 → 12, 3 → 17, 4 → 32, 5 → 62 idle frames; return unless
    `idle == T` or (`idle > T` and `(idle − 2) % 5 == 0`).
 2. AI citizens: `think_civilian_transport(1)`.

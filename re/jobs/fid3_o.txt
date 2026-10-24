@@ -1,0 +1,6 @@
+re/decomp/fidelity3
+Terrain::init
+Map::make_rivers
+Map::make_riverlist
+PathFinder::astar_river
+PathFinder::calc_river_cost

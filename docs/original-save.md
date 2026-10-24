@@ -143,17 +143,17 @@ work -> now; "ok" = equal through the end):
 | part | `21'23'34` (frames 7 - 18,338, 3,056 turns, 818 commands run) | `21'45'58` (18,344 - 21,111, 462 turns) | `21'57'16` (25,552 - 25,637, 15 turns) |
 |---|---|---|---|
 | units | 8 -> 8 (first) | 18,345 (first) | 25,553 (first) |
-| builds | 8 -> **50** | 18,387 | 25,571 |
+| builds | 8 -> 50 -> **200** | 18,387 | 25,571 |
 | walls | ok | ok | ok |
 | ammo | 6,896 | ok | 25,559 |
 | deaths | 7,094 | 20,415 | 25,559 |
 | groups | 422 (UNITMASK now applied, still 422) | 19,047 | 25,595 |
-| guys | 14 (matched at 8) | 18,345 (first) | 25,553 (first) |
+| guys | 14 -> **200** | 18,345 (first) | 25,553 (first) |
 | leaders | 200 -> **566** | 18,369 | 25,553 (first) |
 | cities | 206 | 18,381 | 25,577 |
 | items | 6,752 | ok | ok |
 | goods | 8 -> **2,318** | ok | ok |
-| world | 14 (matched at 8) | 18,351 | 25,553 (first) |
+| world | 14 -> **308** | 18,351 | 25,553 (first) |
 | rules, scenario_data, script_run_time | ok | ok | ok |
 
 **Second pass (2026-10-24): re-measured, the frontier did not move** - `21'23'34`: units 8, builds 50, ammo 6,896, deaths 7,094, groups 422, guys 14, leaders 566, cities 206, items 6,752, goods 2,318, world 14; `21'45'58`: units / guys 18,345, world 18,351, builds 18,387, cities 18,381, leaders 18,405 (the table above says 18,369; the same value before and after this round, moved by another owner's change), groups 19,047, deaths 20,415; `21'57'16`: units / guys / leaders / world 25,553, ammo / deaths 25,559, builds 25,571, cities 25,577, groups 25,595. The round's work is in the diagnostics (section 6.1), the negative results (section 7), GUARD / FOLLOW and the `--astar-check` oracle.
@@ -221,6 +221,70 @@ settled: the `Build.recharging` bytes of the two woodcutters (boundaries 8 / 14:
 (`1/22`, Crossbowmen, `des_x` +1024 at the first step of `21'45'58`; patching it makes `units` and `guys` equal at 18,345 and exposes the
 next difference at 18,351). `units` at boundary 8 of `21'23'34` has no single member, no small delta of any mapped member of any object, no
 one- to three-object time shift that explains it (see section 7).
+
+### 6.2 What loading does besides restoring bytes (third and fourth fidelity pass, 2026-10-24)
+
+`WalkDataGame::walk_data` @5a2360 restores `game_random` (@5a2ddb) in the middle of the walk and then, in its `input` tail (after `Terrain::init(.., 1, 0)`, which draws only from
+`internal_random`), runs two things that touch the generator: `Leader::init(&leaders[9], 9, tribe -1, 9)` @5a30eb and `Farms::add_animals(i)` @8d8f30 for every farm record whose
+byte +0xbc is set. The static closure (depth 10) of the walk reaches `game_random` through nothing else (`Objects::reload_data` only updates graphic pieces, `Types::finalize_grafting`,
+`GraphicPieces::*`, `WorldMap::*`, `TurnControl::init`, `Doober::walk_data` have no draw); `LoadGame::do_load` / `load_game` / `Game::run` add none before the first `Game::do_frame`.
+
+| step | address | draws |
+|---|---|---|
+| `Leader::init(leaders[9], 9, -1, 9)` | @6e3930, test `param_2 < 0` | **0**. The negative tribe is the *reset* branch: it clears the arrays, diplomacy, tech masks, personality and returns before `gain_tech` / `random_personality` / the economic coin. It leaves `flags = 0x2000000`; the walk then ORs 7 and sets tribe 0. (The third pass ran the whole AI init here: 21 draws, wrong.) |
+| `Farms::add_animals(i)` per pen (`+0xbd == 1`, building flags & 4) | @8d8f30 | 5 animals x (coin `r & 1`: even -> chicken, odd -> pig; two position draws `% 0x180`; `Objects::init_unit(9, ..)` -> `Unit::init` -> `Guy::init_real` @5db6b0: one variant draw `% 100`) = **20 per pen** |
+| first `Game::do_frame` | list 9 (processed when `(frame + k) % 10 == 9`) | 5 per pen: `Animal::do_idle` -> `Guy::set_anim(DEFAULT, 0, 1)` with `cur_time >= end_time == 0` picks the idle variant |
+
+So every segment of a chain starts with the generator `LCG^(20 P)(saved seed)` (P = number of finished pens: 2 pens -> 40, 6 -> 120, 7 -> 140). The coin of all five animals of a pen is the
+same: the low bit of the generator alternates, and the five coins are four draws apart. Evidence that this is exact: the **fish clock** (6.3) places a 71-fish burst in the very first frame of
+`21'57'16` (7 pens) at generator position 40 after the load effects, the engine's own burst is at 40 too; with the old 21 extra draws the original's burst sits 22 draws away.
+`21'23'34`: `builds` 50 -> 200 (matched through 194), `guys` 14 -> 20, `world` 14 -> 26 with this fix alone; `RON_NO_LOAD_EFFECTS=1` skips the effects, `RON_LOAD_STAGES=1` prints them.
+
+### 6.3 The fish clock: the original's draw count from the saves (fourth pass)
+
+The 213 fish, 17 whales and 4 sheep of list 8 re-pick their idle variant in lock step: `cur_time` of a gaia animal is the frame number, and every animal of one end time picks in the same
+frame, in object order, in `Objects::inc_time` (nothing else draws between two animals of one list). A pick is `r = game_random % 100`, class r < 70 -> 0, < 83 -> 1, < 96 -> 2, else 3. The
+variants stored in a save are therefore the classes of **consecutive generator outputs**: a burst of 71 fish (the stock map has three: end times 101 / 116 / 170) is a 71-symbol pattern
+that occurs once per 65,536 positions (the low 16 bits of the LCG have period 65,536) and, with the save's generator state, once in reach. List 9 (birds, chickens) is not saved, list 8 is.
+
+`ron-sav A.rcx --replay --compare-next B.rcx` with `RON_FISH_TIMELINE=1 [RON_FISH_J=n]` runs A to the frame of B's embedded save, finds in B the bursts of the last ~400 frames before the save
+(`frame = save_frame - 1 - cur_time`), locates each in the generator stream that starts at the engine's seed right after the load effects, and prints for every burst: the original's
+draws before it counted from the load, the engine's own first pick of that frame (a hook in `Guy::set_anim`, `g_idle_pick_hook`), and the original's draw rate since the previous burst against
+the engine's. It is the first object-level-free *time* axis for the generator; the chain's end-of-segment totals (`--compare-next`) were the only other number. `RON_INSERT="F:k,.."` draws k
+extra numbers (k < 0: puts the generator back) before frame F, a probe for "which frame is short"; `RON_ANIMCHK=1` compares the saved `end_time` of every guy with the engine's animation lengths
+(488 of 489 agree at 18,345).
+
+What it showed: (a) at the first bursts of quiet segments the engine's draws since the load are within a few hundred of the original's once the road searches (6.4) are in (it was 1,000 - 3,000 short); (b) near the
+end of segment 1 the original draws 22 - 28 per frame against the engine's 14 - 15 (fights absent); (c) later segments agree to a few draws per frame, positive or negative.
+
+### 6.4 Road searches: the largest missing draw source (fourth pass)
+
+`BuildType::place_roads` @63c580 ends, for a building that is not a city, not a 'g' (gather) type and belongs to a city (Build +0x72 >= 0), with `REGEN_TOTAL` (mark the building MAKE_ROAD,
+Build +0x60 |= 0x100) or `REGEN_FORCE`: **`PathFinder::find_road` from the building to the city centre and `World::set_road_at` along the path**. REGEN_FORCE comes from `Wall::start`
+(`mask_me(1, REGEN_FORCE)`, every building the moment it is started) and from `Build::process` for MAKE_ROAD buildings every 16 frames (`(frame + o) % 16 == 0`); `City::regen_roads`
+(`Build::activate`, `Build::remove_from_city`) marks every building of the city. `astar_caravan_road` @685990 draws **one number per valid neighbour** (`calc_road_cost` @686300:
+`rnd(20)` first), up to 3200 expansions: 100 - 1,700 draws per search, 40 searches (17,000 draws) in the 2,773 frames of `21'45'58`. The six searches of the first three frames of
+`21'23'34` (frames 7 - 9: the pending MAKE_ROAD flags of the save) cost 250 - 820 draws each and precede every later fish burst; with them `guys` matches through boundary 194 (was 20) and
+`world` through 302 (was 26). `engine/sim/roads.{hpp,cpp}` implements the building variant (4-connected, `cara < 0`); `placement.cpp` / `build.cpp` / `cities.cpp` / `construct.cpp` hook it
+(`wall_start` runs the road between `mask_me` and the fog marks, because `calc_road_cost` reads `was_seen`). `RON_NO_ROAD_SEARCH=1` switches it off for A/B digests.
+Checked against the binary: neighbours' heuristic is `vector_dist(|N - G|) * 60 / 384` (asm @686017: `SAR 6`; the start node uses `/ 192`), the goal test is the exact position, the 3200 cut-off
+is tested after the goal test, a closed node discards, an open duplicate with `length <=` discards, the emission skips the goal and the start and every tile with `TData & 0x4000`.
+Not ported: `Caravan::build_road` (8-connected, resumable slices stored in the caravan, `find_road_restore`), `verify_road`, `Caravans::new_danger`; a one-shot probe of the caravan search adds 4,200
+draws to segment 1 and none to segment 2, so they are not the rest of the deficit.
+
+**Draw distance engine - original** over the 44 pairs of the 2026.08.30 chain (pair named by its first save; start of the fourth pass = old load, no roads, -> after the load fix and the road
+search): 30 pairs closer, 14 further; the sum of |d| over all 44 is dominated by the fights (1.12M -> 1.20M). Quiet pairs: `21'23'34` -224,525 -> -194,661; `21'45'58` -42,142 -> -26,425;
+`21'49'39` -600 -> +216; `21'50'35` -4,535 -> -1,284; `21'53'58` -644 -> +251; `22'13'07` -9,617 -> +781; `22'14'36` -3,606 -> +34; `22'16'35` -1,893 -> -50; `22'17'47` -1,768 -> +9;
+`22'21'11` -7,066 -> +1,757; `22'22'47` -348 -> +135; `22'28'15` -307 -> +51; `22'48'11` -15,637 -> -1,315; `22'52'08` -5,936 -> +2,356. Further: `22'52'38` -4,770 -> +12,899,
+`22'45'30` +2,762 -> +8,713, `22'01'46` -703 -> -1,423, `22'03'19` -85 -> -323, `21'57'16` +177 -> +292. At the first burst after a load the gap
+(original - engine draws before the burst) went: `22'14'36` +270 frames 3,246 -> -110; `22'17'47` +61 frames 595 -> 0 and +118 frames 1,661 -> -29; `21'49'39` +302 frames 1,003 -> 63.
+
+**What remains of the early deficit.** (1) After the road searches `21'23'34` is still -194,661 draws (10.6 per frame): the engine's economy is behind the original's (24 / 23 active buildings
+at 18,338 against 49 / 47, no Large Cities, no wonders): fewer activations, fewer MAKE_ROAD events, and every one of them costs a search. `21'45'58` started from the true state ends with equal
+building counts and is still -26,425; its 40 engine searches look like the original's events (the MAKE_ROAD flags pending in the save at 21,118 are the ones the engine then processes), so the rest is probably not roads. (2) Timing: a search whose
+trigger (a wonder / city activation) is a few frames earlier or later in the engine moves 300 - 600 draws across a window. (3) `Unit::think_scout` for auto-exploring scouts in a fully seen
+region falls through to `think_civilian_transport(0)` / `think_scout(1)` (random cell of the own region); the engine returns 0 there (TODO in ai_unit.cpp), a few draws per 16 frames per scout.
+(4) `units` at boundary 8 of `21'23'34` still differs (no RNG involved any more: guys, world, builds match to 194): a plain member, see section 7.
 
 ## 7. What blocks exact checksums
 

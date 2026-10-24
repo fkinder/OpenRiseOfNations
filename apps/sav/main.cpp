@@ -54,6 +54,8 @@
 #include "sim/combat.hpp"
 #include "sim/orders.hpp"
 #include "sim/original_save.hpp"
+#include "sim/ai.hpp"
+#include "sim/economy.hpp"
 #include "sim/guys.hpp"
 #include "sim/movement.hpp"
 #include "sim/pathfinder.hpp"
@@ -1422,6 +1424,8 @@ std::map<int64_t, std::map<std::vector<uint32_t>, int>> all_check_sums(const std
 
 #ifdef RON_RNG_PROFILE_HOOK
 std::map<std::string, int64_t> g_rng_sites;
+sim::Game* g_trace_game = nullptr;
+int g_trace_until = -1;
 void rng_hook_fn() {
 	void* fr[10];
 	const int n = backtrace(fr, 10);
@@ -1439,8 +1443,88 @@ void rng_hook_fn() {
 		if (key.size() > 150) break;
 	}
 	g_rng_sites[key]++;
+	if (g_trace_game && g_trace_game->frame <= g_trace_until) std::printf("RNGTRACE frame %d seed %08x %s\n", g_trace_game->frame, g_trace_game->rng.seed(), key.c_str());
 }
 #endif
+
+struct IdlePick { int frame; int who; int o; int type; uint32_t seed_after; };
+std::vector<IdlePick> g_idle_picks;
+void idle_pick_hook(sim::Game& g, sim::Unit& u) { g_idle_picks.push_back({g.frame, u.who, u.o, u.type, g.rng.seed()}); }
+// The gaia animals of list 8 re-pick their idle variant in lock step ("cur_time" = frames since the last pick, all fish of one burst picked in
+// the same frame): the variants stored in a save are the classes (r < 70 -> 0, < 83 -> 1, < 96 -> 2, else 3) of CONSECUTIVE generator outputs
+// (the fish are processed in object order in Objects::inc_time, nothing else draws in between). So the saved fish give the position of the
+// original's generator, counted in draws from the load, at every burst frame of the last ~400 frames before the save: a draw-count timeline of
+// the original that needs no object-level truth. `seed_load` is the generator right after the load effects (position 0).
+void fish_timeline_report(sim::Game& truth, int next_frame, uint32_t seed_load, const std::vector<std::pair<int, uint32_t>>& frame_seeds, uint32_t engine_end) {
+	const int64_t J = std::getenv("RON_FISH_J") ? std::atoll(std::getenv("RON_FISH_J")) : 3000000;
+	std::vector<uint8_t> cls(size_t(J + 1));
+	std::unordered_map<uint32_t, int64_t> index_of;
+	index_of.reserve(size_t(J) + 1);
+	uint32_t sd = seed_load;
+	index_of[sd] = 0;
+	for (int64_t j = 1; j <= J; ++j) {
+		sd = sd * 0x19660Du + 0x3C6EF35Fu;
+		const int32_t r = int32_t((int64_t(sd & 0xFFFFu) * 0xFFFF) >> 16) % 100;
+		cls[size_t(j)] = r < 70 ? 0 : r < 83 ? 1 : r < 96 ? 2 : 3;
+		index_of.emplace(sd, j);
+	}
+	struct Pick { int o; int var; int type; };  // var -1: no information (an animal with a single idle animation)
+	std::map<int, std::vector<Pick>> bursts;
+	for (int o = 0; o < truth.objects[8].unit_mark; ++o) {
+		sim::Unit* u = truth.unit(8, o);
+		if (!u || !u->alive() || u->guys.empty()) continue;
+		const sim::Guy& gy = u->guys[0];
+		const int f = next_frame - 1 - int(gy.cur_time);
+		const bool has_var = u->type == 411;
+		bursts[f].push_back({o, has_var ? int(gy.cur_anim) : -1, u->type});
+	}
+	std::printf("  fish timeline (draws since the load; a variant only fixes the position modulo 65,536, so the one within reach of the save's generator is taken)\n");
+	auto oe = index_of.find(truth.rng.seed());
+	auto ee = index_of.find(engine_end);
+	const int64_t n_orig = oe == index_of.end() ? -1 : oe->second, n_eng = ee == index_of.end() ? -1 : ee->second;
+	std::printf("  generator at the save: original draw %lld, engine draw %lld\n", (long long)n_orig, (long long)n_eng);
+	int shown = 0;
+	int64_t prev_f = -1, prev_do = -1, prev_de = -1;
+	for (auto it = bursts.rbegin(); it != bursts.rend() && shown < 60; ++it) {
+		const std::vector<Pick>& v = it->second;
+		int informative = 0;
+		for (const Pick& p : v) informative += p.var >= 0;
+		if (informative < 6 || n_orig < 0) continue;
+		std::vector<int64_t> hits;
+		const int64_t lo = std::max<int64_t>(0, n_orig - 70LL * (next_frame - it->first));
+		for (int64_t j = lo; j <= n_orig && hits.size() < 3; ++j) {
+			bool ok = true;
+			for (size_t k = 0; k < v.size() && ok; ++k) ok = v[k].var < 0 || cls[size_t(j + 1 + int64_t(k))] == v[k].var;
+			if (ok) hits.push_back(j);
+		}
+		int64_t eng_start = -1;
+		for (size_t q = 0; q < frame_seeds.size(); ++q) if (frame_seeds[q].first == it->first) {
+			auto a2 = index_of.find(frame_seeds[q].second);
+			if (a2 != index_of.end()) eng_start = a2->second;
+		}
+		int64_t eng_first_pick = -1, eng_npicks = 0;
+		for (const IdlePick& ip : g_idle_picks) if (ip.frame == it->first && ip.who == 8 && ip.type == 411) {
+			auto a3 = index_of.find(ip.seed_after);
+			if (eng_first_pick < 0 && a3 != index_of.end()) eng_first_pick = a3->second - 1;
+			++eng_npicks;
+		}
+		std::printf("    burst at frame %d (%d frames before the save): %zu animals (%d with a variant), original draws after it:", it->first, next_frame - it->first, v.size(), informative);
+		for (int64_t h : hits) std::printf(" %lld", (long long)(n_orig - h));
+		if (hits.empty()) std::printf(" (no match)");
+		if (eng_start >= 0 && n_eng >= 0) std::printf("; engine draws after that frame's start: %lld", (long long)(n_eng - eng_start));
+		if (hits.size() == 1) std::printf("; original draws before the burst since the load: %lld, engine: %lld (%lld fish)", (long long)hits[0], (long long)eng_first_pick, (long long)eng_npicks);
+		if (hits.size() == 1 && eng_start >= 0 && n_eng >= 0) {
+			const int64_t d_o = n_orig - hits[0], d_e = n_eng - eng_start;
+			std::printf("  (original - engine %+lld)", (long long)(d_o - d_e));
+			if (prev_f >= 0 && prev_f != it->first) std::printf("  rate since the previous burst: original %.2f engine %.2f per frame", double(d_o - prev_do) / double(it->first - prev_f) * -1.0, double(d_e - prev_de) / double(it->first - prev_f) * -1.0);
+			prev_f = it->first; prev_do = d_o; prev_de = d_e;
+		}
+		std::printf("\n");
+		++shown;
+	}
+	auto e = index_of.find(engine_end);
+	std::printf("  (engine end seed is draw %lld since the load)\n", e == index_of.end() ? -1LL : (long long)e->second);
+}
 
 int replay_run(const std::string& path, const std::vector<uint8_t>& save, const std::string& game_dir, int64_t max_frames, const std::string& json_path,
                const std::string& csv_path, bool use_commands, bool verbose, const std::string& next_path = std::string(), bool no_art = false, const std::vector<std::string>& revert = {}) {
@@ -1490,6 +1574,107 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 		art = sim::load_anim_source(cache->files, *game->rules);
 		game->anims = art.get();
 	}
+	if (std::getenv("RON_ANIM_CHECK") && game->anims) {
+		// The saved end_time of every guy against the animation length the engine derives from the install for its
+		// (gpiece, cur_anim): they agree for any guy whose clip was started by Guy::set_anim.
+		std::map<std::tuple<int, int, int, int>, int> bad;  // (who class, type, anim, saved end -> engine frames) count
+		int total = 0, agree = 0;
+		for (int who = 0; who < sim::kNumLeaders; ++who)
+			for (int o = 0; o < game->objects[size_t(who)].unit_mark; ++o) {
+				sim::Unit* u0 = game->unit(who, o);
+				if (!u0 || !u0->alive()) continue;
+				for (const sim::Guy& gy : u0->guys) {
+					++total;
+					const int fr = game->anims->frames(gy.gpiece, gy.cur_anim);
+					if (std::getenv("RON_ANIM_CHECK")[0] == '2') std::printf("guy who %d type %d anim %d time %u/%u\n", who, u0->type, gy.cur_anim, gy.cur_time, gy.end_time);
+					if (int(gy.end_time) == fr) ++agree;
+					else ++bad[{who, u0->type, gy.cur_anim, int(gy.end_time) * 1000 + fr}];
+				}
+			}
+		std::printf("anim check: %d guys, %d agree\n", total, agree);
+		for (const auto& kv : bad)
+			std::printf("  who %d type %d anim %d saved %d engine %d: %d guys\n", std::get<0>(kv.first), std::get<1>(kv.first), std::get<2>(kv.first), std::get<3>(kv.first) / 1000, std::get<3>(kv.first) % 1000, kv.second);
+	}
+
+	if (std::getenv("RON_MASK_CHECK")) {
+		// units with a given unit_masks bit (hex in RON_MASK_CHECK), by type
+		const uint32_t bit = uint32_t(std::strtoul(std::getenv("RON_MASK_CHECK"), nullptr, 16));
+		std::map<std::pair<int, int>, int> cnt;
+		for (int who = 0; who < sim::kNumLeaders; ++who)
+			for (int o = 0; o < game->objects[size_t(who)].unit_mark; ++o) {
+				sim::Unit* u0 = game->unit(who, o);
+				if (u0 && u0->alive() && (u0->unit_masks & bit)) ++cnt[{who, u0->type}];
+			}
+		for (const auto& kv : cnt) std::printf("mask %x: who %d type %d: %d\n", bit, kv.first.first, kv.first.second, kv.second);
+		for (int w = 0; w < 10; ++w) {
+			const sim::Leader& L = game->leaders[size_t(w)];
+			std::printf("leader %d: flags %08x flags2 %08x production_ai %d prod_script_on %d age %d gov %d tribe %d opt_peasants %d\n", w, L.flags, L.flags2, L.production_ai, L.prod_script_on, L.age, L.gov, L.tribe, L.opt_peasants);
+		}
+		{
+			std::map<std::string, int> ut, bt;
+			for (int w = 0; w < 2; ++w) {
+				for (int o = 0; o < game->objects[size_t(w)].unit_mark; ++o) { sim::Unit* u0 = game->unit(w, o); if (u0 && u0->alive()) ut[sim::to_utf8(u0->ptype->type_name)]++; }
+				for (int o = 2000; o < game->objects[size_t(w)].build_mark; ++o) { sim::Build* b0 = game->build(w, o); if (b0 && b0->alive()) bt[sim::to_utf8(b0->ptype->type_name) + (b0->flags & 4 ? "" : "(constr)")]++; }
+			}
+			{ int nol = 0, tot = 0; for (int w = 0; w < 10; ++w) for (int o = 0; o < game->objects[size_t(w)].unit_mark; ++o) { sim::Unit* u0 = game->unit(w, o); if (u0 && u0->alive()) { ++tot; if (u0->openlist) ++nol; } } std::printf("units with openlist: %d of %d\n", nol, tot); }
+			{
+				std::map<std::string, int> oh;
+				for (int w = 0; w < 10; ++w) for (int o = 0; o < game->objects[size_t(w)].unit_mark; ++o) {
+					sim::Unit* u0 = game->unit(w, o);
+					if (!u0 || !u0->alive()) continue;
+					const int ot = u0->orders.empty() ? -1 : int(u0->orders.front().type);
+					const int ga = u0->guys.empty() ? -1 : int(u0->guys[0].cur_anim);
+					oh["who " + std::to_string(w > 1 ? w : 0) + " " + sim::to_utf8(u0->ptype->type_name) + " order " + std::to_string(ot) + " anim " + std::to_string(ga)]++;
+				}
+				for (auto& kv : oh) std::printf("  %s: %d\n", kv.first.c_str(), kv.second);
+			}
+			std::printf("units:"); for (auto& kv : ut) std::printf(" %s=%d", kv.first.c_str(), kv.second); std::printf("\nbuilds:");
+			for (auto& kv : bt) std::printf(" %s=%d", kv.first.c_str(), kv.second); std::printf("\n");
+		}
+		{
+			std::map<int, int> ch;
+			for (int w = 0; w < 8; ++w) for (int o = 0; o < game->objects[size_t(w)].unit_mark; ++o) { sim::Unit* u0 = game->unit(w, o); if (!u0 || !u0->alive()) continue; const int age = game->frame - u0->collide_frame; if (u0->collide_frame >= 0 && age >= 0 && age < 400) ch[age / 20]++; }
+			std::printf("collide_frame age histogram (per 20 frames):"); for (auto& kv : ch) std::printf(" %d:%d", kv.first * 20, kv.second); std::printf("\n");
+		}
+		{
+			int na = 0, nd = 0;
+			for (const sim::Ammo& a : game->ammo) if (a.in_use()) { ++na; std::printf("ammo piece %d who %d o %d whom %d ox %d t %u/%u\n", a.gpiece, a.who, a.o, a.whom, a.ox, a.cur_time, a.total_time); }
+			for (const sim::DeathObj& d : game->deaths) if (d.valid) { ++nd; std::printf("death who %d o %d gpiece %d ammo_piece %d first_frame %d cur_frame %d at %d,%d\n", d.who, d.o, d.gpiece, d.ammo_piece, d.first_frame, d.cur_frame, d.x, d.y); }
+			std::printf("ammo in use %d (of %zu), deaths valid %d\n", na, game->ammo.size(), nd);
+		}
+		std::printf("game: frame %d ai_speed %d editor %d scripted_rules %d\n", game->frame, game->ai_speed, int(game->editor), int(game->scripted_rules));
+	}
+	if (std::getenv("RON_LEADERS")) {
+		for (int w = 0; w < 10; ++w) std::printf("  leader %d: flags %08x flags2 %08x tribe %d age %d prod_ai %d prod_script_on %d\n", w, game->leaders[size_t(w)].flags, game->leaders[size_t(w)].flags2, game->leaders[size_t(w)].tribe, game->leaders[size_t(w)].age, game->leaders[size_t(w)].production_ai, game->leaders[size_t(w)].prod_script_on);
+	}
+	// What the original's load does besides restoring bytes (leader 9's init draws, the pens' animals): RON_NO_LOAD_EFFECTS=1 skips it.
+	if (std::getenv("RON_LOAD_STAGES")) {
+		// the draws of each stage of original_post_load_effects (the generator distance)
+		auto dist = [](uint32_t a, uint32_t b) { int64_t n = 0; for (uint32_t s = a; s != b && n < 100000; s = s * 0x19660Du + 0x3C6EF35Fu) ++n; return n; };
+		const uint32_t s0 = game->rng.seed();
+		game->leaders[9].flags = 0x2000007u;  // Leader::init(.., tribe -1, ..) is the reset branch: no draw
+		game->leaders[9].tribe = 0;
+		const uint32_t s1 = game->rng.seed();
+		int pens = 0;
+		for (size_t i = 0; i < game->farms.size(); ++i) if (game->farms[i].valid) { const uint32_t a = game->rng.seed(); sim::farms_add_animals(*game, int32_t(i)); if (a != game->rng.seed()) ++pens; }
+		for (size_t i = 0; i < game->farms.size(); ++i) { const auto& f = game->farms[i]; const sim::Build* b = f.who >= 0 && f.o >= 0 ? game->build(f.who, f.o) : nullptr; std::printf("  farm %zu: valid %d type %d who %d o %d building %s flags %02x type %d\n", i, int(f.valid), int(f.farm_type), f.who, f.o, b ? "yes" : "no", b ? unsigned(b->flags) : 0u, b ? b->type : -1); }
+		std::printf("load stages: leader 9 init %lld draws, %d pens with animals: %lld draws\n", (long long)dist(s0, s1), pens, (long long)dist(s1, game->rng.seed()));
+		return 0;
+	}
+	if (const char* plan = std::getenv("RON_LOAD_INIT")) {
+		// experiment: Leader::init-style AI draws for the listed leader slots, in order ("8,9"), instead of original_post_load_effects
+		std::stringstream ps(plan);
+		std::string tk;
+		while (std::getline(ps, tk, ',')) {
+			const int k = std::atoi(tk.c_str());
+			const uint32_t fl = game->leaders[size_t(k)].flags;
+			game->leaders[size_t(k)].flags = 0;
+			sim::leader_init_ai(*game, k);
+			game->leaders[size_t(k)].flags = fl | 7;
+		}
+		for (size_t i = 0; i < game->farms.size(); ++i) if (game->farms[i].valid) sim::farms_add_animals(*game, int32_t(i));
+	} else if (!std::getenv("RON_NO_LOAD_EFFECTS")) sim::original_post_load_effects(*game);
+	if (const char* ex = std::getenv("RON_LOAD_EXTRA")) for (int i = std::atoi(ex); i > 0; --i) game->rng.get(0, 0xffff);  // experiment: more load-time draws
 
 	// The game script the replay header names (the embedded save has none): "no_nukes" in the 2026.08.30 chain.
 	if (hdr && !std::getenv("RON_NO_SCRIPTS")) {
@@ -1556,7 +1741,13 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 	}
 #ifdef RON_RNG_PROFILE_HOOK
 	if (std::getenv("RON_RNG_PROFILE")) sim::g_rng_hook = rng_hook_fn;
+	if (const char* tr = std::getenv("RON_RNG_TRACE")) { g_trace_game = game.get(); g_trace_until = std::atoi(tr); }
 #endif
+	// RON_FISH_TIMELINE=1 (with --compare-next): see fish_timeline() below
+	const bool fish_timeline = std::getenv("RON_FISH_TIMELINE") != nullptr;
+	std::vector<std::pair<int, uint32_t>> frame_seeds;
+	const uint32_t seed_load = game->rng.seed();
+	if (fish_timeline) sim::g_idle_pick_hook = idle_pick_hook;
 	// stepping
 	sim::CommandPackage package;
 	size_t ri = 0;
@@ -2280,7 +2471,24 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 				}
 			}
 			if (next_frame >= 0 && f == next_frame) break;
-			if (f < last_boundary) game->do_frame();
+			if (const char* ins = std::getenv("RON_INSERT")) {
+				// experiment: RON_INSERT="F:k[,F:k..]" draws k extra numbers (k < 0: puts the generator back |k| draws) just before frame F's do_frame
+				std::stringstream is(ins);
+				std::string tk;
+				while (std::getline(is, tk, ',')) {
+					int fr = 0, k = 0;
+					if (std::sscanf(tk.c_str(), "%d:%d", &fr, &k) == 2 && fr == f) {
+						const uint32_t ainv = [] { uint32_t x = 0x19660Du; for (int i = 0; i < 5; ++i) x *= 2 - 0x19660Du * x; return x; }();
+						uint32_t sd = game->rng.seed();
+						for (int i = 0; i < std::abs(k); ++i) sd = k > 0 ? sd * 0x19660Du + 0x3C6EF35Fu : (sd - 0x3C6EF35Fu) * ainv;
+						game->rng.reseed(sd);
+					}
+				}
+			}
+			if (f < last_boundary) {
+				if (fish_timeline) frame_seeds.push_back({game->frame, game->rng.seed()});
+				game->do_frame();
+			}
 		}
 	} catch (const std::exception& e) {
 		step_error = e.what();
@@ -2295,6 +2503,50 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 		for (size_t i = 0; i < v.size() && i < 30; ++i) std::printf("    %8lld  %s\n", (long long)v[i].first, v[i].second.c_str());
 	}
 #endif
+	if (std::getenv("RON_ANIMCHK") && game->anims) {
+		// end_time stored in the save against the engine's AnimSource::frames for the guy's current animation
+		std::map<std::string, std::pair<int, int>> tally;
+		for (int w = 0; w < 10; ++w) for (int o = 0; o < game->objects[size_t(w)].unit_mark; ++o) {
+			sim::Unit* u0 = game->unit(w, o);
+			if (!u0 || !u0->alive()) continue;
+			for (const sim::Guy& gy : u0->guys) {
+				const uint32_t want = uint32_t(game->anims->frames(gy.gpiece, gy.cur_anim));
+				char b[96]; std::snprintf(b, sizeof b, "type %d anim %d", u0->type, int(gy.cur_anim));
+				auto& t = tally[b];
+				if (want == gy.end_time) ++t.first; else { ++t.second; if (t.second <= 1) std::printf("  animchk mismatch %s: save end_time %u engine %u (gpiece %d)\n", b, gy.end_time, want, int(gy.gpiece)); }
+			}
+		}
+		int ok = 0, bad = 0;
+		for (auto& kv : tally) { ok += kv.second.first; bad += kv.second.second; }
+		std::printf("  animchk: %d guys agree, %d differ\n", ok, bad);
+	}
+	if (std::getenv("RON_UNITTYPES")) {
+		for (int w = 0; w < 2; ++w) {
+			std::map<std::string, int> h;
+			for (int o = 0; o < game->objects[size_t(w)].unit_mark; ++o) { sim::Unit* u0 = game->unit(w, o); if (u0 && u0->alive()) h[sim::to_utf8(u0->ptype->type_name) + "[" + std::to_string(u0->type) + "]"]++; }
+			std::printf("  who %d at frame %d:", w, game->frame); for (auto& kv : h) std::printf(" %s=%d", kv.first.c_str(), kv.second); std::printf("\n");
+			{ std::map<std::string, int> hb; int act = 0; for (int o = 2000; o < game->objects[size_t(w)].build_mark; ++o) { sim::Build* b0 = game->build(w, o); if (b0 && b0->alive()) { hb[sim::to_utf8(b0->ptype->type_name) + "[" + std::to_string(b0->type) + "]"]++; act += (b0->flags & sim::objflag::kActive) ? 1 : 0; } }
+			  std::printf("  builds who %d (%d active):", w, act); for (auto& kv : hb) std::printf(" %s=%d", kv.first.c_str(), kv.second); std::printf("\n"); }
+		}
+	}
+	if (std::getenv("RON_MAKEROAD")) {
+		for (int w = 0; w < 8; ++w) for (int o = 2000; o < game->objects[size_t(w)].build_mark; ++o) { sim::Build* b0 = game->build(w, o); if (b0 && b0->alive() && (b0->build_masks & sim::bmask::kMakeRoad)) std::printf("  MAKE_ROAD pending at frame %d: who %d o %d type %d city %d (frame+o)%%16 = %d\n", game->frame, w, o, b0->type, int(b0->city), (game->frame + o) % 16); }
+	}
+	if (std::getenv("RON_L9")) {
+		std::map<std::string, int> h9;
+		for (int o = 0; o < game->objects[9].unit_mark; ++o) { sim::Unit* u0 = game->unit(9, o); if (u0 && u0->alive()) h9[sim::to_utf8(u0->ptype->type_name)]++; }
+		std::printf("  list 9 at frame %d:", game->frame); for (auto& kv : h9) std::printf(" %s=%d", kv.first.c_str(), kv.second);
+		if (std::getenv("RON_L9") && std::atoi(std::getenv("RON_L9")) > 1)
+			for (int o = 0; o < game->objects[9].unit_mark; ++o) {
+				sim::Unit* u0 = game->unit(9, o);
+				if (!u0 || !u0->alive()) continue;
+				std::printf("\n    9/%d %s pos %d,%d cara %d orders", o, sim::to_utf8(u0->ptype->type_name).c_str(), u0->x, u0->y, u0->cara);
+				for (const sim::Order& od : u0->orders) std::printf(" [t%d]", int(od.type));
+				for (const sim::Guy& gy : u0->guys) std::printf(" (a%d %u/%u)", gy.cur_anim, gy.cur_time, gy.end_time);
+			}
+		int pens = 0, farms = 0; for (const auto& f : game->farms) if (f.valid) { ++farms; if (f.farm_type & 1) ++pens; }
+		std::printf("; farms %d pens %d\n", farms, pens);
+	}
 	std::printf("  simulated to frame %d (%lld turn boundaries compared, %lld with all 15 parts equal), %lld commands executed\n", game->frame, (long long)boundaries,
 		(long long)all_match, (long long)cmds_run);
 	if (!step_error.empty()) std::printf("  STOPPED: %s\n", step_error.c_str());
@@ -2312,6 +2564,7 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 		sim::OriginalLoadReport rn;
 		auto truth = sim::load_original_save(cache->files, rules, nullptr, next_save, &rn);
 		if (!truth) { std::printf("  next save: load failed: %s\n", rn.error.c_str()); return 1; }
+		if (fish_timeline) fish_timeline_report(*truth, next_frame, seed_load, frame_seeds, game->rng.seed());
 		// 15 parts of both states at the same frame
 		sim::EngineProvider e1(*game), e2(*truth);
 		dw::CheckSumParts a1 = dw::compute_check_sums(e1), a2 = dw::compute_check_sums(e2);
@@ -2340,6 +2593,40 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 			if (!l.mismatches) continue;
 			if (shown++ < 60) std::printf("    differs: %-34s %6lld of %-7lld %s\n", l.member.c_str(), (long long)l.mismatches, (long long)l.objects, l.example.c_str());
 		}
+		if (std::getenv("RON_CARAVANS")) {
+			for (int which = 0; which < 2; ++which) {
+				const sim::Game& gg = which ? *truth : *game;
+				std::printf("  caravans (%s) at frame %d:\n", which ? "original" : "engine", gg.frame);
+				for (int w = 0; w < 2; ++w) for (int o = 0; o < gg.objects[size_t(w)].unit_mark; ++o) {
+					const sim::Unit* u0 = gg.unit(w, o);
+					if (!u0 || !u0->alive() || (u0->type != 59 && u0->type != 61)) continue;
+					std::printf("    %d/%d t%d inside_up %d pos %d,%d orders", w, o, u0->type, u0->inside_up, u0->x, u0->y);
+					for (const sim::Order& od : u0->orders) std::printf(" [t%d]", int(od.type));
+					for (const sim::Guy& gy : u0->guys) std::printf(" (a%d %u/%u)", gy.cur_anim, gy.cur_time, gy.end_time);
+					std::printf("\n");
+				}
+			}
+		}
+		if (std::getenv("RON_FARMS")) {
+			for (int which = 0; which < 2; ++which) {
+				const sim::Game& gg = which ? *truth : *game;
+				int farms = 0, drawing = 0, bare_total = 0, pens = 0;
+				std::map<int, int> hb;
+				for (const auto& f : gg.farms) {
+					if (!f.valid) continue;
+					if (f.farm_type & 1) { ++pens; continue; }
+					++farms;
+					int bare = 0;
+					for (int x = 0; x < 4; ++x) for (int y = 0; y < 4; ++y) if (!(f.percent[size_t(x)][size_t(y)] > 0.0f)) ++bare;
+					bare_total += bare;
+					hb[bare]++;
+					if (bare >= 5) ++drawing;
+				}
+				std::printf("  farms (%s): %d wheat, %d pens, bare cells %d, farms with >= 5 bare %d; bare histogram:", which ? "original" : "engine", farms, pens, bare_total, drawing);
+				for (auto& kv : hb) std::printf(" %d:%d", kv.first, kv.second);
+				std::printf("\n");
+			}
+		}
 		if (const char* lm = std::getenv("RON_LIST_UNIT_DIFF")) {  // every unit whose member `lm` (los_x los_y idle tolerance group uid collide unit_masks ...) differs: engine -> original
 			const std::string mname = lm;
 			auto val = [&](const sim::Unit& u) -> int64_t {
@@ -2355,6 +2642,10 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 				if (mname == "damage_frame") return u.damage_frame;
 				if (mname == "flags") return u.flags;
 				if (mname == "stance") return u.stance;
+				if (mname == "cara") return u.cara;
+				if (mname == "unit_masks2") return int64_t(u.unit_masks2);
+				if (mname == "hold") return (u.unit_masks2 & 0x10) != 0;
+				if (mname == "type") return u.type;
 				return 0;
 			};
 			int n = 0;

@@ -1,0 +1,9 @@
+re/decomp/fidelity4/road
+Build::finished
+Build::close
+Wall::close
+Build::check_capture
+City::find_buildings
+City::check_upgrade
+Cities::capture_city
+Build::remove_from_city

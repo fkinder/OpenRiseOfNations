@@ -1,0 +1,11 @@
+re/decomp/fidelity3/callers_leader.txt
+3
+Leader::make_stuff
+Leader::produce_building
+Leader::create_buildings
+Leader::compute_sites
+Leader::research_techs
+Leader::upgrade_units
+Leader::use_market
+Leader::create_units
+Army::find_target

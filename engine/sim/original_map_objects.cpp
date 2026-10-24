@@ -180,6 +180,23 @@ void order_attack(Builder<Order>& b) {
 	b.f("in_range", &Order::in_range).f("ever_in_range", &Order::ever_in_range).f("new_ord", &Order::new_ord);
 }
 
+// PatrolOrder (AIR_PATROL, GROUP_PATROL): x_pos at +4 and y_pos at +0x20, SimpleArray<Coord>, one waypoint per element.
+void patrol_arrays(Builder<Order>& b) {
+	static const int step_coord = dw::Description::get().find_step(dw::Description::get().find_function("SimpleArray<Coord>::walk_data"), dw::StepKind::Container);
+	b.arrays([](const Game& g, const Seg& s, int step, int64_t base, ArraySpec& spec) {
+		const Order* o = order_of(const_cast<Game&>(g), s);
+		if (!o || step != step_coord || (base != 4 && base != 0x20)) return false;
+		spec.count = int32_t(o->wp.size());
+		spec.simple = true;
+		const int axis = base == 4 ? 0 : 1;
+		spec.block = [o, axis](std::vector<uint8_t>& out) {
+			out.resize(o->wp.size() * 4);
+			for (size_t i = 0; i < o->wp.size(); ++i) put_le(out.data() + 4 * i, 4, uint32_t(o->wp[i][size_t(axis)]));
+		};
+		return true;
+	});
+}
+
 ClassMap make_order_map(const char* name, const char* cls, int32_t flags_off, void (*fill)(Builder<Order>&)) {
 	ClassMap m;
 	Builder<Order> b(m, name, cls);
@@ -239,20 +256,7 @@ const ClassMap& map_order(int t) {
 	static const ClassMap airpatrol = make_order_map("AirPatrolOrder", "AirPatrolOrder", 0x64, [](Builder<Order>& b) {
 		b.f("waypoint", &Order::wp_index).f("oxx", &Order::oxx).f("whose", &Order::whose).f("cruising_alt", &Order::cruising_alt);
 		b.f("sharp_turn", &Order::sharp_turn).f("old", &Order::old).f("returning", &Order::returning);
-		// x_pos at +4 and y_pos at +0x20: SimpleArray<Coord>, one waypoint per element
-		static const int step_coord = dw::Description::get().find_step(dw::Description::get().find_function("SimpleArray<Coord>::walk_data"), dw::StepKind::Container);
-		b.arrays([](const Game& g, const Seg& s, int step, int64_t base, ArraySpec& spec) {
-			const Order* o = order_of(const_cast<Game&>(g), s);
-			if (!o || step != step_coord || (base != 4 && base != 0x20)) return false;
-			spec.count = int32_t(o->wp.size());
-			spec.simple = true;
-			const int axis = base == 4 ? 0 : 1;
-			spec.block = [o, axis](std::vector<uint8_t>& out) {
-				out.resize(o->wp.size() * 4);
-				for (size_t i = 0; i < o->wp.size(); ++i) put_le(out.data() + 4 * i, 4, uint32_t(o->wp[i][size_t(axis)]));
-			};
-			return true;
-		});
+		patrol_arrays(b);
 	});
 	static const ClassMap airattack = make_order_map("AirAttackGroundOrder", "AirAttackGroundOrder", 0x44, [](Builder<Order>& b) {
 		b.f("att_x", &Order::x).f("att_y", &Order::y).f("oxx", &Order::oxx).f("whose", &Order::whose).f("cruising_alt", &Order::cruising_alt);
@@ -273,8 +277,16 @@ const ClassMap& map_order(int t) {
 		b.f("dx", &Order::def_x).f("dy", &Order::def_y).f("guard_x", &Order::x).f("guard_y", &Order::y);
 		b.f("idle", &Order::timer).f("retry", &Order::pause);
 	});
-	static const ClassMap gpatrol = make_order_map("GroupPatrolOrder", "GroupPatrolOrder", 0x60, nullptr);
-	static const ClassMap attackground = make_order_map("AttackGroundOrder", "AttackGroundOrder", 0x1c, nullptr);
+	// GROUP_PATROL: the waypoint index, the arrays and the GroupOrder part (leader o / who, command id, member index; orders_patrol.cpp).
+	static const ClassMap gpatrol = make_order_map("GroupPatrolOrder", "GroupPatrolOrder", 0x60, [](Builder<Order>& b) {
+		b.f("waypoint", &Order::wp_index);
+		b.f("oxx", &Order::oxx).f("whose", &Order::whose).f("id", &Order::id).f("form_id", &Order::form_id).f("group_angle", &Order::group_angle);
+		patrol_arrays(b);
+	});
+	// ATTACK_GROUND: the point, the accuracy (Order::tolerance) and attack_unit (Order::attempts) of orders_patrol.cpp.
+	static const ClassMap attackground = make_order_map("AttackGroundOrder", "AttackGroundOrder", 0x1c, [](Builder<Order>& b) {
+		b.f("att_x", &Order::x).f("att_y", &Order::y).f("accuracy", &Order::tolerance).f("attack_unit", &Order::attempts);
+	});
 	static const ClassMap think = make_order_map("ThinkOrder", "UnitOrder", 0x4, nullptr);
 	switch (t) {
 		case 1: case 2: case 3: case 4: return move;

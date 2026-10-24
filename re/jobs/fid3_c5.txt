@@ -1,0 +1,8 @@
+re/decomp/fidelity3/callers_herd.txt
+2
+Herds::process
+Herd::process
+Animal::do_idle
+Animal::think_bird
+Animal::think_farm_animal
+Unit::do_air_physics

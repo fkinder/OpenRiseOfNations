@@ -431,7 +431,7 @@ succeed for mines and woodcutters (blocked_site returns 36 for > half unseen til
    the box `[x0−1, x0+w−1] × [y0−1, y0+h−1]` — its right and bottom sides are the footprint's own last column and row —
    gets `set_road_at(on)` on every in-map tcoord that is not BLOCKED, not water, and either is outside a building/
    foundation or is not on the box's left/top side. `'e'`-flag buildings that belong to a city get the ring just outside
-   the footprint; with REGEN_FORCE a road is pathed to the city (`PathFinder::find_road`, ❓ not reproduced); `'g'`
+   the footprint; with REGEN_FORCE a road is pathed to the city (`PathFinder::find_road`, reproduced in engine/sim/roads.cpp: movement-spec 12, original-save 6.4); `'g'`
    types get none.
 
 `connects_to_roads` @006398c0 = not (`'g'` 0x40 or `'e'` 0x10 in BUILD_FLAGS) unless `is(UNIVERSITY 420)`.

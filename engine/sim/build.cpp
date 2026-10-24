@@ -5,6 +5,7 @@
 
 #include "sim/aircraft.hpp"
 #include "sim/heroes.hpp"
+#include "sim/roads.hpp"
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
 #include "sim/fog.hpp"
@@ -522,7 +523,15 @@ void build_start(Game& g, Build& b, bool msg) {
 	}
 	// Terrain::object_placed (presentation). mask_me(1, REGEN_FORCE), the fog marks and mark_behind_tiles: the world
 	// loader applied them already for scenario buildings; the CITY bits always here.
-	if (!g.scenario_loading) wall_start(g.world, *b.ptype, b.x, b.y, b.who);
+	if (!g.scenario_loading) {
+		std::pair<Game*, Build*> ctx{&g, &b};
+		wall_start(g.world, *b.ptype, b.x, b.y, b.who,
+		           [](void* c) {
+			           auto* p = static_cast<std::pair<Game*, Build*>*>(c);
+			           place_roads_regen(*p->first, *p->second, true, Regen::Force);  // mask_me(1, REGEN_FORCE): the road to the city
+		           },
+		           &ctx);
+	}
 	if (b.flags & objflag::kCity) wall_mask_city(g, b, true, b.city < 0 ? get_radius(g, b.who, b.type) : city_get_radius(g, b.who, b.city));
 	check_ever_seen(g, b, false);
 	// Build::start: wonders become visible to everyone (update_local_seen).

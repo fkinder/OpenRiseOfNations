@@ -1,0 +1,15 @@
+re/decomp/fidelity4
+Objects::reload_data
+Objects::walk_data
+Object::walk_data
+Unit::walk_data
+Guy::walk_data
+Terrain::walk_data
+Terrain::walk_coord_data
+Doober::walk_data
+Types::finalize_grafting
+GraphicEvents::walk_data
+WorldMap::reinit_all
+WorldMap::full_update
+TurnControl::init
+World::walk_data

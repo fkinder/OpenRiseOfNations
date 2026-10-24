@@ -1,0 +1,8 @@
+re/decomp/fidelity3
+Leader::process_event_frame
+Leaders::end_process_all
+Achieve::capture_data
+Roads::scan_and_kill_stray_roads
+GraphicEvents::process
+OrdersMemManager::cycle
+Leader::process_taunt

@@ -1,0 +1,7 @@
+re/decomp/fidelity4/cc_inctime.txt
+6
+Doober::inc_time
+Surf::inc_time
+Ammo::inc_time
+DeathObj::inc_time
+Nuke::do_damage

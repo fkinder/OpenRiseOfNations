@@ -1,0 +1,3 @@
+re/decomp/fidelity4/fgt_callers.txt
+5
+Build::find_gather_tiles

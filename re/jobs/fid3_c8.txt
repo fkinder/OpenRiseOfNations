@@ -1,0 +1,4 @@
+re/decomp/fidelity3/callers_fa.txt
+3
+Farms::add_animals
+Herd::create_units

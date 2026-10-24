@@ -1,0 +1,13 @@
+re/decomp/fidelity4/road
+PathFinder::find_road
+PathFinder::find_road_restore
+PathFinder::astar_caravan_road
+PathFinder::calc_road_cost
+PathFinder::valid_roadcoord
+BuildType::place_roads
+BuildType::mask_me
+Caravan::build_road
+Caravan::verify_road
+Wall::mask_me
+PathFinder::kill_lists
+PathFinder::init

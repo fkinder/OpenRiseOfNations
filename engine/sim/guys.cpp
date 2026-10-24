@@ -949,6 +949,7 @@ void guy_set_anim(Game& g, Unit& u, Guy& gy, int32_t anim, int32_t p2, int32_t p
 		} else {
 			// @5dac68: game_random, skipped while the unit has a time-sliced search saved.
 			const int32_t r = u.openlist ? 0 : g.rnd_draw(100);
+			if (g_idle_pick_hook && !u.openlist) g_idle_pick_hook(g, u);
 			if (curcat == kCharDefault && p3) {
 				if (gy.guy_flags & 0x20) {
 					if (r >= 70) chosen = kCharIdle1;

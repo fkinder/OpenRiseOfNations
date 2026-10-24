@@ -1,0 +1,4 @@
+re/decomp/fidelity3
+Guy::init_real
+Objects::init_unit
+Guy::init

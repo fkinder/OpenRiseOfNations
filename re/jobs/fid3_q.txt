@@ -1,0 +1,5 @@
+re/decomp/fidelity3
+Leaders::walk_data
+Leader::walk_data
+Game::walk_data
+Objects::walk_data

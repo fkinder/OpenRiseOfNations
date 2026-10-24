@@ -5,6 +5,7 @@
 #include <cmath>
 
 #include "sim/heroes.hpp"
+#include "sim/roads.hpp"
 #include "sim/ai.hpp"
 #include "sim/capture.hpp"
 #include "sim/combat.hpp"
@@ -102,6 +103,7 @@ void wall_mask_me(Game& g, Build& b, bool add, Regen regen) {
 	int32_t radius = 0;
 	if (b.flags & objflag::kCity) radius = b.city < 0 ? get_radius(g, b.who, b.type) : city_get_radius(g, b.who, b.city);
 	mask_me(g.world, *b.ptype, b.x, b.y, add, regen, b.city >= 0);
+	place_roads_regen(g, b, add, regen);  // the REGEN_TOTAL / REGEN_FORCE tail of BuildType::place_roads
 	if (b.flags & objflag::kCity) wall_mask_city(g, b, add, radius);
 }
 

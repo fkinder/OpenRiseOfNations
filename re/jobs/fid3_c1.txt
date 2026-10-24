@@ -1,0 +1,3 @@
+re/decomp/fidelity3/callers_flock.txt
+2
+Objects::add_flock

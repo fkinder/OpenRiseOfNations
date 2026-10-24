@@ -1,0 +1,4 @@
+re/decomp/fidelity3
+Game::do_frame
+Objects::inc_time
+Objects::process_all

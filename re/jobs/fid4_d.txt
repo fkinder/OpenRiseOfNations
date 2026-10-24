@@ -1,0 +1,5 @@
+re/decomp/fidelity4
+Guy::set_anim
+Guy::inc_time
+Unit::inc_time
+Object::inc_time

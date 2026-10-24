@@ -723,7 +723,7 @@ int32_t think_peasant(Game& g, Unit& u, bool force) {
 		if (u.unit_masks & umask::kAiControl) {
 			T = 1;
 		} else {
-			switch (g.leaders[size_t(u.who)].opt_peasants) {
+			switch (g.leaders[size_t(u.who)].opt_peasants_wait) {  // leader_options.list[who] +8 (Unit::think_peasant @5f5760 reads the same field as think_caravan)
 			case 1: T = 7; break;
 			case 2: T = 0xc; break;
 			case 3: T = 0x11; break;

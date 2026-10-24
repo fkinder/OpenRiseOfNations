@@ -104,6 +104,14 @@ int64_t revert_members(Game& to, Game& from, const std::vector<std::string>& mem
 // loaded rules image). False with `err` when the file is missing or does not compile.
 bool original_attach_game_script(Game& g, const GameFiles& files, const std::string& name, std::string* err = nullptr);
 
+// What loading a save does to the running game besides restoring its bytes (WalkDataGame::walk_data @5a2360, the `input` tail after the
+// generator's seed was restored; docs/original-save.md section 6.2): `Leader::init(leaders[9], 9, -1, 9)` (the second gaia leader is not
+// in the file: its random_personality and coin draws come from game_random), then `leaders[9].flags |= 7`, then `Farms::add_animals` for
+// every pen record (the five farm animals of each pen are objects of list 9, which the file does not hold). The replay driver calls it
+// right after the load, before the first frame, so the generator and list 9 are what the original's game had when it resumed.
+// (Not part of the load itself: EngineProvider must keep emitting the file's seed.)
+void original_post_load_effects(Game& g);
+
 // Experiment (the replay search of apps/sav): every mapped (object, member) whose bytes differ between `to` (stepped) and `from` (the
 // loaded save), and a switch that puts one of them back to the save's value and forth again.
 struct Seg_t { int32_t a = 0, b = 0, c = 0; };

@@ -952,7 +952,7 @@ draws from the same `game_random` stream. Tables: `orthog_x/orthog_y` @add250/@a
   `d = dir0 + k` (wrap): skip odd `d` when `orthoOnly`; `N = P + move[d]·192`, `N.metric = P.metric + dy·tw + dx`;
   discard unless `valid_roadcoord`; `count++`; `N.parent = P`; `c = calc_road_cost(N, srcPl, dstPl, d)` (**one RNG draw,
   before the closed/open checks**); `N == G` → `c /= 2`; `N.length = P.length + c`; discard if closed; open duplicate
-  with `length ≤` → discard, else replace; heuristic `vector_dist(|N − G|)·60/192` for `cara < 0`, and for caravans
+  with `length ≤` → discard, else replace; heuristic `vector_dist(|N − G|)·60/384` for `cara < 0` (asm @686017: `SAR 6`; only the start node divides by 192), and for caravans
   `vector_dist(N.x − gx, −gy)·40/16` (**the y argument is `−gy`, not `N.y − gy`**: asm-verified original bug, keep it);
   `value = length + h`, `timeout = P.timeout + 1`, insert. Then close `P`. Empty open list → 0.
 - Emission: from `G.parent` toward the start, excluding the start, push `{x, y, 96, 0}` for every node whose tile lacks

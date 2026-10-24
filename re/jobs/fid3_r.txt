@@ -1,0 +1,2 @@
+re/decomp/fidelity3
+LeaderData::walk_data

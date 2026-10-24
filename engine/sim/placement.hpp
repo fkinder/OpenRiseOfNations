@@ -52,7 +52,9 @@ void mark_behind_tiles(World& w, const Type& bt, int32_t cx, int32_t cy, bool on
 // The grid part of Wall::start @0063e810 (also reached from Build::activate for scenario buildings): mask_me(1,
 // REGEN_FORCE), was_seen and seen2 bits for `who` (the footprint is explored), mark_behind_tiles(1).
 // kill_competing_buildings, check_ever_seen and the forced road are the caller's.
-void wall_start(World& w, const Type& bt, int32_t cx, int32_t cy, int32_t who);
+void wall_start(World& w, const Type& bt, int32_t cx, int32_t cy, int32_t who, void (*after_mask)(void*) = nullptr, void* ctx = nullptr);
+// (`after_mask(ctx)` runs between mask_me(1, REGEN_FORCE) and the fog marks: the forced road to the city is laid there, because
+// calc_road_cost reads the footprint's was_seen bits before Wall::start sets them.)
 
 // Good::init @0066da20: RESOURCE on the x_size * y_size tcoords around the centre (x outer, y inner, no bounds check
 // in the original), BLOCKED too when the type blocks, FLAG_RESOURCE on the centre wcoord. Oil marks nothing.

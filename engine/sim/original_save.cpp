@@ -1,6 +1,8 @@
 // Loading a save of the original game into the engine's Game (docs/original-save.md; sim/original_save.hpp).
 #include "sim/original_save.hpp"
 #include "sim/script_host.hpp"
+#include "sim/ai.hpp"
+#include "sim/economy.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -930,6 +932,24 @@ std::vector<AuditLine> diff_mapped_state(Game& a, Game& b) {
 		}
 	}
 	return out;
+}
+
+void original_post_load_effects(Game& g) {
+	// WalkDataGame::walk_data @5a2360, `input` tail, after Terrain::init(.., 1, 0) (its own generator) and the type-flag loops:
+	//   Leader::init(&leaders[9], 9, tribe -1, 9) @5a30eb; leaders[9].flags |= 7; leaders[9].tribe = 0;
+	//   Farms::add_animals(i) for every farm record whose byte +0xbc is set.
+	// Leader::init with a negative tribe is the *reset* branch (it clears the arrays, the diplomacy, the tech masks and the personality
+	// @6e3930 and returns at the `param_2 < 0` test, before gain_tech / random_personality / the economic coin): no draw. (The third
+	// fidelity pass ran the whole AI init here, 21 draws; with those removed `builds` of `21'23'34` matches through frame 127.)
+	// The reset sets `flags = 0x2000000` (and the word after it, +4, to 0).
+	Leader& l9 = g.leaders[9];
+	l9.flags = 0x2000000u;
+	l9.tribe = 0;  // (-1 while the reset ran)
+	l9.flags |= 7;
+	// Farms::add_animals for every farm record whose first byte is set (+0xbc: valid); the function itself returns unless the record
+	// is a finished pen.
+	for (size_t i = 0; i < g.farms.size(); ++i)
+		if (g.farms[i].valid) farms_add_animals(g, int32_t(i));
 }
 
 bool original_attach_game_script(Game& g, const GameFiles& files, const std::string& name, std::string* err) {
