@@ -177,9 +177,9 @@ to 0 (200 ms), `cannon_time_stamp = game.frame`; `check_cannon_time` (each 15-fr
 `play` = lobby slot 0..7 (also the package order). Slot `Player.flags`: VALID 1, LOCAL 2, HUMAN 4, OBSERVER 8, DROPPED 0x10,
 RESIGNED 0x40, DEFEATED 0x80, WON 0x100, plus setup bits 0x400/0x800 (warnings) 0x1000 RUSH 0x2000 BOOM. AI slots are VALID
 only and send nothing (corpus: 6-slot games have 2 records per turn). Observers: slots above the player count
-(`max_observers`) 🟡. Facts: they are never waited for (§1.3.4) and never become drop-pending; their chat/pings go
+(`max_observers`; rules.xml has the category `maxobservers` 0..6; the port: §8.6.1) 🟡. Facts: they are never waited for (§1.3.4) and never become drop-pending; their chat/pings go
 out-of-band (§7). ❓ whether an observer broadcasts packages at all: `send_local_package` has no observer test, receivers
-accept them, but nobody drains an observer FIFO, which would overflow after 20 turns; no observer in the corpus.
+accept them, but nobody drains an observer FIFO, which would overflow after 20 turns; no observer in the corpus. (The port: observers send no package, nobody queues theirs.)
 
 ## 3. Drops (`DropControl`, UNGRACEFUL_PLAYER_DROP verb 80 = `'P'`)
 
@@ -299,10 +299,16 @@ must be executed deterministically even though it looks cosmetic. For observers 
 NETMSG_SPLINE (30); receivers show out-of-band chat only if they are not active players, unless `info.flags & 0x20`
 (observer chat to all). NETMSG_TAUNT is a no-op. Lobby chat is lobby-layer.
 
+**CHAT_SET (69, 9 bytes `u8 status[8]`; decompile `CommandPackage::process_chat_set @9458e0`, `CommandManager::issue_chat_set @941490`).** `process_chat_set` copies the 8 bytes into the *sender's* leader
+(`LeaderData +0x54 + 4 i`); `issue_chat_set(i, v)` rebuilds the sender's row, sets `status[i] = v` and sends it. `process_chat @9454f0` (sender S, recipient mask `bits`) walks the valid leaders L: for a broadcast
+(`bits == -1`) the line reaches L only if `L.status[S] == 0` (or `semaphore & 0x40`), for a mask it reaches the leaders whose bit is set and **ignores** the status. So `status[i] != 0` means "L does not want to hear
+leader i's broadcast chat" (an ignore list), and team / whispered chat is the CHAT verb's mask. The rows are package-synchronized state (the same on every peer).
+
 ## 8. The port: what was built (roadmap phase 8)
 
 ✅ built and checked against the corpus as stated in §8.4. **Second pass (2026-10-24, §8.5): OOS recovery from the authority's snapshot, `.rcx` recording
-of a live session, the Multiplayer lobby and in-game session in `ronmap`, synchronized saves with re-joining.** Files: `engine/sim/replay.{hpp,cpp}` (the `.rcx` reader and the package codec),
+of a live session, the Multiplayer lobby and in-game session in `ronmap`, synchronized saves with re-joining.** **Third pass (2026-10-24, §8.6): the lobby's seat rules (colours, handicaps,
+observers, guests' choices with the host's approval, kick, chat targets, countdown), scenario games and Conquer the World battles in multiplayer, the LAN browser, chat in a game, `-ffp-contract=off`.** Files: `engine/sim/replay.{hpp,cpp}` (the `.rcx` reader and the package codec),
 `engine/net/` (the lockstep layer and its transports), `apps/net/` (`ron-net`, the tests; `rcxcompare.mjs` checks the reader against
 `rcxdump.mjs`). The layer has no dependency on the engine's `Game`: it knows the verb table (`sim/replay.hpp`) and talks to the simulation
 through `SimHooks`.
@@ -319,6 +325,7 @@ through `SimHooks`.
 | `apps/net/main.cpp` ... | `ron-net survey | timing | replay | selftest | host | join | loopback` |
 | `engine/net/recovery.cpp` | the OOS recovery of `Session` (§8.5.1): authority vote, snapshot transfer, epoch gate, restart |
 | `engine/net/record.{hpp,cpp}` | `Recorder` / `RecordInfo`: the live-session `.rcx` writer (§8.5.2) |
+| `engine/net/seat_transport.{hpp,cpp}`, `engine/net/discovery.{hpp,cpp}` | third pass (§8.6): the machine <-> game slot mapping under `Session`, the LAN announcements and browser |
 | `apps/net/{node,loopback_cmd,native_replay}.*` | `ron-net loopback`, `replay` of recordings of this port, `host` / `join --recover --record` |
 | `apps/map-mac/lobby.{h,mm}` | `mp::Room`, `mp::Runtime`, `mp::CommandSink`: the lobby network side and the in-game session of `ronmap` (§8.5.3) |
 
@@ -379,8 +386,8 @@ them), 29 DROP_FLAG, 13 DROP_VOTE, 14 DROP_DECISION, 0x87 DSYNC (`i32 stamp`), a
 ### 8.3 Determinism risks the current engine must close (cf. [sim-implementation.md](sim-implementation.md))
 - **Iteration order**: players, leaders, objects, groups by index only; no pointer- or hash-ordered containers in the sim;
   `qsort`/`std::sort` ties (original: MSVC `qsort`, insertion sorts in `queues.cpp`/`normalize`) need stable explicit comparators.
-- **Floating point**: the original is x86 SSE2 single precision, no FMA. On arm64 compile `engine/sim` with
-  `-ffp-contract=off` globally (today only some files use `#pragma clang fp contract(off)`; **`build-mac.sh` passes no `-ffp-contract=off`**, and clang's default is `on`), no fast-math, no libm
+- **Floating point**: the original is x86 SSE2 single precision, no FMA. On arm64 compile the engine with
+  `-ffp-contract=off` globally (**`build-mac.sh` passes it since the third pass: §8.6.8**; before it only some files used `#pragma clang fp contract(off)` and clang's default is `on`), no fast-math, no libm
   transcendentals (the original uses its own `sin_table`/`cos` tables), and mirror x86 `cvttss2si` for out-of-range / NaN
   float->int (returns 0x80000000; arm64 `fcvtzs` saturates / returns 0) wherever a float is truncated in the sim.
 - **RNG**: one global `game_random` seeded from `info.seed` (replay-spec §12); UI/sound RNGs must never touch it; draw sites
@@ -408,7 +415,7 @@ delivery delays up to 25 ms; two processes over TCP end 600 / 1500 / 6000 frames
 6. ✅ **OOS**: flipping one bit of one instance makes every peer report within 2 turns (threshold 0) / `threshold + 2` (tested with 3); the simulation stays frozen without `recover`.
    With `recover`: 7 toy cases (2-4 peers, divergent peer = guest / host / the majority's minority, 300 KB snapshots, an observer), two recoveries in a row and two authority deaths
    (mid-transfer, before sending) all end with equal sums; two engine instances repair a divergence injected at frame 150 and end with identical native saves (§8.5.1).
-7. ❓ **Cross-platform soak** (x86-64 against arm64): not run.
+7. ❓ **Cross-platform soak** (x86-64 against arm64): not run; what could be done on one machine is in §8.6.8 (`-ffp-contract=off`, checked not to move any digest).
 
 `ron-net host <port> --random STYLE,SIZE,SEED,NATIONS [--humans N] [--frames N] [--save F]` / `ron-net join <port>`: the host's lobby fixes the setup and the seed, every process builds the same
 `new_random_game`, a small bot plays each seat (so there are commands), the game stops at frame N and the processes write their native save: two processes, 600 frames, 100 turns, 80 commands:
@@ -496,11 +503,114 @@ embedded. The connected peers must sit in exactly the seats that were human in t
   identical saves and the recording (embedded save) replays to the same save.
 - Snapshots read: `re/previews/mp_connect.png`, `mp_lobby.png`, `mp_game_3p_messages.png`, `mp_game_recovered.png`.
 
-#### 8.5.6 Left
+#### 8.5.6 Left (after the second pass; the third pass, 8.6, did the lobby choices, scenario and campaign games, the LAN browser and chat in a game)
 
-Chat during a game (the CHAT verb executes; nothing sends it), a lobby choice of colours / handicaps / observers, a join by browsing the LAN (addresses are typed), NAT traversal, saved scenario games and
-Conquer the World battles (random maps only), per-peer `Player` colours, the x86-64 / arm64 soak (§8.4.7), the original-client interoperability (none by design), a recording of a game that *joined* a running one
-(none: the room closes at START), and the diplomacy / team reset of the DIPLOMACY and SURVIVAL drops.
+NAT traversal, the x86-64 / arm64 soak (§8.4.7), per-peer `Player` colours in the recording header, the original-client interoperability (none by design), a recording of a game that *joined* a running one (none: the room closes at START), and the
+diplomacy / team reset of the DIPLOMACY and SURVIVAL drops.
+
+### 8.6 Third pass: lobby rules, scenario and campaign games, LAN browser, chat, floating point (2026-10-24)
+
+Files added: `engine/net/{seat_transport,discovery}.{hpp,cpp}`. Changed: `net/lobby.*` (seat plan, requests, kick, countdown, chat targets), `net/tcp.*` (`disconnect`, `reopen_door`), `net/game_link.*` (`MpSeats`, `apply_mp_seats`,
+the CHAT fix of 8.6.7), `net/record.*` (the handicap byte of the header), `sim/replay.*` (CHAT_SET codec), `apps/net/*` (loopback with observers / handicaps / scenarios / chat test, `native_replay` reads the header's seats, `selftest` 38 -> 91),
+`apps/map-mac/{lobby,frontend}.{h,mm}` and small hunks of `main.mm`, `build-mac.sh` (one flag). `engine/sim` otherwise untouched.
+
+Facts the original's data gave (rules.xml categories): `handicaps` = 21 entries "Standard", "Skill +1" ... "Skill +20" with DATA 0, 5 ... 100 (`LeaderData::get_handicap`, the gather / territory handicap, read only when `semaphore & 4` = multiplayer);
+`maxobservers` = 0..6; `playerslots` = Open, Closed, None, Computer (+ Rush and Raid / Boom and Build), Human, **Boot Player**, Human / Computer Control All, **Block Player**, Unblock Player (the kick and block of the host).
+`SetupWin::countdown` ticks "n seconds" in the lobby chat before START (10 s).
+
+#### 8.6.1 Seats: game slots are not connection numbers
+
+The Session addresses peers by game slot (= `Player.play` = package order). In a room the machines connect in any order and some only watch, so the lobby's `SeatPlan` (`make_seat_plan`) maps them:
+players take the game slots 0.. in the order of their connection numbers (nobody missing: slot = connection number, as before), seats above them up to `num_nations` are computer players, **observers take the slots
+from `nations` up** (spec 2.2 "slots above the player count"; `nations + observers <= 8`, otherwise `overflow` and the host cannot start). A saved game (`identity`) keeps every player on its connection number (they must sit where they
+sat), a Conquer the World battle forces the seats of the sides (`force_N`). `Lobby::start(seed)` fixes the plan in the table (`seat_N` = the game slot of machine N, `nations_final`) so every machine reads the same one.
+`net::SeatTransport` wraps the raw transport and renames peers <-> game slots in both directions (`send`, `poll`, timeouts, `local_peer`, `peers`), so `Session` is unchanged; lobby messages (0xA0..0xAF) that arrive during the game
+are kept (an observer's out-of-band chat, a finishing machine's barrier) and given back at the end. Observers: `kPlayerObserver`, no package, never waited for, they run everybody's packages (tested: 2 observers, drops, recovery).
+
+#### 8.6.2 Lobby rules (`Lobby`, `mp::Room`, the lobby screen)
+
+- **Per seat:** nation, team 1-4, **colour** (`NationSetup.color` = the team colour slot 0..7: red, blue, pink, green, yellow, cyan, white, orange; default = the seat number; unique among the seats), **handicap**
+  (`handicap_N`, index into the 21 entries), difficulty for computer seats. The host edits every seat (a nation or colour another seat holds changes places with it).
+- **Guests choose their own seat** (`Lobby::request(SeatField, value)`): nation, team, colour, handicap, watch-only. The host validates against the table (`Lobby::check`): `kInvalid` (outside the rules' lists), `kTaken` (a nation or colour
+  another seat holds), `kNoRoom` (observer limit `max_observers`, the last player cannot leave the game, `nations + observers > 8`), `kLocked` (a scenario fixes nation / team / colour, a saved game fixes everything), `kDenied`.
+  Approval mode **Auto** applies a valid request at once and tells the application (`take_request`: the lobby screen mirrors the three seat fields into its `RandomGameSetup`); **Ask** queues it (`pending()`) until the host presses
+  Allow / Deny (`answer`). The answer reaches the guest as a notice; the table is the truth, so a refused combo snaps back.
+- **Observers:** the host's "Observers" combo (0..6, default 2) is the limit, a guest (or the host) presses **Watch only** / **Play instead**; the plan moves the machine above the nations. An observer's game: fog off, "Observing: ..." line, orders refused
+  (`Runtime::submit_wire`), chat out of band (`Runtime::say`: lobby-layer message, shown as "Name (observer): ...").
+- **Kick / block:** the host's **Kick** under a guest's name (`Lobby::kick` sends KICK, `TcpTransport::disconnect` ends the connection: the guest is told "The host removed you", the others see "X was removed"); `Room::kick(peer, block)` also refuses
+  the name when it comes back (API; the screen has Kick only). Names are made unique by the host ("Marcus (2)").
+- **Chat** (`Lobby::say_to`): to everybody, **`/t text` to the team** (machines whose seat has the same team; observers talk to observers), **`/w name text` private**; lines are drawn with the sender's name in the seat's colour, system lines in yellow
+  (join, leave, removal, request outcomes, the countdown); joins are announced once the name is known.
+- **Countdown:** Start begins a 10 s countdown (`Room::begin_countdown`), one "The game starts in n seconds..." line per second for everybody; the button turns into Cancel; a guest leaving or un-readying stops it. (`RON_MP_NO_COUNTDOWN`, the headless
+  paths and the demo start skip it.)
+- After a game the same room is a lobby again (`Room::leave_game`: `started`, barriers, ready flags reset; the door reopens).
+
+#### 8.6.3 The game is a multiplayer game
+
+`net::apply_mp_seats(Game&, who_of, MpSeats)` (every peer, on its fresh Game, before the barrier; the table at START is the same everywhere): `Game::multiplayer = true` (the semaphore bit the original's lobby games have: the lobby handicap
+becomes `LeaderData::get_gather_handicap` / the territory handicap, the AI uses its own difficulty, the multiplayer capture rules of `capture.cpp`, the speed lock flag), the human seats' `Leader::name` = the lobby name (so a CHAT shows the
+player, not "Player"), `Leader::handicap`. Colours are `Leader::color` already. A game continued from a save carries all of it. Recordings carry the names and the handicap byte of the header; `ron-net replay` of a recording without an embedded
+save rebuilds the game and applies the header's seats.
+
+#### 8.6.4 Scenario games
+
+The host's **Scenario...** picks a `.scx` (`mp::load_scenario_info`: the scenario's players, the human-flagged ones first, so game slot k plays leader `who[k]`; table keys `scenario_game`, `scenario`, `scen_*`). The seats of the lobby follow the
+scenario's players (nation, colour, difficulty are the scenario's and locked; handicap, observers and approval work), `num_nations` = the number of players (a room with more players than seats must let some watch). START carries the seed; every
+machine calls `MapRenderer scenarioMultiplayerWithDevice:` = `Game::load(files, scenario, rules, seed)` + `script_host_load` with `ScenarioPlayer::is_human` set from the plan (the AI of each seat is created from that flag, so it must be set before the load,
+identically everywhere). `Runtime::set_who` maps game slots to leaders (`GameHooks`' `seat_who`, `local_play`, the demo bot). The start state is embedded in the recording as a native save (a scenario cannot be rebuilt from a header);
+recovery and saves work (`load_game_bytes` reloads the scenario). Headless: `ronmap GAMEDIR --host PORT --humans N --scenario FILE.scx ...` / `--join`; `ron-net host --scenario` and `ron-net loopback --scenario` exist too.
+
+#### 8.6.5 Conquer the World battles
+
+The host's campaign plays the battle (`ctw_host_start`, `ctw_battle_session`, `ctw_host_result`, `ctw_guest_result` in `lobby.mm`; `ctw_battle.cpp` untouched): in the lobby the host presses **Conquer the World...**, which opens the campaign screens with the room kept;
+**Play** on the map hands the prepared `BattleDef` to the room instead of to a single machine. Seats: the host sits on the campaign player's side, the guests take the other seats (the host's opponents first), the remaining seats are computer players,
+observers watch (`force_N` in the plan). Every machine gets (1) the `BattleDef` as a blob in the table (`encode_battle` / `decode_battle`: every field `build_battle` reads, the setup as its text form; `make_battle` uses the campaign's RNG for some styles, so a
+guest must not re-derive it) and (2) the campaign (`ConquestGame::save_bytes`) as the lobby file, loads it as its copy (`ctwui::load_session`) and builds the same Game (`build_battle`, `new_random_game` / `Game::load` of the custom map). The Game of a battle cannot be rebuilt
+from a save (`"ctw:battle"`), so these games have **no out-of-sync repair and no recording** (a desync ends the game with the error). When the battle is decided the host's side's outcome (1 won, 0 lost, 2 retreated) is applied with `Session::battle_finished`
+and the new campaign is sent to the guests (`ctw_done` = the battle's sequence number), who replace their copy (`frontEndCtwReceived`); the host returns to the map with the room kept (the next battle can be fought by the same players), the guests to the lobby.
+Headless: `ronmap GAMEDIR --ctw-mp --ctw-battle CAMPAIGN:LINK --host PORT --humans N --frames F --mp-bot` / `--ctw-mp --join HOST:PORT ...`: the host prints the campaign's hash after the outcome, the guest the hash of the copy it received: equal.
+
+#### 8.6.6 LAN browser (`net/discovery.*`)
+
+A host's room announces itself once a second as a UDP datagram `"RONL" u8 protocol u16 tcp-port u8 players u8 seats u8 flags (1 scenario, 2 saved game, 4 campaign) str name str map` to the limited broadcast, every interface's subnet broadcast,
+the multicast group 239.255.77.78 and the loopback, port 7778 (`RON_LAN_PORT` overrides it for tests, `RON_LAN_TARGET` adds a unicast target). The connect screen binds the same port (`SO_REUSEADDR` + `SO_REUSEPORT`, joins the group on every
+interface), lists the games with host name, map, players / seats and address (one row per source address and port, a host on this machine heard on two addresses shows once, entries expire 4.5 s after the last datagram), a game of another
+protocol value is grey ("another version of the game"). A click selects (fills the address field), a double click or Return joins. Announcing stops when the game starts. No third-party library.
+
+#### 8.6.7 Chat in a game
+
+- A line a player types in the HUD's chat box is the CHAT verb through the `CommandSink` (the HUD pass); an observer's line goes out of band; CHAT_SET (69) is the ignore list (`/ignore NAME`, `/hear NAME` in the chat box; codec `sim::wire_chat_set`,
+  `Runtime` keeps the table from the executed packages: identical on every machine). A received line shows "Name (Nation): text" with the sender's name and `Leader::color` (the same code as single player, now fed by 8.6.3).
+- **A real desync this pass found:** the engine pushes the presentation event of a CHAT (saved state, so part of the SCRP check sum) only when the line is for the local leader. With a recipient mask (team chat, whispers) the machines of the players outside the mask
+  differed from the others: an out-of-sync report on the first team line. `GameHooks::execute` now processes a CHAT as if the local leader were its sender (always in its own mask), so every machine queues the same event, and the application shows it only to
+  the recipients (`main.mm` `mpFilteredPresentation`: the mask is read from the console's chat list; a broadcast is hidden from a player who ignores the speaker). Test: `ron-net loopback --chat-test` (3 players + an observer: no desync, identical saves);
+  `ronmap --mp-act chat=TEXT@TURN,team=TEXT@TURN,ignore=LEADER@TURN`: a screenshot of the player who ignores Bob and is outside his team shows only its own line.
+
+#### 8.6.8 Floating point (arm64 against x86-64)
+
+The simulation uses single-precision floats in many places (grep: attrition `anti_att`, combat flight, aircraft bank / pitch, cities, construction progress, AI ratios ...). On arm64 clang's default `-ffp-contract=on` fuses `a * b + c`; the original is x86 SSE2 without FMA, and an Intel
+Mac would not fuse, so an Apple Silicon and an Intel `ronmap` could disagree in lockstep. `build-mac.sh` now passes **`-ffp-contract=off`** for every target. It changes nothing on this machine, checked on one tree built twice: `sim-all 600 --ai-every 8` final digests
+**156 / 156 identical** (every stock scenario, `ron-sim --frames 600 --ai-every 8`: 141 run the 600 frames, 15 end at frame 1 by their own victory conditions, as before; the outputs of the two builds `diff` to 0 lines), the 105 `ron-sav --engine-roundtrip` runs over `re/oracle` (69 PASS, 36 FAIL / empty in this tree, **the same lines** with and
+without the flag), `ron-net replay` on the corpus: same output; so the flag is kept. (Whether the arm64 and x86-64 builds then agree is the soak of 8.4.7: not run.)
+
+#### 8.6.9 Results (scratch build with the `build-mac.sh` flags, zero warnings in every target)
+
+- `ron-net selftest`: **91 / 91** (38 before). New: the seat plan (4 cases), the lobby rules over loopback (22: free / taken / invalid / default colours, teams, handicaps, Ask approval refused and allowed, observer limit, plan with a watcher, scenario and saved-game locks,
+  START fixes the plan, the room after a game, team and whisper chat targets, countdown, kick), the seat transport (2 layouts x 3: players and an observer agree on every turn although game slots differ from machine numbers, the observer ran the commands, a dead machine is
+  dropped under its game slot at the same boundary), the drop with an observer in the room (8 / 8), a room over real sockets (join order, requests, whisper, kick, START), discovery (wire format, foreign datagrams, a browser hears the host over UDP, update, expiry), CHAT_SET,
+  the engine: 3 players + 1 observer with handicaps and a chat to a mask (identical saves, handicap in the state), scenario games (italy_mp 2 players, Tutorial 1 2 players + 1 observer).
+- LAN, real processes: `ronmap` 2 players (identical saves); 2 players + 1 observer whose connection number is *between* the players' (the observer got game slot 3, the second guest slot 1: all three saves identical, one asked for colour / team / nation / handicap);
+  a scenario game (`italy_mp`, 8 seats) identical; a Conquer the World battle (`alexander:auto`, 2 players) identical saves and equal campaign hashes; chat with names and colours; `ron-net host` / `join`: 3 processes (handicaps `0,4,2`) 900 frames and a scenario game
+  (2 processes, Tutorial 1, 600 frames): identical saves.
+- `ron-check` 0 failures; `sim-all` digests and the 105 round trips as in 8.6.8; `ron-net replay` on the corpus: 45 / 45 instances agree, final states identical.
+- Snapshots read: `re/previews/mp3_lobby.png` (two guests with their choices, an observer, Kick), `mp3_lobby_ask.png` (a request waiting for the host, Allow / Deny), `mp3_lobby_scenario.png` (a scenario's seats, locked fields), `mp3_connect.png` (the LAN list),
+  `mp3_chat_alice.png` / `mp3_chat_bob.png` (names in colour, the filter), `mp3_game_observer.png`.
+
+#### 8.6.10 Left
+
+NAT traversal and internet play (LAN only); the x86-64 / arm64 soak; original-client interoperability (none by design); recording and out-of-sync repair of a Conquer the World battle (its Game cannot be rebuilt from a save), a CTW battle with the campaign's AI nations
+as co-op partners of several guests (the guests fill the opposing seats first); the host as the room's only observer-less player is not forced (a host may watch); an observer cannot yet switch the seat it looks from; Block has no screen button; the lobby rules have no
+"Closed" / "Open" seat types (the number of nations does that); `DIPLOMACY` / `SURVIVAL` drops still do not reset teams; ranked / matchmaking rules.
 
 ## Evidence
 
@@ -526,7 +636,7 @@ Conquer the World battles (random maps only), per-peer `Player` colours, the x86
 
 1. Default `time_out` and pulse period of `CrossplayNetLibSys` (set by the lobby layer).
 2. Whether `send_all` loops back in `ICrossPlayService` (inferred from usage, 🟡) and the `play < 0` relay branch of `NetDaemon::process`.
-3. Whether observers broadcast packages (FIFO overflow hazard, §2.2); lobby rule that makes a slot an observer.
+3. Whether observers broadcast packages (FIFO overflow hazard, §2.2); lobby rule that makes a slot an observer. (The port: they send none and sit above the nations, §8.6.1; the original's rule is `maxobservers` + the "slots above the player count".)
 4. Which popup button maps to OOS branch A / B (§5.2).
 5. Cause of the post-load `leaders`-only divergence (§5.4).
 6. In-game effect of host migration (`host_player` change): vote arbitration, `TimeSync` reference, SyncFile source.

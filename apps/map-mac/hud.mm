@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 #include "assets/strings.hpp"
 #include "assets/xml.hpp"
@@ -58,6 +59,9 @@ std::string clock_text(int frames) {
 
 bool Hud::init(const ron::GameFiles& files, const ron::IfaceLayout& layout, std::string& error) {
 	layout_ = &layout;
+	if (const char* e = std::getenv("RON_ADVANCED")) advanced_ = std::atoi(e) != 0;  // snapshots: the advanced card rows
+	if (const char* e = std::getenv("RON_GROUP_TYPES")) group_by_type_ = std::atoi(e) != 0;
+	if (const char* e = std::getenv("RON_PREFER_MILITARY")) prefer_military_ = std::atoi(e) != 0;
 	base_el_ = layout.find("IFACEMAINBASE");
 	res_el_ = layout.find("IFACERESOURCES");
 	sel_el_ = layout.find("IFACESELECTED");
@@ -321,6 +325,7 @@ void Hud::draw(UiRenderer& ui, const State& s) {
 	else draw_options(ui, s);
 	ui.next_window();
 	draw_garrison(ui, s);
+	draw_air_garrison(ui, s);
 	ui.next_window();
 	draw_top_strip(ui, s);
 	ui.next_window();
@@ -670,17 +675,74 @@ void Hud::draw_minimap(UiRenderer& ui, const State& s) {
 	}
 }
 
-int Hud::multi_index_at(int x, int y, const State& s) const {
-	if (s.selection.size() < 2) return -1;
+// IFaceSelected::update_selected @00823790: 60 x 35 cells 2 px apart (nx = (W + 2) / 62, ny = (H + 2) / 37), column-major; more objects
+// than cells shrink the cells by k (the smallest k with k^2 * nx * ny >= count, small icons) or, with the "group by type"
+// preference (0x20000), several types and room for one full-size button per type, give one counted button per type in type
+// order (units 50.., buildings 414..) instead.
+std::vector<Hud::MultiButton> Hud::multi_layout(const State& s, bool* small_out) const {
+	std::vector<MultiButton> out;
+	if (small_out) *small_out = false;
+	const int count = int(s.selection.size());
+	if (count < 2) return out;
 	const IfaceRect win{right_.l + 4, right_.r - 4, right_.t + 4, right_.b - 4};
 	const int nx = std::max(1, (win.w() + 2) / 62), ny = std::max(1, (win.h() + 2) / 37);
 	int k = 1;
-	while (int(s.selection.size()) > k * k * nx * ny) k++;
+	while (count > k * k * nx * ny) k++;
+	if (k > 1 && group_by_type_) {
+		std::vector<std::pair<int, bool>> types;  // type, building (a unit and a building never share a TypeIndex)
+		std::vector<int> counts;
+		for (const Object& o : s.selection) {
+			size_t i = 0;
+			while (i < types.size() && types[i].first != o.type) i++;
+			if (i == types.size()) types.push_back({o.type, o.building}), counts.push_back(0);
+			counts[i]++;
+		}
+		std::vector<size_t> order(types.size());
+		for (size_t i = 0; i < order.size(); i++) order[i] = i;
+		std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return types[a].first < types[b].first; });
+		if (types.size() != 1 && int(types.size()) <= nx * ny) {
+			for (size_t n = 0; n < order.size(); n++) {
+				const int col = int(n) / ny, row = int(n) % ny;
+				MultiButton b;
+				b.r = IfaceRect{win.l + col * 62, win.l + col * 62 + 60, win.t + row * 37, win.t + row * 37 + 35};
+				b.type = types[order[n]].first, b.count = counts[order[n]], b.building = types[order[n]].second;
+				for (int i = 0; i < count; i++) {
+					if (s.selection[size_t(i)].type == b.type) {
+						b.index = i;  // the first member's icon
+						break;
+					}
+				}
+				out.push_back(b);
+			}
+			return out;
+		}
+	}
 	const int cw = 62 / k, chh = 37 / k;
-	if (!win.contains(x, y)) return -1;
-	const int cx = (x - win.l) / cw, cy = (y - win.t) / chh;
-	const int i = cx * (ny * k) + cy;  // column-major
-	return i < int(s.selection.size()) ? i : -1;
+	if (small_out) *small_out = k > 1;
+	for (int i = 0; i < count; i++) {
+		const int col = i / (ny * k), row = i % (ny * k);
+		MultiButton b;
+		b.r = IfaceRect{win.l + col * cw, win.l + col * cw + cw - 2, win.t + row * chh, win.t + row * chh + chh - 2};
+		if (b.r.r > win.r) break;
+		b.index = i, b.type = -1;
+		out.push_back(b);
+	}
+	return out;
+}
+
+// -1: none (or a type group: see multi_button_at); else the selection index of the individual button under (x, y).
+int Hud::multi_index_at(int x, int y, const State& s) const {
+	for (const MultiButton& b : multi_layout(s)) {
+		if (b.r.contains(x, y) && b.type < 0) return b.index;
+	}
+	return -1;
+}
+
+int Hud::multi_type_at(int x, int y, const State& s) const {
+	for (const MultiButton& b : multi_layout(s)) {
+		if (b.r.contains(x, y) && b.type >= 0) return b.type;
+	}
+	return -1;
 }
 
 // IFaceSelected::on_redraw @00826420 / update_selected @00823790.
@@ -689,22 +751,19 @@ void Hud::draw_selected(UiRenderer& ui, const State& s) {
 	const ron::XmlElement& e = *sel_el_;
 	const int pw = sel_win_.w(), ph = sel_win_.h();
 	if (s.selection.size() > 1) {
-		// Multi-selection: 60x35 cells, 2 px apart, column-major; shrunk by k with small icons when they do not fit.
-		const IfaceRect win{right_.l + 4, right_.r - 4, right_.t + 4, right_.b - 4};
-		const int nx = std::max(1, (win.w() + 2) / 62), ny = std::max(1, (win.h() + 2) / 37);
-		int k = 1;
-		while (int(s.selection.size()) > k * k * nx * ny) k++;
-		const int cw = 62 / k, chh = 37 / k;
-		const bool small = k > 1;
-		for (size_t i = 0; i < s.selection.size(); i++) {
-			const int col = int(i) / (ny * k), row = int(i) % (ny * k);
-			const IfaceRect rc{win.l + col * cw, win.l + col * cw + cw - 2, win.t + row * chh, win.t + row * chh + chh - 2};
-			if (rc.r > win.r) break;
-			const Object& o = s.selection[i];
-			const bool hover = rc.contains(hover_x_, hover_y_);
-			draw_icon_button(ui, o.tex_id, o.tex_col, o.tex_row, o.tex_x, o.tex_y, rc, hover ? 0xa4 : 0x80, small);
+		// Multi-selection (multi_layout): individual buttons with a health bar, or counted buttons per type.
+		bool small = false;
+		for (const MultiButton& b : multi_layout(s, &small)) {
+			const Object& o = s.selection[size_t(b.index)];
+			const bool hover = b.r.contains(hover_x_, hover_y_);
+			draw_icon_button(ui, o.tex_id, o.tex_col, o.tex_row, o.tex_x, o.tex_y, b.r, hover ? 0xa4 : 0x80, small);
 			ui.next_layer();
-			draw_health(ui, rc, o.hp, o.max_hp, small);
+			if (b.type >= 0) {
+				const std::string t = std::to_string(b.count);
+				ui.write_digits(t, float(b.r.r - ui.digits_width(t, 1) - 3), float(b.r.b - ui.digits_height(1) - 3), kWhite, 1);
+			} else {
+				draw_health(ui, b.r, o.hp, o.max_hp, small);
+			}
 			ui.next_layer();
 		}
 		return;
@@ -846,6 +905,14 @@ void Hud::draw_selected(UiRenderer& ui, const State& s) {
 	}
 }
 
+bool Hud::infinite_hit(int x, int y, const State& s) const {
+	if (s.selection.size() != 1 || !s.selection.front().building || !s.selection.front().own || !opened_) return false;
+	const Object& o = s.selection.front();
+	if (o.queue.empty()) return false;
+	const char* inf_name = o.repeat ? "infinite_queue_on" : "infinite_queue_off";
+	return rect_in(*sel_el_, "BUTTON", inf_name, sel_win_.w(), sel_win_.h()).offset(sel_win_.l, sel_win_.t).contains(x, y);
+}
+
 int Hud::queue_index_at(int x, int y, const State& s) const {
 	if (s.selection.size() != 1 || !s.selection.front().building) return -1;
 	const int pw = sel_win_.w(), ph = sel_win_.h();
@@ -908,7 +975,17 @@ void Hud::draw_options(UiRenderer& ui, const State& s) {
 				draw_market_button(ui, *o, r, factor);
 				continue;
 			}
-			draw_icon_button(ui, tex, col, row, o->tex_x, o->tex_y, r, factor, false);
+			int tx = o->tex_x, ty = o->tex_y;
+			if (o->variant >= 0 && !o->variant_list.empty()) {
+				// STANCE / FORM: the piece of the group's current state (IFACEOPTIONS combat / worker / caster / packer / form).
+				const IfacePiece vp = ron::iface_find_piece(*opt_el_, o->variant_list, o->variant);
+				if (vp.valid()) tex = vp.texture, tx = vp.left, ty = vp.top;
+			}
+			draw_icon_button(ui, tex, col, row, tx, ty, r, factor, false);
+			if (o->orange) {  // a mixed / switched-on state (ORANGE)
+				ui.next_layer();
+				ui.fill(float(r.l), float(r.t), float(r.w()), float(r.h()), argb(0x58, 255, 160, 0), UiType::ColorBlend);
+			}
 			if (!o->label.empty()) {
 				const int lf = ui.font(10, ron::kFontBold);
 				ui.next_layer();
@@ -1067,10 +1144,30 @@ Action Hud::mouse_up(int x, int y, bool right, const State& s) {
 		return a;
 	}
 	if (!right && s.library.active) {
+		if (s.library.final_view) {
+			const int k = final_button_at(x, y, s);
+			if (k >= 0 && s.library.fin[k].type >= 0) {
+				a.kind = ActionKind::Library, a.object = s.library.fin[k].type, a.index = k;
+				return a;
+			}
+			return a;
+		}
+		int which = -1;
+		if (cat_button_at(x, y, &which) >= 0) {
+			a.kind = ActionKind::MiniLib, a.index = which;  // the line's next tech / the next age, as the mini library
+			return a;
+		}
 		int cat = -1, col = -1;
 		const int type = library_cell_at(x, y, s, &cat, &col);
 		if (type >= 0) {
 			a.kind = ActionKind::Library, a.object = type, a.index = cat;
+			return a;
+		}
+	}
+	if (!right) {
+		const int ar = air_cell_at(x, y, s);
+		if (ar >= 0) {
+			if (s.air.own) a.kind = ActionKind::AirSelect, a.index = ar;
 			return a;
 		}
 	}
@@ -1103,11 +1200,17 @@ Action Hud::mouse_up(int x, int y, bool right, const State& s) {
 		a.kind = ActionKind::SelectIndex;
 		a.index = idx;
 	}
+	const int tg = multi_type_at(x, y, s);
+	if (!right && tg >= 0) {
+		a.kind = ActionKind::SelectType;
+		a.object = tg;
+	}
 	const int q = queue_index_at(x, y, s);
 	if (!right && q >= 0) {
 		a.kind = ActionKind::QueueItem;
 		a.index = q;
 	}
+	if (!right && infinite_hit(x, y, s)) a.kind = ActionKind::Infinite;
 	return a;
 }
 

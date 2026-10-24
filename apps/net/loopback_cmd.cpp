@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
@@ -13,8 +14,14 @@
 #include "common.hpp"
 #include "demobot.hpp"
 #include "loopback.hpp"
+#include "net/seat_transport.hpp"
 #include "node.hpp"
 #include "sim/anim_assets.hpp"
+#include "sim/save.hpp"
+#include "sim/commands.hpp"
+#include "sim/replay.hpp"
+#include "sim/script_host.hpp"
+#include "sim/script_ui.hpp"
 #include "sim/newgame.hpp"
 #include "sim/rules.hpp"
 #include "sim/rules_xml.hpp"
@@ -50,10 +57,31 @@ LoopbackResult run_loopback(const LoopbackOptions& o) {
 	try {
 		Env& env = env_for(o.game_dir);
 		sim::RandomGameSetup setup = sim::default_random_setup(2);
-		const std::string perr = sim::parse_random_option(*env.rules, o.random_spec, setup);
-		if (!perr.empty()) {
-			res.text = "--random: " + perr;
-			return res;
+		// a scenario game: the seats are the scenario's players, the human-flagged ones first (the lobby's order, apps/map-mac/lobby.mm)
+		const bool scen = !o.scenario.empty();
+		ron::Scenario sc0;
+		std::string scen_file, scen_rel;
+		std::array<int, 8> scen_who{};
+		if (scen) {
+			scen_file = std::filesystem::exists(o.scenario) ? o.scenario : env.files->resolve(o.scenario);
+			if (scen_file.empty()) {
+				res.text = "scenario not found: " + o.scenario;
+				return res;
+			}
+			scen_rel = sim::scenario_rel_path(*env.files, scen_file);
+			sc0 = ron::parse_scenario(ron::read_file(scen_file));
+			std::vector<const ron::ScenarioPlayer*> ps;
+			for (const ron::ScenarioPlayer& p : sc0.players)
+				if (p.who >= 0 && p.who < 8) ps.push_back(&p);
+			std::stable_sort(ps.begin(), ps.end(), [](const ron::ScenarioPlayer* a, const ron::ScenarioPlayer* b) { return (a->is_human != 0) > (b->is_human != 0); });
+			setup = sim::default_random_setup(std::max<int>(2, int(ps.size())));
+			for (int k = 0; k < 8; ++k) scen_who[size_t(k)] = k < int(ps.size()) ? ps[size_t(k)]->who : k;
+		} else {
+			const std::string perr = sim::parse_random_option(*env.rules, o.random_spec, setup);
+			if (!perr.empty()) {
+				res.text = "--random: " + perr;
+				return res;
+			}
 		}
 		const int n = o.humans;
 		if (n < 1 || n > setup.num_nations) {
@@ -62,11 +90,22 @@ LoopbackResult run_loopback(const LoopbackOptions& o) {
 		}
 		for (int i = 0; i < 8; ++i) setup.nation[size_t(i)].human = i < n;
 		setup.game_speed = 2;
+		const int nobs = std::clamp(o.observers, 0, 8 - setup.num_nations);
 		net::LoopbackHub hub(8, o.hub_seed, o.dlo, o.dhi);
-		for (int p = n; p < 8; ++p) hub.kill(p);
+		for (int p = n + nobs; p < 8; ++p) hub.kill(p);
 		std::array<int, 8> who{};
-		for (int i = 0; i < 8; ++i) who[size_t(i)] = i;
+		for (int i = 0; i < 8; ++i) who[size_t(i)] = scen ? scen_who[size_t(i)] : i;
+		// the room: machines 0..n-1 play (game slot = machine), machines n.. watch from the slots above the nations
+		const uint32_t present = (1u << (n + nobs)) - 1, obs_mask = ((1u << nobs) - 1) << n;
+		const net::SeatPlan plan = net::make_seat_plan(present, obs_mask, setup.num_nations, true);
+		net::MpSeats mpseats;
+		mpseats.plan = plan;
+		for (int s = 0; s < 8; ++s) {
+			mpseats.name[size_t(s)] = "Player " + std::to_string(s + 1);
+			mpseats.handicap[size_t(s)] = size_t(s) < o.handicaps.size() ? o.handicaps[size_t(s)] : 0;
+		}
 		struct Peer {
+			std::unique_ptr<net::SeatTransport> tr;
 			std::unique_ptr<EngineNode> node;
 			std::unique_ptr<net::Session> session;
 			std::unique_ptr<DemoBot> bot;
@@ -74,34 +113,63 @@ LoopbackResult run_loopback(const LoopbackOptions& o) {
 			bool done = false, injected = false;
 			uint64_t resent = 0;
 		};
-		std::vector<Peer> peers(static_cast<size_t>(n));
+		std::vector<Peer> peers(static_cast<size_t>(n + nobs));
 		std::string scenario;
 		uint32_t seed = 0;
-		for (int i = 0; i < n; ++i) {
+		for (int i = 0; i < n + nobs; ++i) {
+			const int slot = plan.slot_of[size_t(i)];
+			const bool watcher = slot >= plan.nations;
 			sim::RandomExtras extras;
-			std::unique_ptr<sim::Game> g = sim::new_random_game(*env.files, *env.rules, env.art.get(), setup, &extras);
+			std::unique_ptr<sim::Game> g;
+			if (scen) {
+				ron::Scenario sc = sc0;
+				for (ron::ScenarioPlayer& pl : sc.players) {
+					int seat = -1;
+					for (int k = 0; k < setup.num_nations; ++k)
+						if (scen_who[size_t(k)] == pl.who) seat = k;
+					pl.is_human = seat >= 0 && seat < n ? 4 : 0;
+				}
+				g = std::make_unique<sim::Game>();
+				g->anims = env.art.get();
+				g->load(*env.files, sc, *env.rules, 12345);
+				sim::script_host_load(*g, *env.files, scen_file, sc);
+				extras.setup = setup;
+				extras.setup.seed = 12345;
+			} else {
+				g = sim::new_random_game(*env.files, *env.rules, env.art.get(), setup, &extras);
+			}
 			if (!g) {
-				res.text = "the random game could not be built: " + extras.error;
+				res.text = "the game could not be built: " + extras.error;
 				return res;
 			}
-			scenario = sim::random_setup_string(extras.setup);
+			net::apply_mp_seats(*g, who, mpseats);   // a multiplayer game: names, handicaps (the same on every machine)
+			g->local_play = watcher ? who[0] : slot;   // the seat this machine looks from (an observer watches from the first seat)
+			scenario = scen ? scen_rel : sim::random_setup_string(extras.setup);
 			seed = extras.setup.seed;
 			Peer& pr = peers[size_t(i)];
 			pr.node = std::make_unique<EngineNode>(*env.files, *env.rules, env.art.get(), std::move(g), scenario, seed, who);
 			net::SessionConfig cfg;
-			cfg.local_slot = i;
+			cfg.local_slot = slot;
 			cfg.seed = seed;
 			cfg.speed = 2;
 			cfg.recover = o.recover;
 			cfg.timeout_ms = 0;
-			for (int s = 0; s < setup.num_nations; ++s) cfg.slot_flags[size_t(s)] = net::kPlayerValid | (s < n ? net::kPlayerHuman : 0u);
-			pr.session = std::make_unique<net::Session>(hub.endpoint(i), pr.node->hooks(), cfg);
+			for (int s = 0; s < 8; ++s) {
+				if (s < setup.num_nations) cfg.slot_flags[size_t(s)] = net::kPlayerValid | (s < n ? net::kPlayerHuman : 0u);
+				else if (plan.peer_of[size_t(s)] >= 0) cfg.slot_flags[size_t(s)] = net::kPlayerValid | net::kPlayerObserver;
+			}
+			pr.tr = std::make_unique<net::SeatTransport>(hub.endpoint(i), plan.peer_of);
+			pr.session = std::make_unique<net::Session>(*pr.tr, pr.node->hooks(), cfg);
 			pr.node->attach(*pr.session);
 			EngineNode* nd = pr.node.get();
-			pr.bot = std::make_unique<DemoBot>([nd]() -> const sim::Game& { return nd->game(); }, i);
-			if (!o.record_base.empty()) {
+			if (!watcher) pr.bot = std::make_unique<DemoBot>([nd]() -> const sim::Game& { return nd->game(); }, who[size_t(slot)]);
+			if (!o.record_base.empty() && !watcher) {
 				const std::string base = o.record_base + "_peer" + std::to_string(i) + ".rcx";
-				const net::RecordInfo info = net::record_info_for_random(extras.setup, seed, i, who, nd->game(), scenario);
+				net::RecordInfo info = net::record_info_for_random(extras.setup, seed, i, who, nd->game(), scenario);
+				for (int sl = 0; sl < setup.num_nations && sl < 8; ++sl) {
+					info.seats[size_t(sl)].handicap = mpseats.handicap[size_t(sl)];
+					if (info.seats[size_t(sl)].human) info.seats[size_t(sl)].name = mpseats.name[size_t(sl)];
+				}
 				std::string err;
 				if (!pr.node->record(base, info, err)) {
 					res.text = err;
@@ -116,7 +184,18 @@ LoopbackResult run_loopback(const LoopbackOptions& o) {
 			}
 			while (p.fed < p.session->local_stamp() + 1) {
 				++p.fed;
-				if (o.bots) p.session->submit(p.bot->next(p.fed));
+				if (o.bots && p.bot) p.session->submit(p.bot->next(p.fed));
+				if (o.chat_test && &p == &peers[0] && p.fed == 30) {  // a line to everybody and a line to seats 0 and 1 (CHAT bits, docs/replay-spec.md section 9)
+					for (int team = 0; team < 2; ++team) {
+						sim::Command c;
+						c.verb = sim::Verb::Chat;
+						c.text = team ? u"for my team only" : u"hello all";
+						c.chat_bits = team ? 3 : -1;
+						net::Bytes b;
+						sim::engine_to_wire(c, b);
+						p.session->submit(b);
+					}
+				}
 			}
 		};
 		for (Peer& p : peers) {
@@ -197,6 +276,26 @@ LoopbackResult run_loopback(const LoopbackOptions& o) {
 		}
 		res.identical = same;
 		res.final_fnv = res.fnv.empty() ? 0 : res.fnv[0];
+		res.handicap_seen = n > 1 ? peers[0].node->game().leaders[1].handicap : -1;
+		if (o.chat_test) {
+			// every instance recorded both lines in its console and queued the same presentation events (the line to a recipient mask used to reach only
+			// the seats in the mask, which split the saved state: GameHooks::execute); who sees what is the application's filter at display time
+			std::string rep = "ok";
+			for (size_t i = 0; i < peers.size(); ++i) {
+				const sim::Game& gm = peers[i].node->game();
+				int lines = 0, hello = 0, team = 0, masked = 0;
+				for (const auto& ln : gm.ctl.chat) {
+					lines += ln.text == "hello all" || ln.text == "for my team only";
+					masked += ln.text == "for my team only" && ln.bits == 3u;
+				}
+				if (const sim::ScriptPresentation* sp = sim::script_presentation(gm))
+					for (const sim::ScriptEvent& e : sp->events)
+						if (e.kind == sim::ScriptEvent::kChat) hello += e.text == "hello all", team += e.text == "for my team only";
+				if (lines != 2 || masked != 1 || hello != 1 || team != 1)
+					rep = "instance " + std::to_string(i) + ": console lines " + std::to_string(lines) + " (mask kept " + std::to_string(masked) + "), events hello " + std::to_string(hello) + " team " + std::to_string(team);
+			}
+			res.chat_report = rep;
+		}
 		if (!o.save_out.empty() && !first.empty()) {
 			std::ofstream f(o.save_out, std::ios::binary);
 			f.write(reinterpret_cast<const char*>(first.data()), std::streamsize(first.size()));
@@ -229,11 +328,21 @@ int cmd_loopback(int argc, char** argv) {
 		else if (const char* v8 = val("--game")) o.game_dir = v8;
 		else if (const char* v9 = val("--hub-seed")) o.hub_seed = uint32_t(std::atoll(v9));
 		else if (const char* v10 = val("--deadlock-rounds")) o.deadlock_rounds = uint64_t(std::atoll(v10));
+		else if (const char* vs = val("--scenario")) o.scenario = vs;
+		else if (const char* vo = val("--observers")) o.observers = std::atoi(vo);
+		else if (const char* vh = val("--handicap")) {
+			for (const char* q = vh; *q;) {
+				o.handicaps.push_back(std::atoi(q));
+				while (*q && *q != ',') ++q;
+				if (*q == ',') ++q;
+			}
+		}
+		else if (!std::strcmp(argv[i], "--chat-test")) o.chat_test = true;
 		else if (!std::strcmp(argv[i], "--recover")) o.recover = true;
 		else if (!std::strcmp(argv[i], "--no-bot")) o.bots = false;
 		else if (!std::strcmp(argv[i], "--verbose")) o.verbose = true;
 	}
-	if (o.random_spec.empty()) {
+	if (o.random_spec.empty() && o.scenario.empty()) {
 		std::fprintf(stderr, "usage: ron-net loopback --random STYLE,SIZE,SEED,NATIONS[,TRIBES..] [--humans N] [--frames F] [--delay a,b] [--recover]\n"
 		                     "         [--diverge FRAME:PEER]... [--record BASE] [--save FILE] [--game DIR] [--verbose]\n");
 		return 64;

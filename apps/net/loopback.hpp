@@ -11,7 +11,11 @@ namespace ronnet {
 
 struct LoopbackOptions {
 	std::string game_dir, random_spec;
+	std::string scenario;                      // a scenario file (instead of random_spec): its players are the seats, the human-flagged ones first
 	int humans = 2;
+	int observers = 0;                         // machines that only watch (game slots above the nations; docs/multiplayer-spec.md 8.6)
+	std::vector<int> handicaps;                // per human seat (rules.xml "handicaps" index); the games are made multiplayer games either way
+	bool chat_test = false;                    // peer 0 sends a team chat and a broadcast chat at stamp 30; the result reports what every instance recorded
 	int32_t frames = 300;
 	int dlo = 0, dhi = 2;
 	uint32_t hub_seed = 1;
@@ -32,6 +36,8 @@ struct LoopbackResult {
 	int32_t frame = 0;
 	uint64_t rounds = 0, final_fnv = 0;
 	std::vector<uint64_t> fnv;
+	std::string chat_report;                     // chat_test: "ok" or what differed
+	int handicap_seen = -1;                      // peer 0's leader 1 handicap in the final state
 	std::map<int, std::vector<std::string>> segments;
 };
 

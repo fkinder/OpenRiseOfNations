@@ -87,4 +87,17 @@ private:
 void setup_to_lobby(const sim::RandomGameSetup& s, Lobby& lobby);
 bool lobby_to_setup(const Lobby& lobby, sim::RandomGameSetup& out, std::string& error);
 
+// What the room adds to a game that the RandomGameSetup / scenario does not carry (multiplayer-spec 8.6): the seat plan START fixed, the
+// players' names and the handicaps, all by game slot. Read from the lobby table at START, so every peer holds the same values.
+struct MpSeats {
+	SeatPlan plan;
+	std::array<std::string, 8> name;
+	std::array<int, 8> handicap{};
+};
+MpSeats lobby_mp_seats(const Lobby& lobby);
+// Makes the Game a multiplayer game on this machine (Game::multiplayer = the semaphore bit the lobby game has: handicaps, the AI's own
+// difficulty, the multiplayer capture rules), gives the human seats their player names and handicaps. `who_of[slot]` = the leader of a game
+// slot. Called by every peer before the barrier, identically.
+void apply_mp_seats(sim::Game& g, const std::array<int, 8>& who_of, const MpSeats& seats);
+
 }  // namespace ron::net

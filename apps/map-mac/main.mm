@@ -114,6 +114,7 @@
 #include "tips.hpp"
 #include "hotkeys.hpp"
 #include "uistr.hpp"
+#include "uix.hpp"
 #include "assets/strings.hpp"
 #include "sim/capture.hpp"
 #include "audio.hpp"
@@ -417,6 +418,14 @@ static bool debug_skip(const char* pass) {
                              build:(std::function<std::unique_ptr<ron::sim::Game>(const ron::GameFiles&, const ron::sim::Rules&, const ron::sim::AnimSource*,
                                                                                    ron::sim::RandomExtras*, std::string*)>)build
                              error:(NSString* __autoreleasing*)error;
+// A multiplayer game of a scenario (docs/multiplayer-spec.md 8.6): the scenario's players are the seats; the leaders in `humans` (by Player.who) are
+// human on every machine, the others are computer players.
++ (instancetype)scenarioMultiplayerWithDevice:(id<MTLDevice>)device
+                                      gameDir:(NSString*)dir
+                                     scenario:(NSString*)scenario
+                                         seed:(uint32_t)seed
+                                       humans:(const std::array<bool, 8>&)humans
+                                        error:(NSString* __autoreleasing*)error;
 // A random-map skirmish (sim/newgame.hpp): `setup` from the setup screen, or `spec` (the --random option text) when setup is null.
 + (instancetype)randomGameWithDevice:(id<MTLDevice>)device
                              gameDir:(NSString*)dir
@@ -629,6 +638,9 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	std::unique_ptr<ron::sim::Game> _game;
 	std::string _scenarioPath;  // the scenario file as Game::load got it (a save records it relative to the install); a random game: its setup text
 	BOOL _randomActive;         // a random-map skirmish (sim/newgame.hpp) instead of a scenario file
+	uint64_t _mpFilterSeq;      // multiplayer chat filter: the presentation events below this sequence number were handled
+	BOOL _mpScenarioHumans;     // a multiplayer scenario game: `_mpHuman` says which of the scenario's players are human
+	std::array<bool, 8> _mpHuman;
 	ron::sim::RandomGameSetup _randomSetup;
 	std::string _randomSpec;    // the --random option text, parsed once the rules are loaded
 	std::function<std::unique_ptr<ron::sim::Game>(const ron::GameFiles&, const ron::sim::Rules&, const ron::sim::AnimSource*,
@@ -838,6 +850,9 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 			path = scenarioPath.UTF8String;
 			if (!files.resolve(path).empty()) path = files.resolve(path);  // allow paths relative to the game dir
 			sc = ron::parse_scenario(ron::read_file(path));
+			if (_mpScenarioHumans)  // the room decides who plays which of the scenario's players (identically on every machine)
+				for (ron::ScenarioPlayer& pl : sc.players)
+					if (pl.who >= 0 && pl.who < 8) pl.is_human = _mpHuman[size_t(pl.who)] ? 4 : 0;
 		}
 		_scenarioPath = path;
 		const ron::Tileset ts = ron::load_tileset(files, sc.terrain.tileset);
@@ -1128,6 +1143,18 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		if (ev.kind == 2) return 0;
 	}
 	return -1;
+}
+
++ (instancetype)scenarioMultiplayerWithDevice:(id<MTLDevice>)device
+                                      gameDir:(NSString*)dir
+                                     scenario:(NSString*)scenario
+                                         seed:(uint32_t)seed
+                                       humans:(const std::array<bool, 8>&)humans
+                                        error:(NSString* __autoreleasing*)error {
+	MapRenderer* r = [MapRenderer alloc];
+	r->_mpScenarioHumans = YES;
+	r->_mpHuman = humans;
+	return [r initWithDevice:device gameDir:dir scenario:scenario simulate:YES seed:seed error:error];
 }
 
 + (instancetype)randomGameWithDevice:(id<MTLDevice>)device
@@ -1422,10 +1449,12 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	_mp = rt;
 	_mpEnded = NO;
 	if (!_game) return;
-	const int slot = rt->slot();
-	_game->local_play = slot;
+	const int slot = rt->slot(), who = rt->who();
+	_game->local_play = who;
 	_cm.net = rt.get();
-	_cm.play = slot, _cm.play_who = slot;
+	_cm.play = slot, _cm.play_who = who;
+	if (!save) rt->prepare_game(*_game);   // the players' names, handicaps and the multiplayer flag, identically on every machine
+	if (rt->observer()) _fogOn = NO;       // an observer sees the whole map and issues nothing
 	if (save) {  // a continued game: the saved state replaces the fresh one (same scenario: the terrain the renderer built stays)
 		std::string err;
 		if (![self mpRestore:*save error:err]) {
@@ -1435,7 +1464,7 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		}
 	}
 	// the camera starts on this player's own seat
-	const ron::sim::ObjectList& ol = _game->objects[size_t(slot & 7)];
+	const ron::sim::ObjectList& ol = _game->objects[size_t(who & 7)];
 	for (int o = 0; o < ol.unit_mark && o < int(ol.units.size()); o++) {
 		const ron::sim::Unit* u = ol.units[size_t(o)].get();
 		if (u && u->alive()) {
@@ -1460,8 +1489,9 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		std::unique_ptr<ron::sim::Game> g = ron::sim::load_game_bytes(*_files, *_simRules, _art.get(), snap, &info);
 		if (!g) return NO;
 		_game = std::move(g);
-		_game->local_play = _mp->slot();
-		_cm.play = _mp->slot(), _cm.play_who = _mp->slot();
+		_game->local_play = _mp->who();
+		_cm.play = _mp->slot(), _cm.play_who = _mp->who();
+		_mpFilterSeq = 0;
 		if (ron::net::GameHooks* h = _mp->hooks()) h->rebind(*_game);
 		[self afterGameReplaced];
 		_mpFrame = _game->frame;
@@ -1564,6 +1594,7 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	if (!_mp->started()) text = "Waiting for the other players to finish loading...";
 	else if (_mp->recovering()) text = "The game was out of sync: repairing it from another player's game...";
 	else text = _mp->stall_text();
+	if (text.empty() && _mp->observer()) text = "Observing: you see the game from " + _mp->seat_name(0) + "'s seat. Chat is open; orders are not.";
 	if (text.empty() && _mpEnded) text = _mp->error();
 	if (text.empty()) return;
 	const int f = _ui.font(16, -1);
@@ -1630,8 +1661,54 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	return simd_make_float2(x, y);
 }
 
+// The object under a drawable point for the air orders: the nearest drawn unit within 30 px, else the building whose footprint
+// centre is within 450 world units (as commandAttackAt). Returns false with tw = to = -1 when there is none.
+- (void)objectAtDrawable:(CGPoint)p who:(int&)tw object:(int&)to {
+	tw = to = -1;
+	float best = 30;
+	for (const SimUnitDrawn& d : _drawnUnits) {
+		const simd_float3 base = simd_make_float3(d.x, d.y, std::max(0.0f, _terrain.sample_height(d.x, d.y)));
+		const float dist = simd_distance([self screenOf:base + simd_make_float3(0, 0, 60)], simd_make_float2(float(p.x), float(p.y)));
+		if (dist < best) best = dist, tw = d.who, to = d.o;
+	}
+	if (tw >= 0) return;
+	const simd_float2 g = [self groundAt:p];
+	if (getenv("RON_UIX_TRACE")) std::fprintf(stderr, "[uix] click ground (%.0f, %.0f), %zu placed buildings\n", g.x, g.y, _placed.size());
+	float bestw = 450;
+	for (const PlacedBuilding& b : _placed) {
+		if (b.who < 0) continue;
+		if (_fogOn && !ron::sim::build_seen_by(*_game, _game->local_play, b.who, b.o)) continue;
+		const float dist = simd_distance(g, simd_make_float2(b.x, b.y));
+		if (dist < bestw) bestw = dist, tw = b.who, to = b.o;
+	}
+}
+
+// A targeting option of the third pass (patrol, guard, bombard, transfer, air mission) takes the click.
+- (BOOL)targetClickAt:(CGPoint)p modifiers:(NSEventModifierFlags)m {
+	int tw, to;
+	[self objectAtDrawable:p who:tw object:to];
+	const simd_float2 g = [self groundAt:p];
+	const int32_t x = int32_t(std::lround(std::clamp(g.x, 0.0f, _mesh.width - 1))), y = int32_t(std::lround(std::clamp(g.y, 0.0f, _mesh.height - 1)));
+	uix::Ctx uc = [self uixCtx];
+	const uix::Mods um{(m & NSEventModifierFlagShift) != 0, (m & (NSEventModifierFlagControl | NSEventModifierFlagCommand)) != 0, (m & NSEventModifierFlagOption) != 0};
+	return uix::target_click(uc, _targeting, x, y, tw, to, um);
+}
+
 - (void)commandMoveAt:(CGPoint)p {
 	if (!_game || _selected.empty()) return;
+	{
+		// Aircraft selected: FLIGHT to attack an enemy / rebase onto a friendly airbase or carrier, a patrol on the ground.
+		uix::Ctx uc = [self uixCtx];
+		if (uix::all_air(uc)) {
+			int tw, to;
+			[self objectAtDrawable:p who:tw object:to];
+			const simd_float2 g = [self groundAt:p];
+			const int32_t x = int32_t(std::lround(std::clamp(g.x, 0.0f, _mesh.width - 1))), y = int32_t(std::lround(std::clamp(g.y, 0.0f, _mesh.height - 1)));
+			const NSEventModifierFlags m = [NSEvent modifierFlags];
+			const uix::Mods um{(m & NSEventModifierFlagShift) != 0, false, (m & NSEventModifierFlagOption) != 0};
+			if (uix::right_click(uc, x, y, tw, to, um)) return;
+		}
+	}
 	if ([self commandAttackAt:p]) return;
 	const simd_float2 g = [self groundAt:p];
 	const int32_t x = int32_t(std::lround(std::clamp(g.x, 0.0f, _mesh.width - 1))),
@@ -2584,6 +2661,13 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	const int mode = _hud.chat_mode();
 	_hud.chat_close();
 	if (!_game || text.empty()) return;
+	if (_mp) {  // multiplayer: an observer's chat goes out of band; "/ignore NAME" and "/hear NAME" are CHAT_SET
+		if (_mp->observer()) {
+			_mp->say(text);
+			return;
+		}
+		if ([self mpChatCommand:text]) return;
+	}
 	const int me = [self localPlayer];
 	int32_t bits = -1;
 	if (mode != 0) {
@@ -2596,6 +2680,63 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	}
 	const std::u16string tx = ron::utf8_to_utf16(text);
 	[self issueAs:me block:^bool { return _cm.issue_chat(tx, bits); }];
+}
+
+// "/ignore NAME" stops the broadcast chat of a player (CHAT_SET, executed by every machine), "/hear NAME" takes it back.
+- (BOOL)mpChatCommand:(const std::string&)text {
+	const bool ign = text.rfind("/ignore ", 0) == 0, hear = text.rfind("/hear ", 0) == 0;
+	if (!ign && !hear) return NO;
+	std::string name = text.substr(text.find(' ') + 1);
+	auto low = [](std::string v) {
+		for (char& c : v) c = char(std::tolower(static_cast<unsigned char>(c)));
+		return v;
+	};
+	for (int slot = 0; slot < _mp->plan().nations && slot < 8; slot++) {
+		if (_mp->plan().peer_of[size_t(slot)] < 0 || slot == _mp->slot() || low(_mp->seat_name(slot)) != low(name)) continue;
+		_mp->set_chat_mute(_mp->who_of(slot), ign);
+		[self say:std::string(ign ? "You will not hear " : "You hear again ") + _mp->seat_name(slot) + "'s messages to everybody."];
+		return YES;
+	}
+	[self say:"There is no player named \"" + name + "\"."];
+	return YES;
+}
+
+// In a multiplayer game every machine queues every chat line (the engine's presentation queue is saved state, so it must not depend on who sits at
+// this machine: net::GameHooks::execute); the line is shown here only to the recipients of its mask, and a broadcast line not at all when the local
+// player ignores its speaker (CHAT_SET). Returns a copy without the hidden events, or null when nothing new has to be hidden.
+- (std::unique_ptr<ron::sim::ScriptPresentation>)mpFilteredPresentation:(const ron::sim::ScriptPresentation*)p {
+	if (!_mp || !p || !_game) return nullptr;
+	const uint64_t from = _mpFilterSeq;
+	_mpFilterSeq = p->next_seq;   // the view consumes everything below this frame's next_seq now
+	const int me = _game->local_play;
+	auto hidden = [&](const ron::sim::ScriptEvent& e) {
+		if (e.kind != ron::sim::ScriptEvent::kChat) return false;
+		for (auto it = _game->ctl.chat.rbegin(); it != _game->ctl.chat.rend(); ++it) {
+			if (it->from != e.who || it->text != e.text) continue;
+			if (it->bits == 0xFFFFFFFFu) return _mp->chat_muted(me, e.who);                          // to everybody: unless the player ignores the speaker
+			return !(me >= 0 && me < 32 && ((it->bits >> uint32_t(me)) & 1u));                       // to a team or one player: only its recipients
+		}
+		return false;
+	};
+	bool any = false;
+	if (getenv("RON_MP_DEBUG"))
+		for (const ron::sim::ScriptEvent& e : p->events)
+			if (e.seq >= from && e.kind == ron::sim::ScriptEvent::kChat)
+				std::fprintf(stderr, "[mp] chat event seq %llu from %d \"%s\" me %d hidden %d (console lines %zu, muted %d)\n", (unsigned long long)e.seq, e.who, e.text.c_str(), me, int(hidden(e)),
+				             _game->ctl.chat.size(), int(_mp->chat_muted(me, e.who)));
+	for (const ron::sim::ScriptEvent& e : p->events)
+		if (e.seq >= from && hidden(e)) {
+			any = true;
+			break;
+		}
+	if (!any) return nullptr;
+	auto copy = std::make_unique<ron::sim::ScriptPresentation>(*p);
+	for (ron::sim::ScriptEvent& e : copy->events)
+		if (e.seq >= from && hidden(e)) {  // an empty game message: the view steps over it (its cursor must pass the sequence number) and shows nothing
+			e.kind = ron::sim::ScriptEvent::kGameMessage;
+			e.text.clear();
+		}
+	return copy;
 }
 
 // --chat / --chat-draft: Enter, the text typed, and (--chat) Return.
@@ -3092,6 +3233,13 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 			opt(hud::kOptCancel, 4, 3, true);
 			return out;
 		}
+		{
+			uix::Ctx uc = [self uixCtx];
+			if (uix::all_air(uc)) {  // aircraft: AIRSTRIKE / PATROL, TRANSFER, RETURN (UnitOut::make_options, the air rows)
+				uix::air_unit_options(uc, out);
+				return out;
+			}
+		}
 		opt(hud::kOptMoveTo, 0, 0, own);
 		opt(hud::kOptAttackTo, 1, 0, false);  // TODO(sim): the ATTACK_TO verb (attack-move) is not ported
 		if (citizens) {
@@ -3103,6 +3251,10 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		}
 		opt(hud::kOptHalt, 0, 3, own);
 		opt(hud::kOptGarrison, 1, 3, own);
+		{
+			uix::Ctx uc = [self uixCtx];
+			uix::unit_extra_options(uc, out);  // carriers; the advanced rows (stance, formation, patrol, guard, disband)
+		}
 		return out;
 	}
 	if (!_selectedBuilds.empty()) {
@@ -3183,6 +3335,10 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 			int gx, gy;
 			if (!free_slot(3, &gx, &gy)) gx = 2, gy = 3;
 			opt(hud::kOptEjectAll, std::min(gx, 2), 3, true);
+		}
+		{
+			uix::Ctx uc = [self uixCtx];
+			uix::build_extra_options(uc, out);  // airbase: SCRAMBLE / REPEAT / RECALL; silo: ATTACK_GROUND
 		}
 	}
 	return out;
@@ -3373,6 +3529,10 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		for (int k = 0; k < 4; k++) fill(lib.tech[k][i], base[k] + i);
 	}
 	(void)L;
+	{
+		uix::Ctx uc = [self uixCtx];
+		uix::library_final(uc, first, inprod, lib);  // the final-techs view (IFaceLibrary jeopardy)
+	}
 	return lib;
 }
 
@@ -3559,6 +3719,12 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	s.card_message = _cardMessage;
 	s.library = [self libraryState:me];
 	s.garrison = [self garrisonState:me];
+	{
+		uix::Ctx uc = [self uixCtx];
+		s.air = uix::air_garrison(uc, [self](int32_t type, int32_t who, int32_t o, hud::Icon& ic) {
+			[self unitIcon:type who:who o:o into:ic.tex_id col:ic.col row:ic.row x:ic.x y:ic.y];
+		});
+	}
 	if (_progressButtons) s.progress = [self progressItems:me];
 	s.flash_mask = _flashMask, s.flash_tick = _flashTick;
 	if (const char* ft = getenv("RON_FLASH_TEST")) s.flash_mask = std::atoi(ft), s.flash_tick = int(_timeMs / 66.0);  // a bit mask of goods, for snapshots
@@ -3632,8 +3798,17 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	if (ctx == -1) return YES;
 	const bool units = !_selected.empty(), builds = !_selectedBuilds.empty();
 	if (ctx == -2 || ctx == -4) return builds;
-	if (ctx == -3 || ctx == -6) return units;
-	if (ctx == -5) return NO;
+	if (ctx == -3) return units;
+	if (ctx == -5 || ctx == -6) {  // -5 aircraft, -6 land and sea units
+		if (!units || !_game) return NO;
+		bool air = true, ground = true;
+		for (const auto& [who, o] : _selected) {
+			const ron::sim::Unit* u = _game->unit(who, o);
+			const bool is_air = u && u->ptype && u->ptype->domain == ron::sim::kDomainAir;
+			air = air && is_air, ground = ground && !is_air;
+		}
+		return ctx == -5 ? air : ground;
+	}
 	if (!_game) return NO;
 	for (const auto& [who, o] : _selectedBuilds) {
 		if (const ron::sim::BuildView* b = [self buildView:who o:o]) {
@@ -3679,6 +3854,21 @@ static const char* keymap_option_name(int option) {
 		case hud::kOptCancel: return "OPTION_CANCEL";
 		case 65: return "OPTION_NEXT";
 		case 66: return "OPTION_BACK";
+		case uix::kOptDisbandAll: return "OPTION_DISBAND_ALL";
+		case uix::kOptGuard: return "OPTION_GUARD";
+		case uix::kOptAttackGround: return "OPTION_ATTACK_GROUND";
+		case uix::kOptTransfer: return "OPTION_TRANSFER";
+		case uix::kOptAirstrike: return "OPTION_AIRSTRIKE";
+		case uix::kOptFighters: return "OPTION_FIGHTERS";
+		case uix::kOptBombers: return "OPTION_BOMBERS";
+		case uix::kOptHelis: return "OPTION_HELIS";
+		case uix::kOptAllAir: return "OPTION_ALLAIR";
+		case uix::kOptScramble: return "OPTION_SCRAMBLE";
+		case uix::kOptRepeat: return "OPTION_REPEAT";
+		case uix::kOptReturn: return "OPTION_RETURN";
+		case uix::kOptRecall: return "OPTION_RECALL";
+		case uix::kOptInfinite: return "OPTION_INFINITE";
+		case uix::kOptQueue: return "OPTION_QUEUE";
 		default: return nullptr;
 	}
 }
@@ -3694,6 +3884,20 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		case hud::kOptAlarmPeasant: return {"EJECTS", "ALARMPEASANT"};
 		case hud::kOptEjectAll: return {"EJECTS", "EJECTALL"};
 		case hud::kOptAutoExplore: return {"ORDERS", "AUTOEXPLORE"};
+		case uix::kOptGuard: return {"ORDERS", "GUARD"};
+		case uix::kOptAttackGround: return {"ORDERS", "ATTACKGROUND"};
+		case uix::kOptTransfer: return {"AIR", "AIRTRANSFER"};
+		case uix::kOptAirstrike: return {"AIR", "AIRSTRIKE"};
+		case uix::kOptAirPatrol: return {"AIR", "AIRPATROL"};
+		case uix::kOptFighters: return {"AIR", "AIRFIGHTERS"};
+		case uix::kOptBombers: return {"AIR", "AIRBOMBERS"};
+		case uix::kOptHelis: return {"AIR", "AIRHELIS"};
+		case uix::kOptAllAir: return {"AIR", "AIRALL"};
+		case uix::kOptScramble: return {"AIR", "AIRSCRAMBLE"};
+		case uix::kOptRepeat: return {"AIR", "AIRREPEAT"};
+		case uix::kOptReturn: return {"AIR", "AIRRETURN"};
+		case uix::kOptRecall: return {"AIR", "AIRRECALL"};
+		case hud::kOptStance: return {"STANCES", "STANCE"};
 		default: return {nullptr, nullptr};
 	}
 }
@@ -3921,6 +4125,59 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 			tip.first = [self typeName:gu.type] + (gu.count > 1 ? " x" + std::to_string(gu.count) : std::string());
 			tip.info.push_back(uistr::tr("Click to eject."));
 			lines("EJECT", {"EJECTS", "ORDERS"});
+			break;
+		}
+		case hud::HoverKind::AirButton: case hud::HoverKind::AirHeader: {
+			// IFaceAirGarrison::on_button_move (options 0x27..0x29: select fighters / bombers / helicopters) and on_spot_move (the
+			// ready / fuelling headers): the option's name, help.xml's AIR entries.
+			const bool header = h.kind == hud::HoverKind::AirHeader;
+			const int fam = std::clamp(header ? 0 : h.a, 0, 2), col = header ? h.a : h.b;
+			if (!header) {
+				tip.first = _hud.option_name(uix::kOptFighters + fam);
+				static const char* const keys[3] = {"AIRFIGHTERS", "AIRBOMBERS", "AIRHELIS"};
+				static const char* const hk[3] = {"OPTION_FIGHTERS", "OPTION_BOMBERS", "OPTION_HELIS"};
+				lines(keys[fam], {"AIR"});
+				tip.hotkey = [self hotkeyFor:hk[fam] param:-2];
+			} else {
+				tip.first = uistr::tr(col == 0 ? "Ready" : "Fueling");
+			}
+			lines(col == 0 ? "AIRREADY" : "AIRFUELING", {"AIR"});
+			break;
+		}
+		case hud::HoverKind::TypeGroup: {
+			// A counted type button of the selection panel: Click keeps only the type, Shift as well, Ctrl removes it.
+			tip.first = [self typeName:h.a];
+			const std::string d1 = _hud.option_desc(167), d2 = _hud.option_desc(174);  // OPTION_OBJECT / "Double clicking selects all objects of this type"
+			tip.info.push_back(d1.empty() ? uistr::tr("Click to select only this type, CTRL-Click to remove it.") : d1);
+			if (!d2.empty()) tip.info.push_back(d2);
+			break;
+		}
+		case hud::HoverKind::LibraryCat: {
+			// OPTION 0xaf "Category of research": the next age / tech of the line.
+			const ron::sim::Leader& L = _game->leaders[size_t(me & 7)];
+			static const int base[4] = {572, 565, 558, 551};
+			const int type = h.a == 0 ? 544 + L.age : base[std::clamp(h.a - 1, 0, 3)] + L.epoch[size_t(std::clamp(h.a - 1, 0, 3))];
+			if (type < 0 || type > 628 || !_game->type(type).loaded) break;
+			tip.first = [self typeName:type];
+			for (int g = 0; g < 6; g++) {
+				const int c = ron::sim::get_cost(*_game, type, g, me, -1, -1, 0, 0, -1);
+				if (c > 0) tip.cost.push_back({g, c, lv.stockpile[g] >= c});
+			}
+			const ron::sim::Type& T = _game->type(type);
+			lines(up_str(ron::sim::to_utf8(T.help_name.empty() ? T.name : T.help_name)), {"LIBRARY", "SPELLS", "BUILDINGS", "UNITS"});
+			break;
+		}
+		case hud::HoverKind::LibraryFinal: {
+			const int type = 579 + std::clamp(h.a, 0, 3);
+			if (!_game->type(type).loaded) break;
+			const ron::sim::Type& T = _game->type(type);
+			tip.first = [self typeName:type];
+			for (int g = 0; g < 6; g++) {
+				const int c = ron::sim::get_cost(*_game, type, g, me, -1, -1, 0, 0, -1);
+				if (c > 0) tip.cost.push_back({g, c, lv.stockpile[g] >= c});
+			}
+			lines(up_str(ron::sim::to_utf8(T.help_name.empty() ? T.name : T.help_name)), {"LIBRARY", "SPELLS", "BUILDINGS", "UNITS"});
+			if (tip.info.empty() && !T.desc.empty()) tip.info.push_back(ron::sim::to_utf8(T.desc));
 			break;
 		}
 		case hud::HoverKind::Progress: {
@@ -4334,6 +4591,35 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	if (issue()) _cm.process_turn(*_game);
 }
 
+// What uix.* (the third HUD pass: air, advanced orders, selection rules) needs from this window.
+- (uix::Ctx)uixCtx {
+	uix::Ctx c;
+	c.game = _game.get();
+	c.cm = &_cm;
+	c.me = [self localPlayer];
+	c.process = [self] { _cm.process_turn(*_game); };
+	c.units = &_selected, c.builds = &_selectedBuilds, c.targeting = &_targeting;
+	c.advanced = _hud.advanced();
+	c.say = [self](const std::string& t) { [self say:t]; };
+	c.loc = [self](int i, const char* fallback) { return [self locString:i fallback:fallback]; };
+	c.look_at = [self](float x, float y) { [self lookAtX:x y:y]; };
+	c.on_screen = [self](int32_t who, int32_t o, bool building) {
+		const float bottom = float(_hud.bar_top());
+		auto inside = [&](simd_float2 sp) { return sp.x >= 0 && sp.y >= 0 && sp.x < _uiW && sp.y < (_hudOn ? bottom : _uiH); };
+		if (!building) {
+			for (const SimUnitDrawn& d : _drawnUnits) {
+				if (d.who == who && d.o == o) return inside([self uiPointOfUnit:d]);
+			}
+			return false;
+		}
+		for (const PlacedBuilding& b : _placed) {
+			if (b.who == who && b.o == o) return inside([self uiPointOfBuilding:b]);
+		}
+		return false;
+	};
+	return c;
+}
+
 - (std::vector<int32_t>)ownSelectedUnits {
 	std::vector<int32_t> v;
 	for (const auto& [who, o] : _selected) {
@@ -4391,7 +4677,13 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 			[self issueAs:me block:^bool { return _cm.issue_queue(*_game, objs, object, n); }];
 			break;
 		}
-		default: break;
+		default: {
+			// The options of the third pass: stances, formations, patrol, air orders, disband, queue (uix.mm).
+			uix::Ctx uc = [self uixCtx];
+			uix::Mods um{(m & NSEventModifierFlagShift) != 0, (m & (NSEventModifierFlagControl | NSEventModifierFlagCommand)) != 0, (m & NSEventModifierFlagOption) != 0};
+			uix::run_option(uc, option, object, um);
+			break;
+		}
 	}
 }
 
@@ -4602,7 +4894,18 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 			return 1;
 		}
 	}
-	(void)shift;
+	if (o == "OPTION_TOGGLE_ADVANCED") {  // the bar's Advanced Options button (pref 0x2: the card's stance / formation / patrol rows)
+		_hud.set_advanced(!_hud.advanced());
+		[[NSUserDefaults standardUserDefaults] setBool:_hud.advanced() forKey:@"AdvancedMenu"];
+		[self say:_hud.advanced() ? "Advanced orders on" : "Advanced orders off"];
+		return 1;
+	}
+	{
+		uix::Ctx uc = [self uixCtx];
+		const uix::Mods um{shift != NO, (m & (NSEventModifierFlagControl | NSEventModifierFlagCommand)) != 0, (m & NSEventModifierFlagOption) != 0};
+		const int r = uix::key_option(uc, o, param, um);
+		if (r >= 0) return r;
+	}
 	return 0;
 }
 
@@ -4613,13 +4916,16 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 			break;
 		case hud::ActionKind::MinimapOrder: [self orderAtWorldX:a.wx y:a.wy modifiers:m]; break;
 		case hud::ActionKind::Option: [self runOption:a.option object:a.object modifiers:m]; break;
-		case hud::ActionKind::SelectIndex: {
-			if (a.index < int(_hudState.selection.size())) {
-				const hud::Object& o = _hudState.selection[size_t(a.index)];
-				_selected.clear(), _selectedBuilds.clear();
-				(o.building ? _selectedBuilds : _selected).push_back({o.who, o.o});
-				[self selectionChanged];
-			}
+		case hud::ActionKind::Infinite: [self runOption:uix::kOptInfinite object:-1 modifiers:m]; break;
+		case hud::ActionKind::SelectIndex: case hud::ActionKind::SelectType: case hud::ActionKind::AirSelect: {
+			// OPTION_OBJECT (click: only this one, Ctrl: remove it, Shift: only the objects of its type), a counted type button
+			// (a.object) and the air garrison's family buttons (a.index: 0 fighters, 1 bombers, 2 helicopters).
+			uix::Ctx uc = [self uixCtx];
+			const uix::Mods um{(m & NSEventModifierFlagShift) != 0, (m & (NSEventModifierFlagControl | NSEventModifierFlagCommand)) != 0, (m & NSEventModifierFlagOption) != 0};
+			if (a.kind == hud::ActionKind::SelectIndex) uix::select_object(uc, _hudState.selection, a.index, um);
+			else if (a.kind == hud::ActionKind::SelectType) uix::select_type(uc, a.object, um);
+			else if (_hudState.air.active) uix::select_air(uc, _hudState.air.who, _hudState.air.o, a.index);
+			[self selectionChanged];
 			break;
 		}
 		case hud::ActionKind::Buy: case hud::ActionKind::Sell: {
@@ -4729,7 +5035,9 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	} else if (!_selectedBuilds.empty()) {
 		const std::vector<int32_t> objs = [self ownSelectedBuilds];
 		const bool add = (m & NSEventModifierFlagShift) != 0;
-		[self issueAs:me block:^bool { return _cm.issue_gather_point(*_game, objs, ix, iy, 0, add); }];
+		uix::Ctx uc = [self uixCtx];
+		const int action = uix::gather_action(uc);  // 3 for airbases: a patrol point for their planes
+		[self issueAs:me block:^bool { return _cm.issue_gather_point(*_game, objs, ix, iy, action, add); }];
 		std::printf("rally %zu building(s) at (%d, %d)\n", objs.size(), ix, iy);
 	}
 }
@@ -4865,6 +5173,12 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	};
 	const bool is_units = !units.empty();
 	std::vector<std::pair<int32_t, int32_t>> found = is_units ? pick(units) : pick(builds);
+	if (is_units) {
+		// Console::on_left_up's filters: Prefer Military, Ctrl+Shift citizens, Alt soldiers, Alt+Ctrl siege, Alt+Shift aircraft.
+		uix::Ctx uc = [self uixCtx];
+		const uix::Mods um{(m & NSEventModifierFlagShift) != 0, (m & (NSEventModifierFlagControl | NSEventModifierFlagCommand)) != 0, (m & NSEventModifierFlagOption) != 0};
+		uix::box_filter(uc, found, um, _hud.prefer_military());
+	}
 	if (found.empty()) {
 		if (!shift) _selected.clear(), _selectedBuilds.clear();
 		[self selectionChanged];
@@ -4906,6 +5220,18 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	std::vector<simd_float2> out;
 	const int n = int(_selected.size());
 	if (n <= 0) return out;
+	{
+		// Group::compute_form (uix::formation_slots): the slots the MOVE_TO will produce.
+		uix::Ctx uc = [self uixCtx];
+		const simd_float2 d = _formEnd - _formStart;
+		const bool facing = simd_length(d) > 96;
+		const uint32_t angle = facing ? ron::sim::find_angle(int32_t(std::lround(d.x)), int32_t(std::lround(d.y))) : 0;
+		const auto slots = uix::formation_slots(uc, int32_t(std::lround(_formStart.x)), int32_t(std::lround(_formStart.y)), _formForm, _formWidth, facing, angle);
+		if (!slots.empty()) {
+			for (const auto& p : slots) out.push_back(simd_make_float2(float(p.first), float(p.second)));
+			return out;
+		}
+	}
 	simd_float2 fwd = _formEnd - _formStart;
 	const float len = simd_length(fwd);
 	fwd = len > 1 ? fwd / len : simd_make_float2(0, 1);
@@ -5040,6 +5366,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		const simd_float2 g = [self groundAt:[self toDrawable:p]];
 		if (_targeting == hud::kOptMoveTo) [self orderAtWorldX:g.x y:g.y modifiers:m];
 		else if (_targeting == hud::kOptGarrison) [self commandGarrisonAt:[self toDrawable:p]];
+		else [self targetClickAt:[self toDrawable:p] modifiers:m];
 		_targeting = -1;
 	} else if ([self pres] && [self pres]->mouse_selection_disabled) {
 		_boxing = NO;  // mouse_selection_disable: clicks and boxes select nothing
@@ -5333,6 +5660,9 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	if ([d objectForKey:@"HelpVerbosity"]) _verbosity = std::clamp(int([d integerForKey:@"HelpVerbosity"]), 1, 3);
 	if ([d objectForKey:@"ProgressButtons"]) [self setProgressButtons:[d boolForKey:@"ProgressButtons"]];
 	if ([d objectForKey:@"GameSpeed"]) _speed = std::clamp(int([d integerForKey:@"GameSpeed"]), 0, 4);
+	if ([d objectForKey:@"AdvancedMenu"]) _hud.set_advanced([d boolForKey:@"AdvancedMenu"]);      // pref 0x2
+	if ([d objectForKey:@"GroupByType"]) _hud.set_group_by_type([d boolForKey:@"GroupByType"]);  // pref 0x20000
+	if ([d objectForKey:@"PreferMilitary"]) _hud.set_prefer_military([d boolForKey:@"PreferMilitary"]);
 	_profile[0] = _hud.panel_flags(), _profile[1] = _hud.minilib_open(), _profile[2] = _verbosity, _profile[3] = _progressButtons, _profile[4] = _speed;
 }
 
@@ -5558,6 +5888,8 @@ static int vk_of(NSEvent* e) {
 - (void)consumeScript {
 	if (!_game) return;
 	const ron::sim::ScriptPresentation* p = [self pres];
+	std::unique_ptr<ron::sim::ScriptPresentation> mpFiltered = [self mpFilteredPresentation:p];
+	if (mpFiltered) p = mpFiltered.get();
 	const scriptview::Env env = [self scriptEnv];
 	const scriptview::Callbacks cb = [self scriptCallbacks];
 	if (p && _scriptLog) [self logScript:*p];
@@ -6161,6 +6493,117 @@ static int vk_of(NSEvent* e) {
 	});
 }
 
+// A multiplayer game of a scenario: the room's table carries the scenario and the seats (the scenario's players, humans first).
+- (void)frontEndPlayMultiplayerScenario:(std::shared_ptr<mp::Room>)room {
+	[self.menu setBusy:@"Loading the scenario…"];
+	[self.view draw];
+	dispatch_async(dispatch_get_main_queue(), ^{
+		mp::ScenarioInfo si;
+		NSString* err = nil;
+		MapRenderer* r = nil;
+		std::shared_ptr<mp::Runtime> rt;
+		if (!room->read_scenario(si)) {
+			err = @"the host's scenario did not arrive";
+		} else if (room->lobby().start_plan().players == 0) {
+			err = @"the host's seats did not arrive";
+		} else {
+			const ron::net::SeatPlan plan = room->lobby().start_plan();
+			std::array<bool, 8> humans{};
+			std::array<int, 8> who{};
+			for (int k = 0; k < 8; k++) who[size_t(k)] = k < si.seats ? si.who[size_t(k)] : k;
+			for (int k = 0; k < si.seats && k < 8; k++) humans[size_t(si.who[size_t(k)] & 7)] = plan.peer_of[size_t(k)] >= 0;
+			r = [MapRenderer scenarioMultiplayerWithDevice:self.device gameDir:self.gameDir scenario:@(si.rel.c_str()) seed:room->lobby().seed() humans:humans error:&err];
+			if (r) {
+				rt = std::make_shared<mp::Runtime>(room);
+				rt->set_who(who);
+				[r attachMultiplayer:rt loaded:nullptr];
+			}
+		}
+		if (!r) {
+			[self.menu setBusy:nil];
+			[self.menu showError:[NSString stringWithFormat:@"Could not start the scenario: %@", err ?: @"unknown error"]];
+			[self.menu showScreen:@"multiplayer"];
+			return;
+		}
+		const CGSize ds = self.view.drawableSize;
+		const float scale = float(self.window.backingScaleFactor > 0 ? self.window.backingScaleFactor : 1);
+		[r setUiWidth:int(ds.width) height:int(ds.height) scale:scale];
+		[self.menu stopAudio];
+		self.view.frontEnd = nil;
+		self.menu = nil;
+		[self attachGame:r];
+	});
+}
+
+// A Conquer the World battle of the host's campaign, played by the room (lobby.h "Conquer the World battles in multiplayer").
+- (void)frontEndPlayMultiplayerCtw:(std::shared_ptr<mp::Room>)room session:(std::shared_ptr<ctwui::Session>)hostSession {
+	[self.menu setBusy:@"Preparing the battle…"];
+	[self.view draw];
+	dispatch_async(dispatch_get_main_queue(), ^{
+		std::string cerr;
+		std::shared_ptr<ctwui::Session> session = mp::ctw_battle_session(*room, hostSession, self.gameDir.UTF8String, cerr);
+		NSString* err = nil;
+		MapRenderer* r = nil;
+		if (!session) {
+			err = @(cerr.c_str());
+		} else {
+			if (room->is_host()) _ctwSession = session;
+			auto build = [session](const ron::GameFiles& f, const ron::sim::Rules& rr, const ron::sim::AnimSource* a, ron::sim::RandomExtras* x, std::string* e) {
+				return session->game.build_battle(f, rr, session->battle, a, x, e);
+			};
+			r = [MapRenderer ctwBattleWithDevice:self.device gameDir:self.gameDir build:build error:&err];
+		}
+		if (!r) {
+			[self.menu setBusy:nil];
+			[self.menu showError:[NSString stringWithFormat:@"Could not prepare the battle: %@", err ?: @"unknown error"]];
+			[self.menu showScreen:@"multiplayer"];
+			return;
+		}
+		auto rt = std::make_shared<mp::Runtime>(room);
+		rt->set_recover(false);   // a battle's Game cannot be rebuilt from a save
+		rt->record_to("");
+		[r attachMultiplayer:rt loaded:nullptr];
+		__weak MapAppDelegate* weakSelf = self;
+		const bool host = room->is_host();
+		__weak MapRenderer* weakR = r;
+		r.onCtwEnd = ^(int outcome) {
+			dispatch_async(dispatch_get_main_queue(), ^{
+				MapAppDelegate* me = weakSelf;
+				if (!me) return;
+				if (host) mp::ctw_host_result(*room, *session, outcome);   // the host's side is the campaign's: its outcome counts
+				[weakR mpClose];
+				[me showMenu:host ? @"ctw-map" : @"main"];
+				NSString* line = host ? [NSString stringWithFormat:@"The battle is over: %s.", outcome == 1 ? "won" : outcome == 0 ? "lost" : "retreated"]
+				                      : @"The battle is over. The host's campaign decides what it means.";
+				[me.menu mpResume:room ctw:host ? YES : NO message:line];
+			});
+		};
+		const CGSize ds = self.view.drawableSize;
+		const float scale = float(self.window.backingScaleFactor > 0 ? self.window.backingScaleFactor : 1);
+		[r setUiWidth:int(ds.width) height:int(ds.height) scale:scale];
+		[self.menu stopAudio];
+		self.view.frontEnd = nil;
+		self.menu = nil;
+		[self attachGame:r];
+	});
+}
+
+// A guest takes the campaign the host sent after the battle in place of its copy.
+- (NSString*)frontEndCtwReceived:(const std::vector<uint8_t>&)campaign outcome:(int)outcome {
+	const std::string tmp = std::string(NSTemporaryDirectory().UTF8String) + "ron-ctw-recv-" + std::to_string(getpid()) + ".ctw";
+	FILE* f = std::fopen(tmp.c_str(), "wb");
+	if (!f) return nil;
+	std::fwrite(campaign.data(), 1, campaign.size(), f);
+	std::fclose(f);
+	std::string err;
+	std::shared_ptr<ctwui::Session> s = ctwui::load_session(self.gameDir.UTF8String, tmp, &err);
+	std::remove(tmp.c_str());
+	if (!s) return [NSString stringWithFormat:@"(the campaign copy could not be loaded: %s)", err.c_str()];
+	_ctwSession = s;
+	(void)outcome;
+	return s->game.news.empty() ? nil : @(s->game.news.back().text.c_str());
+}
+
 // ---- Conquer the World (ctw_ui.h): the campaign's own battles run in the game window like any other game; its end brings
 // the front end back to the strategic map with the outcome applied.
 - (std::shared_ptr<ctwui::Session>)frontEndCtwSession {
@@ -6314,6 +6757,10 @@ int main(int argc, const char* argv[]) {
 		std::string mpJoin, mpRecord, mpLoad, mpSave;
 		std::vector<std::pair<std::string, uint32_t>> mpActs;  // --mp-act what@turn,...
 		bool mpBot = false;
+		int mpObservers = 0, mpMaxObs = 2;          // --mp-observers K: the host waits for K observer machines; --mp-max-observers N
+		bool mpWatch = false, ctwMp = false;        // --mp-watch: this guest asks to be an observer; --ctw-mp: a campaign battle with the room
+		std::string mpName;                         // --mp-name
+		std::vector<std::pair<ron::net::SeatField, int>> mpAsk;   // --mp-nation / --mp-team / --mp-color / --mp-handicap: this machine's seat requests
 		std::vector<int32_t> sel_objs;
 		float place_x = 0, place_y = 0;
 		uint32_t seed = 12345;
@@ -6383,6 +6830,26 @@ int main(int argc, const char* argv[]) {
 					if (at != std::string::npos && at < end) mpActs.push_back({list.substr(q, at - q), uint32_t(std::atoi(list.c_str() + at + 1))});
 					q = end + 1;
 				}
+			} else if (a == "--scenario" && more) {
+				positional.push_back(@(argv[++i]));   // the scenario file, as the positional argument does
+			} else if (a == "--mp-observers" && more) {
+				mpObservers = std::atoi(argv[++i]);
+			} else if (a == "--mp-max-observers" && more) {
+				mpMaxObs = std::atoi(argv[++i]);
+			} else if (a == "--mp-watch") {
+				mpWatch = true;
+			} else if (a == "--ctw-mp") {
+				ctwMp = true;
+			} else if (a == "--mp-name" && more) {
+				mpName = argv[++i];
+			} else if (a == "--mp-nation" && more) {
+				mpAsk.push_back({ron::net::SeatField::Tribe, std::atoi(argv[++i])});
+			} else if (a == "--mp-team" && more) {
+				mpAsk.push_back({ron::net::SeatField::Team, std::atoi(argv[++i])});
+			} else if (a == "--mp-color" && more) {
+				mpAsk.push_back({ron::net::SeatField::Color, std::atoi(argv[++i])});
+			} else if (a == "--mp-handicap" && more) {
+				mpAsk.push_back({ron::net::SeatField::Handicap, std::atoi(argv[++i])});
 			} else if (a == "--mp-diverge" && more) {
 				mpDiverge = std::atoi(argv[++i]);  // test: this machine's state is corrupted at that frame, the session must repair it
 			} else if (a == "--all-ai") {
@@ -6702,7 +7169,106 @@ int main(int argc, const char* argv[]) {
 		NSString* error = nil;
 		std::shared_ptr<ctwui::Session> ctwSess;
 		MapRenderer* r = nil;
-		if (ctwBattle) {
+		std::shared_ptr<ctwui::Session> ctwMpSess;   // --ctw-mp: the campaign copy this machine plays the battle from
+		std::shared_ptr<mp::Room> ctwMpRoom;
+		if (ctwMp && (mpHostPort > 0 || !mpJoin.empty())) {
+			// A campaign battle with the room, headless: the host's campaign (CAMPAIGN:LINK as for --ctw-battle) is fought by --humans players; the
+			// host applies the outcome to its campaign and sends it; every guest ends with an identical copy.
+			auto room = std::make_shared<mp::Room>();
+			std::string merr;
+			if (mpHostPort > 0) {
+				if (!ctwBattle) {
+					std::fprintf(stderr, "--ctw-mp --host needs --ctw-battle CAMPAIGN:LINK\n");
+					return 2;
+				}
+				const std::string spec = ctwBattle.UTF8String;
+				const size_t colon = spec.find(':');
+				ron::GameFiles files(gameDir.UTF8String);
+				ron::sim::ctw::ConquestSetup cs;
+				cs.campaign = ctwcli::resolve_campaign(files, spec.substr(0, colon));
+				cs.seed = seed;
+				cs.difficulty = g_difficulty >= 0 ? g_difficulty : 2;
+				std::string err;
+				if (!cs.campaign.empty()) ctwMpSess = ctwui::new_session(gameDir.UTF8String, cs, &err);
+				if (!ctwMpSess) {
+					std::fprintf(stderr, "ctw-mp: %s\n", cs.campaign.empty() ? "no such campaign" : err.c_str());
+					return 1;
+				}
+				if (ctwRound > 0) ctwcli::play_rounds(ctwMpSess->game, ctwRound);
+				ron::sim::ctw::LinkChoice link;
+				if (!ctwcli::pick_link(ctwMpSess->game, colon == std::string::npos ? "auto" : spec.substr(colon + 1), &link, &err)) {
+					std::fprintf(stderr, "ctw-mp: %s\n", err.c_str());
+					return 1;
+				}
+				ron::sim::ctw::ConquestGame& cg = ctwMpSess->game;
+				cg.cur_link = link;
+				cg.cur_style = cg.pick_style(link);
+				ctwMpSess->battle = cg.make_battle(link, cg.cur_style);
+				if (!room->host(uint16_t(mpHostPort), mpName.empty() ? "Host" : mpName, merr)) {
+					std::fprintf(stderr, "%s\n", merr.c_str());
+					return 2;
+				}
+				std::printf("[host] ctw battle %s attacks %s; listening on port %d for %d player(s)\n", cg.tribe_name(link.attacker).c_str(), cg.node_name(link.to).c_str(), mpHostPort, mpHumans - 1);
+				const double t0 = CACurrentMediaTime();
+				while (room->humans() < mpHumans + mpObservers || !room->guests_ready()) {
+					room->pump();
+					room->transport().idle(20);
+					if (CACurrentMediaTime() - t0 > 120) {
+						std::fprintf(stderr, "[host] nobody joined\n");
+						return 2;
+					}
+				}
+				const double t1 = CACurrentMediaTime();
+				while ((room->players() != mpHumans || room->observers() != mpObservers) && CACurrentMediaTime() - t1 < 10) {
+					room->pump();
+					room->transport().idle(20);
+				}
+				if (!mp::ctw_host_start(*room, *ctwMpSess, err)) {
+					std::fprintf(stderr, "[host] %s\n", err.c_str());
+					return 2;
+				}
+			} else {
+				std::string host = mpJoin;
+				int port = 7777;
+				if (const size_t colon = host.rfind(':'); colon != std::string::npos) port = std::atoi(host.c_str() + colon + 1), host.resize(colon);
+				if (!room->join(host, uint16_t(port), mpName.empty() ? "Guest" : mpName, 30000, merr)) {
+					std::fprintf(stderr, "%s\n", merr.c_str());
+					return 2;
+				}
+				room->set_name(mpName.empty() ? "Guest " + std::to_string(room->slot()) : mpName);
+				room->set_ready(true);
+				if (mpWatch) room->request(ron::net::SeatField::Observer, 1);
+				const double t0 = CACurrentMediaTime();
+				while (!room->started()) {
+					room->pump();
+					room->transport().idle(20);
+					if (CACurrentMediaTime() - t0 > 120 || room->host_lost()) {
+						std::fprintf(stderr, "[join] the host never started the battle\n");
+						return 2;
+					}
+				}
+			}
+			std::string err;
+			ctwMpSess = mp::ctw_battle_session(*room, ctwMpSess, gameDir.UTF8String, err);
+			if (!ctwMpSess) {
+				std::fprintf(stderr, "ctw-mp: %s\n", err.c_str());
+				return 2;
+			}
+			std::shared_ptr<ctwui::Session> sess = ctwMpSess;
+			auto build = [sess](const ron::GameFiles& f, const ron::sim::Rules& rr, const ron::sim::AnimSource* a, ron::sim::RandomExtras* x, std::string* e2) {
+				return sess->game.build_battle(f, rr, sess->battle, a, x, e2);
+			};
+			r = [MapRenderer ctwBattleWithDevice:device gameDir:gameDir build:build error:&error];
+			if (r) {
+				auto rt = std::make_shared<mp::Runtime>(room);
+				rt->set_recover(false);
+				rt->record_to("");
+				rt->enable_bot(mpBot);
+				for (const auto& act : mpActs) rt->add_act(act.first, act.second);
+				[r attachMultiplayer:rt loaded:nullptr];
+			}
+			ctwMpRoom = room;
+		} else if (ctwBattle) {
 			// CAMPAIGN:LINK -> a hand-off battle of a fresh campaign (the player attacks along LINK: auto or FROM>TO)
 			const std::string spec = ctwBattle.UTF8String;
 			const size_t colon = spec.find(':');
@@ -6741,29 +7307,75 @@ int main(int argc, const char* argv[]) {
 			};
 			r = [MapRenderer ctwBattleWithDevice:device gameDir:gameDir build:build error:&error];
 		} else if (mpHostPort > 0 || !mpJoin.empty()) {
-			// One machine of a LAN game without the lobby screens: the host fixes the setup (--random) once --humans players are in, the guests take it
+			// One machine of a LAN game without the lobby screens: the host fixes the setup (--random, or --scenario FILE) once --humans players (and
+			// --mp-observers observers) are in, the guests take it
 			auto room = std::make_shared<mp::Room>();
 			std::string merr;
 			ron::sim::RandomGameSetup mpSetup;
+			mp::ScenarioInfo mpScen;
+			bool mpScenario = false;
 			std::shared_ptr<std::vector<uint8_t>> mpLoaded;
 			if (mpHostPort > 0) {
-				if (!random_spec || !mp::parse_spec(gameDir.UTF8String, random_spec.UTF8String, mpSetup, merr)) {
-					std::fprintf(stderr, "--host needs --random STYLE,SIZE,SEED,NATIONS: %s\n", merr.c_str());
+				if (scenario) {
+					if (!mp::load_scenario_info(gameDir.UTF8String, scenario.UTF8String, mpScen, merr)) {
+						std::fprintf(stderr, "--scenario: %s\n", merr.c_str());
+						return 2;
+					}
+					mpScenario = true;
+					mpSetup = ron::sim::default_random_setup(mpScen.seats);
+					mpSetup.num_nations = mpScen.seats;
+					for (int k = 0; k < mpScen.seats; k++) {
+						mpSetup.nation[size_t(k)].tribe = mpScen.tribe[size_t(k)];
+						mpSetup.nation[size_t(k)].color = mpScen.color[size_t(k)];
+						mpSetup.nation[size_t(k)].difficulty = mpScen.difficulty[size_t(k)];
+					}
+				} else if (!random_spec || !mp::parse_spec(gameDir.UTF8String, random_spec.UTF8String, mpSetup, merr)) {
+					std::fprintf(stderr, "--host needs --random STYLE,SIZE,SEED,NATIONS or --scenario FILE: %s\n", merr.c_str());
 					return 2;
 				}
-				if (!room->host(uint16_t(mpHostPort), "Host", merr)) {
+				if (!room->host(uint16_t(mpHostPort), mpName.empty() ? "Host" : mpName, merr)) {
 					std::fprintf(stderr, "%s\n", merr.c_str());
 					return 2;
 				}
-				std::printf("[host] listening on port %d for %d player(s)\n", mpHostPort, mpHumans - 1);
-				const double t0 = CACurrentMediaTime();
-				while (room->humans() < mpHumans) {
+				room->set_max_observers(mpMaxObs);
+				room->publish(mpSetup);
+				if (mpScenario) room->publish_scenario(mpScen);
+				for (const auto& ask : mpAsk)  // the host's own seat (the first player's): handicap only, the rest is the setup's
+					if (ask.first == ron::net::SeatField::Handicap) room->lobby().set("handicap_0", ask.second);
+				std::printf("[host] listening on port %d for %d player(s)%s\n", mpHostPort, mpHumans - 1, mpScenario ? " (scenario)" : "");
+				// guests' requests are mirrored into the setup as they arrive, as the lobby screen does
+				auto serve = [&]() {
 					room->pump();
+					ron::net::SeatRequest rq;
+					bool changed = false;
+					while (room->lobby().take_request(rq)) {
+						if (rq.seat >= 0 && rq.seat < 8) {
+							ron::sim::NationSetup& ns = mpSetup.nation[size_t(rq.seat)];
+							if (rq.field == ron::net::SeatField::Tribe) ns.tribe = rq.value;
+							else if (rq.field == ron::net::SeatField::Team) ns.team = rq.value;
+							else if (rq.field == ron::net::SeatField::Color) ns.color = rq.value;
+						}
+						changed = true;
+					}
+					if (changed) room->publish(mpSetup);
+				};
+				const double t0 = CACurrentMediaTime();
+				while (room->humans() < mpHumans + mpObservers) {
+					serve();
 					room->transport().idle(20);
 					if (CACurrentMediaTime() - t0 > 120) {
 						std::fprintf(stderr, "[host] nobody joined\n");
 						return 2;
 					}
+				}
+				const double t1 = CACurrentMediaTime();  // the guests' first requests (an observer's seat, nation, team, colour, handicap)
+				while ((room->players() != mpHumans || room->observers() != mpObservers || !room->guests_ready()) && CACurrentMediaTime() - t1 < 15) {
+					serve();
+					room->transport().idle(20);
+				}
+				for (int k = 0; k < 20; k++) {
+					serve();
+					room->transport().idle(10);
 				}
 				mpSetup.game_speed = 2;
 				if (!mpLoad.empty()) {  // continue a saved game: its setup and seed, the file goes to the guests before START
@@ -6785,30 +7397,45 @@ int main(int argc, const char* argv[]) {
 						std::fprintf(stderr, "[host] %s\n", e.what());
 						return 2;
 					}
+					room->lobby().set("identity", 1);
 					room->publish(mpSetup);
 					room->lobby().set("from_save", "1");
 					room->lobby().send_file(*mpLoaded);
 					room->start(mpSetup.seed);
 				} else {
 					if (!room->seat_humans(mpSetup)) {
-						std::fprintf(stderr, "[host] fewer than two players\n");
+						std::fprintf(stderr, "[host] the room cannot start a game (fewer than two machines, or no seat fits)\n");
 						return 2;
 					}
 					room->publish(mpSetup);
-					room->start(mpSetup.seed);
+					if (!room->start(mpSetup.seed)) {
+						std::fprintf(stderr, "[host] the seats do not fit\n");
+						return 2;
+					}
+				}
+				{
+					const ron::net::SeatPlan pl = room->lobby().start_plan();
+					std::printf("[host] plan: %d player(s), %d observer(s), %d seat(s):", pl.players, pl.observers, pl.nations);
+					for (int sl = 0; sl < 8; sl++)
+						if (pl.peer_of[size_t(sl)] >= 0) std::printf(" slot%d=%s", sl, room->name_of(pl.peer_of[size_t(sl)]).c_str());
+					std::printf("\n");
 				}
 			} else {
 				std::string host = mpJoin;
 				int port = 7777;
 				if (const size_t colon = host.rfind(':'); colon != std::string::npos) port = std::atoi(host.c_str() + colon + 1), host.resize(colon);
-				if (!room->join(host, uint16_t(port), "Guest", 30000, merr)) {
+				if (!room->join(host, uint16_t(port), mpName.empty() ? "Guest" : mpName, 30000, merr)) {
 					std::fprintf(stderr, "%s\n", merr.c_str());
 					return 2;
 				}
-				room->set_name("Guest " + std::to_string(room->slot()));
+				room->set_name(mpName.empty() ? "Guest " + std::to_string(room->slot()) : mpName);
+				room->set_ready(true);
+				if (mpWatch) room->request(ron::net::SeatField::Observer, 1);
+				for (const auto& ask : mpAsk) room->request(ask.first, ask.second);
 				const double t0 = CACurrentMediaTime();
 				while (!room->started()) {
 					room->pump();
+					for (std::string n; !(n = room->take_notice()).empty();) std::printf("[join] %s\n", n.c_str());
 					room->transport().idle(20);
 					if (CACurrentMediaTime() - t0 > 120 || room->host_lost()) {
 						std::fprintf(stderr, "[join] the host never started the game\n");
@@ -6819,6 +7446,7 @@ int main(int argc, const char* argv[]) {
 					std::fprintf(stderr, "[join] the lobby has no map settings\n");
 					return 2;
 				}
+				mpScenario = room->read_scenario(mpScen);
 				if (room->lobby().has("from_save")) {  // the host continues a saved game: its file arrives before START
 					if (!room->lobby().file_complete()) {
 						std::fprintf(stderr, "[join] the saved game did not arrive\n");
@@ -6826,11 +7454,23 @@ int main(int argc, const char* argv[]) {
 					}
 					mpLoaded = std::make_shared<std::vector<uint8_t>>(room->lobby().file());
 				}
-				std::printf("[join] slot %d: style %d size %d seed %u nations %d\n", room->slot(), mpSetup.map_style, mpSetup.map_size, mpSetup.seed, mpSetup.num_nations);
+				const ron::net::SeatPlan pl = room->lobby().start_plan();
+				std::printf("[join] peer %d is game slot %d (%s): style %d size %d seed %u nations %d\n", room->slot(), pl.slot_of[size_t(room->slot() & 7)],
+				            pl.slot_of[size_t(room->slot() & 7)] >= pl.nations ? "observer" : "player", mpSetup.map_style, mpSetup.map_size, mpSetup.seed, mpSetup.num_nations);
 			}
-			r = [MapRenderer randomGameWithDevice:device gameDir:gameDir setup:&mpSetup spec:nil error:&error];
+			std::array<int, 8> mpWho{};
+			for (int k = 0; k < 8; k++) mpWho[size_t(k)] = mpScenario && k < mpScen.seats ? mpScen.who[size_t(k)] : k;
+			if (mpScenario) {
+				const ron::net::SeatPlan pl = room->lobby().start_plan();
+				std::array<bool, 8> humans{};
+				for (int k = 0; k < mpScen.seats && k < 8; k++) humans[size_t(mpScen.who[size_t(k)] & 7)] = pl.peer_of[size_t(k)] >= 0;
+				r = [MapRenderer scenarioMultiplayerWithDevice:device gameDir:gameDir scenario:@(mpScen.rel.c_str()) seed:room->lobby().seed() humans:humans error:&error];
+			} else {
+				r = [MapRenderer randomGameWithDevice:device gameDir:gameDir setup:&mpSetup spec:nil error:&error];
+			}
 			if (r) {
 				auto rt = std::make_shared<mp::Runtime>(room);
+				rt->set_who(mpWho);
 				rt->enable_bot(mpBot);
 				rt->record_to(mpRecord);  // none unless asked: headless runs must not fill the user's folder
 				if (mpDiverge >= 0) rt->diverge_at(mpDiverge);
@@ -6879,6 +7519,40 @@ int main(int argc, const char* argv[]) {
 			std::fprintf(stderr, "the multiplayer game did not run to frame %d\n", sim_frames);
 			[r mpClose];
 			return 3;
+		}
+		if (ctwMpSess && ctwMpRoom) {
+			// the battle is decided (or adjudicated by the units left): the host's outcome moves the host's campaign, the guests copy the result
+			const int outcome = [r ctwAdjudicated];
+			const uint64_t mine = [&]() {
+				uint64_t h = 1469598103934665603ull;
+				for (uint8_t c : ctwMpSess->game.save_bytes()) h = (h ^ c) * 1099511628211ull;
+				return h;
+			}();
+			std::printf("[%s] ctw battle: frame %d, local outcome %s\n", ctwMpRoom->is_host() ? "host" : "join", sim_frames, outcome == 1 ? "victory" : "defeat");
+			if (ctwMpRoom->is_host()) {
+				mp::ctw_host_result(*ctwMpRoom, *ctwMpSess, outcome);
+				[r mpClose];
+				uint64_t after = 1469598103934665603ull;
+				for (uint8_t c : ctwMpSess->game.save_bytes()) after = (after ^ c) * 1099511628211ull;
+				std::printf("[host] campaign after the battle: %s; fnv64 %016llx\n", ctwMpSess->last_result.c_str(), (unsigned long long)after);
+				ctwMpRoom->transport().idle(200);
+			} else {
+				[r mpClose];
+				uint32_t seq = 0;
+				std::vector<uint8_t> camp;
+				int host_outcome = -1;
+				const double t0 = CACurrentMediaTime();
+				while (!mp::ctw_guest_result(*ctwMpRoom, seq, camp, host_outcome) && CACurrentMediaTime() - t0 < 20) {
+					ctwMpRoom->lobby().poll();
+					ctwMpRoom->transport().idle(20);
+				}
+				uint64_t got = 1469598103934665603ull;
+				for (uint8_t c : camp) got = (got ^ c) * 1099511628211ull;
+				std::printf("[join] campaign copy from the host: %zu bytes, host outcome %d, fnv64 %016llx (my copy before the battle %016llx)\n", camp.size(), host_outcome, (unsigned long long)got,
+				            (unsigned long long)mine);
+				return camp.empty() ? 3 : 0;
+			}
+			return 0;
 		}
 		// Scripted moves, then N simulation frames (headless checks with --snapshot).
 		for (int f = 0; f <= sim_frames && r.simulating && !r.multiplayer; f++) {

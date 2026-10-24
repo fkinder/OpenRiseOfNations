@@ -11,7 +11,9 @@ if ! xcrun --find clang++ >/dev/null 2>&1; then
 	exit 1
 fi
 
-CXXFLAGS=(-std=c++17 -O2 -Wall -Wextra -I engine -mmacosx-version-min=12.0)
+# -ffp-contract=off: no fused multiply-add. The simulation must be bit-identical on every machine (lockstep multiplayer, docs/multiplayer-spec.md 8.3): the original is
+# x86 SSE2 without FMA and clang on arm64 fuses a * b + c by default, which would make an Apple Silicon and an Intel Mac disagree in the float paths of the engine.
+CXXFLAGS=(-std=c++17 -O2 -Wall -Wextra -I engine -mmacosx-version-min=12.0 -ffp-contract=off)
 # UNIVERSAL=1 builds Apple Silicon + Intel binaries (used by package-mac.sh); otherwise only this Mac's architecture.
 if [[ "${UNIVERSAL:-0}" == "1" ]]; then
 	CXXFLAGS+=(-arch arm64 -arch x86_64)

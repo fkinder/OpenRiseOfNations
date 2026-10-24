@@ -1,5 +1,6 @@
 #include "net/game_link.hpp"
 
+#include <algorithm>
 #include <cstring>
 
 #include "sim/datawalk.hpp"
@@ -108,7 +109,14 @@ void GameHooks::execute(int slot, const uint8_t* cmd, size_t len) {
 		}
 		return;
 	}
+	// CHAT: the engine pushes a presentation event (saved, so checksummed) only when the line is for the local leader; with a recipient mask that
+	// would make the machines of the players outside the mask differ from the others (an out-of-sync report on the first team chat). The line is
+	// processed as if the local leader were its sender (always in its own mask), so every machine records the same event; the application shows it
+	// only to the recipients (apps/map-mac/main.mm mpFilteredPresentation reads the mask from the console's chat list).
+	const int32_t keep_local = g_->local_play;
+	if (op == sim::op::kChat) g_->local_play = who_[size_t(slot & 7)];
 	package_.process(*g_, c, slot, who_[size_t(slot & 7)]);
+	g_->local_play = keep_local;
 	++commands_run;
 }
 
@@ -238,6 +246,32 @@ bool lobby_to_setup(const Lobby& l, sim::RandomGameSetup& s, std::string& error)
 		return false;
 	}
 	return true;
+}
+
+MpSeats lobby_mp_seats(const Lobby& l) {
+	MpSeats m;
+	m.plan = l.start_plan();
+	if (m.plan.players == 0) m.plan = l.plan();
+	for (int slot = 0; slot < 8; ++slot) {
+		const int peer = m.plan.peer_of[size_t(slot)];
+		std::string nm = peer >= 0 ? l.get("name_" + std::to_string(peer)) : std::string();
+		if (nm.empty() && peer >= 0) nm = "Player " + std::to_string(slot + 1);
+		m.name[size_t(slot)] = nm;
+		m.handicap[size_t(slot)] = int(l.get_int(key_n("handicap", slot), 0));
+	}
+	return m;
+}
+
+void apply_mp_seats(sim::Game& g, const std::array<int, 8>& who_of, const MpSeats& m) {
+	g.multiplayer = true;
+	for (int slot = 0; slot < m.plan.nations && slot < 8; ++slot) {
+		if (m.plan.peer_of[size_t(slot)] < 0) continue;   // a computer seat keeps its nation's name and its difficulty
+		const int who = who_of[size_t(slot)];
+		if (who < 0 || who >= int(g.leaders.size())) continue;
+		sim::Leader& L = g.leaders[size_t(who)];
+		if (!m.name[size_t(slot)].empty()) L.name = m.name[size_t(slot)];
+		L.handicap = std::clamp(m.handicap[size_t(slot)], 0, 255);
+	}
 }
 
 }  // namespace ron::net

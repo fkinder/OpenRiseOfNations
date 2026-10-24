@@ -30,6 +30,12 @@
 // Multiplayer (lobby.h): the room started the game; `setup` is the final one (the host's seed, human seats = connected players).
 // `save`: a saved multiplayer game the session continues (null for a new game).
 - (void)frontEndPlayMultiplayer:(std::shared_ptr<mp::Room>)room setup:(const ron::sim::RandomGameSetup&)setup save:(std::shared_ptr<std::vector<uint8_t>>)save;
+// A scenario game: the room's table carries the scenario and its seats (Room::read_scenario).
+- (void)frontEndPlayMultiplayerScenario:(std::shared_ptr<mp::Room>)room;
+// A Conquer the World battle of the host's campaign: `session` is the host's (null on a guest, which builds its copy from the campaign file the
+// host sent). A guest asks the host side what to do with the campaign the host sent after the battle.
+- (void)frontEndPlayMultiplayerCtw:(std::shared_ptr<mp::Room>)room session:(std::shared_ptr<ctwui::Session>)session;
+- (NSString*)frontEndCtwReceived:(const std::vector<uint8_t>&)campaign outcome:(int)outcome;
 @end
 
 @interface FrontEnd : NSObject <MTKViewDelegate>
@@ -54,6 +60,9 @@
 // Headless test: the host presses Start on the lobby of the demo room (every guest is made ready first).
 - (void)mpDemoStart;
 - (void)ctwShowSession:(std::shared_ptr<ctwui::Session>)session sub:(NSString*)sub select:(NSString*)country;
+// Back from a multiplayer game (a Conquer the World battle): the room is a lobby again. The host (`ctw` YES) returns to the campaign map with the
+// room kept (the next battle can be played with the same players), a guest to the lobby, with `message` as a line in the chat.
+- (void)mpResume:(std::shared_ptr<mp::Room>)room ctw:(BOOL)ctw message:(NSString*)message;
 // Input in view points with a top-left origin.
 - (void)mouseMoved:(CGPoint)p;
 - (void)mouseDown:(CGPoint)p clicks:(NSInteger)clicks;

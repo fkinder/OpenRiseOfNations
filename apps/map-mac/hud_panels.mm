@@ -187,6 +187,7 @@ void Hud::draw_library(UiRenderer& ui, const State& s) {
 	if (!lib_el_ || !s.library.active) return;
 	const ron::XmlElement& e = *lib_el_;
 	library_rect_ = IfaceRect{left_.l + (left_.w() - 319) / 2, left_.l + (left_.w() - 319) / 2 + 319, left_.t, left_.t + 168};
+	if (s.library.final_view) return draw_library_final(ui, s);
 	const IfaceRect w = library_rect_;
 	const int pw = w.w(), ph = w.h();
 	ui.add(ron::iface_find_piece(e, "back"), float(w.l), float(w.t), 0, 0, kWhite, UiType::Normal);
@@ -216,6 +217,21 @@ void Hud::draw_library(UiRenderer& ui, const State& s) {
 		if (under.valid()) ui.add(under, float(ar.l - 5), float(ar.t - 1));
 		cell(s.library.age[c], ar, true);
 		for (int k = 0; k < 4; k++) cell(s.library.tech[k][c], rect_in(e, "BUTTON", kLineTech[k], pw, ph, c).offset(w.l, w.t), false);
+	}
+	ui.next_layer();
+	// The category column (cat_age / cat 0..3): a lit frame under the mouse while the line can research, and the progress of the
+	// next tech filling the cell in the line's colour (update_visibility: percent_done, get_tech_color).
+	static const uint32_t line_col[4] = {rgb(255, 40, 40), rgb(0, 255, 255), rgb(0, 255, 0), rgb(255, 255, 0)};
+	for (int i = 0; i < 5; i++) {
+		const MiniLibButton& m = i == 0 ? s.minilib.age : s.minilib.cat[i - 1];
+		if (!m.valid) continue;
+		const IfaceRect rc = i == 0 ? rect_in(e, "BUTTON", "cat_age", pw, ph).offset(w.l, w.t) : rect_in(e, "BUTTON", "cat", pw, ph, i - 1).offset(w.l, w.t);
+		if (m.percent >= 0) {
+			const int h = rc.h() * std::clamp(m.percent, 0, 100) / 100;
+			ui.fill(float(rc.l), float(rc.b - h), float(rc.w()), float(h), ((i == 0 ? rgb(255, 255, 255) : line_col[i - 1]) & 0x00FFFFFF) | 0x70000000, UiType::ColorBlend);
+		} else if (m.enabled && rc.contains(hover_x_, hover_y_)) {
+			ui.frame(float(rc.l), float(rc.t), float(rc.w()), float(rc.h()), rgb(255, 255, 255));
+		}
 	}
 	ui.next_layer();
 }

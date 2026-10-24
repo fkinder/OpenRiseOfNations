@@ -322,9 +322,23 @@ Hover Hud::hover_at(int x, int y, const State& s) const {
 		const int pi = progress_index_at(x, y, s);
 		if (pi >= 0) return {HoverKind::Progress, pi, 0};
 		if (s.library.active) {
-			int cat = -1, col = -1;
-			const int t = library_cell_at(x, y, s, &cat, &col);
-			if (t >= 0) return {HoverKind::LibraryCell, t, 0};
+			if (s.library.final_view) {
+				const int k = final_button_at(x, y, s);
+				if (k >= 0) return {HoverKind::LibraryFinal, k, 0};
+			} else {
+				int which = -1;
+				if (cat_button_at(x, y, &which) >= 0) return {HoverKind::LibraryCat, which, 0};
+				int cat = -1, col = -1;
+				const int t = library_cell_at(x, y, s, &cat, &col);
+				if (t >= 0) return {HoverKind::LibraryCell, t, 0};
+			}
+		}
+		{
+			int col = 0;
+			const int ar = air_cell_at(x, y, s, &col);
+			if (ar >= 0) return {HoverKind::AirButton, ar, col};
+			const int ah = air_header_at(x, y, s);
+			if (ah >= 0) return {HoverKind::AirHeader, ah, 0};
 		}
 		const int gi = garrison_index_at(x, y, s);
 		if (gi >= 0) return {HoverKind::Garrison, gi, 0};
@@ -353,6 +367,8 @@ Hover Hud::hover_at(int x, int y, const State& s) const {
 	if (s.selection.size() > 1) {
 		const int i = multi_index_at(x, y, s);
 		if (i >= 0) return {HoverKind::SelObject, i, 0};
+		const int tg = multi_type_at(x, y, s);
+		if (tg >= 0) return {HoverKind::TypeGroup, tg, 0};
 		return h;
 	}
 	const ron::XmlElement& e = *sel_el_;
@@ -363,6 +379,7 @@ Hover Hud::hover_at(int x, int y, const State& s) const {
 	if (hp.contains(x, y)) return {HoverKind::SelHitPoints, 0, 0};
 	const int q = queue_index_at(x, y, s);
 	if (q >= 0) return {HoverKind::SelQueue, q, 0};
+	if (infinite_hit(x, y, s)) return {HoverKind::Option, 64, -1};
 	{
 		const Object& o = s.selection.front();
 		std::vector<int> kinds;

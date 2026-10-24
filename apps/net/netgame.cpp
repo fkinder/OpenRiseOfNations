@@ -17,6 +17,7 @@
 #include "commands.hpp"
 #include "common.hpp"
 #include "demobot.hpp"
+#include "net/game_link.hpp"
 #include "net/lobby.hpp"
 #include "net/tcp.hpp"
 #include "node.hpp"
@@ -121,6 +122,7 @@ int cmd_netgame(int argc, char** argv) {
 
 		net::Lobby lobby(t);
 		if (host) {
+			if (arg_value(argc, argv, "--handicap")) lobby.set("handicaps", arg_value(argc, argv, "--handicap"));
 			if (scenario_file.empty()) {
 				net::setup_to_lobby(setup, lobby);
 				lobby.start(setup.seed);  // the host's seed becomes game_seed
@@ -181,6 +183,23 @@ int cmd_netgame(int argc, char** argv) {
 			for (int i = 0; i < setup.num_nations; ++i) nhumans += setup.nation[size_t(i)].human;
 		}
 
+		{  // a multiplayer game: the multiplayer flag, "Player N" names, the handicaps of --handicap a,b,c (the host's, sent with the lobby table)
+			net::MpSeats seats;
+			seats.plan = net::make_seat_plan((1u << std::min(nhumans, 8)) - 1, 0, nseats, true);
+			std::string hs = lobby.get("handicaps");
+			size_t at = 0;
+			for (int sl = 0; sl < 8; ++sl) {
+				seats.name[size_t(sl)] = "Player " + std::to_string(sl + 1);
+				if (at < hs.size()) {
+					seats.handicap[size_t(sl)] = std::atoi(hs.c_str() + at);
+					const size_t comma = hs.find(',', at);
+					at = comma == std::string::npos ? hs.size() : comma + 1;
+				}
+			}
+			std::array<int, 8> w{};
+			for (int i = 0; i < 8; ++i) w[size_t(i)] = i;
+			net::apply_mp_seats(*game, w, seats);
+		}
 		lobby.barrier(1);  // SyncPoint: nobody starts before everybody has its game
 		while (!lobby.barrier_done(1)) {
 			lobby.poll();

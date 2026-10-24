@@ -74,7 +74,7 @@ std::vector<uint8_t> header_bytes(const RecordInfo& in) {
 		raw[0x32] = uint8_t(s.tribe);
 		raw[0x33] = uint8_t(s.who);
 		raw[0x34] = uint8_t(int8_t(s.team));
-		raw[0x35] = 0;
+		raw[0x35] = uint8_t(s.handicap);
 		raw[0x36] = uint8_t(i);
 		raw[0x37] = 0;
 		raw[0x38] = uint8_t(s.diff);

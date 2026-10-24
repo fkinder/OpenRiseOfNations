@@ -9,6 +9,7 @@
 
 #include "commands.hpp"
 #include "common.hpp"
+#include "net/game_link.hpp"
 #include "node.hpp"
 #include "sim/anim_assets.hpp"
 #include "sim/newgame.hpp"
@@ -59,6 +60,19 @@ int replay_native(const sim::Replay& rp, const std::string& path, const std::str
 			if (!g) {
 				std::printf("%s: the start state could not be built\n", name.c_str());
 				return 1;
+			}
+			if (!rp.native_save) {  // the room made it a multiplayer game: the header carries the players' names and handicaps (an embedded save has them already)
+				net::MpSeats seats;
+				seats.plan = net::make_seat_plan(0, 0, int(setup.num_nations), true);
+				for (const sim::ReplayPlayer& p : rp.header.players) {
+					if (!p.present() || p.play < 0 || p.play > 7) continue;
+					if (!(p.flags & 4)) continue;   // human
+					seats.plan.peer_of[size_t(p.play)] = p.play;
+					seats.name[size_t(p.play)] = sim::to_utf8(p.name);
+					seats.handicap[size_t(p.play)] = p.handicap;
+				}
+				seats.plan.nations = setup.num_nations;
+				net::apply_mp_seats(*g, who, seats);
 			}
 			nodes.push_back(std::make_unique<EngineNode>(files, rules, art.get(), std::move(g), scenario, seed, who));
 			Inst in;

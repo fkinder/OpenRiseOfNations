@@ -27,6 +27,9 @@ public:
 	static std::unique_ptr<TcpTransport> host_open(uint16_t port, std::string& error);
 	void accept_new();
 	void close_door();
+	void reopen_door();   // host: listens again on the port host_open used (the room is a lobby again after a game)
+	// Host: ends a client's connection (the host removing a player); the slot is free for the next arrival. The usual timeout notice follows.
+	void disconnect(int slot);
 	bool door_open() const { return open_ && listen_fd_ >= 0; }
 	uint32_t present_mask() const;  // bit s: slot s is connected (this peer included)
 	// Connects to a host and waits for its welcome. Retries the connection until `timeout_ms` (the host may not be listening yet).
@@ -61,6 +64,7 @@ private:
 	void lost(Conn& c);
 
 	int me_ = 0, total_ = 1;
+	uint16_t port_ = 0;
 	bool open_ = false;  // lobby mode
 	int listen_fd_ = -1;
 	std::vector<Conn> conns_;  // host: one per client; client: the connection to the host (one entry)

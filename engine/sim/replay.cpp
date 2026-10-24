@@ -916,6 +916,17 @@ void wire_resign(std::vector<uint8_t>& out, int32_t play) {
 	put32(out, uint32_t(play));
 }
 
+void wire_chat_set(std::vector<uint8_t>& out, const std::array<uint8_t, 8>& status) {
+	out.push_back(op::kChatSet);
+	out.insert(out.end(), status.begin(), status.end());
+}
+
+bool parse_chat_set(const uint8_t* cmd, size_t len, std::array<uint8_t, 8>& status) {
+	if (len != 9 || cmd[0] != op::kChatSet) return false;
+	std::copy(cmd + 1, cmd + 9, status.begin());
+	return true;
+}
+
 void wire_drop(std::vector<uint8_t>& out, uint8_t play, uint8_t option) {
 	out.push_back(op::kUngracefulDrop);
 	out.push_back(play);

@@ -13,16 +13,21 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <deque>
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
+#include "ctw_ui.h"
+#include "net/discovery.hpp"
 #include "net/game_link.hpp"
 #include "net/lobby.hpp"
 #include "net/lockstep.hpp"
 #include "net/record.hpp"
+#include "net/seat_transport.hpp"
 #include "net/tcp.hpp"
 #include "sim/commands.hpp"
 #include "sim/game.hpp"
@@ -30,6 +35,7 @@
 
 namespace mp {
 
+struct ScenarioInfo;
 namespace net = ron::net;
 namespace sim = ron::sim;
 
@@ -52,7 +58,10 @@ public:
 	const std::string& address() const { return address_; }
 	std::vector<std::string> lan_addresses() const;           // the host's IPv4 addresses a guest can type
 	uint32_t present_mask() const;                            // bit s: slot s is connected (this peer included)
-	int humans() const;
+	int humans() const;                                       // machines in the room (players and observers)
+	int players() const;                                      // machines that play
+	int observers() const;                                    // machines that only watch
+	net::SeatPlan plan() const;                               // who sits where (game slots), as the room is now
 	std::string name_of(int slot) const;                      // "" when nobody is there
 	bool ready_of(int slot) const;
 	void set_ready(bool ready);
@@ -62,22 +71,55 @@ public:
 	void set_name(const std::string& name);                   // after joining (the headless guests name themselves by their slot)
 
 	void say(const std::string& text);
+	// Chat to a target: kind 0 everybody, 1 the team, 2 one peer (`peer`). Returns false when nobody would hear it.
+	bool say_to(int kind, int peer, const std::string& text);
 	const std::deque<net::Lobby::ChatLine>& chat() const;
+
+	// ---- seat rules (multiplayer-spec 8.6)
+	// Guest: asks the host to change this player's own seat (nation, team, colour, handicap, observer); the answer comes back as a notice.
+	// Host: the same call applies an observer toggle at once (the host edits the other fields directly).
+	void request(net::SeatField f, int value);
+	void set_approval_ask(bool ask);                          // host: guests' nation / team / colour requests wait for the host's decision
+	bool approval_ask() const { return ask_; }
+	void set_max_observers(int n);                            // host: rules.xml "maxobservers" 0..6
+	int max_observers() const;
+	void kick(int peer, bool block = false);                  // host: removes a player (block: the same name cannot come back to this room)
+	bool kicked() const { return kicked_; }                   // guest: the host removed this machine
+	bool blocked_name(const std::string& n) const;
+	uint32_t ctw_seq = 0;                                     // Conquer the World battles played in this room (the host counts; the table carries it)
+	// Host: the start countdown (the original ticks "n seconds" in the chat); the screen calls tick_countdown every frame while it runs.
+	void begin_countdown(int seconds);
+	void cancel_countdown();
+	bool counting() const { return countdown_end_ > 0; }
+	bool tick_countdown();                                    // true when it reached 0 (the host starts the game)
+	int countdown_left() const;
+	// After a game: the same room, a lobby again (guests keep their connection).
+	void leave_game();
+	bool in_game() const { return in_game_; }
+
+	// ---- LAN announcements (a host's room appears in the Multiplayer screen's list of games)
+	// Host: what the announcement says (the map text and flags: net::kLanScenario ...). Sent once a second by pump() until the game starts.
+	void announce(const std::string& map_text, uint8_t flags = 0);
+	void stop_announcing();
 
 	// The setup. Host: edit locally, publish after every change. Guest: read what the host published.
 	void publish(const sim::RandomGameSetup& s);
 	bool read_setup(sim::RandomGameSetup& out) const;
 	// Host: fixes the table and sends START with `seed` (the setup's human seats must be the connected slots: see seat_humans).
-	void start(uint32_t seed);
+	bool start(uint32_t seed);   // false when the plan does not fit (no player, observers above the eight slots)
 	bool started() const;
-	// Marks the seats of `s` that connected peers sit in as human and the others as computer players; raises num_nations to cover the highest
-	// connected slot. Returns false when fewer than two humans are connected (the lobby needs a second player to start).
+	// Marks the seats of `s` that players sit in as human and the others as computer players (the room's plan: players take seats in the order
+	// they joined, observers sit above the nations); raises num_nations to cover them. Returns false when the game cannot start: fewer than two
+	// machines in the room, no player, or the observers do not fit in the eight slots.
 	bool seat_humans(sim::RandomGameSetup& s) const;
+	// A scenario game: the host's choice, as the lobby table carries it (seats = the scenario's players, humans first).
+	void publish_scenario(const ScenarioInfo& si);
+	bool read_scenario(ScenarioInfo& out) const;
 
 	net::TcpTransport& transport() { return *transport_; }
 	net::Lobby& lobby() { return *lobby_; }
 	// Hands the connection to the game: the Room keeps the pointers, the Runtime uses them. (The room is not pumped any more.)
-	void enter_game() { in_game_ = true; }
+	void enter_game();
 
 private:
 	std::unique_ptr<net::TcpTransport> transport_;
@@ -87,7 +129,55 @@ private:
 	std::string address_, my_name_;
 	std::deque<std::string> notices_;
 	uint32_t last_mask_ = 1;
+	bool kicked_ = false, ask_ = false;
+	std::set<std::string> blocked_;
+	std::set<int> pending_kicks_, joined_;
+	double countdown_end_ = 0;
+	int countdown_shown_ = 0;
+	net::LanAnnouncer announcer_;
+	net::LanGame announce_;
 };
+
+// A scenario game's seats (docs/multiplayer-spec.md 8.6): the scenario's players, ordered so the human-flagged ones come first; game slot k plays
+// the leader `who[k]`.
+struct ScenarioInfo {
+	std::string rel;      // path relative to the install
+	std::string title;
+	int seats = 0;
+	std::array<int, 8> who{}, tribe{}, color{}, difficulty{}, team{};
+	std::array<bool, 8> human{};   // the scenario's own flag
+	std::array<std::string, 8> name;
+};
+bool load_scenario_info(const std::string& game_dir, const std::string& path, ScenarioInfo& out, std::string& err);
+
+// ---------------------------------------------------------------- Conquer the World battles in multiplayer (docs/multiplayer-spec.md 8.6)
+//
+// The host's campaign plays a battle with the room's players in its seats. The host fixes who sits where (itself on the campaign player's side,
+// the guests on the other seats), the BattleDef travels as a blob in the lobby table and the campaign (ConquestGame::save_bytes) as the lobby's
+// file; every machine builds the battle with ConquestGame::build_battle from its own copy of the campaign. A battle's Game cannot be rebuilt
+// from a save, so there is no out-of-sync repair and no recording in these games. After the battle the host applies the outcome to its campaign
+// (Session::battle_finished) and sends the new campaign to the guests, who replace their copies.
+std::string encode_battle(const sim::ctw::ConquestGame::BattleDef& b);
+bool decode_battle(const std::string& blob, sim::ctw::ConquestGame::BattleDef& out);
+// Host: seats the room (the campaign player's seat for the host, the other seats for the guests in order, the rest computer players), publishes the
+// battle and the campaign, sends START. False with `err` when the players do not fit the battle's seats.
+bool ctw_host_start(Room& room, ctwui::Session& session, std::string& err);
+// Every machine, after START: the Session to build the battle from (the host's own; a guest's copy is loaded from the campaign file the host sent)
+// with `battle` set from the table. Null with `err` on failure.
+std::shared_ptr<ctwui::Session> ctw_battle_session(Room& room, std::shared_ptr<ctwui::Session> host_session, const std::string& game_dir, std::string& err);
+// Host, once the battle is decided: the outcome (1 won, 0 lost, 2 retreated) is applied to the campaign and the new campaign sent to the guests.
+void ctw_host_result(Room& room, ctwui::Session& session, int outcome);
+// Guest: the campaign the host sent after the battle (empty until it is complete). `outcome` is the host's.
+bool ctw_guest_result(Room& room, uint32_t& seq, std::vector<uint8_t>& campaign, int& outcome);
+
+// Test hook for the connect screen's snapshot: rooms of other machines announce themselves on the LAN port for `seconds` (from a thread of this process).
+void spawn_demo_hosts(int seconds);
+
+// The UDP port of the LAN announcements (RON_LAN_PORT overrides it: tests run several rooms on one machine).
+uint16_t lan_port();
+
+// The colour a team colour slot is drawn in (the chat and message text colours of the original's TeamColors, ARGB).
+uint32_t seat_text_color(int color);
 
 // Test hook for the lobby screenshots: guests that join 127.0.0.1:port from threads of this process, say a line each and get ready.
 void spawn_demo_guests(uint16_t port, const std::vector<std::string>& names, const std::vector<std::string>& lines, int ready_mask);
@@ -151,11 +241,31 @@ public:
 	std::string last_save() const { return last_save_; }
 	bool paused() const { return session_ ? session_->paused() : false; }
 	int speed() const { return session_ ? session_->speed() : 2; }
-	int slot() const { return room_->slot(); }
-	int humans() const { return humans_; }
+	int slot() const { return slot_; }                     // the game slot (the Session's numbering)
+	int humans() const { return humans_; }                 // players with a seat (observers not counted)
 	uint32_t epoch() const { return session_ ? session_->epoch() : 0; }
 	bool recovering() const { return session_ && session_->recovering(); }
 	bool left() const { return left_; }                    // this player resigned / was dropped: the game goes on without it
+	// The seat plan START fixed: this machine's game slot (the Session's slot; for a room whose order differs from the seat order it is not the
+	// connection number), its leader, whether it only watches.
+	const net::SeatPlan& plan() const { return plan_; }
+	bool observer() const { return plan_.slot_of[size_t(room_->slot() & 7)] >= plan_.nations; }
+	int who() const { return observer() ? who_[0] : who_[size_t(slot_ & 7)]; }   // observers: the leader they watch from (the first seat's)
+	int who_of(int slot) const { return who_[size_t(slot & 7)]; }
+	void set_who(const std::array<int, 8>& w);
+	void set_recover(bool on) { recover_ = on; }            // out-of-sync repair from a snapshot (off for a Conquer the World battle: its Game cannot be rebuilt from a save)              // a scenario game: game slot k plays leader w[k] (default: k)
+	// Makes the Game a multiplayer game: names, handicaps, the multiplayer flag (net::apply_mp_seats with the room's table). Every machine calls
+	// this on its fresh Game before attach() (a game continued from a save already carries them).
+	void prepare_game(sim::Game& g);
+	// An observer's chat (no package carries it): out of band to everybody. Players use the CHAT verb through the CommandSink.
+	void say(const std::string& text);
+	// A player's chat line as a CHAT command (the HUD's chat box does the same through the CommandSink): to everybody, or to this player and its allies.
+	void chat(const std::string& text, bool team_only);
+	// CHAT_SET: this player hears / ignores the broadcast chat of a leader. chat_muted answers for any (listener, speaker) pair as the
+	// executed CHAT_SET packages left the table (identical on every machine).
+	void set_chat_mute(int speaker_who, bool mute);
+	bool chat_muted(int listener_who, int speaker_who) const { return mute_[size_t(listener_who & 7)][size_t(speaker_who & 7)] != 0; }
+	std::string who_name(int who) const;                    // the lobby name of the player who plays that leader ("" for a computer)
 
 	// What the player is told: pause, speed, resign, drop and desync messages with their time, newest last.
 	void note(const std::string& text, uint32_t color = 0xFFFFFFFF);
@@ -186,6 +296,11 @@ private:
 	void close_recording();
 
 	std::shared_ptr<Room> room_;
+	net::SeatPlan plan_;
+	int slot_ = 0;
+	std::array<int, 8> who_{{0, 1, 2, 3, 4, 5, 6, 7}};
+	std::array<std::array<uint8_t, 8>, 8> mute_{};   // [listener leader][speaker leader] != 0: the listener ignores the speaker's broadcast chat
+	std::unique_ptr<net::SeatTransport> seat_tr_;
 	std::function<sim::Game&()> game_;
 	std::unique_ptr<net::GameHooks> hooks_;
 	std::unique_ptr<net::Session> session_;
@@ -193,7 +308,7 @@ private:
 	std::string scenario_, error_;
 	uint32_t seed_ = 0;
 	int humans_ = 1, speed0_ = 2;
-	bool started_ = false, barrier_sent_ = false, left_ = false, bot_ = false;
+	bool started_ = false, barrier_sent_ = false, left_ = false, bot_ = false, recover_ = true;
 	int32_t diverge_frame_ = -1;
 	bool diverged_ = false;
 	uint32_t bot_fed_ = 0, bot_epoch_ = 0;

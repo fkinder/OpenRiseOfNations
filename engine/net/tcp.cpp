@@ -114,7 +114,27 @@ std::unique_ptr<TcpTransport> TcpTransport::host_open(uint16_t port, std::string
 		return nullptr;
 	}
 	set_nonblocking(t->listen_fd_);
+	t->port_ = port;
 	return t;
+}
+
+void TcpTransport::reopen_door() {
+	if (me_ != 0 || listen_fd_ >= 0 || port_ == 0) return;
+	listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+	if (listen_fd_ < 0) return;
+	int one = 1;
+	setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+	sockaddr_in a{};
+	a.sin_family = AF_INET;
+	a.sin_addr.s_addr = htonl(INADDR_ANY);
+	a.sin_port = htons(port_);
+	if (bind(listen_fd_, reinterpret_cast<sockaddr*>(&a), sizeof a) != 0 || listen(listen_fd_, 8) != 0) {
+		close(listen_fd_);
+		listen_fd_ = -1;
+		return;
+	}
+	set_nonblocking(listen_fd_);
+	open_ = true;
 }
 
 uint32_t TcpTransport::present_mask() const {
@@ -133,6 +153,18 @@ void TcpTransport::close_door() {
 	open_ = false;
 	if (listen_fd_ >= 0) close(listen_fd_);
 	listen_fd_ = -1;
+}
+
+void TcpTransport::disconnect(int slot) {
+	if (me_ != 0) return;
+	for (Conn& c : conns_)
+		if (c.alive && c.slot == slot) {
+			flush_conn(c);
+			if (!c.alive) return;
+			shutdown(c.fd, SHUT_WR);   // what was queued (a KICK) still reaches the peer
+			lost(c);
+			return;
+		}
 }
 
 void TcpTransport::accept_new() {

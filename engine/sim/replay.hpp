@@ -30,7 +30,7 @@ constexpr int kReplayVerbCount = 82;  // opcodes 0..81
 namespace op {
 constexpr uint8_t kGroup = 0, kMoveTo = 7, kCheckSums = 57, kChat = 68, kResign = 70, kQuit = 71, kCamera = 72, kLeaderOptions = 73,
                   kTurnData = 74, kPause = 76, kCannonTime = 77, kPlayerSpeed = 79, kUngracefulDrop = 80, kSplineVerb = 51,
-                  kSpeedSet = 52, kSpeedUp = 53, kSpeedDown = 54, kHotkey = 34, kCheatViewAll = 59;
+                  kSpeedSet = 52, kSpeedUp = 53, kSpeedDown = 54, kHotkey = 34, kCheatViewAll = 59, kChatSet = 69;
 }  // namespace op
 
 // "MOVE_TO"; nullptr for an opcode above 81.
@@ -183,6 +183,13 @@ void wire_camera(std::vector<uint8_t>& out, uint8_t zoom, int32_t x, int32_t y);
 void wire_pause(std::vector<uint8_t>& out, uint8_t state);
 void wire_resign(std::vector<uint8_t>& out, int32_t play);
 void wire_drop(std::vector<uint8_t>& out, uint8_t play, uint8_t option);
+// CHAT_SET (69, 9 bytes: u8 status[8]): the sender's chat filter. CommandPackage::process_chat_set stores the 8 bytes in the sender's leader
+// (LeaderData +0x54 + 4 i); CommandPackage::process_chat then delivers a chat to everybody (bits == -1) to a leader L only when
+// L.status[sender] == 0, so status[i] != 0 means "the sender does not want to hear leader i's broadcast chat" (a recipient mask in the CHAT
+// ignores it, so team and whispered lines always arrive). The engine's Command has no field for it: the layer carries it as raw bytes and the
+// application keeps the table (apps/map-mac/lobby.mm).
+void wire_chat_set(std::vector<uint8_t>& out, const std::array<uint8_t, 8>& status);
+bool parse_chat_set(const uint8_t* cmd, size_t len, std::array<uint8_t, 8>& status);
 
 // The reader's package decode: a payload as recorded (obfuscated when `multiplayer`) -> `plain` (de-XORed, padding still in place) and its commands. False when it does not
 // parse to the last byte.

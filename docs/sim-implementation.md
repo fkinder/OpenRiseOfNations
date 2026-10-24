@@ -1207,6 +1207,10 @@ the DataWalk check sums.
 - **Lobby and session in `ronmap`** (`apps/map-mac/lobby.{h,mm}`, `frontend.mm`; ui-port.md §10.3). `mp::Room` (TCP lobby mode, names, ready flags, chat, table for late joiners), `mp::Runtime` (`Session` +
   `GameHooks` over the renderer's `Game`), `mp::CommandSink` (the local `CommandManager` hands its queue to the session through an explicit instantiation of its private member instead of executing it), pause / speed /
   resign / save as lockstep commands, a synchronized save (`Session::request_save`, `kSaveAt`) and a saved game continued by re-joining peers (`Lobby::send_file`).
+- **Third pass** (multiplayer-spec §8.6). `net/lobby.*` gained the seat rules (`SeatPlan`: players in joining order, computer seats, observers above the nations; guests' requests for nation / team / colour / handicap / watching with the host's rules and approval; kick; countdown; team and
+  private chat; names), `net/seat_transport.*` maps machines to game slots under the unchanged `Session`, `net/discovery.*` is the LAN browser's UDP announcements, `apply_mp_seats` makes a Game a multiplayer game (`Game::multiplayer`, lobby names, handicaps), scenario games and Conquer the World
+  battles are played by a room (`mp::ctw_*`). Engine-side finding: a CHAT with a recipient mask desynchronised the machines outside the mask (the presentation event is saved state); `GameHooks::execute` queues it identically everywhere and the application filters at display time.
+  `build-mac.sh` passes `-ffp-contract=off` (digests of all 156 stock scenarios, the 105 `ron-sav --engine-roundtrip` runs and the corpus replays are unchanged by it).
 - **Engine binding** (`net/game_link.hpp`). `GameHooks(Game&, seat_who, ChecksumMode, ExecPolicy)`: commands run through `CommandPackage::process(g, cmd, play, who)` (the group state resets per package); `ChecksumMode::Original`
   = the 15 DataWalk parts of a game loaded from an original save (`EngineProvider`), `Native` = the CRC-32s of the sections of the engine's own save (any game, e.g. a random game); `ExecPolicy::sav_compatible()` leaves out the
   aircraft verbs `ron-sav` does not feed, `all_engine()` also runs RESIGN / QUIT / drops on the leaders (`leader_defeat`, `kHuman` cleared for an AI takeover).
@@ -1219,11 +1223,12 @@ ron-net timing <file.rcx|dir> [--delay a,b]           turn clock only: Session o
 ron-net replay <file.rcx> [--game DIR] [--frames N] [--delay a,b] [--observers K] [--all-verbs] [--no-art] [--verbose]
                                                       engine instances in lockstep, one per human, each fed its own player's packages; prints the lines of ron-sav --replay and
                                                       "lockstep: ... the instances agree on all 15 parts at every turn" + "final state ... identical" (exit 1 if not)
-ron-net selftest [--seed N] [--trials K]              toy simulation: agreement, stall, duplicate / gap, pause, speed, resign, drops x 4 options, desync + threshold, delay independence
+ron-net selftest [--seed N] [--trials K]              toy simulation: agreement, stall, duplicate / gap, pause, speed, resign, drops x 4 options, desync + threshold, delay independence; the lobby's seat rules, the seat transport, a room over TCP,
+                                                      LAN discovery, CHAT_SET; engine instances with an observer / handicaps / chat, scenario games
 ron-net host <port> --random STYLE,SIZE,SEED,NATIONS | --scenario FILE [--seed S]  [--humans N] [--frames N] [--save F] [--recover] [--record F] [--diverge-at FRAME]
 ron-net join <port> [--address A] [--frames N] [--save F] [--recover] [--record F] [--diverge-at FRAME]
                                                       a LAN game of N processes (127.0.0.1 by default); a bot plays each seat; the saves must be byte-identical
-ron-net loopback --random STYLE,SIZE,SEED,NATIONS [--humans N] [--frames F] [--recover] [--diverge FRAME:PEER]... [--record BASE] [--save F] [--delay a,b]
+ron-net loopback (--random STYLE,SIZE,SEED,NATIONS | --scenario FILE) [--humans N] [--observers K] [--handicap a,b,c] [--chat-test] [--frames F] [--recover] [--diverge FRAME:PEER]... [--record BASE] [--save F] [--delay a,b]
                                                       N engine instances of one game in this process (loopback transport); the recovery and the recording without sockets
 ron-net replay <file.rcx> [--save F]                  also replays recordings of this port (embedded native save, or the random game of the header) and writes the final native save
 ronmap --host PORT --humans N --random ... [--frames N --snapshot f --save-game f] | --join HOST:PORT [...]     (also --mp-bot --mp-record F --mp-diverge FRAME --mp-act what@TURN --mp-save F --mp-load F)
@@ -1231,12 +1236,12 @@ ronmap --host PORT --humans N --random ... [--frames N --snapshot f --save-game 
 
 Results (this session): `ron-net timing` on the 59 multiplayer replays: 172,276 packages, 86,144 turns, 0 frame differences. `ron-net replay` on the 45 replays with an embedded save: instances agree 45 / 45 (15,334
 turns, delivery delays 0..3 and 0..25 ms), final states identical 45 / 45, the fidelity lines `diff`-equal to `ron-sav --replay` for 45 / 45 (still 0 turns with all 15 parts equal: the engine's fidelity work is the other task).
-`ron-net selftest` 38 / 38 (seeds 1..12, 30 drop trials per option; recovery: 7 cases, repeated, authority deaths; the engine part: a divergence repaired in two instances, recording chain, replay of the recordings
+`ron-net selftest` 91 / 91 with the third pass (38 before; seeds 1..12, 30 drop trials per option; recovery: 7 cases, repeated, authority deaths; the engine part: a divergence repaired in two instances, recording chain, replay of the recordings
 byte for byte). LAN: 2 processes 600 frames, 3 processes 1500 frames, scenario, and a `kill -9` of one of three processes (20,000 frames): saves identical; 3 processes with one corrupted at frame 150: majority vote,
 recovered, identical saves; `ronmap` 2 and 3 processes (`--host` / `--join`): identical saves, recordings replay to them, recovery, synchronized save and continuation of a saved game.
 
 Not done: the x86-64 / arm64 soak, the 14 corpus replays that start without an embedded save (only the turn clock covers them; recordings *of this port* without a save replay: the random setup is in the header),
-diplomacy / team reset of the DIPLOMACY and SURVIVAL drops in the engine, saved games other than random maps. (Chat in a running game, the speed / pause / control-group verbs and the other console verbs became engine commands in the second orders pass: see "Orders and commands, second pass".) Build note: `build-mac.sh` has no `-ffp-contract=off` (multiplayer-spec §8.3).
+diplomacy / team reset of the DIPLOMACY and SURVIVAL drops in the engine, saved games other than random maps. (Chat in a running game, the speed / pause / control-group verbs and the other console verbs became engine commands in the second orders pass: see "Orders and commands, second pass".) Build note: `build-mac.sh` passes `-ffp-contract=off` since the multiplayer third pass (multiplayer-spec §8.6.8).
 
 
 ## Conquer the World (docs/ctw-spec.md; engine/sim/ctw*.cpp, script_funcs_ctw.cpp; 2026-10-24)
@@ -1516,3 +1521,22 @@ segment), `Farms::inc_time` (decompile identical), `Guy::set_anim` (three draw s
 flag 4), think_fish (AI-controlled boats only), caravan roads (one-shot probe: +4.2k draws in segment 1, 0 in segment 2).
 **Checks** (scratch build with the build-mac.sh flags, zero warnings): `ron-check` 0 failures; `sim-all 600 --ai-every 8` 156/156 self-check OK, `--roundtrip 200` 156/156; `ron-sav --engine-roundtrip` 69/69 PASS;
 `ron-net selftest` 38/38 and `ron-net replay` on `21'57'16`: the two instances agree.
+
+### Fidelity log, fifth pass (2026-10-24, `units` at boundary 8, the walker, Object defaults; docs/original-save.md 6.5)
+
+20. **`Stack<PathData>` allocation** (`Unit.path_size` / `path_inc`; `pathfinder.cpp` `emit_path`, `objects.cpp` `unit_init`, `original_map_objects.cpp` path map): `Stack<PathData>::init` @46d720 /
+`push` @46d820 / `increase_size` @46e8c0, `Unit::init` @612100 (`if (size < 10)` init). A search whose emission exceeds 10 entries leaves a 20-big stack after the straightening; the engine
+emitted `max(recorded, length)`. Fixes `units` at boundary 8 of `21'23'34`. `Unit` grows by 8 bytes (`save_walk.inc` guard; not saved natively).
+21. **The checksum walker lost the objects the engine created** (`datawalk.cpp` `each_object`, `Provider::hold_containers`, `EngineProvider`): each element is a top-level walk and `begin_walk()` dropped
+the engine-owned object list, so only the first created object of a list (and none after) was in `units` / `guys` / `builds`. `guys` / `builds` 200 -> 308 / 338 on `21'23'34`, `21'57'16` builds 25,571 -> 25,601.
+`each_element` (items / goods) keeps the old behaviour: re-asking the base provider there changes the presence of the recorded items.
+22. **`Object::init` @647750**: `inside_down_who = who` for units (`unit_init`); a never-used slot has `up_who` = 0xff (`Object::up_who` default; `add_to_world` @64d8c0 does not write it).
+23. **Stance in `Unit::init` / `Build::init`**: the options switch (`opt_buildings` / `opt_peasants` / the option bits) instead of the never-loaded `combat_stance` / `worker_stance`;
+`set_auto_peasant_level` writes `opt_peasants`. **Digests**: 8 of the 156 `sim-all 600 --ai-every 8` digests change (casters / packers now start with `~(options >> 4) & 1` / `~(options >> 3) & 1`
+instead of 0): ColdWar `alaska`, `central`, `hostages`, `mexico`, `poland`, `poland_cz`, `poland_hun` and `Custom/skirmish/skirmish.scx`. Self-check 156/156, `--roundtrip` 156/156 unchanged.
+24. **Mapped members**: `Object +0x41 launch_frames` (`Object::launch_timer`) and `Guy +0x44..+0x50 bank / last_bank / pitch / last_pitch` (loaded and emitted; `22'23'40` and `22'52'08` differed in exactly this byte
+at their first boundary). Not mapped: `Object +0x44 launching` (`launch_list`), `Guy +0x40 turret_inc`.
+**Open** (docs/original-save.md 6.5): one missing `game_random` draw in frames 293 - 295 of `21'23'34` (units / guys / world at 308), `City.land` / `City.filled` -1 at the frame-200 strategy pass, then the unit
+drift and the idle citizens of the engine's economy.
+**Checks** (scratch build with the build-mac.sh flags, zero warnings in a clean full build): `ron-check` 0 failures; `sim-all 600 --ai-every 8` 156/156 self-check OK, `--roundtrip 200` 156/156; `ron-sav --engine-roundtrip` 69/69 PASS;
+`ron-net selftest` 86/86 and `ron-net replay` on `21'57'16`: the two instances agree.

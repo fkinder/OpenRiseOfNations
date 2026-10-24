@@ -67,6 +67,11 @@ struct Option {
 	// the trend arrow (Game::delta_flux of the good: -1 falling, 0 steady, 1 rising). price < 0: an ordinary option.
 	int price = -1, trend = 0, good = -1;
 	std::string label;  // a text button's caption (ejected units, the "Sell:" / "Buy:" row heads)
+	// STANCE / FORM buttons (IFaceButton::setup_button EXPLICIT): the icon is the `variant`-th piece of the IFACEBUTTONCLASS list
+	// `variant_list` ("combat", "worker", "caster", "packer", "form"); `orange` marks a mixed / switched-on state (ORANGE tint).
+	std::string variant_list;
+	int variant = -1;
+	bool orange = false;
 };
 
 struct Blip {
@@ -135,6 +140,10 @@ struct Library {
 	bool active = false;
 	LibCell age[7];
 	LibCell tech[4][7];  // [line][level]
+	// The final-techs ("jeopardy") view (IFaceLibrary::on_redraw: has_preq(BASE_FINALTYPES) and no rules / flag veto): four
+	// 74 x 157 buttons for the final techs 579 + line, replacing the grid.
+	bool final_view = false;
+	LibCell fin[4];
 };
 
 // A group of garrisoned units (IFaceGarrison): the units of one type and owner inside the selected building / carrier.
@@ -145,6 +154,25 @@ struct GarrisonUnit {
 	int tex_col = 0, tex_row = 0, tex_x = -1, tex_y = -1;
 	uint8_t rgb[3] = {255, 255, 255};  // the owner's team colour
 	bool own = false;                  // owned by the viewer (clickable)
+};
+// IFaceAirGarrison (ui-spec 6.3, re/decomp/ui_air): the aircraft inside the selected airbase / carrier by family (fighters,
+// bombers, helicopters) and state (ready = full fuel, fuelling), with the count and the mean fuel of the cell.
+struct Icon {  // a command-card / unit icon cell (tex_x / tex_y >= 0: the explicit position)
+	std::string tex_id;
+	int col = 0, row = 0, x = -1, y = -1;
+};
+struct AirCell {
+	int count = 0, fuel = 100;  // fuel: mean percent of the planes in the cell
+	std::vector<int32_t> objs;  // their object slots
+};
+struct AirGarrison {
+	bool active = false;
+	int32_t who = -1, o = -1;  // the container
+	bool own = false;          // the buttons are enabled only for the viewer's own container
+	bool helis = false;        // helicopters inside (the small layout shows one row)
+	bool carrier = false;      // a carrier (fighter-bombers) rather than an airbase (biplane line)
+	AirCell cell[3][2];        // [family: fighters, bombers, helicopters][0 ready, 1 fuelling]
+	Icon icon[3];              // the families' unit icons (the leader's current upgrade of each line)
 };
 struct Garrison {
 	bool active = false;
@@ -200,6 +228,7 @@ struct State {
 	std::vector<Rare> rares;
 	Library library;
 	Garrison garrison;
+	AirGarrison air;
 	std::vector<ProgressItem> progress;  // own productions (the buttons show with set_progress_buttons)
 	std::string card_message;            // IFaceMarket's text over the card rows (a Market that cannot trade yet)
 	std::string speed_name;              // the clock's game speed word ("Normal"), localised
@@ -210,7 +239,8 @@ struct State {
 // What the mouse is over, for the mouse-over help (MouseOver: option, spots, buttons).
 enum class HoverKind { None, Option, SelObject, SelQueue, SelStat, SelHitPoints, Good, CommerceCap, PopCap, CityCap, MarketBuy,
 	                   MarketSell, ToggleMarket, ToggleResources, ToggleInfra, Infra, Caption, BarButton, MinimapButton, Display,
-	                   MiniLibCat, MiniLibToggle, Timer, Clock, Minimap, Rare, LibraryCell, Garrison, Progress };
+	                   MiniLibCat, MiniLibToggle, Timer, Clock, Minimap, Rare, LibraryCell, Garrison, Progress, AirButton, AirHeader, TypeGroup,
+	                   LibraryCat, LibraryFinal };
 struct Hover {
 	HoverKind kind = HoverKind::None;
 	int a = -1, b = -1;       // Option: option, object. Good / Market / Infra: the good. BarButton: its index. SelStat: 0 attack 1 armor 2 range.
@@ -220,12 +250,14 @@ struct Hover {
 };
 
 enum class ActionKind { None, Option, MinimapLook, MinimapOrder, SelectIndex, QueueItem, Consumed, Buy, Sell, BarButton, MinimapButton, MiniLib,
-	                        Library, GarrisonEject, Progress };
+	                        Library, GarrisonEject, Progress, AirSelect, SelectType, Infinite };
 struct Action {
 	ActionKind kind = ActionKind::None;
 	int option = -1, object = -1, index = -1;
 	float wx = 0, wy = 0;
 	bool all = false;  // GarrisonEject: a right click ejects every unit of the type
+	// AirSelect: index = the family row (0 fighters, 1 bombers, 2 helicopters, -1 all); SelectType: object = the TypeIndex of a
+	// grouped selection button (State::selection entries of that type).
 };
 
 class Hud {
@@ -253,6 +285,16 @@ public:
 	void set_progress_buttons(bool on) { progress_buttons_ = on; }
 	// Columns of rare goods drawn (draw_special_resources: a column of 8): MessageWin shifts right by 50 px per column.
 	int rare_columns() const { return rare_cols_; }
+	// "Advanced Menu" (profile pref bit 0x2, OPTION_TOGGLE_ADVANCED): the card also offers stances, formations, patrol, guard,
+	// disband, bombard / air-patrol (UnitOut::make_options "A" rows). "Group by type" (pref 0x20000): an overflowing selection
+	// shows one counted button per type.
+	bool advanced() const { return advanced_; }
+	void set_advanced(bool on) { advanced_ = on; }
+	// "Prefer Military" (a box that holds soldiers and civilians takes the soldiers; Ctrl flips it): profile preference.
+	bool prefer_military() const { return prefer_military_; }
+	void set_prefer_military(bool on) { prefer_military_ = on; }
+	bool group_by_type() const { return group_by_type_; }
+	void set_group_by_type(bool on) { group_by_type_ = on; }
 	bool minilib_open() const { return minilib_open_; }
 	void toggle_minilib() { minilib_open_ = !minilib_open_; }
 	// Where MessageWin's feedback / instructions line sits: top 45, or 100 with the mini library expanded.
@@ -311,6 +353,27 @@ private:
 	void draw_progress(ron::metal::UiRenderer& ui, const State& s);
 	void draw_library(ron::metal::UiRenderer& ui, const State& s);
 	void draw_garrison(ron::metal::UiRenderer& ui, const State& s);
+	void draw_air_garrison(ron::metal::UiRenderer& ui, const State& s);
+	void draw_library_final(ron::metal::UiRenderer& ui, const State& s);
+	// The air panel's cells: a rect per (family, column) and the header spots, resolved against the window (air_layout).
+	struct AirLayout {
+		bool small = false;
+		ron::IfaceRect win, head[2], cell[3][2];
+		int rows = 3;
+	};
+	AirLayout air_layout(const State& s) const;
+	int air_cell_at(int x, int y, const State& s, int* col = nullptr) const;
+	int air_header_at(int x, int y, const State& s) const;
+	int final_button_at(int x, int y, const State& s) const;
+	int cat_button_at(int x, int y, int* which) const;
+	// The selection panel's buttons: index into State::selection, or (grouped) a type; see multi_layout.
+	struct MultiButton {
+		ron::IfaceRect r;
+		int index = -1;  // the selection entry (individual buttons), -1 for a type group
+		int type = -1, count = 1;
+		bool building = false;
+	};
+	std::vector<MultiButton> multi_layout(const State& s, bool* small = nullptr) const;
 	void draw_chat(ron::metal::UiRenderer& ui, const State& s);
 	void draw_market_button(ron::metal::UiRenderer& ui, const Option& o, const ron::IfaceRect& r, int factor);
 	ron::IfaceRect garrison_rect() const;
@@ -325,7 +388,9 @@ private:
 	void vdivider(ron::metal::UiRenderer& ui, int x, int y, int h, bool thick);
 	int card_slot_at(int x, int y) const;
 	int multi_index_at(int x, int y, const State& s) const;
+	int multi_type_at(int x, int y, const State& s) const;
 	int queue_index_at(int x, int y, const State& s) const;
+	bool infinite_hit(int x, int y, const State& s) const;  // the selection panel's INFINITE toggle (OPTION_INFINITE)
 
 	const ron::IfaceLayout* layout_ = nullptr;
 	const ron::XmlElement *base_el_ = nullptr, *res_el_ = nullptr, *sel_el_ = nullptr, *opt_el_ = nullptr, *mini_el_ = nullptr,
@@ -345,7 +410,7 @@ private:
 	ron::IfaceRect minilib_win_, toggle_rects_[4], minilib_buttons_[5], market_buttons_[2][4], infra_cells_[6];  // screen rects (set by draw)
 	const ron::XmlElement* ml_el_ = nullptr;
 	int pressed_market_ = -1;
-	bool progress_buttons_ = false, icons_aliased_ = false;
+	bool progress_buttons_ = false, icons_aliased_ = false, advanced_ = false, group_by_type_ = true, prefer_military_ = true;
 	int rare_cols_ = 0, timers_bottom_ = 45;
 	struct RareIcon {
 		std::string tex_id;

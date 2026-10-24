@@ -30,7 +30,7 @@ namespace ron::net {
 
 struct RecordSeat {
 	bool present = false, human = false, local = false;
-	int tribe = 0, who = 0, team = -1, diff = 2;
+	int tribe = 0, who = 0, team = -1, diff = 2, handicap = 0;
 	std::string name;
 };
 

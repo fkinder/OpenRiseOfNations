@@ -8,15 +8,21 @@
 #include <functional>
 #include <memory>
 #include <set>
+#include <thread>
 #include <string>
 
 #include <unistd.h>
 
 #include <filesystem>
+#include <chrono>
 #include <fstream>
 #include <iterator>
 
 #include "commands.hpp"
+#include "net/discovery.hpp"
+#include "net/lobby.hpp"
+#include "net/seat_transport.hpp"
+#include "net/tcp.hpp"
 #include "common.hpp"
 #include "loopback.hpp"
 #include "sim/replay.hpp"
@@ -605,6 +611,35 @@ void test_engine(Tally& t, const std::string& dir, uint32_t seed) {
 		}
 		t.check(r.ok && r.recoveries == 0 && r.epoch == 0 && replay_ok, "engine, 3 instances, no divergence: no recovery, and the recording of one instance (random game from the header) replays to the final native save", r.ok ? "frame " + std::to_string(r.frame) : r.text);
 	}
+	// 3. the lobby's rules in a running game (docs/multiplayer-spec.md 8.6): two players and an observer, handicaps, chat to everybody and to a team
+	{
+		LoopbackOptions o;
+		o.game_dir = dir;
+		o.random_spec = "16,0," + std::to_string(seed + 2) + ",3";
+		o.humans = 3;   // three seats: the third is outside the team mask of the chat test
+		o.observers = 1;
+		o.handicaps = {0, 5, 0};
+		o.chat_test = true;
+		o.frames = 240;
+		o.dhi = 4;
+		const LoopbackResult r = run_loopback(o);
+		t.check(r.ok && r.identical && r.fnv.size() == 4, "engine, 3 players + 1 observer (game slot above the nations): all four instances end in identical native saves", r.ok ? "frame " + std::to_string(r.frame) : r.text);
+		t.check(r.handicap_seen == 5, "handicap: the seat's lobby handicap is in the game state (Leader::handicap), the game is a multiplayer game", "leader 1 handicap " + std::to_string(r.handicap_seen));
+		t.check(r.chat_report == "ok", "chat: a line to everybody and a line to a recipient mask (seats 0 and 1, the third seat outside it) leave every instance in the same state: no out-of-sync, the mask is kept for the display filter", r.chat_report);
+	}
+	// 4. scenario games: the scenario's players are the seats (the human-flagged ones first), Game::load on every peer with the same seed
+	for (int variant = 0; variant < 2; ++variant) {
+		LoopbackOptions o;
+		o.game_dir = dir;
+		o.scenario = variant ? "scenario/Tutorial1/tut1.scx" : "scenario/Custom/italy_mp/italy_mp.scx";
+		o.humans = 2;
+		o.observers = variant;   // italy_mp uses all eight seats: nobody can watch; the tutorial has room for one observer
+		o.frames = 200;
+		o.dhi = 3;
+		const LoopbackResult r = run_loopback(o);
+		t.check(r.ok && r.identical && int(r.fnv.size()) == 2 + variant,
+		        std::string("engine, scenario game (") + (variant ? "Tutorial 1, 2 players + 1 observer" : "italy_mp, 8 seats, 2 players") + "): identical native saves", r.ok ? "frame " + std::to_string(r.frame) : r.text);
+	}
 	fs::remove_all(tmp, ec);
 }
 
@@ -618,6 +653,410 @@ void test_no_wallclock(Tally& t, uint32_t seed) {
 		states.push_back(mix(mix(c.nodes[0].bis[149].sums[0], c.nodes[0].bis[149].sums[7]), c.nodes[0].bis[149].sums[15]));
 	}
 	t.check(states[0] == states[1] && states[1] == states[2], "determinism: the delivery delay changes when turns run, never what they compute");
+}
+
+
+// ---------------------------------------------------------------- the lobby rules (multiplayer-spec 8.6)
+
+// N lobbies over the loopback transport: machine 0 is the host.
+struct Room {
+	explicit Room(int n) : hub(n, 1, 0, 0) {
+		for (int i = 0; i < n; ++i) lobby.push_back(std::make_unique<net::Lobby>(hub.endpoint(i)));
+	}
+	void pump(int rounds = 30) {
+		for (int r = 0; r < rounds; ++r) {
+			for (auto& l : lobby) l->poll();
+			hub.advance(1);
+		}
+	}
+	net::LoopbackHub hub;
+	std::vector<std::unique_ptr<net::Lobby>> lobby;
+	net::Lobby& host() { return *lobby[0]; }
+	net::Lobby& at(int i) { return *lobby[size_t(i)]; }
+	int reply(int i, net::SeatField f, int v) {  // a request from machine i and the host's answer code
+		net::Lobby::Reply r;
+		while (at(i).take_reply(r)) {}
+		at(i).request(f, v);
+		pump();
+		return at(i).take_reply(r) ? r.code : -1;
+	}
+};
+
+void test_lobby_rules(Tally& t) {
+	// -- the seat plan: players in connection order, observers above the nations
+	{
+		const net::SeatPlan p = net::make_seat_plan(0b1111, 0b0010, 3, false);
+		const bool ok = p.players == 3 && p.observers == 1 && p.nations == 3 && p.peer_of[0] == 0 && p.peer_of[1] == 2 && p.peer_of[2] == 3 && p.peer_of[3] == 1 && p.slot_of[1] == 3 &&
+		                p.slot_of[2] == 1 && !p.overflow && p.human_mask() == 0b0111;
+		t.check(ok, "seats: players take the seats in connection order, the observer sits above the nations (4 machines, machine 1 watches)");
+		const net::SeatPlan q = net::make_seat_plan(0b1011, 0, 2, true);   // a saved game: players keep their numbers
+		t.check(q.nations == 4 && q.peer_of[3] == 3 && q.peer_of[2] == -1 && q.slot_of[1] == 1, "seats: a saved game's players keep the seats they connected in");
+		const net::SeatPlan o = net::make_seat_plan(0xff, 0b11110000, 5, false);
+		t.check(o.overflow && o.nations == 5, "seats: observers that do not fit above the nations are reported");
+		std::array<int, 8> forced;
+		forced.fill(-1);
+		forced[0] = 1, forced[1] = 0;
+		const net::SeatPlan f = net::make_seat_plan(0b11, 0, 2, false, &forced);
+		t.check(f.peer_of[1] == 0 && f.peer_of[0] == 1, "seats: a battle can seat a player on a given side");
+	}
+	// -- guests' requests
+	Room room(4);
+	net::Lobby& h = room.host();
+	h.set("num_nations", 4);
+	for (int i = 0; i < 4; ++i) h.set("tribe_" + std::to_string(i), -1), h.set("team_" + std::to_string(i), -1), h.set("color_" + std::to_string(i), -1);
+	h.set("max_observers", 1);
+	room.pump();
+	for (int i = 1; i < 4; ++i) room.at(i).set_name(i == 2 ? "Ayla" : "Marcus");   // two guests with the same name
+	h.set_name("Host");
+	room.pump();
+	t.check(h.get("name_1") == "Marcus" && h.get("name_3") != "Marcus" && !h.get("name_3").empty(), "names: a second player of the same name gets a different one", h.get("name_1") + " / " + h.get("name_3"));
+	t.check(room.reply(1, net::SeatField::Tribe, 5) == net::kAccepted && h.get_int("tribe_1") == 5 && room.at(2).get_int("tribe_1") == 5, "request: a free nation is granted at once and every machine sees it");
+	net::SeatRequest rq;
+	t.check(h.take_request(rq) && rq.seat == 1 && rq.field == net::SeatField::Tribe && rq.value == 5 && !rq.pending, "request: the host's application is told which seat changed");
+	t.check(room.reply(2, net::SeatField::Tribe, 5) == net::kTaken && h.get_int("tribe_2") == -1, "request: a nation another seat holds is refused");
+	t.check(room.reply(2, net::SeatField::Tribe, 99) == net::kInvalid, "request: a nation that does not exist is refused");
+	t.check(room.reply(2, net::SeatField::Color, 5) == net::kAccepted && room.reply(3, net::SeatField::Color, 5) == net::kTaken && room.reply(3, net::SeatField::Color, 6) == net::kAccepted,
+	        "request: a colour is unique among the seats");
+	t.check(room.reply(1, net::SeatField::Color, 0) == net::kTaken && room.reply(1, net::SeatField::Color, 6) == net::kTaken && room.reply(1, net::SeatField::Color, 9) == net::kInvalid,
+	        "request: the colour a seat has by default (its number) counts as taken");
+	t.check(room.reply(1, net::SeatField::Team, 1) == net::kAccepted && h.get_int("team_1") == 1 && room.reply(1, net::SeatField::Team, 7) == net::kInvalid, "request: teams 1-4 or none");
+	t.check(room.reply(3, net::SeatField::Handicap, 4) == net::kAccepted && h.get_int("handicap_3") == 4 && room.reply(3, net::SeatField::Handicap, 99) == net::kInvalid, "request: handicap within the rules' list");
+	// -- the host decides
+	h.set_approval(net::Lobby::Approval::Ask);
+	while (h.take_request(rq)) {}
+	room.at(1).request(net::SeatField::Tribe, 8);
+	room.pump();
+	bool pend = h.pending().size() == 1 && h.get_int("tribe_1") == 5;
+	const uint32_t id = pend ? h.pending().front().id : 0;
+	h.answer(id, false);
+	room.pump();
+	net::Lobby::Reply rep;
+	bool denied = false;
+	while (room.at(1).take_reply(rep)) denied = denied || rep.code == net::kDenied;
+	t.check(pend && denied && h.get_int("tribe_1") == 5 && h.pending().empty(), "approval: a request waits for the host; refused, the table is unchanged and the guest is told");
+	room.at(1).request(net::SeatField::Tribe, 8);
+	room.pump();
+	h.answer(h.pending().empty() ? 0 : h.pending().front().id, true);
+	room.pump();
+	bool applied = false;
+	while (h.take_request(rq)) applied = applied || (!rq.pending && rq.value == 8 && rq.seat == 1);
+	t.check(h.get_int("tribe_1") == 8 && applied && room.at(3).get_int("tribe_1") == 8, "approval: allowed, the table changes and the application is told");
+	h.set_approval(net::Lobby::Approval::Auto);
+	// -- observers
+	t.check(room.reply(2, net::SeatField::Observer, 1) == net::kAccepted && h.observer_of(2), "observers: a guest may ask to watch within the host's limit");
+	t.check(room.reply(3, net::SeatField::Observer, 1) == net::kNoRoom, "observers: the host's maximum (1) is respected");
+	{
+		const net::SeatPlan p = h.plan();
+		t.check(p.players == 3 && p.observers == 1 && p.slot_of[2] >= p.nations && p.slot_of[1] == 1 && p.slot_of[3] == 2, "observers: the plan moves the watcher above the nations and closes the gap");
+	}
+	t.check(room.reply(2, net::SeatField::Tribe, 1) == net::kInvalid, "observers: a watcher has no seat to change");
+	t.check(room.reply(2, net::SeatField::Observer, 0) == net::kAccepted && !h.observer_of(2), "observers: a watcher may join the players again");
+	// -- locks
+	h.set("scenario_game", 1);
+	t.check(room.reply(1, net::SeatField::Tribe, 2) == net::kLocked && room.reply(1, net::SeatField::Handicap, 2) == net::kAccepted, "scenario: nation, team and colour are the scenario's, the handicap is still free");
+	h.set("scenario_game", "");
+	h.set("identity", 1);
+	t.check(room.reply(1, net::SeatField::Handicap, 2) == net::kLocked, "saved game: every seat is fixed");
+	h.set("identity", "");
+	// -- start fixes the plan for everybody
+	room.reply(2, net::SeatField::Observer, 1);
+	t.check(h.start(77), "start: the host fixes the plan and the seed");
+	room.pump();
+	{
+		const net::SeatPlan a = h.start_plan(), b = room.at(3).start_plan();
+		bool same = a.nations == b.nations && a.players == 3 && a.observers == 1;
+		for (int s = 0; s < 8; ++s) same = same && a.peer_of[size_t(s)] == b.peer_of[size_t(s)];
+		t.check(same && room.at(3).started() && room.at(3).seed() == 77, "start: every machine reads the same plan and seed");
+	}
+	// -- the room after a game
+	for (int i = 0; i < 4; ++i) room.at(i).reset_game();
+	room.pump();
+	t.check(!h.started() && !room.at(2).started(), "room: after a game it is a lobby again");
+	// -- chat targets, kick, countdown
+	room.at(2).set_ready(false);
+	h.set("team_0", 2);
+	h.set("team_1", 2);
+	h.set("team_2", 3);
+	room.pump();
+	for (int i = 0; i < 4; ++i)
+		for (net::Lobby::ChatLine l; room.at(i).take_chat(l);) {}
+	h.say_to(1, -1, "team plan");   // the host and the machine in seat 1 are on team 3 (index 2); seat 2 is on team 4
+	room.pump();
+	net::Lobby::ChatLine cl;
+	int heard = 0, who = -1;
+	for (int i = 1; i < 4; ++i)
+		if (room.at(i).take_chat(cl)) ++heard, who = i;
+	t.check(heard == 1 && who == 1 && cl.kind == 1 && cl.text == "team plan", "chat: a team line reaches the machines of the team and nobody else", "heard by " + std::to_string(heard));
+	room.at(1).say_to(2, 3, "psst");
+	room.pump();
+	heard = 0;
+	for (int i = 0; i < 4; ++i)
+		if (room.at(i).take_chat(cl)) ++heard, who = i;
+	t.check(heard == 1 && who == 3 && cl.kind == 2 && cl.from == 1, "chat: a whisper reaches only its receiver");
+	h.countdown_set(5);
+	room.pump();
+	net::Lobby::ChatLine sys;
+	bool seen = false;
+	while (room.at(2).take_chat(sys)) seen = seen || (sys.kind == 3 && sys.text.find("5 seconds") != std::string::npos);
+	t.check(seen && room.at(2).countdown() == 5, "countdown: the guests see the host's ticks as system lines");
+	h.countdown_set(0);
+	room.pump();
+	t.check(room.at(2).countdown() < 0, "countdown: cancelled for everybody");
+	h.kick(3);
+	room.pump();
+	t.check(room.at(3).kicked() && !room.at(1).kicked(), "kick: the removed machine is told");
+}
+
+// ---------------------------------------------------------------- seats in the lockstep layer
+
+// The same scenario with raw transports (an observer in the highest slot, the victim a player in the middle): the layer itself.
+void test_drop_with_observer(Tally& t, uint32_t seed) {
+	int good = 0;
+	std::string first_bad;
+	const int trials = 8;
+	for (int trial = 0; trial < trials; ++trial) {
+		const uint32_t sd = seed * 977 + uint32_t(trial);
+		Cluster c(4, sd, 0, 5, [](net::SessionConfig& cfg) { cfg.slot_flags[3] = net::kPlayerValid | net::kPlayerObserver; }, 3);
+		Rng pick(sd);
+		c.run_to(30 + pick.below(40));
+		const int victim = int(pick.below(3));
+		c.hub.kill_after_sends(victim, int(pick.below(4)));
+		const uint32_t end = c.nodes[0].s->boundaries() + 120;
+		for (int r = 0; r < 40000; ++r) {
+			bool all = true;
+			for (size_t i = 0; i < c.nodes.size(); ++i)
+				if (int(i) != victim && c.nodes[i].s->boundaries() < end && c.nodes[i].last.kind != net::StepKind::Error) all = false;
+			if (all) break;
+			c.round();
+			if (!c.hub.alive(victim)) c.nodes[size_t(victim)].dead = true;
+		}
+		c.nodes[size_t(victim)].dead = true;
+		std::string why;
+		bool ok = c.agree(why);
+		for (size_t i = 0; i < c.nodes.size() && ok; ++i)
+			if (int(i) != victim && (c.nodes[i].drops.size() != 1 || c.nodes[i].s->boundaries() < end)) ok = false, why = "node " + std::to_string(i) + ": " + std::to_string(c.nodes[i].drops.size()) + " drops, boundary " + std::to_string(c.nodes[i].s->boundaries());
+		if (ok) ++good;
+		else if (first_bad.empty()) first_bad = "seed " + std::to_string(sd) + ", victim " + std::to_string(victim) + ": " + why;
+	}
+	t.check(good == trials, "drop with an observer in the room: the players and the observer apply it at the same boundary with equal sums", std::to_string(good) + "/" + std::to_string(trials) + (first_bad.empty() ? "" : "; first failure " + first_bad));
+}
+
+void test_seat_transport(Tally& t, uint32_t seed) {
+	// four machines, one of which only watches and one of which dies; "permuted": machine 1 watches and machine 3 dies, so the game slots differ from the
+	// machine numbers (0 <- machine 0, 1 <- machine 2, 2 <- machine 3, observer slot 3 <- machine 1); "straight": machine 3 watches and machine 2 dies
+	for (int variant = 0; variant < 2; ++variant) {
+		const uint32_t obs_mask = variant ? 0b0010 : 0b1000;
+		const int victim = variant ? 3 : 2;
+		net::LoopbackHub hub(4, seed + uint32_t(variant), 0, 6);
+		const net::SeatPlan plan = net::make_seat_plan(0b1111, obs_mask, 3, false);
+		struct M {
+			std::unique_ptr<net::SeatTransport> tr;
+			std::unique_ptr<ToySim> sim;
+			std::unique_ptr<net::Session> s;
+			std::vector<net::BoundaryInfo> bis;
+			std::vector<std::pair<int, uint32_t>> drops;
+			uint32_t fed = 0;
+			Rng rng{1};
+		};
+		std::vector<M> ms(4);
+		for (int i = 0; i < 4; ++i) {
+			M& m = ms[size_t(i)];
+			m.sim = std::make_unique<ToySim>();
+			m.rng = Rng(seed * 31 + uint32_t(i));
+			net::SessionConfig c;
+			c.local_slot = plan.slot_of[size_t(i)];
+			c.seed = seed;
+			c.speed = 2;
+			c.max_pauses = 0;
+			for (int sl = 0; sl < 8; ++sl) {
+				if (sl < plan.nations) c.slot_flags[size_t(sl)] = net::kPlayerValid | net::kPlayerHuman;
+				else if (plan.peer_of[size_t(sl)] >= 0) c.slot_flags[size_t(sl)] = net::kPlayerValid | net::kPlayerObserver;
+			}
+			m.tr = std::make_unique<net::SeatTransport>(hub.endpoint(i), plan.peer_of);
+			m.s = std::make_unique<net::Session>(*m.tr, *m.sim, c);
+			M* mp = &m;
+			m.s->on_boundary = [mp](const net::BoundaryInfo& b) { mp->bis.push_back(b); };
+			m.s->on_drop = [mp](int slot, int, uint32_t boundary) { mp->drops.emplace_back(slot, boundary); };
+		}
+		auto feed = [&](int i) {
+			M& m = ms[size_t(i)];
+			const bool watcher = plan.slot_of[size_t(i)] >= plan.nations;
+			while (m.fed < m.s->local_stamp() + 1) {
+				++m.fed;
+				if (watcher) continue;
+				net::Bytes b = {24, uint8_t(m.rng.next()), 0, 0, 0, 1, 0, 0, 0};
+				m.s->submit(b);
+			}
+		};
+		for (int i = 0; i < 4; ++i) {
+			feed(i);
+			ms[size_t(i)].s->start();
+		}
+		bool killed = false;
+		uint32_t at = 0;
+		for (int r = 0; r < 400000; ++r) {
+			uint32_t lo = UINT32_MAX;
+			for (int i = 0; i < 4; ++i) {
+				if (killed && i == victim && !hub.alive(victim)) continue;   // a machine that is still alive finishes its broadcast and dies at the cut
+				feed(i);
+				ms[size_t(i)].s->step();
+				if (i != victim) lo = std::min(lo, ms[size_t(i)].s->boundaries());
+			}
+			hub.advance(1);
+			if (!killed && lo >= 60) {
+				hub.kill_after_sends(victim, 1);   // the machine dies in the middle of a broadcast
+				killed = true;
+				at = lo;
+			}
+			if (killed && lo >= at + 80) break;
+		}
+		std::vector<int> live;
+		for (int i = 0; i < 4; ++i)
+			if (i != victim) live.push_back(i);
+		bool equal = true;
+		size_t first_bad = 0, n = SIZE_MAX;
+		for (int i : live) n = std::min(n, ms[size_t(i)].bis.size());
+		for (size_t j = 0; j < n && equal; ++j)
+			for (int i : live)
+				if (std::memcmp(ms[size_t(i)].bis[j].sums, ms[size_t(live[0])].bis[j].sums, sizeof ms[0].bis[j].sums) != 0) equal = false, first_bad = j + 1;
+		const std::string name = std::string(variant ? "permuted" : "straight") + " seating";
+		if ((!equal || n <= 100) && std::getenv("RON_NET_DEBUG"))
+			for (int i = 0; i < 4; ++i)
+				std::printf("    machine %d (slot %d): boundaries %u frame %d commands %llu drops %zu %s\n", i, plan.slot_of[size_t(i)], ms[size_t(i)].s->boundaries(), ms[size_t(i)].sim->f,
+				            (unsigned long long)ms[size_t(i)].sim->commands, ms[size_t(i)].drops.size(), ms[size_t(i)].s->describe_drop(plan.slot_of[size_t(victim)]).c_str());
+		t.check(equal && n > 100, "seats, " + name + ": players and an observer agree on every turn", std::to_string(n) + " turns" + (equal ? "" : ", first difference at turn " + std::to_string(first_bad)));
+		const int obs = variant ? 1 : 3;
+		// the observer's state is the players' state (the sums above compare it turn by turn); it ran the players' commands, sent none of its own
+		t.check(ms[size_t(obs)].sim->commands > 100 && ms[size_t(obs)].s->boundaries() >= ms[size_t(live[0] == obs ? live[1] : live[0])].s->boundaries() - 2,
+		        "seats, " + name + ": the observer executed the players' commands and kept up with them", std::to_string(ms[size_t(obs)].sim->commands) + " commands");
+		bool dropped = true;
+		for (int i : live) dropped = dropped && !ms[size_t(i)].drops.empty() && ms[size_t(i)].drops[0] == ms[size_t(live[0])].drops[0] && ms[size_t(i)].drops[0].first == plan.slot_of[size_t(victim)];
+		t.check(dropped, "seats, " + name + ": the dead machine is dropped under its game slot (" + std::to_string(plan.slot_of[size_t(victim)]) + "), at the same boundary everywhere");
+	}
+}
+
+// ---------------------------------------------------------------- a room over real sockets
+
+void test_tcp_room(Tally& t) {
+	const uint16_t port = uint16_t(42000 + (getpid() % 1000));
+	std::string err;
+	std::unique_ptr<net::TcpTransport> host = net::TcpTransport::host_open(port, err);
+	if (!host) {
+		t.check(false, "room over TCP: listen", err);
+		return;
+	}
+	std::unique_ptr<net::TcpTransport> g1, g2;
+	std::string e1, e2;
+	std::thread th1([&]() { g1 = net::TcpTransport::join("127.0.0.1", port, 5000, e1); });
+	std::thread th2([&]() {
+		std::this_thread::sleep_for(std::chrono::milliseconds(300));
+		g2 = net::TcpTransport::join("127.0.0.1", port, 5000, e2);
+	});
+	net::Lobby hl(*host);
+	for (int i = 0; i < 300 && (!g1 || !g2); ++i) {
+		hl.poll();
+		host->idle(10);
+	}
+	th1.join();
+	th2.join();
+	if (!g1 || !g2) {
+		t.check(false, "room over TCP: two guests join", e1 + " " + e2);
+		return;
+	}
+	net::Lobby l1(*g1), l2(*g2);
+	auto pump = [&](int n = 60) {
+		for (int i = 0; i < n; ++i) {
+			hl.poll(), l1.poll(), l2.poll();
+			int p;
+			while (host->take_timeout(p)) hl.peer_left(p);
+			std::this_thread::sleep_for(std::chrono::milliseconds(2));
+		}
+	};
+	hl.set("num_nations", 3);
+	hl.set("max_observers", 1);
+	hl.set_name("Host");
+	l1.set_name("Ayla");
+	l2.set_name("Marcus");
+	pump();
+	t.check(g1->local_peer() == 1 && g2->local_peer() == 2 && hl.name_of(2) == "Marcus" && l1.name_of(2) == "Marcus", "room over TCP: guests get the lowest free slots, names reach everybody");
+	l1.request(net::SeatField::Color, 5);
+	l2.request(net::SeatField::Observer, 1);
+	pump();
+	net::Lobby::Reply r1, r2;
+	const bool a1 = l1.take_reply(r1), a2 = l2.take_reply(r2);
+	t.check(a1 && a2 && r1.code == net::kAccepted && r2.code == net::kAccepted && hl.get_int("color_1") == 5 && hl.observer_of(2) && l1.observer_of(2), "room over TCP: a colour and an observer request are granted and mirrored");
+	l1.say_to(2, 2, "psst");
+	pump();
+	net::Lobby::ChatLine cl;
+	t.check(l2.take_chat(cl) && cl.text == "psst" && cl.kind == 2 && !hl.take_chat(cl), "room over TCP: a whisper reaches its receiver only");
+	hl.kick(2);
+	host->disconnect(2);
+	pump(100);
+	t.check(l2.kicked() && !l1.kicked() && host->peers().size() == 1, "room over TCP: the host removes a guest: it is told, the connection ends, the other guest stays");
+	hl.set("identity", "");
+	t.check(hl.start(5) && hl.plan().players == 2, "room over TCP: START fixes the plan of the machines that remain");
+}
+
+// ---------------------------------------------------------------- LAN discovery
+
+void test_discovery(Tally& t) {
+	const uint16_t port = uint16_t(41000 + (getpid() % 1000));
+	net::LanGame g;
+	g.name = "Alice";
+	g.map = "Old World, Medium";
+	g.port = 7777;
+	g.players = 2;
+	g.seats = 4;
+	g.flags = net::kLanScenario;
+	const std::vector<uint8_t> dg = net::encode_announcement(g);
+	net::LanGame back;
+	t.check(net::decode_announcement(dg.data(), dg.size(), back) && back.name == "Alice" && back.map == "Old World, Medium" && back.port == 7777 && back.players == 2 && back.seats == 4 &&
+	            back.flags == net::kLanScenario && back.compatible(),
+	        "discovery: an announcement survives the wire format");
+	std::vector<uint8_t> bad = dg;
+	bad[0] = 'X';
+	t.check(!net::decode_announcement(bad.data(), bad.size(), back) && !net::decode_announcement(dg.data(), 6, back), "discovery: foreign or short datagrams are ignored");
+	net::LanAnnouncer a;
+	net::LanBrowser b;
+	std::string err;
+	if (!a.open(port, err) || !b.open(port, err)) {
+		t.check(false, "discovery: sockets", err);
+		return;
+	}
+	a.set(g);
+	uint64_t now = 1000;
+	const int sent = a.tick(now);
+	bool found = false;
+	for (int i = 0; i < 100 && !found; ++i) {
+		b.poll(now);
+		found = !b.games().empty();
+		if (!found) usleep(10000);
+	}
+	t.check(sent >= 2 && found && b.games()[0].name == "Alice" && b.games()[0].port == 7777,
+	        "discovery: a browser hears the host's announcement (UDP broadcast / multicast / loopback)", "datagrams sent " + std::to_string(sent) + (found ? ", from " + b.games()[0].address : ", none heard"));
+	g.players = 3;
+	a.set(g);
+	a.tick(now + 1500);
+	for (int i = 0; i < 100; ++i) {
+		b.poll(now + 1500);
+		if (!b.games().empty() && b.games()[0].players == 3) break;
+		usleep(10000);
+	}
+	t.check(b.games().size() == 1 && b.games()[0].players == 3, "discovery: repeated announcements update one entry");
+	b.poll(now + 20000);
+	t.check(b.games().empty(), "discovery: a host that stops announcing disappears from the list");
+}
+
+// ---------------------------------------------------------------- CHAT_SET
+
+void test_chat_set(Tally& t) {
+	std::array<uint8_t, 8> st{};
+	st[2] = 1, st[5] = 1;
+	std::vector<uint8_t> w;
+	sim::wire_chat_set(w, st);
+	std::array<uint8_t, 8> back{};
+	t.check(w.size() == 9 && w[0] == 69 && sim::replay_command_length(w.data(), w.size()) == 9 && sim::parse_chat_set(w.data(), w.size(), back) && back == st,
+	        "CHAT_SET: 9 bytes on the wire, the table survives the codec");
 }
 
 }  // namespace
@@ -645,6 +1084,12 @@ int cmd_selftest(int argc, char** argv) {
 	test_desync(t, seed);
 	test_recovery(t, seed);
 	test_no_wallclock(t, seed);
+	test_lobby_rules(t);
+	test_drop_with_observer(t, seed);
+	test_seat_transport(t, seed);
+	test_tcp_room(t);
+	test_discovery(t);
+	test_chat_set(t);
 	if (engine) test_engine(t, game, seed);
 	std::printf("selftest: %d passed, %d failed\n", t.pass, t.fail);
 	return t.fail ? 1 : 0;
