@@ -8,6 +8,7 @@
 #include "sim/combat_internal.hpp"
 #include "sim/economy.hpp"
 #include "sim/fog.hpp"
+#include "sim/garrison.hpp"
 #include "sim/groups.hpp"
 #include "sim/guys.hpp"
 #include "sim/movement.hpp"
@@ -324,7 +325,7 @@ int32_t compare_target(Game& g, Object& s, int32_t ox, int32_t whom, bool unchec
 		if (!raid) {
 			int32_t a = t.ptype->attack;
 			if (aaB && s.ptype->domain != kDomainAir) a = 0;
-			const bool empty_city = (t.flags & objflag::kCity) && true;  // TODO(garrison): num_inside(0) == 0
+			const bool empty_city = (t.flags & objflag::kCity) && num_inside(g, t, 0) == 0;
 			if (!empty_city) {
 				if (a != 0 && !human_s) {
 					if (has_objmask(s, objmask::kSiege)) v += 1000000;

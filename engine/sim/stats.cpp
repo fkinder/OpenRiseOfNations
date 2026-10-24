@@ -1,11 +1,12 @@
 // Leader-dependent unit and building stats (docs/combat-spec.md section 5.1): ObjectData / UnitData / BuildData ::attack,
 // armor, hits, max_range and min_range, Unit::update_hits / update_armor (captain computes, copied down the o_down
 // chain), the upgrade counters and BuildTypeData::get_building_range. Hero (general) terms are written but do not fire
-// yet (has_general and HeroesData::find_hero are -1); garrison terms likewise (count_inside is 0).
+// yet (has_general and HeroesData::find_hero are -1); the garrison terms count what is inside (sim/garrison.hpp).
 #include <algorithm>
 
 #include "sim/combat_internal.hpp"
 #include "sim/fog.hpp"
+#include "sim/garrison.hpp"
 #include "sim/groups.hpp"
 #include "sim/production.hpp"
 
@@ -57,20 +58,8 @@ int32_t find_hero(const Game& g, const Object& ob, int32_t type, int32_t radius)
 	return -1;
 }
 
-// ObjectData::count_inside(count_type, type) on a building. TODO(garrison, combat-spec 5.1): garrisons are not
-// simulated, nothing is inside.
-int32_t count_inside(const Game& g, const Build& b, int32_t count_type, int32_t type) {
-	(void)g, (void)b, (void)count_type, (void)type;
-	return 0;
-}
-constexpr int32_t kCountType = 0, kCountStrictType = 1;
-
-// The leader's general type: tribe_can_type(types[0x36]) ? 0x36 : its tribe substitute. TODO(heroes): the substitute
-// is not traced; with count_inside at 0 the choice cannot change a result.
-int32_t leader_general_type(const Game& g, int32_t who) {
-	(void)tribe_can_type(g, who, 0x36);
-	return 0x36;
-}
+// The leader's general type: tribe_can_type(types[0x36]) ? 0x36 : its tribe substitute (LeaderData::get_graft).
+int32_t leader_general_type(const Game& g, int32_t who) { return get_graft(g, who, 0x36); }
 bool general_garrisoned(const Game& g, const Build& b) {
 	return count_inside(g, b, kCountType, leader_general_type(g, b.who)) != 0;
 }

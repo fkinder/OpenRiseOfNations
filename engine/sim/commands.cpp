@@ -3,6 +3,7 @@
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
 #include "sim/game.hpp"
+#include "sim/garrison.hpp"
 #include "sim/production.hpp"
 
 namespace ron::sim {
@@ -104,6 +105,18 @@ void CommandPackage::process(Game& g, const Command& c, int32_t play, int32_t pl
 		if (c.ox < 0 || (t && t->alive())) group_action_gather(g, gr, c.ox, QueuePos(c.queued));
 		return;
 	}
+	case Verb::Garrison: {
+		// process_garrison: ox < 0, whom < 0 or the target is alive -> Group::action_garrison(ox, whom, queued, 0).
+		if (group < 0) return;
+		const Object* t = (c.ox >= 0 && c.whom >= 0) ? g.object(c.whom, c.ox) : nullptr;
+		if (c.ox < 0 || c.whom < 0 || (t && t->alive()))
+			group_action_garrison(g, g.groups.g[size_t(group)], c.ox, c.whom, QueuePos(c.queued), 0);
+		return;
+	}
+	case Verb::EjectAll:
+		if (group >= 0)
+			group_action_eject_all(g, g.groups.g[size_t(group)], c.back_to_work, c.who, c.eject_o, c.eject_who);  // @710b40
+		return;
 	case Verb::CityGather:
 		if (group >= 0) group_action_city_gather(g, g.groups.g[size_t(group)], c.type, QueuePos(c.queued));  // @948a10
 		return;
@@ -346,6 +359,30 @@ bool CommandManager::issue_city_gather(const Game& g, const std::vector<int32_t>
 	c.verb = Verb::CityGather;
 	c.type = t;
 	c.queued = int8_t(q);
+	local_.push_back(c);
+	return true;
+}
+
+bool CommandManager::issue_garrison(const Game& g, const std::vector<int32_t>& objs, int32_t ox, int32_t whom, QueuePos q) {
+	if (!issue_group(g, objs)) return false;
+	Command c;
+	c.verb = Verb::Garrison;
+	c.ox = ox;
+	c.whom = whom;
+	c.queued = int8_t(q);
+	local_.push_back(c);
+	return true;
+}
+
+bool CommandManager::issue_eject_all(const Game& g, const std::vector<int32_t>& objs, bool back_to_work, int32_t who,
+                                     int32_t eject_o, int32_t eject_who) {
+	if (!issue_group(g, objs)) return false;
+	Command c;
+	c.verb = Verb::EjectAll;
+	c.back_to_work = back_to_work ? 1 : 0;
+	c.who = who;
+	c.eject_o = eject_o;
+	c.eject_who = eject_who;
 	local_.push_back(c);
 	return true;
 }

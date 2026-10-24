@@ -9,6 +9,7 @@
 #include "sim/capture.hpp"
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
+#include "sim/garrison.hpp"
 #include "sim/guys.hpp"
 #include "sim/production.hpp"
 #include "sim/script_host.hpp"
@@ -436,14 +437,12 @@ void Game::load(const GameFiles& files, const Scenario& s, const Rules& r, uint3
 		}
 	}
 	scenario_loading = false;
-	// insert_inside: contained units leave the map.
+	// insert_inside: contained units leave the map and join the container's chain.
 	for (const Inside& in : inside) {
 		Unit* u = unit(in.who, in.o);
 		if (!u || !u->alive()) continue;
-		remove_from_world(*this, *u);
-		u->inside_up = int16_t(in.in_o);
-		u->inside_up_who = int8_t(in.in_who);
-		// TODO(scenario-objects 4.4): the container's inside_down chain, aircraft carriers, transports.
+		unit_insert_inside(*this, *u, in.in_o, in.in_who);
+		// TODO(scenario-objects 4.4): aircraft carriers, transports.
 	}
 	// World::compute_all_territory with the buildings in place (world-spec 3 step 8, production-spec 5.10.2). TODO:
 	// Game::run's Leaders::init_production_script and GameDaemon::calc_danger before the first frame.

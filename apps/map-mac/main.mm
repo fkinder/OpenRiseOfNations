@@ -85,6 +85,7 @@
 #include "sim/anim_assets.hpp"
 #include "sim/commands.hpp"
 #include "sim/game.hpp"
+#include "sim/garrison.hpp"
 #include "sim/rules.hpp"
 #include "sim/rules_xml.hpp"
 #include "sim/script_host.hpp"
@@ -1186,7 +1187,24 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	for (const auto& [who, o] : _selected) {
 		if (ron::sim::is_enemy(*_game, who, tw)) by_owner[who].push_back(o);
 	}
-	if (by_owner.empty()) return NO;
+	if (by_owner.empty()) {
+		// A friendly building under the cursor: the selected units that fit in it garrison (GARRISON).
+		if (to < ron::sim::kBuildBase) return NO;
+		std::map<int32_t, std::vector<int32_t>> garrison;
+		for (const auto& [who, o] : _selected) {
+			const ron::sim::Unit* u = _game->unit(who, o);
+			if (u && u->alive() && ron::sim::is_ally(*_game, who, tw) && ron::sim::unit_can_garrison(*_game, *u, to, tw))
+				garrison[who].push_back(o);
+		}
+		if (garrison.empty()) return NO;
+		for (const auto& [who, objs] : garrison) {
+			_cm.play = who;
+			_cm.play_who = who;
+			if (_cm.issue_garrison(*_game, objs, to, tw)) _cm.process_turn(*_game);
+		}
+		std::printf("garrison into %d:%d with %zu owner group(s) at frame %d\n", tw, to, garrison.size(), _game->frame);
+		return YES;
+	}
 	for (const auto& [who, objs] : by_owner) {
 		_cm.play = who;
 		_cm.play_who = who;

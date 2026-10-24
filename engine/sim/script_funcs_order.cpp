@@ -6,6 +6,7 @@
 // the action, is not modelled (groups.cpp TODO).
 #include "script/bhs_stdlib.hpp"
 #include "sim/combat.hpp"
+#include "sim/garrison.hpp"
 #include "sim/groups.hpp"
 #include "sim/guys.hpp"
 #include "sim/orders.hpp"
@@ -69,7 +70,10 @@ bool unit_group_arg(NativeCall& c, size_t k, int32_t* who, std::vector<int32_t>*
 void unit_dbg_jump(Game& g, Unit& u) {
 	const Order* a = get_action(u);
 	if (a && a->type == kGarrison) {
-		// TODO(garrison): Object::insert_inside(target) + repath + kill_current_order (garrisons are not ported).
+		const int32_t ox = a->ox, whom = a->whom;
+		unit_insert_inside(g, u, ox, whom);
+		repath(g, u);
+		kill_current_order(g, u, false);
 		return;
 	}
 	if (a && a->type == kGather) {
@@ -326,11 +330,12 @@ void install_order_funcs(ScriptHost& h) {
 		return make_int(-1);
 	});
 
-	auto garrison = [&g, &h](int32_t w, int32_t o, int32_t bw, int32_t bo) {  // unit_garrison_order @9f8380
+	auto garrison = [&g, one](int32_t w, int32_t o, int32_t bw, int32_t bo) {  // unit_garrison_order @9f8380
 		if (!valid_unit(g, w, o) || !valid_build(g, bw, bo) || !live_leader(g, w) || !live_leader(g, bw)) return -1;
-		set_group(g, w, o, -1);
-		h.todo_calls["unit_garrison_order: Group::action_garrison"]++;  // TODO(garrison): garrisons are not ported
-		return 1;
+		// A group of the one unit, GARRISON with QUEUE_NEW and find 0; the builtin returns -1 (garrison-spec 5).
+		Group& gr = one(w, o);
+		group_action_garrison(g, gr, bo, bw, kQueueNew, 0);
+		return -1;
 	};
 	def("unit_garrison_order", [garrison](NativeCall& c) {
 		return make_int(garrison(c.arg_int(0) - 1, c.arg_int(1), c.arg_int(2) - 1, c.arg_int(3)));
@@ -338,6 +343,42 @@ void install_order_funcs(ScriptHost& h) {
 	def("unit_garrison_order", [garrison](NativeCall& c) {  // @4ce730 (the unit's own leader)
 		return make_int(garrison(c.arg_int(0) - 1, c.arg_int(1), c.arg_int(0) - 1, c.arg_int(2)));
 	}, 1);
+	// group_garrison_order: (int who; int building_o) / (int who; int building_who; int building_o) on the default
+	// group "_Unnamed<who>", (string name; int who; int object_o), (UnitGroup g; int who; int object_o). The
+	// building's leader is the group's own for the first form.
+	auto group_garrison = [&g](Group& gr, int32_t bw, int32_t bo) {
+		if (!valid_build(g, bw, bo)) return make_int(-1);
+		if (gr.num != 0) group_action_garrison(g, gr, bo, bw, kQueueNew, 0);
+		return make_int(-1);
+	};
+	def("group_garrison_order", [&g, group_garrison](NativeCall& c) {  // (int who; int building_o)
+		const int32_t gi = g.scen.find_group(unnamed(c.arg_int(0)));
+		if (gi < 0) return make_int(-1);
+		ScenarioData::Group& sg = g.scen.groups[size_t(gi)];
+		Group* gr = create_game_group(g, sg.who, sg.ids);
+		return gr ? group_garrison(*gr, sg.who, c.arg_int(1)) : make_int(-1);
+	}, 0);
+	def("group_garrison_order", [&g, group_garrison](NativeCall& c) {  // (int who; int building_who; int building_o)
+		const int32_t gi = g.scen.find_group(unnamed(c.arg_int(0)));
+		if (gi < 0) return make_int(-1);
+		ScenarioData::Group& sg = g.scen.groups[size_t(gi)];
+		Group* gr = create_game_group(g, sg.who, sg.ids);
+		return gr ? group_garrison(*gr, c.arg_int(1) - 1, c.arg_int(2)) : make_int(-1);
+	}, 1);
+	def("group_garrison_order", [&g, group_garrison](NativeCall& c) {  // (string group_name; int who; int object_o)
+		const int32_t gi = g.scen.find_group(c.arg_str(0));
+		if (gi < 0) return make_int(-1);
+		ScenarioData::Group& sg = g.scen.groups[size_t(gi)];
+		Group* gr = create_game_group(g, sg.who, sg.ids);
+		return gr ? group_garrison(*gr, c.arg_int(1) - 1, c.arg_int(2)) : make_int(-1);
+	}, 2);
+	def("group_garrison_order", [&g, group_garrison](NativeCall& c) {  // (UnitGroup g; int who; int object_o)
+		int32_t who;
+		std::vector<int32_t> ids;
+		if (!unit_group_arg(c, 0, &who, &ids)) return make_int(-1);
+		Group* gr = create_game_group(g, who, ids);
+		return gr ? group_garrison(*gr, c.arg_int(1) - 1, c.arg_int(2)) : make_int(-1);
+	}, 3);
 	def("unit_eject_order", [&g, &h](NativeCall& c) {  // @9f84e0: a unit inside a unit issues COME_OUT (a command)
 		const int32_t w = c.arg_int(0) - 1, o = c.arg_int(1);
 		const Unit* u = valid_unit(g, w, o);

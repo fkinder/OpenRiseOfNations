@@ -12,6 +12,7 @@
 #include <algorithm>
 
 #include "sim/game.hpp"
+#include "sim/garrison.hpp"
 #include "sim/guys.hpp"
 #include "sim/movement.hpp"
 #include "sim/orders.hpp"
@@ -678,12 +679,6 @@ int32_t get_inside(Game& g, const Unit& u, int32_t* who_out) {
 	return o;
 }
 
-// ObjectData::num_inside(0) @646d50. TODO(transport): units are never carried yet, so the chain is empty.
-int32_t num_inside(const Unit& u) {
-	(void)u;
-	return 0;
-}
-
 // UnitData::is_packing @60aa60: the current order is a SPECIAL_ANIM of a packing animation. TODO(packers): not
 // simulated (no SPECIAL_ANIM orders are created yet).
 bool is_packing(const Unit& u) {
@@ -831,9 +826,12 @@ void group_finish_insert(Game& g, Group& gr, std::vector<Order>& saved) {
 			// 🟡 re-issued as a QUEUE_LAST group attack on the same target (mandatory as saved).
 			group_action_attack(g, gr, o.ox, o.whom, o.mandatory, kQueueLast, 0);
 			break;
+		case kGarrison:
+			group_action_garrison(g, gr, o.ox, o.whom, kQueueLast, o.find);
+			break;
 		default:
 			// TODO(orders-spec 2.1): BUILD_AT/REPAIR (action_swarm_around), GATHER, BOARD_SHIP, FOLLOW, GUARD,
-			// CAST_SPELL, TRADE_ROUTE, GROUP_PATROL (redo_patrol_order), ATTACK_GROUND, GARRISON: those group actions
+			// CAST_SPELL, TRADE_ROUTE, GROUP_PATROL (redo_patrol_order), ATTACK_GROUND: those group actions
 			// are not ported (and their orders are not created yet).
 			break;
 		}
@@ -1069,7 +1067,7 @@ void group_action_move_near(Game& g, Group& gr, int32_t x, int32_t y, int32_t to
 				                     false) != 0) {
 					if (u.ptype->domain == 0 && leader_can_transport(g, who) != 0)
 						t = current_upgrade_type(g, who, 0x140);  // TRANSPORTBARGE (no fallback here)
-					if (u.ptype->domain == 1 && num_inside(u) != 0) {
+					if (u.ptype->domain == 1 && num_inside(g, u, 0) != 0) {
 						const Object* c = obj_at(g, u.inside_down_who, u.inside_down);
 						if (c) t = c->type;
 					}

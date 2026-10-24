@@ -7,7 +7,9 @@
 
 #include "sim/combat_internal.hpp"
 #include "sim/fog.hpp"
+#include "sim/garrison.hpp"
 #include "sim/groups.hpp"
+#include "sim/production.hpp"
 #include "sim/orders.hpp"
 #include "sim/search.hpp"
 #include "sim/trig.hpp"
@@ -35,6 +37,7 @@ constexpr int32_t kForaging1 = 0x2fe, kForaging2 = 0x2ff, kForaging3 = 0x300;
 // Wonders and other types read here.
 constexpr int32_t kTerraCottaWonder = 0x211, kColosseum = 0x212, kRedFort = 0x216, kVersailles = 0x218,
                   kStatueOfLiberty = 0x219, kKremlin = 0x21a;
+constexpr int32_t kFortType = 0x1bb, kTowerType = 0x1b7;  // BuildTypeData fort (vslot 0xfc) and TOWER
 constexpr int32_t kAircraftCarrier = 0x15f, kFishermen = 0x13d, kMilitiaClass = 0x42, kSpyClass = 0x3a;
 // Rare goods (Leader.rare / rare_conquest bit = TypeIndex - 6).
 constexpr int32_t kRareCitrus = 26 - 6, kRareTitanium = 36 - 6;
@@ -423,7 +426,7 @@ void unit_repair_damage(Game& g, Unit& u, int32_t hp, bool show, bool conquest) 
 		                 -1, 0, -1);
 		add_move_order(g, *n, sx, sy, 1, false, kQueueNew, false, -1, -1);
 	}
-	// TODO(garrisons): Object::insert_inside for a garrisoned chain.
+	if (u.inside_up >= 0) unit_insert_inside(g, *n, u.inside_up, u.inside_up_who);  // a garrisoned chain: the same container
 	// The group the chain belongs to takes the chain again (Group::kill then Group::add of u); the console's
 	// selection and hotkey groups do the same (UI, not simulated).
 	if (u.group >= 0 && u.group < int32_t(g.groups.g.size())) {
@@ -444,9 +447,22 @@ void process_healing(Game& g, Unit& u) {
 	const Leader& L = g.leaders[size_t(who)];
 	const int32_t rate0 = KA(g, "unit_heal_rate", 0);
 	if (!u.on_map()) {
-		// Garrisoned: heal at unit_heal_rate[heal level] (Red Fort faster, ships in a dock 2/3) in a building that
-		// trains this unit, a city or fort, or a tower. TODO(garrisons): units are never inside a building yet.
-		(void)kRedFort;
+		// Garrisoned (combat-spec 7.2): heal at unit_heal_rate[heal level] (Red Fort faster, ships in a dock 2/3) in a
+		// building that trains this unit, a city or fort, or a tower.
+		int32_t xw;
+		const int32_t x = unit_get_inside(g, u, &xw);
+		const Object* c = x >= 0 ? g.object(xw, x) : nullptr;
+		if (!c || !c->alive() || !c->ptype) return;
+		int32_t rate = KA(g, "unit_heal_rate", get_heal_level(g, who));
+		if (type_is(*c->ptype, kRedFort) || has_wonder_bits(g, who, kRedFort) == 2)
+			rate = rate * 100 / (RON_K(g, "red_fort_heal") + 100);
+		if (dom == kDomainSea && type_is(*c->ptype, 0x1b0)) rate = (2 * rate + 2) / 3;  // a dock
+		if (rate < 1) rate = 1;
+		if (!on_tick(g, u, rate)) return;
+		const int32_t where = u.ptype->where;
+		if ((where >= 0 && type_is(*c->ptype, where)) || (c->flags & objflag::kCity) || type_is(*c->ptype, kFortType) ||
+		    type_is(*c->ptype, kTowerType))
+			heal_one(g, u, rate, true, true);
 		return;
 	}
 	if (dom == kDomainSea) {

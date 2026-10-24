@@ -6,6 +6,7 @@
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
 #include "sim/fog.hpp"
+#include "sim/garrison.hpp"
 #include "sim/groups.hpp"
 #include "sim/guys.hpp"
 #include "sim/production_internal.hpp"
@@ -170,7 +171,8 @@ int32_t wall_update_hits(Game& g, Build& b, bool full) {
 		}
 	}
 	b.construct_hits = ch;
-	// TODO(garrison): construct_hits <= damage with occupants (and no air) -> Object::eject_contents.
+	if (b.construct_hits <= b.damage && b.inside_down >= 0 && !can_carry_domain(g, b, kDomainAir))
+		eject_contents(g, b, 1, -1, 0, 1);
 	return full ? b.myhits : b.construct_hits;
 }
 

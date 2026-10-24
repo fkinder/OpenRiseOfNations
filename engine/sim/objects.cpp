@@ -6,6 +6,7 @@
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
 #include "sim/game.hpp"
+#include "sim/garrison.hpp"
 #include "sim/guys.hpp"
 #include "sim/movement.hpp"
 #include "sim/orders.hpp"
@@ -481,8 +482,8 @@ void unit_process(Game& g, Unit& u) {
 		for (int32_t i = 0; i < u.guy_mark && size_t(i) < u.guys.size(); i++) guy_process(g, u, u.guys[size_t(i)]);
 		for (int32_t i = squad; size_t(i) < u.guys.size(); i++) guy_process(g, u, u.guys[size_t(i)]);
 	} else {
-		// 6. TODO(frame-spec 9): garrisoned / carried units (come_out checks, guy position copies).
-		for (Guy& gy : u.guys) gy.last_z = gy.z;
+		// 6. garrisoned / carried (garrison-spec 7): transient masks, the AI come_out check, guy z copies.
+		unit_process_inside(g, u);
 	}
 }
 
@@ -534,6 +535,8 @@ void objects_process_all(Game& g) {
 				// ACTIVE_PING territory reveal (needs territory).
 				build_process(g, *b);
 			} else if (b->hold_frames) {
+				// A dead building still holding a garrison lets one chain out per frame (Build::process_ejection).
+				if (b->build_masks & bmask::kEjecting) build_process_ejection(g, *b);
 				b->hold_frames--;
 			}
 		}

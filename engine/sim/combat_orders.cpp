@@ -5,6 +5,7 @@
 #include <algorithm>
 
 #include "sim/combat_internal.hpp"
+#include "sim/garrison.hpp"
 #include "sim/groups.hpp"
 #include "sim/guys.hpp"
 #include "sim/movement.hpp"
@@ -336,7 +337,10 @@ int32_t check_target_path(Game& g, Unit& u, Order& act) {
 		return 1;
 	}
 	if (t == kGarrison) {
-		// TODO(garrison): adjacent_to.
+		if (object_adjacent_to(g, u, ox, whom)) {
+			repath(g, u);
+			return 1;
+		}
 		return 0;
 	}
 	if (is_in_range(g, u, ox, whom, u.orders_x, u.orders_y, 0, nullptr)) return 0;

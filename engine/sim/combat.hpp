@@ -245,6 +245,7 @@ void guy_execute_events(Game& g, Unit& u, Guy& gy);  // Guy::execute_events @5d9
 void build_process_attack(Game& g, Build& b);         // the attack part of Build::process @61edf0
 int32_t build_do_attack(Game& g, Build& b);           // Build::do_attack @6228f0
 int32_t get_garrison_arrows(const Game& g, const Build& b);  // BuildData::get_garrison_arrows @62e3d0
+int32_t get_base_garrison_arrows(const Game& g, const Build& b);  // BuildData::get_base_garrison_arrows @62e340
 int32_t get_shot(const Game& g, const Object& b);     // BuildData::get_shot @62dd90
 
 // ---------------------------------------------------------------- healing, supply, attrition (combat-spec 7; attrition.cpp)

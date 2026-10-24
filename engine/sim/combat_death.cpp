@@ -5,6 +5,7 @@
 
 #include "sim/combat_internal.hpp"
 #include "sim/economy.hpp"
+#include "sim/garrison.hpp"
 #include "sim/groups.hpp"
 #include "sim/guys.hpp"
 #include "sim/orders.hpp"
@@ -60,10 +61,15 @@ bool death_blocks(const Game& g, const DeathObj& d) {
 void object_close(Game& g, Object& ob, int32_t death) {
 	if (ob.alive()) {
 		if (!on_map(ob)) {
-			// TODO(garrison): remove_from_inside.
+			// A garrisoned unit leaves its container first (Unit::close already dropped the death animation).
+			unit_remove_from_inside(g, static_cast<Unit&>(ob));
 			remove_from_world(g, ob);
 		} else {
-			// TODO(garrison): num_inside -> eject_contents / kill_contents.
+			// Whatever is inside comes out (a building raises EJECTING) or, in an aircraft carrier / silo, dies.
+			if (num_inside(g, ob, 1) > 0) {
+				if (can_carry_domain(g, ob, kDomainAir)) kill_contents(g, ob);
+				else eject_contents(g, ob, 1, -1, 0, 1);
+			}
 			if (death == 0 || !blocks_while_dead(ob)) remove_from_world(g, ob);
 		}
 		if (ob.is_unit) objects_remove_units(g, ob.who);

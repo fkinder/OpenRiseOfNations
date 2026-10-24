@@ -7,6 +7,7 @@
 #include "sim/ai.hpp"
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
+#include "sim/garrison.hpp"
 #include "sim/groups.hpp"
 #include "sim/guys.hpp"
 #include "sim/orders.hpp"
@@ -35,21 +36,9 @@ bool is_worker_t(int32_t t) { return t >= 50 && t <= 53; }
 bool is_scholar_t(int32_t t) { return t == 52 || t == 53; }
 bool is_peasant_t(int32_t t) { return t == 50 || t == 51; }
 
-// ObjectData::count_inside(COUNT_TYPE / COUNT_NON_DECOY_TYPE, t) over the inside_down chain.
+// ObjectData::count_inside(COUNT_TYPE / COUNT_NON_DECOY_TYPE, t) over the inside_down chain (garrison.cpp).
 int32_t count_inside_type(const Game& g, const Object& ob, int32_t t, bool no_decoys) {
-	int32_t n = 0;
-	int32_t o = ob.inside_down, w = ob.inside_down_who;
-	for (int guard = 0; o >= 0 && guard < kUnitLimit; guard++) {
-		const Object* c = g.object(w, o);
-		if (!c) break;
-		if (c->alive() && c->ptype && type_is(*c->ptype, t)) {
-			const bool decoy = c->is_unit && (static_cast<const Unit*>(c)->unit_masks & umask::kDecoy);
-			if (!(no_decoys && decoy)) n++;
-		}
-		o = c->inside_down;
-		w = c->inside_down_who;
-	}
-	return n;
+	return count_inside(g, ob, no_decoys ? kCountNonDecoyType : kCountType, t);
 }
 
 

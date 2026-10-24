@@ -14,6 +14,7 @@
 //                [--respond WHO:WHOM@1|0[@FRAME]]... [--peasants WHO:N[@FRAME]]... [--econ-every K] [--ai-every K]
 //                [--starting-resources N] [--difficulty N] [--no-scripts] [--script-log]
 //                [--select WHO:o1,..@FRAME]... [--option N[:MENU[:TYPE]]@FRAME]...
+//                [--garrison WHO:o1,..@BO:BWHO[@FRAME][%queue]]... [--eject-all WHO:o1,..[@FRAME][/back_to_work]]...
 //        ron-sim --dump circle|ring|stamps
 // Scripts: --script-log prints the scenario builtins' presentation queue as it fills (messages, sounds, objectives,
 // camera, pings; sim/script_ui.hpp) and the run-time messages; --select / --option set the seat-local input a renderer
@@ -28,6 +29,9 @@
 // setting (0 Low .. 12 Random) before loading; --difficulty the GameInfo difficulty (0 easiest .. 5; default 2) the
 // computer opponents use outside scripted scenarios. --ai-every K prints each AI leader's state, armies, score and
 // diplomacy.
+// Garrisons (docs/garrison-spec.md): --garrison issues GROUP + GARRISON (the units go into building BO of leader BWHO);
+// --eject-all GROUP + EJECTALL (the listed buildings let their garrison out; /1 = back_to_work: citizens only, orders
+// kept). --list prints `inside N` on a building (and on a unit) with a garrison.
 // --attack issues GROUP + ATTACK (target object TO of leader TWHO). --combat-every prints a combat summary (alive
 // units and hit points per leader, live ammo, corpses, kills) every K frames.
 // --move issues GROUP + MOVE_TO for the listed units of leader WHO at FRAME (default 0); /form sets the formation
@@ -63,6 +67,7 @@
 #include "sim/ai.hpp"
 #include "sim/production.hpp"
 #include "sim/game.hpp"
+#include "sim/garrison.hpp"
 #include "sim/guys.hpp"
 #include "sim/rules.hpp"
 #include "sim/script_host.hpp"
@@ -75,7 +80,7 @@ using namespace ron::sim;
 
 struct Script {
 	enum Kind { Move, Halt, Form, Attack, Build, Queue, Rally, Swarm, Disband, Unqueue, Gather, CityGather, Buy, Sell,
-		        Tribute, Respond, Peasants, Select, Option } kind = Move;
+		        Tribute, Respond, Peasants, Select, Option, Garrison, EjectAll } kind = Move;
 	int32_t who = 0;
 	std::vector<int32_t> objs;
 	int32_t x = 0, y = 0, frame = 0, form = -1, queue = 2, rotate = 0;
@@ -175,6 +180,49 @@ Script parse_attack(const std::string& a) {
 	const size_t at2 = rest.find('@');
 	s.to = int32_t(std::strtol(rest.substr(c2 + 1, at2 == std::string::npos ? std::string::npos : at2 - c2 - 1).c_str(), nullptr, 0));
 	if (at2 != std::string::npos) s.frame = int32_t(std::strtol(rest.c_str() + at2 + 1, nullptr, 0));
+	return s;
+}
+
+// WHO:o1,o2@BO:BWHO[@FRAME][%queue]
+Script parse_garrison(const std::string& a) {
+	Script s;
+	s.kind = Script::Garrison;
+	std::string t = a;
+	const size_t pct = t.find('%');
+	if (pct != std::string::npos) {
+		s.queue = int32_t(std::strtol(t.c_str() + pct + 1, nullptr, 0));
+		t = t.substr(0, pct);
+	}
+	const size_t colon = t.find(':'), at = t.find('@');
+	if (colon == std::string::npos || at == std::string::npos || at < colon) throw std::runtime_error("bad --garrison " + a);
+	s.who = int32_t(std::strtol(t.substr(0, colon).c_str(), nullptr, 0));
+	s.objs = parse_list(t.substr(colon + 1, at - colon - 1));
+	const std::string rest = t.substr(at + 1);
+	const size_t c2 = rest.find(':');
+	if (c2 == std::string::npos) throw std::runtime_error("bad --garrison building " + a);
+	s.to = int32_t(std::strtol(rest.substr(0, c2).c_str(), nullptr, 0));
+	const size_t at2 = rest.find('@');
+	s.twho = int32_t(std::strtol(rest.substr(c2 + 1, at2 == std::string::npos ? std::string::npos : at2 - c2 - 1).c_str(), nullptr, 0));
+	if (at2 != std::string::npos) s.frame = int32_t(std::strtol(rest.c_str() + at2 + 1, nullptr, 0));
+	return s;
+}
+
+// WHO:o1,o2[@FRAME][/back_to_work]
+Script parse_eject_all(const std::string& a) {
+	Script s;
+	s.kind = Script::EjectAll;
+	s.num = 0;  // back_to_work
+	std::string t = a;
+	const size_t slash = t.find('/');
+	if (slash != std::string::npos) {
+		s.num = int32_t(std::strtol(t.c_str() + slash + 1, nullptr, 0));
+		t = t.substr(0, slash);
+	}
+	const size_t colon = t.find(':'), at = t.find('@');
+	if (colon == std::string::npos) throw std::runtime_error("bad --eject-all " + a);
+	s.who = int32_t(std::strtol(t.substr(0, colon).c_str(), nullptr, 0));
+	s.objs = parse_list(t.substr(colon + 1, at == std::string::npos ? std::string::npos : at - colon - 1));
+	if (at != std::string::npos) s.frame = int32_t(std::strtol(t.c_str() + at + 1, nullptr, 0));
 	return s;
 }
 
@@ -381,6 +429,7 @@ uint64_t digest(const Game& g) {
 			f.add(u->unit_masks), f.add(int32_t(u->group)), f.add(int32_t(u->collide)), f.add(int32_t(u->idle));
 			f.add(u->damage), f.add(int32_t(u->damage_frac)), f.add(int32_t(u->recharging)), f.add(u->unit_masks2);
 			f.add(int32_t(u->o_up)), f.add(int32_t(u->o_down)), f.add(int32_t(u->targeted)), f.add(int32_t(u->cavarch_o));
+			f.add(int32_t(u->inside_up)), f.add(int32_t(u->inside_down));  // garrisons (docs/garrison-spec.md)
 			f.add(int32_t(u->near_o)), f.add(int32_t(u->damage_frame));
 			f.add(uint32_t(u->orders.size()));
 			for (const Order& o2 : u->orders) {
@@ -444,6 +493,7 @@ uint64_t digest(const Game& g) {
 			f.add(uint32_t(b->flags)), f.add(b->damage), f.add(uint32_t(b->hold_frames));
 			const Build* bb = static_cast<const Build*>(b);
 			f.add(int32_t(bb->attack_ox)), f.add(int32_t(bb->recharging));
+			f.add(int32_t(bb->inside_down)), f.add(bb->build_masks);  // garrisons: the first occupant, EJECTING
 		}
 		const Leader& l = g.leaders[size_t(who)];
 		f.add(l.score_combat), f.add(l.units_killed), f.add(l.units_lost), f.add(l.retarget_budget);
@@ -934,6 +984,7 @@ struct Tracked {
 struct RunResult {
 	std::vector<uint64_t> digests;
 	std::vector<Tracked> tracked;
+	std::vector<std::array<int32_t, 2>> watched;  // buildings (who, o) named by --garrison / --eject-all
 	int32_t final_frame = 0;
 	bool fog_failed = false;
 	std::array<uint16_t, kNumLeaders> initial_uids{};  // obj_ctr after loading (objects created later have higher uids)
@@ -993,7 +1044,8 @@ void print_production(const Game& g, bool full) {
 	const GameView v = make_view(g, false);
 	for (const BuildView& b : v.builds) {
 		if (b.who >= 8) continue;
-		const bool busy = !b.active || !b.queue.empty() || !b.rally.empty();
+		const Build* sb0 = g.build(b.who, b.o);
+		const bool busy = !b.active || !b.queue.empty() || !b.rally.empty() || (sb0 && sb0->inside_down >= 0);
 		if (!full && !busy) continue;
 		std::printf("    %d:%-4d %-20s (%6d,%6d) %s", b.who, b.o, type_name(g, b.type).c_str(), b.x, b.y,
 		            b.active ? "done" : b.started ? "building" : "site");
@@ -1006,6 +1058,11 @@ void print_production(const Game& g, bool full) {
 			            b.queue[i].time);
 		if (b.repeat) std::printf(" (repeat)");
 		for (size_t i = 0; i < b.rally.size(); i++) std::printf("%s (%d,%d)/%d", i == 0 ? " | rally" : " ->", b.rally[i].x, b.rally[i].y, b.rally[i].action);
+		if (const Build* sb = g.build(b.who, b.o)) {
+			if (sb->inside_down >= 0)
+				std::printf(" | inside %d (pop %d) arrows %d", num_inside(g, *sb, 1), num_inside(g, *sb, 0),
+				            sb->ptype->attack != 0 ? get_garrison_arrows(g, *sb) : 0);
+		}
 		std::printf("\n");
 	}
 }
@@ -1214,6 +1271,14 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 			if (!u) continue;
 			rr.tracked.push_back({s.who, o, u->x, u->y, s.x, s.y, -1, s.frame, 0, u->x, u->y, 0});
 		}
+		auto watch = [&](int32_t w, int32_t o) {
+			for (const auto& e : rr.watched)
+				if (e[0] == w && e[1] == o) return;
+			rr.watched.push_back({w, o});
+		};
+		if (s.kind == Script::Garrison) watch(s.twho, s.to);
+		if (s.kind == Script::EjectAll)
+			for (int32_t o : s.objs) watch(s.who, o);
 		if (s.kind == Script::Attack) {  // the attack target too
 			bool known = false;
 			for (const Tracked& t : rr.tracked) known |= t.who == s.twho && t.o == s.to;
@@ -1242,6 +1307,14 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 				cm.issue_form(*g, s.objs, s.form, s.rotate);
 			} else if (s.kind == Script::Attack) {
 				cm.issue_attack(*g, s.objs, s.to, s.twho, QueuePos(s.queue));
+			} else if (s.kind == Script::Garrison) {
+				cm.issue_garrison(*g, s.objs, s.to, s.twho, QueuePos(s.queue));
+				if (print) std::printf("  f%-5d GARRISON %d:%d%s -> building %d:%d\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0],
+				                       s.objs.size() > 1 ? "+" : "", s.twho, s.to);
+			} else if (s.kind == Script::EjectAll) {
+				cm.issue_eject_all(*g, s.objs, s.num != 0);
+				if (print) std::printf("  f%-5d EJECTALL %d:%d%s%s\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0],
+				                       s.objs.size() > 1 ? "+" : "", s.num ? " (back to work)" : "");
 			} else if (s.kind == Script::Build || s.kind == Script::Queue) {
 				const int32_t t = find_type(*g, s.type);
 				if (t < 0) throw std::runtime_error("unknown type " + s.type);
@@ -1347,10 +1420,19 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 				const Unit* u = g->unit(t.who, t.o);
 				if (!u) continue;
 				const Order* f0 = u->front();
-				std::printf("  f%-5d %d:%-4d (%6d,%6d) a=%08x order=%d tgt=%d:%d path=%zu anim=%d collide=%d dmg=%d%s\n",
+				std::printf("  f%-5d %d:%-4d (%6d,%6d) a=%08x order=%d tgt=%d:%d path=%zu anim=%d collide=%d dmg=%d%s%s\n",
 				            g->frame, t.who, t.o, u->x, u->y, u->angle, int(u->order_type()), f0 ? f0->whom : -1,
 				            f0 ? f0->ox : -1, u->path.size(), u->guys.empty() ? -1 : int(u->guys[0].cur_anim),
-				            int(u->collide), u->damage, u->alive() ? "" : " DEAD");
+				            int(u->collide), u->damage, u->alive() ? "" : " DEAD", u->on_map() ? "" : " INSIDE(on_map=0)");
+			}
+			// The buildings the garrison scripts name: what is inside and the garrison arrows they fire.
+			for (const auto& wb : rr.watched) {
+				const Build* b = g->build(wb[0], wb[1]);
+				if (!b || !b->alive()) continue;
+				std::printf("  f%-5d bld %d:%-4d %-14s inside %d (pop %d) arrows %d limit %d%s\n", g->frame, wb[0], wb[1],
+				            type_name(*g, b->type).c_str(), num_inside(*g, *b, 1), num_inside(*g, *b, 0),
+				            b->ptype->attack != 0 ? get_garrison_arrows(*g, *b) : 0, get_garrison_limit(*g, b->type, b->who),
+				            (b->build_masks & bmask::kEjecting) ? " EJECTING" : "");
 			}
 		}
 	}
@@ -1463,6 +1545,8 @@ int main(int argc, char** argv) {
 			}
 			else if (std::strcmp(argv[i], "--form") == 0) scripts.push_back(parse_form(argv[i + 1]));
 			else if (std::strcmp(argv[i], "--attack") == 0) scripts.push_back(parse_attack(argv[i + 1]));
+			else if (std::strcmp(argv[i], "--garrison") == 0) scripts.push_back(parse_garrison(argv[i + 1]));
+			else if (std::strcmp(argv[i], "--eject-all") == 0) scripts.push_back(parse_eject_all(argv[i + 1]));
 			else if (std::strcmp(argv[i], "--build") == 0) scripts.push_back(parse_prod(Script::Build, argv[i + 1]));
 			else if (std::strcmp(argv[i], "--queue") == 0 || std::strcmp(argv[i], "--research") == 0)
 				scripts.push_back(parse_prod(Script::Queue, argv[i + 1]));

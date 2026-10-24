@@ -7,6 +7,7 @@
 
 #include "sim/ai.hpp"
 #include "sim/combat_internal.hpp"
+#include "sim/garrison.hpp"
 #include "sim/guys.hpp"
 #include "sim/orders.hpp"
 #include "sim/production.hpp"
@@ -530,7 +531,9 @@ int32_t take_damage(Game& g, Object& tgt, int32_t hp, int32_t frac, int32_t deat
 				g.cities[size_t(tgt.who)][size_t(b.city)].city_flags |= 0xe;
 			// TODO(garrison): the AI alarm (Group::action_alarm of the city for cities and garrison types).
 		}
-		// TODO(garrison): eject_contents when destroyed.
+		// A destroyed building lets its garrison out (production-spec 6.11: only with someone inside).
+		if (b.inside_down >= 0 && tgt.damage >= obj_hits(g, tgt) && !can_carry_domain(g, tgt, kDomainAir))
+			eject_contents(g, tgt, 1, -1, 0, 1);
 		if ((b.flags & objflag::kCity) && (b.flags & objflag::kActive)) {
 			if (b.damage >= obj_hits(g, b)) {
 				b.flags |= objflag::kNewThink;

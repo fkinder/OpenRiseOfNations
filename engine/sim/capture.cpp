@@ -13,6 +13,7 @@
 #include "sim/compass.hpp"
 #include "sim/economy.hpp"
 #include "sim/fog.hpp"
+#include "sim/garrison.hpp"
 #include "sim/guys.hpp"
 #include "sim/orders.hpp"
 #include "sim/pathfinder.hpp"
@@ -116,8 +117,10 @@ int32_t wall_swap_team(Game& g, Build& b, int32_t who) {
 }  // namespace
 
 int32_t build_swap_team(Game& g, Build& b, int32_t who) {
-	// @628210. TODO(garrison): Object::kill_contents for a missile silo and Object::eject_contents(1, -1, 0, 1) (the
-	// ejected units' Unit::come_out draws game_random @61a1aa); nothing is ever inside a building here.
+	// @628210. A silo's missiles die; the garrison comes out (EJECTING: the old building lets one chain out per frame,
+	// each Unit::come_out drawing game_random @61a1aa for AI units).
+	if (type_is(*b.ptype, ptype::kMissileSilo)) kill_contents(g, b);
+	eject_contents(g, b, 1, -1, 0, 1);
 	if (!type_is(*b.ptype, ptype::kLibrary)) build_clean_queue(g, b, true);
 	const int32_t n = wall_swap_team(g, b, who);
 	if (n >= 0) {
@@ -256,9 +259,8 @@ int32_t check_capture(Game& g, Object& t, int32_t o, int32_t who) {
 			if (vector_dist(std::abs(ob->x - b.x), std::abs(ob->y - b.y)) > reach) continue;
 			int32_t v = capture_value(*ob);
 			if (v != 0 && !ob->is_unit && cw == owner) {
-				// The defender's own buildings: garrison (num_inside: TODO(garrison), 0) + 6, forts + 12; the attacker
-				// now sees them.
-				v = 0 + (type_is(*ob->ptype, ptype::kFortX) ? 12 : 6) + v;
+				// The defender's own buildings: garrison (num_inside(1)) + 6, forts + 12; the attacker now sees them.
+				v = num_inside(g, *ob, 1) + (type_is(*ob->ptype, ptype::kFortX) ? 12 : 6) + v;
 				if (!(ob->visible & (1 << who))) {
 					ob->visible = int8_t(ob->visible | (1 << who));
 					object_update_local_seen(g, *ob);
@@ -688,11 +690,13 @@ void blow_up_towers(Game& g, int32_t who, int32_t attacker) {
 	}
 }
 // Leader::blow_up_units @6d2170 (multiplayer): every unit dies (dt 3: death animations draw game_random); garrisoned
-// units come out first (TODO(garrison): never inside here).
+// units come out first (Unit::come_out(0), which draws game_random @61a1aa).
 void blow_up_units(Game& g, int32_t who) {
 	for (int32_t o = 0; o < g.objects[size_t(who)].unit_mark; o++) {
 		Unit* u = g.unit(who, o);
-		if (u && u->alive()) object_die(g, *u, 3, -1, 0.0f);
+		if (!u || !u->alive()) continue;
+		if (!u->on_map()) unit_come_out(g, *u, 0);
+		if (u->alive()) object_die(g, *u, 3, -1, 0.0f);
 	}
 }
 void blow_up_buildings(Game& g, int32_t who) {  // @6d22b0

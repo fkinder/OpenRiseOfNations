@@ -7,6 +7,7 @@
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
 #include "sim/game.hpp"
+#include "sim/garrison.hpp"
 #include "sim/guys.hpp"
 #include "sim/movement.hpp"
 #include "sim/trig.hpp"
@@ -417,6 +418,8 @@ int32_t do_job(Game& g, Unit& u, OrderType t, Order* o) {
 		return do_build(g, u, *o);  // Unit::do_build @5eebf0 (production-spec 4.1)
 	case kRepair:
 		return do_repair(g, u, *o);  // Unit::do_repair @5ee420 (4.8)
+	case kGarrison:
+		return do_garrison(g, u, *o);  // Unit::do_garrison @5e6b80 (garrison-spec 4)
 	case kSpecialAnim:
 		// Unit::do_spec_anim: the walk-out order of Unit::come_out is killed in the call that adds it; any other
 		// (none created yet) ends at once too. TODO(anims): timed special animations.
@@ -427,8 +430,8 @@ int32_t do_job(Game& g, Unit& u, OrderType t, Order* o) {
 		kill_current_order(g, u, false);
 		return 0;
 	default:
-		// TODO(orders-spec 6): gather, build, attack, garrison, ... are not simulated yet; such orders are never
-		// created by the implemented commands.
+		// TODO(orders-spec 6): board / await-board, follow, guard, cast, strafe, patrol, ... are not simulated yet; such
+		// orders are never created by the implemented commands.
 		return 0;
 	}
 }

@@ -1,7 +1,7 @@
 // Player commands for local play (docs/replay-spec.md sections 7-9, docs/orders-spec.md sections 1-2): the issuer
 // side (CommandManager::issue_*, add_group) and the executor (CommandPackage::process_*), for the verbs the movement,
 // combat and production cores support: GROUP, ATTACK, STANCE, FORM, MOVE_TO, HALT, SWARM_AROUND, DISBAND,
-// GATHER_POINT, QUEUE_UP, BUILD, BUILDMASK, UNQUEUE.
+// GATHER_POINT, QUEUE_UP, BUILD, BUILDMASK, UNQUEUE, GARRISON, EJECTALL.
 //
 // Usage per simulation step (frame-spec.md section 2): issue commands any time while frame F is current, then
 // CommandManager::process_turn(game) executes them in issue order, then game.do_frame() turns F into F + 1.
@@ -21,7 +21,7 @@ enum class Verb : uint8_t {
 	Group = 0, Stance = 2, Form = 3, Attack = 4, SwarmAround = 6, MoveTo = 7, Halt = 12, Disband = 21, GatherPoint = 22,
 	QueueUp = 24, Build = 25, BuildMask = 33, Unqueue = 48,
 	// economy (docs/economy-spec.md section 11)
-	Trade = 17, CityGather = 18, Gather = 19, ClearTributes = 39, Accept = 41, Reject = 42, Tribute = 43,
+	Trade = 17, CityGather = 18, Gather = 19, Garrison = 20, EjectAll = 26, ClearTributes = 39, Accept = 41, Reject = 42, Tribute = 43,
 	DemandTribute = 44, Buy = 46, Sell = 47, LeaderOptions = 73
 };
 
@@ -55,6 +55,9 @@ struct Command {
 	// peasants, peasants_wait, buildings, BitMask<32> flags.
 	int32_t good = 0, amount = 0, flags = 0, peasants = 0, peasants_wait = 2, buildings = 0;
 	uint32_t option_flags = 0;
+	// GARRISON (13): i32 ox, i32 whom, queued (ox / whom / queued above). EJECTALL (17): i32 back_to_work, i32 who,
+	// i32 eject_o, i32 eject_who (`who` above; who < 0 = the group's own contents).
+	int32_t back_to_work = 0, eject_o = -1, eject_who = -1;
 };
 
 // CommandPackage: the executor. `group` (the current group set by GROUP) persists across packages.
@@ -116,6 +119,12 @@ public:
 	bool issue_gather(const Game& g, const std::vector<int32_t>& objs, int32_t ox, QueuePos q = kQueueNew);
 	// CITY_GATHER: the group's cities send new workers to their buildings of type t (t < 0: farm / woodcutter / mine).
 	bool issue_city_gather(const Game& g, const std::vector<int32_t>& cities, int32_t t, QueuePos q = kQueueNew);
+	// GARRISON: the group's units walk to the building objects[whom][ox] and go inside (Group::action_garrison).
+	bool issue_garrison(const Game& g, const std::vector<int32_t>& objs, int32_t ox, int32_t whom, QueuePos q = kQueueNew);
+	// EJECTALL: the group's buildings / carriers let their contents out (who < 0); `back_to_work` ejects only citizens
+	// and lets them resume their orders. With who >= 0 and eject_o a building, the units of leader `who` come out of it.
+	bool issue_eject_all(const Game& g, const std::vector<int32_t>& objs, bool back_to_work = false, int32_t who = -1,
+	                     int32_t eject_o = -1, int32_t eject_who = -1);
 	// TRADE: caravans run a route from city building ox (whom) to oxx (whose); oxx < 0 picks the best partner.
 	bool issue_trade(const Game& g, const std::vector<int32_t>& objs, int32_t ox, int32_t whom, int32_t oxx = -1,
 	                 int32_t whose = -1, QueuePos q = kQueueNew);

@@ -326,6 +326,30 @@ Stubbed / approximated (TODO in code, with spec references):
   `Object::close`).
 
 
+## Garrisons
+
+`engine/sim/garrison.cpp` / `.hpp` (docs/garrison-spec.md, 2026-10-23): the container links (`unit_get_inside`,
+`unit_insert_inside`, `unit_remove_from_inside`, with the leader's "inside" counters), `num_inside` / `count_inside`
+(the PDB's CountIndex), `can_carry_domain`, `type_can_garrison` (the 'l' / 'm' flags and the trainer families),
+`unit_can_garrison`, `find_garrison_build`, `object_adjacent_to`, the GARRISON order (`add_garrison_order`,
+`kill_garrison_order`, `do_garrison`), `group_action_garrison` / `group_action_eject_all` behind the GARRISON (20) and
+EJECTALL (26) commands (`CommandManager::issue_garrison` / `issue_eject_all`), `eject_contents` / `kill_contents`,
+`build_process_ejection` (active and dead buildings), the garrisoned branch of `unit_process` and the garrison branch
+of `process_healing`. Hooked: `take_damage` / `wall_update_hits` (a destroyed building ejects), `object_close`,
+`capture.cpp` (`swap_team`, `blow_up_units`, the strength scan), `build_train` / `come_out`'s rally branches, the
+scenario loader (contained units join the chain), the scenario builtins `unit_garrison_order` /
+`group_garrison_order`, `ronmap`'s right-click on an allied building. `ron-sim --garrison WHO:o1,o2@BO:BWHO@FRAME`
+and `--eject-all WHO:o@FRAME[/1]`; `--list` prints `inside N (pop M) arrows A` per building.
+
+Checked: europe.scx, three Riflemen into a Fortress (arrows 2 → 5, `inside 3`), EJECTALL brings them out next to it;
+capture.scx Light Horse into a Stable and out with cleared orders; a full Fortress (limit 10) refuses the 11th and
+12th; citizens of a Major City keep their gather orders and resume after `/1`; a destroyed Fortress ejects one chain
+per frame; a unit heals inside; all 156 stock scenarios 600 frames with the AI and the self-check OK.
+
+Stubbed (TODO in code): transports (carry_orders, same_damage, caravan hand-over, `is_entering_or_exiting`),
+aircraft (helicopters on carriers, airbase scramble), the militia disarm spell on leaving, the scenario ignore-orders
+prelude, the Lakota / American gather bonuses from the "inside" counters, fire rafts / aircraft ejecting a garrison.
+
 ## Healing and attrition
 
 `engine/sim/attrition.cpp` (combat-spec 7, economy-spec 7.2-7.3, 2026-10-23):

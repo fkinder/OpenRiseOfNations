@@ -7,6 +7,7 @@
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
 #include "sim/fog.hpp"
+#include "sim/garrison.hpp"
 #include "sim/groups.hpp"
 #include "sim/guys.hpp"
 #include "sim/movement.hpp"
@@ -55,60 +56,6 @@ void BuildQueue::un_queue(int32_t i, int32_t n) {
 
 namespace {
 
-// ObjectData::get_inside @651a80: the outermost container of a unit (o, *who_out), -1 if not inside.
-int32_t get_inside(const Game& g, const Unit& u, int32_t* who_out) {
-	if (who_out) *who_out = -1;
-	if (u.inside_up < 0) return -1;
-	int32_t o = u.inside_up, w = u.inside_up_who;
-	for (int guard = 0; guard < 64; guard++) {
-		const Object* ob = g.object(w, o);
-		if (!ob || !ob->is_unit) break;
-		const Unit& c = static_cast<const Unit&>(*ob);
-		if (c.inside_up < 0) break;
-		w = c.inside_up_who;
-		o = c.inside_up;
-	}
-	if (who_out) *who_out = w;
-	return o;
-}
-
-// Object::insert_inside(o, who) @647e90 (the "in a building" leader counters +0xa28.. are not kept).
-void insert_inside(Game& g, Unit& u, int32_t o, int32_t who) {
-	Object* c = g.object(who, o);
-	if (!c) return;
-	// ObjectData::inside_bottom: the last object of the container's chain.
-	Object* bottom = c;
-	for (int guard = 0; bottom->inside_down >= 0 && guard < 1000; guard++) {
-		Object* n = g.object(bottom->inside_down_who, bottom->inside_down);
-		if (!n) break;
-		bottom = n;
-	}
-	remove_from_world(g, u);
-	bottom->inside_down = u.o;
-	bottom->inside_down_who = u.who;
-	u.inside_up = bottom->o;
-	u.inside_up_who = bottom->who;
-}
-
-// Object::remove_from_inside @6480f0.
-void remove_from_inside(Game& g, Unit& u) {
-	if (u.inside_up < 0) return;
-	Object* up = g.object(u.inside_up_who, u.inside_up);
-	if (up) {
-		up->inside_down = u.inside_down;
-		up->inside_down_who = u.inside_down_who;
-	}
-	if (u.inside_down >= 0) {
-		if (Unit* d = g.unit(u.inside_down_who, u.inside_down)) {
-			d->inside_up = u.inside_up;
-			d->inside_up_who = u.inside_up_who;
-		}
-	}
-	u.inside_up = -1;
-	u.inside_down = -1;
-	add_to_world(g, u);
-}
-
 void unit_set_stance(Game& g, Unit& u, int32_t s) {
 	Unit* c = &u;
 	for (int guard = 0; c->o_up >= 0 && guard < 64; guard++) {
@@ -134,7 +81,7 @@ void unit_go_inside(Game& g, Unit& u, int32_t o, int32_t who) {
 		if (!p) break;
 		c = p;
 	}
-	insert_inside(g, *c, o, who);
+	unit_insert_inside(g, *c, o, who);
 	// (UI: the console selection drops it.)
 	const Object* cont = g.object(who, o);
 	if (cont && cont->is_unit && c->ptype->uber_size > 1) {
@@ -147,11 +94,11 @@ void unit_go_inside(Game& g, Unit& u, int32_t o, int32_t who) {
 	if (c->o_down >= 0) {
 		Unit* d = g.unit(c->who, c->o_down);
 		if (d && d->alive()) {
-			insert_inside(g, *d, o, who);  // go_inside(follower, o, who, 1)
+			unit_insert_inside(g, *d, o, who);  // go_inside(follower, o, who, 1)
 			for (Unit* q = d; q->o_down >= 0;) {
 				Unit* n = g.unit(q->who, q->o_down);
 				if (!n || !n->alive()) break;
-				insert_inside(g, *n, o, who);
+				unit_insert_inside(g, *n, o, who);
 				q = n;
 			}
 		}
@@ -653,7 +600,7 @@ int32_t unit_come_out(Game& g, Unit& u0, int32_t param) {
 	const int32_t who = u.who;
 	const Type& T = *u.ptype;
 	int32_t Xwho = -1;
-	int32_t X = get_inside(g, u, &Xwho);
+	int32_t X = unit_get_inside(g, u, &Xwho);
 	uint32_t ang = 0x80000000u;
 	int32_t sx = 0, sy = 0, gp_x = 0, gp_y = 0;
 	bool from_bld = false;
@@ -754,7 +701,7 @@ int32_t unit_come_out(Game& g, Unit& u0, int32_t param) {
 		u.x = sx;
 		u.y = sy;
 		u.z = find_tcoord_z(g, tcoord_of(sx), tcoord_of(sy), 1);
-		remove_from_inside(g, u);
+		unit_remove_from_inside(g, u);
 	}
 	// ---- E
 	unit_set_new_location(g, u, sx, sy, true, true);
@@ -818,8 +765,10 @@ int32_t unit_come_out(Game& g, Unit& u0, int32_t param) {
 							else if (is_gather_type(*bb->ptype) && !type_is(*bb->ptype, ptype::kUniversity)) special = true;  // TODO: num_gatherers < gather_max
 							else skip = true;
 						}
-						if ((bb->flags & objflag::kActive) && is_ally(g, who, bw) && get_garrison_limit(g, bb->type, bw) != 0 && p.action == 1) {
-							skip = true;  // TODO(garrison): can_garrison / num_inside
+						if ((bb->flags & objflag::kActive) && is_ally(g, who, bw) && get_garrison_limit(g, bb->type, bw) != 0 &&
+						    type_can_garrison(g, T, bb->type) && p.action == 1) {
+							if (num_inside(g, *bb, 0) + unit_control_cost(u) <= get_garrison_limit(g, bb->type, bw)) special = true;
+							else skip = true;
 						}
 						if (T.attack != 0 && !(u.type >= 50 && u.type <= 53) && is_enemy(g, who, bw) && p.action == 2) special = true;
 						if (skip && !special) continue;
@@ -883,8 +832,14 @@ int32_t unit_come_out(Game& g, Unit& u0, int32_t param) {
 				if ((T.unit_flags2 & 8) && (bb.flags & objflag::kCity) && !is_enemy(g, who, bw)) {
 					add_trade_order(g, u, bo, bw, -1, -1, kQueueLast, false);  // (vslot +0x24 is_trade: a city centre)
 					final_pt = false;
+				} else if (final_pt && bb.alive() && !bb.is_unit && (bb.flags & objflag::kActive) && is_ally(g, who, bw) &&
+				         get_garrison_limit(g, bb.type, bw) != 0 && type_can_garrison(g, T, bb.type) && fact != 0) {
+					for (Unit* m = &u; m; m = m->o_down >= 0 ? g.unit(who, m->o_down) : nullptr) {
+						add_garrison_order(g, *m, bo, bw, 0, kQueueLast, false);
+						if (m->o_down == m->o) break;
+					}
+					final_pt = false;
 				}
-				// TODO(garrison): garrison orders.
 				if (T.attack != 0 && is_enemy(g, who, bw)) {
 					if (fact != 0) {
 						for (Unit* m = &u; m; m = m->o_down >= 0 ? g.unit(who, m->o_down) : nullptr) {
@@ -984,12 +939,13 @@ int32_t build_train(Game& g, Build& b, int32_t t) {
 			// Scholars stay inside up to gather_max (Build::check_gatherers): TODO(economy). Everything else leaves.
 			if (!(t == 52 || t == 53)) unit_come_out(g, U, 0);
 		} else {
-			// (BuildData::gather_inside with room keeps the unit garrisoned: TODO(garrison) num_inside)
-			if (build_gather_inside(b) && !unit_is(g, U, ptype::kCarrier, true)) {
+			// BuildData::gather_inside with room keeps the unit garrisoned; a unit that cannot leave stays, unless the
+			// building is over its garrison limit, which kills it.
+			if (build_gather_inside(b) && num_inside(g, b, 0) <= lim && !unit_is(g, U, ptype::kCarrier, true)) {
 				// stays inside
-			} else if (unit_come_out(g, U, 0) != 0) {
-				// TODO(garrison): killed when the building is over its garrison limit (num_inside(0) > lim).
-				(void)lim;
+			} else if (unit_come_out(g, U, 0) != 0 && num_inside(g, b, 0) > lim) {
+				unit_die(g, U, 0);
+				return -1;
 			}
 		}
 	}

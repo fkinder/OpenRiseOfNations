@@ -8,6 +8,7 @@
 #include "sim/combat.hpp"
 #include "sim/combat_internal.hpp"
 #include "sim/economy.hpp"
+#include "sim/garrison.hpp"
 #include "sim/groups.hpp"
 #include "sim/guys.hpp"
 #include "sim/orders.hpp"
@@ -51,20 +52,6 @@ bool unit_is_busy(const Unit& u) {
 }
 
 bool is_peasant_type(int32_t t) { return t == ptype::kPeasants || t == ptype::kPeasantsKorean; }
-
-// ObjectData::count_inside(COUNT_PEASANTS, 0): citizens carried by this unit (transports).
-int32_t count_inside_peasants(const Game& g, const Unit& u) {
-	int32_t n = 0;
-	int32_t o = u.inside_down, w = u.inside_down_who;
-	for (int guard = 0; o >= 0 && guard < kUnitLimit; guard++) {
-		const Object* ob = g.object(w, o);
-		if (!ob) break;
-		if (ob->is_unit && ob->alive() && is_peasant_type(ob->type)) n++;
-		o = ob->inside_down;
-		w = ob->inside_down_who;
-	}
-	return n;
-}
 
 // GroupData::count(COUNT_PEASANTS 1 / COUNT_GATHER_PEASANTS 0xb / COUNT_BUILD_PEASANTS 0xe).
 // TODO(spec): the counting rules are taken from the names (citizen members; with a GATHER / BUILD_AT action).
@@ -154,15 +141,8 @@ int32_t count_builders(const std::vector<const Unit*>& units, int32_t self_o, in
 	return n;
 }
 
-// Object::adjacent_to(ox, whom) @651f40.
-bool adjacent_to(const Game& g, const Unit& u, int32_t ox, int32_t whom) {
-	if (u.ptype->domain == 1 && !(u.ptype->unit_flags & 0x10)) {
-		int32_t lim = K("boat_garrison_max_distance");
-		if (u.ptype->new_block_radius < 4) lim += 0x180;
-		return attack_dist(g, u, ox, whom) < lim;
-	}
-	return attack_dist(g, u, ox, whom, u.x, u.y) < 0x60;
-}
+// Object::adjacent_to(ox, whom) @651f40 (garrison.cpp).
+bool adjacent_to(const Game& g, const Unit& u, int32_t ox, int32_t whom) { return object_adjacent_to(g, u, ox, whom); }
 
 // WallData::covers_tile(tx, ty) @6439b0: the footprint from the corner tile.
 bool covers_tile(const Build& b, int32_t tx, int32_t ty) {
@@ -392,7 +372,7 @@ void group_action_swarm_around(Game& g, Group& gr, int32_t ox, int32_t whom, Que
 			if (unit_is_busy(*u)) continue;
 			// TODO(spells): SpellTypeData::is_castable(CIVILIANSPELL 659) is taken as 0.
 			if (order == kBuildAt || order == kRepair) {
-				if (!is_peasant_type(u->type) && count_inside_peasants(g, *u) == 0) {
+				if (!is_peasant_type(u->type) && count_inside(g, *u, kCountPeasants, 0) == 0) {
 					group_add(g, tmp, mo, who, 0, 0);
 					continue;
 				}
@@ -411,7 +391,7 @@ void group_action_swarm_around(Game& g, Group& gr, int32_t ox, int32_t whom, Que
 			if (!T->is_unit && T->ptype->domain == 1 && !type_is(*T->ptype, ptype::kDock) && is_peasant_type(u->type) &&
 			    0 >= 3) {
 				ft = current_upgrade(g, who, ptype::kTransportBarge);  // TODO(transports): LeaderData::can_transport
-			} else if (!T->is_unit && T->ptype->domain == 0 && count_inside_peasants(g, *u) != 0 && u->inside_down >= 0) {
+			} else if (!T->is_unit && T->ptype->domain == 0 && count_inside(g, *u, kCountPeasants, 0) != 0 && u->inside_down >= 0) {
 				const Object* p = g.object(u->inside_down_who, u->inside_down);
 				if (p) ft = p->type;
 			}
@@ -732,19 +712,7 @@ void build_process(Game& g, Build& b) {
 	const int32_t who = b.who;
 	Leader& l = LD(g, who);
 	if (b.healing) b.healing--;
-	if (b.build_masks & bmask::kEjecting) {
-		// Build::process_ejection @6201e0: one occupant per frame.
-		if (b.inside_down >= 0) {
-			Unit* u = g.unit(b.inside_down_who, b.inside_down);
-			if (u) {
-				Unit* c = u;
-				for (int guard = 0; c->o_up >= 0 && guard < 64; guard++) c = g.unit(c->who, c->o_up);
-				unit_come_out(g, *c, 1);
-			}
-		} else {
-			b.build_masks &= ~bmask::kEjecting;
-		}
-	}
+	if (b.build_masks & bmask::kEjecting) build_process_ejection(g, b);  // Build::process_ejection @6201e0
 	// (HOLDS_AIR: Object::do_launch, TODO(air))
 	if (b.ptype->attack != 0) build_process_attack(g, b);
 	if (!b.alive()) return;

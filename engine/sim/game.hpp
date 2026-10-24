@@ -107,6 +107,9 @@ struct Leader {
 	int32_t barracks_queued = 0, stable_queued = 0, factory_queued = 0, combat_queued = 0, dock_queued = 0,
 	        air_queued = 0;
 	int32_t peasants = 0, scholars = 0, scouts = 0, scholar_militia = 0;
+	// Captains garrisoned in a building (Object::insert_inside / remove_from_inside, garrison-spec 1): citizens
+	// +0xa28, stable units +0xa2c, specials +0xa30, barracks units +0xa34.
+	int32_t peasants_inside = 0, stable_inside = 0, special_inside = 0, barracks_inside = 0;
 	uint8_t ages_queued = 0, epochs_queued = 0;  // +0x67f4 / +0x67f5
 	int32_t tech_frame = 0;                        // +0x7c4
 	std::array<int32_t, 4> tech_cat_frame{};       // +0x7c8

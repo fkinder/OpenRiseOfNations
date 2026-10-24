@@ -9,6 +9,7 @@
 
 #include "sim/combat_internal.hpp"
 #include "sim/fog.hpp"
+#include "sim/garrison.hpp"
 #include "sim/groups.hpp"
 #include "sim/guys.hpp"
 #include "sim/movement.hpp"
@@ -430,13 +431,6 @@ void ammo_inc_time(Game& g, Ammo& a) {
 	}
 }
 
-// ObjectData::count_inside(COUNT_GARRISON_ARROWS) @64dda0. TODO(garrison): the inside_down chain is not built by
-// the loader yet, so no occupant contributes.
-int32_t count_garrison_arrows(const Game& g, const Build& b) {
-	(void)g, (void)b;
-	return 0;
-}
-
 bool build_find_target(Game& g, Build& b) {
 	// Build::find_target @622c80
 	const int32_t r = (std::max(b.ptype->x_size, b.ptype->y_size) + 2 * obj_max_range(g, b)) * 96;
@@ -555,12 +549,25 @@ int32_t get_shot(const Game& g, const Object& b) {
 	return a <= 2 ? 0 : a <= 4 ? 1 : 2;
 }
 
+int32_t get_base_garrison_arrows(const Game& g, const Build& b) {
+	// @62e340: the type's base arrows, plus the Maya bonus (tribe bonus 1) unless this is an active city building whose
+	// city is not assimilated to its owner (city +0x5f != +0x5e).
+	int32_t base = b.ptype->base_arrows;
+	if (!has_tribe_bonus(g, b.who, 1)) return base;
+	if ((b.flags & objflag::kCity) && (b.flags & objflag::kActive) && b.city >= 0 && b.who >= 0 && b.who < 8 &&
+	    size_t(b.city) < g.cities[size_t(b.who)].size()) {
+		const City& C = g.cities[size_t(b.who)][size_t(b.city)];
+		if (C.race != C.who) return base;
+	}
+	return base + RON_K(g, "maya_garrison_arrows");
+}
+
 int32_t get_garrison_arrows(const Game& g, const Build& b) {
 	// @62e3d0
 	const int32_t div = (obj_attack(g, b) + 5) / 10;
 	if (div == 0) return 0;
-	const int32_t base = b.ptype->base_arrows;  // TODO: Maya garrison arrows (tribe bonus 1)
-	int32_t S = count_garrison_arrows(g, b);
+	const int32_t base = get_base_garrison_arrows(g, b);
+	int32_t S = count_inside(g, b, kCountGarrisonArrows, 0);
 	if (base == 0) S += div / 2;
 	return base + std::min(S / div, b.ptype->most_shots);
 }
