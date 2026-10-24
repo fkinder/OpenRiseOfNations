@@ -190,7 +190,7 @@ public:
 	// LEADER_OPTIONS: the auto-gather delay (peasants 0..5), the caravan delay and the building option.
 	bool issue_leader_options(int32_t peasants, int32_t peasants_wait, int32_t buildings, uint32_t flags);
 
-	// Console / turn control (commands_extra.cpp). HOTKEY: `n` 0..17 of the local leader. With `units` the selection is sent as GROUP first
+	// Console / turn control (commands_extra.cpp). HOTKEY: `n` 0..17 of the local leader (18..25: the named army groups, sim/control.hpp). With `units` the selection is sent as GROUP first
 	// and the command copies it into the control group (HotKeyGroups::copy_group); with none it stores / clears the camera bookmark
 	// (x, y, zoom) or clears the group.
 	bool issue_hotkey(const Game& g, const std::vector<int32_t>& objs, int32_t n, bool clear = false);

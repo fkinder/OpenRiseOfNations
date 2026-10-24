@@ -5,7 +5,7 @@
 namespace hotkeys {
 
 bool Groups::issue(ron::sim::CommandManager& cm, const ron::sim::Game& g, const Command& c, const ObjectList& units, const ObjectList& builds) {
-	if (c.group < 0 || c.group >= ron::sim::kHotKeyGroupsPerLeader) return false;
+	if (c.group < 0 || c.group >= kNumSlots) return false;
 	attach(g);
 	bool ok;
 	if (c.clear && !c.valid) {
@@ -25,8 +25,10 @@ bool Groups::issue(ron::sim::CommandManager& cm, const ron::sim::Game& g, const 
 
 Slot Groups::slot(int play, int group) const {
 	Slot s;
-	if (!game_ || play < 0 || play >= 9 || group < 0 || group >= ron::sim::kHotKeyGroupsPerLeader) return s;
-	const ron::sim::HotKeyGroup& h = game_->ctl.hotkeys[size_t(play * ron::sim::kHotKeyGroupsPerLeader + group)];
+	if (!game_ || play < 0 || play >= 9 || group < 0 || group >= kNumSlots) return s;
+	const ron::sim::HotKeyGroup& h = group < ron::sim::kHotKeyGroupsPerLeader
+	                                     ? game_->ctl.hotkeys[size_t(play * ron::sim::kHotKeyGroupsPerLeader + group)]
+	                                     : game_->ctl.named[size_t(play * ron::sim::kNamedGroupsPerLeader + (group - ron::sim::kHotKeyGroupsPerLeader))];
 	if (!h.used) return s;
 	s.used = true;
 	if (h.bookmark) {

@@ -2,7 +2,8 @@
 // HotKeyGroups::copy_group). The verb lives in sim/commands_extra.cpp: `issue` sends the selection as GROUP and then the HOTKEY
 // command through CommandManager (issue_hotkey / issue_hotkey_bookmark), so a control group is recorded, replayed and networked like
 // every other order; the group table is Game::ctl.hotkeys (sim/control.hpp), 18 groups per leader (digits 0-9 -> 0..9, F1-F8 ->
-// 10..17). `slot` reads the table back for the HUD (recall, centre, add to the selection).
+// 10..17; 18..25 the named army groups of Game::ctl.named, docs/ui-port.md section 14). `slot` reads the table back for the HUD (recall,
+// centre, add to the selection).
 #pragma once
 
 #include <array>
@@ -16,8 +17,10 @@ namespace hotkeys {
 
 using ObjectList = std::vector<std::pair<int32_t, int32_t>>;  // (leader, object)
 
-// The payload of HOTKEY: group 0..17 of `play`; clear drops it; valid = the verb stores a camera bookmark (x, y, zoom) instead of the
+// The payload of HOTKEY: group 0..25 of `play`; clear drops it; valid = the verb stores a camera bookmark (x, y, zoom) instead of the
 // selection (clear == 1 and valid == 1), as CommandManager::issue_hotkey sends it.
+constexpr int kNumSlots = 26;  // 18 of the original's table + 8 named army groups
+
 struct Command {
 	int play = 0;
 	int group = 0, clear = 0, valid = 0;

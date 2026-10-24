@@ -27,6 +27,10 @@ struct HotKeyGroup {
 };
 
 constexpr int kHotKeyGroupsPerLeader = 18, kHotKeyGroupCount = 162;  // hotkey_groups: 9 leaders x 18 (digits 0-9, F1-F8)
+// Named army groups (a port addition, docs/ui-port.md section 14): 8 more slots per leader, stored by the same HOTKEY verb with
+// group = kHotKeyGroupCount + leader * 8 + n (values the original's executor ignored, so recorded games never carry them and the
+// 18-per-leader encoding of the first 162 is untouched). The issuer numbers them 18..25 (kHotKeyGroupsPerLeader + n).
+constexpr int kNamedGroupsPerLeader = 8, kNamedGroupCount = 72, kNamedGroupBase = kHotKeyGroupCount;
 
 struct ControlState {
 	// TurnControl: speed (0..4) and the frame time it sets (set_new_target_time), the pause bit (semaphore byte0 & 1) and the pauses
@@ -37,6 +41,8 @@ struct ControlState {
 	int32_t speed_changes = 0;
 	// HotKeyGroups: index = leader * 18 + n.
 	std::array<HotKeyGroup, kHotKeyGroupCount> hotkeys{};
+	// Named army groups: index = leader * 8 + n (the names are presentation data and live in the app).
+	std::array<HotKeyGroup, kNamedGroupCount> named{};
 	// Game::action_cheat_*: info.player[who].accum_cheated, and the "view all" toggle (semaphore byte0 & 2).
 	std::array<int32_t, 10> accum_cheated{};
 	bool view_all = false;
