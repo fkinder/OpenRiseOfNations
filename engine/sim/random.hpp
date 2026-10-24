@@ -7,6 +7,11 @@
 
 namespace ron::sim {
 
+#ifdef RON_RNG_PROFILE_HOOK
+// Profiling build only (apps/sav RON_RNG_PROFILE=1, docs/original-save.md section 6): called on every draw.
+inline void (*g_rng_hook)() = nullptr;
+#endif
+
 class Random {
 public:
 	explicit Random(uint32_t seed = 0) : seed_(seed) {}
@@ -20,6 +25,9 @@ public:
 	uint32_t seed() const { return seed_; }
 
 	uint32_t next() {
+#ifdef RON_RNG_PROFILE_HOOK
+		if (g_rng_hook) g_rng_hook();
+#endif
 		seed_ = seed_ * 0x19660Du + 0x3C6EF35Fu;
 		return seed_;
 	}

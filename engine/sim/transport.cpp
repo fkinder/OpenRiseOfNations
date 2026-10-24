@@ -65,11 +65,7 @@ int32_t region_of_tile_at(const Game& g, int32_t x, int32_t y) {
 }
 
 // UnitData::is_busy @60a370: the front order is a pack / unpack cast, or the unit is entering / leaving a building.
-// TODO(spells): is_entering_or_exiting (a SPECIAL_ANIM of type 0 / 1) is not modelled.
-bool is_busy(const Unit& u) {
-	const Order* f = u.front();
-	return f && f->type == kCastSpell && (spell_is_pack(f->spell) || spell_is_unpack(f->spell));
-}
+bool is_busy(const Unit& u) { return cast_is_busy(u); }
 
 }  // namespace
 

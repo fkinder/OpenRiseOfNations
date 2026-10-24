@@ -313,6 +313,8 @@ const ClassMap& map_good();            // Good
 const ClassMap& map_item();            // Item
 const ClassMap& map_goods_array();     // the global PtrArray<Good>
 const ClassMap& map_items_array();
+const ClassMap& map_herd();           // Herd (0x24: cx, cy, wx, wy, t, good_o, herd, herd_flags)
+const ClassMap& map_herds_array();    // the global PtrArray<Herd>
 const ClassMap& map_city();
 const ClassMap& map_caravan_link();
 const ClassMap& map_cities_lists();    // Cities: 8 PtrArray<City>

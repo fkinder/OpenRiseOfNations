@@ -98,4 +98,25 @@ std::vector<AuditLine> diff_mapped_state(Game& a, Game& b);
 // match): undoes what the engine changed in them. Returns the number of member values copied.
 int64_t revert_members(Game& to, Game& from, const std::vector<std::string>& members);
 
+// A multiplayer game started with a game script (GameInfo.script_type 1: scenario/Scripts/<Name>/<name>.bhs, e.g. "no_nukes") keeps the
+// script's name in the replay header only (the embedded save has no scenario_script). Creates g.scripts for a loaded game and compiles
+// that script so Game::do_frame runs it again (a run_once block runs once more: the effects it has on the rules are already in the
+// loaded rules image). False with `err` when the file is missing or does not compile.
+bool original_attach_game_script(Game& g, const GameFiles& files, const std::string& name, std::string* err = nullptr);
+
+// Experiment (the replay search of apps/sav): every mapped (object, member) whose bytes differ between `to` (stepped) and `from` (the
+// loaded save), and a switch that puts one of them back to the save's value and forth again.
+struct Seg_t { int32_t a = 0, b = 0, c = 0; };
+struct MemberChange {
+	std::string key;      // "Unit.angle"
+	Seg_t id;
+	const void* segment = nullptr;  // the binding (omap::Segment), valid while the Game lives
+	const void* entry = nullptr;    // the omap::Entry
+	std::vector<uint8_t> now, before;
+};
+std::vector<MemberChange> changed_members(Game& to, Game& from);
+std::vector<MemberChange> members_of(Game& g, const std::vector<std::string>& keys);  // every bound (object, member) named in `keys`
+void apply_member(Game& to, const MemberChange& c, bool revert);
+void apply_member_bytes(Game& to, const MemberChange& c, const std::vector<uint8_t>& bytes);  // load arbitrary member bytes  // revert: write `before`; else write `now`
+
 }  // namespace ron::sim

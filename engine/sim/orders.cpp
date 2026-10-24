@@ -2,6 +2,9 @@
 // The original's OrderList is a circular list whose execution order is head_node->prev first; here it is a deque in
 // execution order (front() = current order). QUEUE_FIRST is push_front, every other add is push_back.
 #include "sim/orders.hpp"
+#include <cstdio>
+#include <cstdlib>
+#include "sim/animals.hpp"
 #include "sim/production.hpp"
 
 #include "sim/aircraft.hpp"
@@ -182,13 +185,21 @@ void kill_current_order(Game& g, Unit& u, bool no_side_effects) {
 	} else if (cur.type == kTradeRoute) {
 		end_trade_route(g, u);
 	}
-	// CAST_SPELL side effects: TODO(spells): a paid order gives its cost back (unpay_cast_costs; a no-op for TRANSPORT:
-	// empty cost, mana 0) and a packing merchant refreshes its gpiece. SPECIAL_ANIM: TODO (not created yet).
+	// CAST_SPELL side effects (spells-spec 7): a paid order gives its cost back (unpay_cast_costs; a no-op for TRANSPORT:
+	// empty cost, mana 0), and a merchant killing a pack cast refreshes its gpiece afterwards (scene.recalc_builds).
+	bool merchant_packing = false;
+	if (cur.type == kCastSpell) {
+		if (std::getenv("RON_SPELL_TRACE")) std::fprintf(stderr, "[spell] f%d %d:%d CAST_SPELL 0x%x order removed (paid %d, spell_time %d)\n", g.frame, u.who, u.o, unsigned(cur.spell), cur.paid, int(u.spell_time));
+		if (cur.paid != 0 && !no_side_effects && !g.scenario_loading) unpay_cast_costs(g, cur.spell, u.o, u.who);
+		merchant_packing = unit_is_merchant(u) && cast_is_packing(u);
+	}
+	// SPECIAL_ANIM: TODO (the landing-order bookkeeping lives in aircraft.cpp).
 	const bool pathed = order_is_pathed(cur);
 	u.orders.pop_front();
 	if (pathed) kill_current_path(g, u);
 	clear_partial_path(u);
 	update_action(g, u);
+	if (merchant_packing && !g.scenario_loading) unit_update_gpiece(g, u);
 }
 
 void close_orders(Game& g, Unit& u, bool x) {
@@ -329,10 +340,43 @@ void work(Game& g, Unit& u) {
 				}
 			}
 		} else {
-			// TODO(orders-spec 5): unpacked packers cast PACK (651) before moving; packing is not simulated, so they
-			// move as if packed.
+			// An unpacked packer packs up before it moves (orders-spec 5, @60d180): a lone explicit move that ends within the
+			// unit's block radius is rewritten to end where the unit stands; a move to its own 48-cell is simply finished.
+			bool done = false;
+			if (cur && (cur->flags & orderflag::kExplicit) && u.orders.size() == 1 &&
+			    vector_dist(cur->x - u.x, cur->y - u.y) < u.ptype->block_radius) {
+				cur->x = u.x;
+				cur->y = u.y;
+				cur->dest_x = u.x;
+				cur->dest_y = u.y;
+				cur->last_x = u.x;
+				cur->last_y = u.y;
+				cur->tolerance = 0;
+				if (order_is_pathed(*cur) && !u.path.empty()) {
+					while (!u.path.empty() && !(u.path.back().flags & pathflag::kFinal)) u.path.pop_back();
+					if (!u.path.empty()) {
+						PathData p = u.path.back();
+						u.path.pop_back();
+						p.x = u.x;
+						p.y = u.y;
+						u.path.push_back(p);
+					}
+				}
+				done = true;
+			}
+			if (!done && cur) {
+				if (ucoord_of(u.x) == ucoord_of(cur->x) && ucoord_of(u.y) == ucoord_of(cur->y)) {
+					kill_current_order(g, u, false);
+					return;
+				}
+				add_cast_order(g, u, -1, -1, -1, -1, 0x28b, kQueueFirst, false);
+				cur = update_order(u);
+				type = cur ? cur->type : kOrderNone;
+			}
 		}
-	} else if (type != kOrderNone && (u.flags & objflag::kIdling)) {
+	}
+	// LAB_0060d733 (both the move branch and the others reach it): an idle unit with an order stops idling.
+	if (type != kOrderNone && (u.flags & objflag::kIdling)) {
 		const int32_t t = u.type;
 		if (t == 0x3d || t == 0x3e || t == 400 || unit_is(g, u, 0x13d)) g.leaders[size_t(u.who)].flags |= leaderflag::kRecompute;
 		u.flags &= uint8_t(~objflag::kIdling);
@@ -391,7 +435,8 @@ void work(Game& g, Unit& u) {
 int32_t do_job(Game& g, Unit& u, OrderType t, Order* o) {
 	switch (t) {
 	case kOrderNone:
-		do_idle(g, u);
+		if (is_animal_who(u.who)) animal_do_idle(g, u);  // vslot +0x184: Animal::do_idle @5d7460 (sim/animals.cpp)
+		else do_idle(g, u);
 		return 0;
 	case kMoveTo:
 		return do_move(g, u, *o);
@@ -439,6 +484,7 @@ int32_t do_job(Game& g, Unit& u, OrderType t, Order* o) {
 		do_strafe(g, u, *o);  // Unit::do_strafe @5eab00 (aircraft-spec 5)
 		return 0;
 	case kAirPatrol:
+		if (is_animal_who(u.who)) animal_think_bird(g, u, *o);  // vslot +0x180 (a no-op for ordinary units)
 		do_air_patrol(g, u, *o);  // Unit::do_air_patrol @5ea620
 		return 0;
 	case kAirAttackGround:

@@ -161,6 +161,7 @@ void calc_danger(Game& g);  // GameDaemon::calc_danger @732d10 (World.danger, ev
 // The AI branches of Unit::think after the economy part (ai-spec 12.6 steps 12-16).
 void think_ai(Game& g, Unit& u, bool tick);
 int32_t think_scout(Game& g, Unit& u, int32_t region_mode);  // Unit::think_scout @5f6010
+int32_t ai_think_spellcaster(Game& g, Unit& u);              // Unit::think_spellcaster @5f27a0 (use_generals / use_spies / use_scouts)
 void explore_goody(Game& g, Unit& u);  // Unit::explore_goody @5f9780 (G1 draws)
 int32_t ai_find_goody_box(Game& g, Unit& u);  // Unit::find_goody_box @5f2540
 

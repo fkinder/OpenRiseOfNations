@@ -1,5 +1,6 @@
 // Loading a save of the original game into the engine's Game (docs/original-save.md; sim/original_save.hpp).
 #include "sim/original_save.hpp"
+#include "sim/script_host.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -314,6 +315,19 @@ struct Loader {
 			});
 		}
 		g.good_mark = std::min<int32_t>(g.good_mark, int32_t(g.goods.size()));
+		// herds
+		{
+			const dw::Rec& r = global("herds");
+			sh.bind(&r, omap::map_herds_array());
+			each_container(r, container_step("PtrArray<Herd>::walk_data"), [&](int, const dw::ContainerData& cd) {
+				g.herds.assign(size_t(cd.length), Game::Herd());
+				for (size_t i = 0; i < cd.elems.size() && i < g.herds.size(); ++i) {
+					if (!cd.elems[i] || !cd.present[i]) continue;
+					sh.bind(cd.elems[i], omap::map_herd(), int32_t(i));
+					omap::map_herd().load_from(&g.herds[i], *cd.elems[i], 0);
+				}
+			});
+		}
 		// cities (+ caravan links)
 		{
 			const dw::Rec& r = global("cities");
@@ -471,6 +485,9 @@ struct Loader {
 				}
 			}
 		}
+		// Leader slot 9 (gaia's birds, farm animals) is not in the save; the running game has it valid (docs/original-save.md section 7).
+		g.leaders[size_t(kGaiaWho)].flags = leaderflag::kValid;
+		g.leaders[size_t(kGaiaWho)].color = kGaiaWho;
 		size_t k = 0;
 		each_child(lr, step_enc, [&](int64_t, dw::Rec* r) {
 			if (k >= active.size()) return;
@@ -913,6 +930,106 @@ std::vector<AuditLine> diff_mapped_state(Game& a, Game& b) {
 		}
 	}
 	return out;
+}
+
+bool original_attach_game_script(Game& g, const GameFiles& files, const std::string& name, std::string* err) {
+	if (name.empty()) return false;
+	std::string lower = name;
+	for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+	const std::string rel = "scenario\\Scripts\\" + lower + "\\" + lower + ".bhs";
+	if (files.resolve(rel).empty()) {
+		if (err) *err = "game script " + rel + " not found";
+		return false;
+	}
+	if (!g.scripts) g.scripts = std::make_unique<ScriptHost>(g);
+	ScriptHost& h = *g.scripts;
+	h.files = &files;
+	std::string cerr;
+	if (!h.compile(rel, &cerr)) {
+		if (err) *err = cerr;
+		return false;
+	}
+	h.scenario_script = bhs::to_u16(lower);
+	return true;
+}
+
+std::vector<MemberChange> changed_members(Game& to, Game& from) {
+	std::vector<MemberChange> out;
+	if (!to.original) return out;
+	std::vector<uint8_t> shadow, a, b;
+	for (const auto& kv : to.original->segs) {
+		const dw::Rec& rec = *kv.first;
+		for (const omap::Segment& seg : kv.second) {
+			void* ot = seg.map->resolve ? seg.map->resolve(to, seg.id) : nullptr;
+			void* of = seg.map->resolve ? seg.map->resolve(from, seg.id) : nullptr;
+			if (!ot || !of) continue;
+			for (const omap::Entry& e : seg.map->entries) {
+				shadow.resize(size_t(e.size));
+				rec.read(seg.base + e.off, shadow.data(), shadow.size());
+				a = shadow;
+				b = shadow;
+				e.emit(ot, a.data());
+				e.emit(of, b.data());
+				if (a == b) continue;
+				MemberChange c;
+				c.key = seg.map->name + "." + e.name;
+				c.id = Seg_t{seg.id.a, seg.id.b, seg.id.c};
+				c.segment = &seg;
+				c.entry = &e;
+				c.now = a;
+				c.before = b;
+				out.push_back(std::move(c));
+			}
+		}
+	}
+	return out;
+}
+
+std::vector<MemberChange> members_of(Game& g, const std::vector<std::string>& keys) {
+	std::vector<MemberChange> out;
+	if (!g.original) return out;
+	std::vector<uint8_t> shadow, a;
+	for (const auto& kv : g.original->segs) {
+		const dw::Rec& rec = *kv.first;
+		for (const omap::Segment& seg : kv.second) {
+			void* ot = seg.map->resolve ? seg.map->resolve(g, seg.id) : nullptr;
+			if (!ot) continue;
+			for (const omap::Entry& e : seg.map->entries) {
+				const std::string key = seg.map->name + "." + e.name;
+				bool match = std::find(keys.begin(), keys.end(), key) != keys.end();
+				for (size_t q = 0; !match && q < keys.size(); ++q)  // "Unit.*": every member of the class
+					match = keys[q].size() > 1 && keys[q].back() == '*' && key.compare(0, keys[q].size() - 1, keys[q], 0, keys[q].size() - 1) == 0;
+				if (!match) continue;
+				shadow.resize(size_t(e.size));
+				rec.read(seg.base + e.off, shadow.data(), shadow.size());
+				a = shadow;
+				e.emit(ot, a.data());
+				MemberChange c;
+				c.key = key;
+				c.id = Seg_t{seg.id.a, seg.id.b, seg.id.c};
+				c.segment = &seg;
+				c.entry = &e;
+				c.now = a;
+				c.before = a;
+				out.push_back(std::move(c));
+			}
+		}
+	}
+	return out;
+}
+
+void apply_member(Game& to, const MemberChange& c, bool revert) {
+	const omap::Segment& seg = *static_cast<const omap::Segment*>(c.segment);
+	const omap::Entry& e = *static_cast<const omap::Entry*>(c.entry);
+	void* ot = seg.map->resolve ? seg.map->resolve(to, seg.id) : nullptr;
+	if (ot) e.load(ot, (revert ? c.before : c.now).data());
+}
+
+void apply_member_bytes(Game& to, const MemberChange& c, const std::vector<uint8_t>& bytes) {
+	const omap::Segment& seg = *static_cast<const omap::Segment*>(c.segment);
+	const omap::Entry& e = *static_cast<const omap::Entry*>(c.entry);
+	void* ot = seg.map->resolve ? seg.map->resolve(to, seg.id) : nullptr;
+	if (ot && bytes.size() == size_t(e.size)) e.load(ot, bytes.data());
 }
 
 int64_t revert_members(Game& to, Game& from, const std::vector<std::string>& members) {

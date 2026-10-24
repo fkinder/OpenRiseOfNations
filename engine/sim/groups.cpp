@@ -17,6 +17,7 @@
 #include "sim/movement.hpp"
 #include "sim/orders.hpp"
 #include "sim/search.hpp"
+#include "sim/spells.hpp"
 #include "sim/trig.hpp"
 
 namespace ron::sim {
@@ -672,12 +673,8 @@ int32_t get_inside(Game& g, const Unit& u, int32_t* who_out) {
 	return o;
 }
 
-// UnitData::is_packing @60aa60: the current order is a SPECIAL_ANIM of a packing animation. TODO(packers): not
-// simulated (no SPECIAL_ANIM orders are created yet).
-bool is_packing(const Unit& u) {
-	(void)u;
-	return false;
-}
+// UnitData::is_packing @60aa60: the current order is a CAST_SPELL of a pack spell (spells-spec 5).
+bool is_packing(const Unit& u) { return cast_is_packing(u); }
 
 // Type vtable +0x10c (taken as is_siege: UnitTypeData unit_flags 0x20000; also assumed by action_halt).
 bool is_siege(const Unit& u) { return (u.ptype->unit_flags & 0x20000) != 0; }

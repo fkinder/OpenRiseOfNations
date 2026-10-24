@@ -16,11 +16,15 @@
 //                the command stream (or --json file) and the CSV of re/tools/rcxdump.mjs --checksums.
 //   --step-diff N     (with a save or replay) which mapped members the engine changes in N frames from the save
 //   --compare-next B  (with --replay) run to the frame of replay B's embedded save and list the members that differ from that save
+//   --solve-at B      (with --replay) at boundary B: for each of units/builds/groups/guys/leaders/goods/world whose hash differs, test
+//                     whether ONE changed byte explains it (Adler-32 algebra) and name the object, member and byte
 //   --revert M,..     (with --replay) experiment: put members ("Unit.flags") back to the save's values after the first step
 //   --field-report    how many members of each original class the engine maps (the rest stays in the shadow)
 //   other options: --quiet --no-diag --mutate N (self-test) --json F --csv F --game DIR --no-art --no-commands --verbose
 // Exit code: 1 if the decode fails, 2 if a recomputed value differs from the stored/expected one under --verify / --engine-roundtrip.
 #include <csignal>
+#include <cxxabi.h>
+#include <dlfcn.h>
 #include <execinfo.h>
 #include <signal.h>
 #include <unistd.h>
@@ -35,6 +39,8 @@
 #include <functional>
 #include <memory>
 #include <set>
+#include <tuple>
+#include <unordered_map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -44,8 +50,12 @@
 #include "sim/commands.hpp"
 #include "sim/datawalk.hpp"
 #include "sim/datawalk_engine.hpp"
+#include "sim/fog.hpp"
+#include "sim/combat.hpp"
+#include "sim/orders.hpp"
 #include "sim/original_save.hpp"
 #include "sim/rules.hpp"
+#include "sim/rules_xml.hpp"
 
 namespace dw = ron::sim::datawalk;
 
@@ -598,10 +608,493 @@ int64_t json_enum(const Json& args, const char* key, const std::map<std::string,
 	return it == names.end() ? def : it->second;
 }
 
+
+// ---- hash tracing: the bytes a CHECK_SUMS part hashes, labelled, and a solver for a small difference of two hashes ----------
+
+int64_t g_solve_at = -1;  // --solve-at B: at that boundary name the changed byte of every part that differs by one byte
+
+struct PartTrace {
+	struct R { size_t begin, len; int who, o, step; };
+	std::vector<uint8_t> bytes;
+	std::vector<R> ranges;
+};
+
+// Runs part `part` (units 0, builds 1, groups 5, guys 6, leaders 7, goods 10, world 11) with a hook that records every hashed range.
+bool trace_part(dw::Provider& p, int part, PartTrace& out) {
+	const dw::Description& d = dw::Description::get();
+	dw::ChecksumWalker w(d, p);
+	int cur_who = -1, cur_o = -1;
+	w.set_hook([&](int step, const uint8_t* b, size_t n) {
+		out.ranges.push_back({out.bytes.size(), n, cur_who, cur_o, step});
+		out.bytes.insert(out.bytes.end(), b, b + n);
+	});
+	auto gid = [&](const char* n) { return d.find_global(n); };
+	auto i32 = [&](dw::Obj o, int64_t off) { const uint8_t* b = p.image(o, off, 4); return int32_t(b[0] | b[1] << 8 | b[2] << 16 | uint32_t(b[3]) << 24); };
+	dw::Obj objects = p.global(gid("objects")), leaders = p.global(gid("leaders")), obj_base = p.global(gid("obj_base"));
+	const int off_valid = d.find_field("Objects", "valid")->offset, off_unit = d.find_field("Objects", "unit_mark")->offset,
+	          off_build = d.find_field("Objects", "build_mark")->offset;
+	const int fn_multi = d.find_function("MultiPtrArray<Object>::walk_data");
+	const int step_lists = d.find_step(fn_multi, dw::StepKind::Container);
+	auto active = [&](int who) { return (i32(leaders, int64_t(who) * 0x6eec) & 1) != 0; };
+	w.reset();
+	if (part == 0 || part == 1 || part == 6) {
+		if (!i32(objects, off_valid)) return true;
+		const int32_t lo = i32(obj_base, part == 1 ? 4 : 0);
+		const int fn_guys = d.find_function("PtrArray<Guy>::walk_data");
+		for (int who = 0; who < (part == 1 ? 8 : 9); ++who) {
+			if (!active(who)) continue;
+			const int32_t hi = i32(objects, (part == 1 ? off_build : off_unit) + 4 * who);
+			dw::Site site{step_lists, int64_t(who) * 0x1c + 4};
+			dw::ContainerHeader h;
+			if (!p.container(objects, site, h)) return false;
+			for (int64_t o = lo; o < std::min<int64_t>(hi, h.length); ++o) {
+				if (!p.present(objects, site, o)) continue;
+				dw::Obj e = p.element(objects, site, o);
+				if (!e || !(*p.image(e, 8, 1) & 1)) continue;
+				cur_who = who;
+				cur_o = int(o);
+				if (part == 6) w.walk(fn_guys, e, -1, 0xe4);
+				else w.walk(d.dispatch_function(step_lists, p.data_type(objects, site, o)), e, -1, 0);
+			}
+		}
+		return true;
+	}
+	if (part == 7) {
+		const int fn = d.find_function("LeaderData::walk_data");
+		for (int who = 0; who < 8; ++who) { cur_who = who; w.walk(fn, leaders, gid("leaders"), int64_t(who) * 0x6eec); }
+		return true;
+	}
+	if (part == 5) {
+		dw::Obj groups = p.global(gid("groups"));
+		const int fn = d.find_function("Group::walk_data");
+		dw::Site site{d.find_step(d.find_function("Array<Group>::walk_data"), dw::StepKind::Container, -1, 0), 0};
+		dw::ContainerHeader h;
+		if (!p.container(groups, site, h)) return false;
+		for (int64_t i = 0; i < h.length; ++i) {
+			dw::Obj e = p.element(groups, site, i);
+			if (!e) continue;
+			cur_o = int(i);
+			w.walk(fn, e, -1, 0);
+		}
+		cur_o = -1;
+		w.add_image(groups, 28, 32);
+		return true;
+	}
+	if (part == 8) {
+		dw::Obj cities = p.global(gid("cities"));
+		const int fn_city = d.find_function("City::walk_data");
+		const int step = d.find_step(d.find_function("PtrArray<City>::walk_data"), dw::StepKind::Container);
+		for (int who = 0; who < 8; ++who) {
+			if (!active(who)) continue;
+			dw::Site site{step, int64_t(who) * 0x1c};
+			dw::ContainerHeader h;
+			if (!p.container(cities, site, h)) return false;
+			for (int64_t i = 0; i < h.length; ++i) {
+				if (!p.present(cities, site, i)) continue;
+				dw::Obj e = p.element(cities, site, i);
+				if (!e) continue;
+				const uint8_t* fl = p.image(e, 4, 2);
+				if (!(fl[0] & 1)) continue;
+				cur_who = who;
+				cur_o = int(i);
+				w.walk(fn_city, e, -1, 0);
+			}
+		}
+		return true;
+	}
+	if (part == 3 || part == 4) {
+		dw::Obj objs = objects;
+		if (!i32(objects, off_valid)) return true;
+		const int fn = d.find_function(part == 3 ? "AmmoData::walk_data" : "DeathObjData::walk_data");
+		const int arr = d.find_function(part == 3 ? "PtrArray<Ammo>::walk_data" : "ObjectArray<DeathObj>::walk_data");
+		dw::Site site{d.find_step(arr, dw::StepKind::Container, -1, 0), int64_t(d.find_field("Objects", part == 3 ? "ammo_objs" : "death_objs")->offset)};
+		dw::ContainerHeader h;
+		if (!p.container(objs, site, h)) return false;
+		for (int64_t i = 0; i < h.length; ++i) {
+			dw::ContainerKind ck = d.container_kind(site.step);
+			if ((ck == dw::ContainerKind::PtrArray || ck == dw::ContainerKind::MultiPtrArray) && !p.present(objs, site, i)) continue;
+			dw::Obj e = p.element(objs, site, i);
+			if (!e) continue;
+			if (part == 3 ? !(*p.image(e, 4, 1) & 3) : !i32(e, 0)) continue;
+			cur_o = int(i);
+			w.walk(fn, e, -1, 0);
+		}
+		return true;
+	}
+	if (part == 9 || part == 10) {
+		dw::Obj goods = p.global(gid(part == 9 ? "items" : "goods"));
+		const int fn = d.find_function(part == 9 ? "Item::walk_data" : "Good::walk_data");
+		dw::Site site{d.find_step(d.find_function(part == 9 ? "PtrArray<Item>::walk_data" : "PtrArray<Good>::walk_data"), dw::StepKind::Container), 0};
+		dw::ContainerHeader h;
+		if (!p.container(goods, site, h)) return false;
+		for (int64_t i = 0; i < h.length; ++i) {
+			if (!p.present(goods, site, i)) continue;
+			dw::Obj e = p.element(goods, site, i);
+			if (!e || !(*p.image(e, 8, 1) & 1)) continue;
+			cur_o = int(i);
+			w.walk(fn, e, -1, 0);
+		}
+		return true;
+	}
+	if (part == 11) {
+		dw::Obj world = p.global(gid("world"));
+		if (i32(world, 8) > 0) w.walk("World::walk_data", world, gid("world"), 0, {{"part", -1}});
+		return true;
+	}
+	return false;
+}
+
+uint32_t adler_of(const std::vector<uint8_t>& b) {
+	uint32_t a = 1, s = 0;
+	for (uint8_t x : b) { a = (a + x) % 65521; s = (s + a) % 65521; }
+	return (s << 16) | a;
+}
+
+int64_t modpow(int64_t b, int64_t e, int64_t m) { int64_t r = 1; b %= m; while (e) { if (e & 1) r = r * b % m; b = b * b % m; e >>= 1; } return r; }
+
+// If the original's hash differs from `trace`'s by one changed byte (value difference e in -255..255), names the byte(s).
+void solve_single_byte(const PartTrace& tr, uint32_t want, const char* part_name) {
+	const dw::Description& d = dw::Description::get();
+	const int64_t M = 65521, N = int64_t(tr.bytes.size());
+	const uint32_t have = adler_of(tr.bytes);
+	int64_t da = ((int64_t(want & 0xffff) - (have & 0xffff)) % M + M) % M, db = ((int64_t(want >> 16) - (have >> 16)) % M + M) % M;
+	std::printf("    solve %s: %lld bytes hashed, delta a=%lld b=%lld\n", part_name, (long long)N, (long long)da, (long long)db);
+	int shown = 0;
+	for (int e = -255; e <= 255 && shown < 12; ++e) {
+		if (e == 0) continue;
+		const int64_t ee = ((e % M) + M) % M;
+		if (ee != da) continue;
+		const int64_t w0 = db * modpow(ee, M - 2, M) % M;  // the weight N - i (mod M) of the changed byte
+		for (int64_t w = w0; w <= N; w += M) {
+			if (w < 1) continue;
+			const int64_t i = N - w;
+			for (const auto& r : tr.ranges) {
+				if (size_t(i) < r.begin || size_t(i) >= r.begin + r.len) continue;
+				const int fn = d.step_function(r.step);
+				std::printf("      single byte e=%+d at stream %lld: who %d o %d, %s step %d range %lld..%lld byte +%zu (engine 0x%02x -> original 0x%02x)\n", e, (long long)i, r.who, r.o,
+					fn >= 0 ? d.function_name(fn) : "?", r.step, (long long)d.step_const(r.step, 0), (long long)d.step_const(r.step, 1), size_t(i) - r.begin, tr.bytes[size_t(i)], (tr.bytes[size_t(i)] + e) & 0xff);
+				{
+					std::printf("        range bytes (engine, %zu):", r.len);
+					for (size_t q = 0; q < std::min<size_t>(r.len, 24); ++q) std::printf(" %02x", tr.bytes[r.begin + q]);
+					std::printf("%s\n", r.len > 24 ? " ..." : "");
+					const size_t ri = size_t(&r - tr.ranges.data());
+					for (size_t q = ri > 3 ? ri - 3 : 0; q < std::min(tr.ranges.size(), ri + 4); ++q) {
+						const auto& rr = tr.ranges[q];
+						const int f2 = d.step_function(rr.step);
+						std::printf("          %s range %zu: step %d (%s) len %zu:", q == ri ? ">>" : "  ", q, rr.step, f2 >= 0 ? d.function_name(f2) : "?", rr.len);
+						for (size_t z = 0; z < std::min<size_t>(rr.len, 16); ++z) std::printf(" %02x", tr.bytes[rr.begin + z]);
+						std::printf("\n");
+					}
+				}
+				++shown;
+				break;
+			}
+		}
+	}
+	if (!shown) std::printf("      (not a single changed byte)\n");
+	// A whole column: the same byte of every object of one walk step off by the same e (a counter every object keeps).
+	{
+		std::map<std::pair<int, size_t>, std::pair<int64_t, int64_t>> col;  // (step, byte in range) -> (count, weight sum)
+		for (const auto& r : tr.ranges)
+			for (size_t k = 0; k < r.len && k < 64; ++k) {
+				auto& cw = col[{r.step, k}];
+				cw.first++;
+				cw.second += N - int64_t(r.begin + k);
+			}
+		int shown_col = 0;
+		for (const auto& kv : col) {
+			for (int e = -8; e <= 8 && shown_col < 12; ++e) {
+				if (e == 0) continue;
+				if (((int64_t(e) * kv.second.first) % M + M) % M != da || ((int64_t(e) * kv.second.second) % M + M) % M != db) continue;
+				const int fn = d.step_function(kv.first.first);
+				std::printf("      column: every object's byte +%zu of %s step %d range %lld.. off by %+d (%lld objects)\n", kv.first.second, fn >= 0 ? d.function_name(fn) : "?", kv.first.first,
+					(long long)d.step_const(kv.first.first, 0), e, (long long)kv.second.first);
+				++shown_col;
+			}
+		}
+	}
+	// One integer member (1, 2 or 4 bytes) that is off by a small amount (|delta| <= D) anywhere in the stream.
+	{
+		const int D = N > 300000 ? 64 : 600;
+		int hits = 0;
+		for (const auto& r : tr.ranges) {
+			for (size_t off = 0; off < r.len && hits < 16; ++off) {
+				for (int wdt : {1, 2, 4}) {
+					if (off + size_t(wdt) > r.len) continue;
+					uint32_t v = 0;
+					for (int k = 0; k < wdt; ++k) v |= uint32_t(tr.bytes[r.begin + off + size_t(k)]) << (8 * k);
+					const uint64_t mod = wdt == 4 ? (uint64_t(1) << 32) : (uint64_t(1) << (8 * wdt));
+					for (int dl = -D; dl <= D && hits < 16; ++dl) {
+						if (dl == 0) continue;
+						const uint32_t nv = uint32_t((uint64_t(v) + mod + uint64_t(int64_t(dl) % int64_t(mod) + int64_t(mod))) % mod);
+						int64_t sa = 0, sb = 0;
+						for (int k = 0; k < wdt; ++k) {
+							const int e = int((nv >> (8 * k)) & 0xff) - int((v >> (8 * k)) & 0xff);
+							sa += e;
+							sb += int64_t(e) * (N - int64_t(r.begin + off + size_t(k)));
+						}
+						if (((sa % M) + M) % M != da || ((sb % M) + M) % M != db) continue;
+						const int fn = d.step_function(r.step);
+						std::printf("      %d-byte member off by %+d at stream %zu: who %d o %d, %s step %d range %lld..%lld +%zu (engine %u -> original %u)\n", wdt, dl, r.begin + off, r.who, r.o,
+							fn >= 0 ? d.function_name(fn) : "?", r.step, (long long)d.step_const(r.step, 0), (long long)d.step_const(r.step, 1), off, v, nv);
+						++hits;
+					}
+				}
+			}
+		}
+		if (!hits) std::printf("      (no integer member off by at most %d)\n", D);
+	}
+	// Two bytes of the same member of two different objects, changed by the same amount e (a counter that runs differently
+	// in two objects): e + e = da and e (w1 + w2) = db.
+	{
+		std::vector<int> range_of(size_t(N), -1);
+		for (size_t k = 0; k < tr.ranges.size(); ++k)
+			for (size_t i = 0; i < tr.ranges[k].len; ++i) range_of[tr.ranges[k].begin + i] = int(k);
+		int pairs = 0;
+		for (int e = -64; e <= 64 && pairs < 10; ++e) {
+			if (e == 0 || ((2 * e) % M + M) % M != da) continue;
+			const int64_t need = db * modpow(((e % M) + M) % M, M - 2, M) % M;  // w1 + w2 mod M
+			for (int64_t i = 0; i < N && pairs < 10; ++i) {
+				const int64_t w1 = N - i;
+				for (int64_t w2 = (need - w1 % M + M) % M; w2 <= N; w2 += M) {
+					if (w2 < 1) continue;
+					const int64_t j = N - w2;
+					if (j <= i) continue;
+					const auto& ri = tr.ranges[size_t(range_of[size_t(i)])];
+					const auto& rj = tr.ranges[size_t(range_of[size_t(j)])];
+					if (ri.step != rj.step || size_t(i) - ri.begin != size_t(j) - rj.begin || (ri.who == rj.who && ri.o == rj.o)) continue;
+					const int fn = d.step_function(ri.step);
+					std::printf("      same member of two objects, e=%+d each: %s step %d range %lld..%lld byte +%zu: (who %d o %d) and (who %d o %d)\n", e,
+						fn >= 0 ? d.function_name(fn) : "?", ri.step, (long long)d.step_const(ri.step, 0), (long long)d.step_const(ri.step, 1), size_t(i) - ri.begin, ri.who, ri.o, rj.who, rj.o);
+					++pairs;
+				}
+			}
+		}
+	}
+}
+
+
+int g_shift_part = -1;
+int64_t g_shift_at = -1;
+std::map<int64_t, PartTrace> g_shift_traces;
+
+// Hypothesis: the original's object(s) are a few frames ahead of / behind the engine's. For each labelled object (who, o) of part
+// `g_shift_part` and each other frame t within 8 of g_shift_at, the effect of substituting the object's bytes by those of frame t;
+// then one or two such substitutions that reproduce the original's hash at g_shift_at.
+void shift_search(uint32_t want) {
+	const int64_t M = 65521;
+	auto it0 = g_shift_traces.find(g_shift_at);
+	if (it0 == g_shift_traces.end()) return;
+	const PartTrace& base = it0->second;
+	const int64_t N = int64_t(base.bytes.size());
+	// object segments of a trace: (who, o) -> [begin, end) (the objects' ranges are contiguous)
+	auto segments = [](const PartTrace& t) {
+		std::map<std::pair<int, int>, std::pair<size_t, size_t>> seg;
+		for (const auto& r : t.ranges) {
+			auto key = std::make_pair(r.who, r.o);
+			auto f = seg.find(key);
+			if (f == seg.end()) seg[key] = {r.begin, r.begin + r.len};
+			else f->second.second = r.begin + r.len;
+		}
+		return seg;
+	};
+	const auto bseg = segments(base);
+	// prefix states (a, b) at every byte, and suffix transforms from every byte: (sum of bytes, b-contribution from a = 0)
+	std::vector<std::pair<int64_t, int64_t>> pre(size_t(N) + 1);
+	pre[0] = {1, 0};
+	for (int64_t i = 0; i < N; ++i) {
+		const int64_t a = (pre[size_t(i)].first + base.bytes[size_t(i)]) % M;
+		pre[size_t(i) + 1] = {a, (pre[size_t(i)].second + a) % M};
+	}
+	std::vector<std::pair<int64_t, int64_t>> suf(size_t(N) + 1);  // from a = 0 and b = 0 start
+	suf[size_t(N)] = {0, 0};
+	for (int64_t i = N - 1; i >= 0; --i) {
+		// processing byte i then the rest: a_i = x_i; b gets a_i * (1 + rest length) + ...
+		const int64_t rest = N - 1 - i;
+		const int64_t x = base.bytes[size_t(i)];
+		suf[size_t(i)] = {(suf[size_t(i) + 1].first + x) % M, (suf[size_t(i) + 1].second + x * (rest + 1)) % M};
+	}
+	const uint32_t h0 = adler_of(base.bytes);
+	struct Cand { std::pair<int, int> obj; int64_t t; };
+	std::vector<Cand> hits;
+	int64_t trials = 0;
+	for (const auto& kv : g_shift_traces) {
+		if (kv.first == g_shift_at) continue;
+		const PartTrace& other = kv.second;
+		const auto oseg = segments(other);
+		for (const auto& sg : bseg) {
+			auto f = oseg.find(sg.first);
+			if (f == oseg.end()) continue;
+			// base[0, begin) + other segment + base[end, N)
+			std::pair<int64_t, int64_t> st = pre[sg.second.first];
+			for (size_t q = f->second.first; q < f->second.second; ++q) {
+				st.first = (st.first + other.bytes[q]) % M;
+				st.second = (st.second + st.first) % M;
+			}
+			const int64_t Lsuf = N - int64_t(sg.second.second);
+			const int64_t a = (st.first + suf[sg.second.second].first) % M;
+			const int64_t b = (st.second + st.first * Lsuf + suf[sg.second.second].second) % M;
+			++trials;
+			if ((uint32_t(b) << 16 | uint32_t(a)) == want) hits.push_back({sg.first, kv.first});
+		}
+	}
+	std::printf("  time-shift search: %lld (object, frame) substitutions (base hash %u, wanted %u)\n", (long long)trials, h0, want);
+	for (const auto& h : hits) std::printf("    SHIFT HIT: object (%d,%d) as at frame %lld\n", h.obj.first, h.obj.second, (long long)h.t);
+	if (hits.empty()) std::printf("    (no single object at another frame explains it)\n");
+}
+
+
+// Group::action_unitmask @6fcb90 (no Verb in sim/commands.hpp yet): toggles `mask` on the members of the current group. The first member
+// decides (set unless the mask is AI control 0x40000, cleared when it already has the bit); the others follow the first one's new state.
+// The command's `set` field is not read by the original. AUTO_EXPLORE (0x100) additionally forgets the unit's orders.
+void apply_unitmask(sim::Game& g, int32_t group, uint32_t mask) {
+	if (group < 0 || group >= sim::kNumGroups) return;
+	sim::Group& gr = g.groups.g[size_t(group)];
+	if (gr.buildings) return;
+	bool follow = mask != 0x40000;
+	for (int32_t i = 0; i < gr.num; ++i) {
+		sim::Unit* u = g.unit(gr.who, gr.list[size_t(i)]);
+		if (!u || !u->alive()) continue;
+		if (mask == 0x100 && sim::unit_is_plane(*u) && u->ptype->domain == 2 && !(u->ptype->unit_flags & 0x20)) continue;
+		const bool now = (u->unit_masks & mask) == 0 ? follow : false;
+		if (now) u->unit_masks |= mask;
+		else u->unit_masks &= ~mask;
+		follow = now;
+		if (mask == 0x100) {
+			u->flags |= sim::objflag::kNewThink;
+			sim::clear_orders(g, *u);
+		}
+	}
+}
+
+int64_t g_pshift_at = -1;
+std::map<int64_t, std::map<std::pair<std::tuple<int, int, int>, std::string>, std::vector<uint8_t>>> g_pshift_vals;
+
+// Hypothesis: a few guys of the original have, at boundary B, some of their members (positions, ...) as the engine has them at another
+// frame. The engine is at frame B+8 here: we need the state at B, so the search re-derives the base from the recorded member values
+// (guys part only, byte positions found by inverting each member; additive effects; one or two guys, four member sets).
+void partial_shift_search(sim::Game& game, int64_t B, uint32_t want) {
+	const int64_t M = 65521;
+	// Reconstruct the state at B by writing the recorded values back into the (later) engine state for every Guy member.
+	const auto& base = g_pshift_vals[B];
+	std::vector<sim::MemberChange> all = sim::members_of(game, {"Guy.*"});
+	for (const auto& mc : all) {
+		auto it = base.find({{mc.id.a, mc.id.b, mc.id.c}, mc.key});
+		if (it != base.end()) sim::apply_member_bytes(game, mc, it->second);
+	}
+	sim::EngineProvider ep(game);
+	PartTrace t0;
+	trace_part(ep, 6, t0);
+	const int64_t N = int64_t(t0.bytes.size());
+	const uint32_t h0 = adler_of(t0.bytes);
+	if (h0 == want) { std::printf("  partial-shift: the reconstructed state already matches\n"); return; }
+	const int64_t ta = ((int64_t(want & 0xffff) - (h0 & 0xffff)) % M + M) % M, tb = ((int64_t(want >> 16) - (h0 >> 16)) % M + M) % M;
+	// member positions: one inverted trace per member kind over all guys
+	std::map<std::string, std::vector<const sim::MemberChange*>> bykey;
+	for (const auto& mc : all) bykey[mc.key].push_back(&mc);
+	std::map<std::pair<std::tuple<int, int, int>, std::string>, std::vector<int64_t>> pos;
+	for (auto& kv : bykey) {
+		const size_t n = kv.second.front()->now.size();
+		if (n == 0 || n > 8) continue;
+		for (const auto* c : kv.second) {
+			std::vector<uint8_t> cur(n);
+			auto it = base.find({{c->id.a, c->id.b, c->id.c}, c->key});
+			cur = it != base.end() ? it->second : c->now;
+			std::vector<uint8_t> inv(n);
+			for (size_t k = 0; k < n; ++k) inv[k] = uint8_t(~cur[k]);
+			sim::apply_member_bytes(game, *c, inv);
+		}
+		sim::EngineProvider ep3(game);
+		PartTrace t1;
+		const bool ok = trace_part(ep3, 6, t1) && t1.bytes.size() == t0.bytes.size();
+		for (const auto* c : kv.second) {
+			auto it = base.find({{c->id.a, c->id.b, c->id.c}, c->key});
+			sim::apply_member_bytes(game, *c, it != base.end() ? it->second : c->now);
+		}
+		if (!ok) continue;
+		size_t ri = 0;
+		std::map<std::tuple<int, int>, std::vector<int64_t>> byobj;
+		for (size_t q = 0; q < t0.bytes.size(); ++q) {
+			while (ri + 1 < t0.ranges.size() && t0.ranges[ri].begin + t0.ranges[ri].len <= q) ++ri;
+			if (t0.bytes[q] != t1.bytes[q]) byobj[{t0.ranges[ri].who, t0.ranges[ri].o}].push_back(int64_t(q));
+		}
+		// guys of one unit follow each other in the stream: the k-th guy of the unit owns the k-th group of n changed bytes
+		for (auto& bo : byobj) {
+			size_t gi = 0;
+			for (size_t q = 0; q + n <= bo.second.size(); q += n, ++gi)
+				pos[{{std::get<0>(bo.first), std::get<1>(bo.first), int(gi)}, kv.first}] = std::vector<int64_t>(bo.second.begin() + std::ptrdiff_t(q), bo.second.begin() + std::ptrdiff_t(q + n));
+		}
+	}
+	const std::vector<std::vector<std::string>> sets = {
+		{"Guy.x", "Guy.y", "Guy.des_x", "Guy.des_y", "Guy.last_x", "Guy.last_y"},
+		{"Guy.x", "Guy.y", "Guy.des_x", "Guy.des_y", "Guy.last_x", "Guy.last_y", "Guy.z", "Guy.last_z"},
+		{"Guy.x", "Guy.y", "Guy.des_x", "Guy.des_y", "Guy.last_x", "Guy.last_y", "Guy.z", "Guy.last_z", "Guy.angle", "Guy.des_angle", "Guy.last_angle", "Guy.last_speed", "Guy.avg_speed"},
+		{"Guy.cur_time", "Guy.last_time", "Guy.end_time", "Guy.cur_anim", "Guy.stopped"},
+		{"Guy.x", "Guy.y", "Guy.des_x", "Guy.des_y", "Guy.last_x", "Guy.last_y", "Guy.z", "Guy.last_z", "Guy.angle", "Guy.des_angle", "Guy.last_angle", "Guy.last_speed", "Guy.avg_speed", "Guy.cur_time", "Guy.last_time", "Guy.end_time", "Guy.cur_anim", "Guy.stopped"}};
+	struct Cand { std::tuple<int, int, int> obj; int64_t t; int set; int64_t a, b; };
+	std::vector<Cand> cands;
+	std::set<std::tuple<int, int, int>> objs;
+	for (const auto& kv : pos) objs.insert(kv.first.first);
+	for (const auto& kv : g_pshift_vals) {
+		const int64_t t = kv.first;
+		if (t == B) continue;
+		for (const auto& ob : objs)
+			for (size_t si = 0; si < sets.size(); ++si) {
+				int64_t sa = 0, sb = 0;
+				bool any = false;
+				for (const std::string& key : sets[si]) {
+					auto pi = pos.find({ob, key});
+					auto vb = base.find({ob, key});
+					auto vt = kv.second.find({ob, key});
+					if (pi == pos.end() || vb == base.end() || vt == kv.second.end()) continue;
+					for (size_t k = 0; k < pi->second.size() && k < vb->second.size(); ++k) {
+						const int e = int(vt->second[k]) - int(vb->second[k]);
+						if (!e) continue;
+						any = true;
+						sa += e;
+						sb += int64_t(e) * (N - pi->second[k]);
+					}
+				}
+				if (any) cands.push_back({ob, t, int(si), ((sa % M) + M) % M, ((sb % M) + M) % M});
+			}
+	}
+	std::printf("  partial-shift search: %zu candidates; target a=%lld b=%lld\n", cands.size(), (long long)ta, (long long)tb);
+	std::map<std::pair<int64_t, int64_t>, std::vector<size_t>> byeff;
+	for (size_t i = 0; i < cands.size(); ++i) byeff[{cands[i].a, cands[i].b}].push_back(i);
+	int shown = 0;
+	auto name = [&](const Cand& c) { char b[96]; std::snprintf(b, sizeof b, "guy (%d,%d,%d) members-set %d as at frame %lld", std::get<0>(c.obj), std::get<1>(c.obj), std::get<2>(c.obj), c.set, (long long)c.t); return std::string(b); };
+	for (size_t i = 0; i < cands.size() && shown < 20; ++i) {
+		if (cands[i].a == ta && cands[i].b == tb) { std::printf("    PSHIFT HIT (1): %s\n", name(cands[i]).c_str()); ++shown; }
+		auto f = byeff.find({((ta - cands[i].a) % M + M) % M, ((tb - cands[i].b) % M + M) % M});
+		if (f == byeff.end()) continue;
+		for (size_t j : f->second) if (j > i && cands[j].obj != cands[i].obj && shown < 20) { std::printf("    PSHIFT HIT (2): %s + %s\n", name(cands[i]).c_str(), name(cands[j]).c_str()); ++shown; }
+	}
+	if (!shown) {
+		// three guys: pairs of candidates of the wide member sets in a map, then the third one
+		std::vector<size_t> wide;
+		for (size_t i = 0; i < cands.size(); ++i) if (cands[i].set == 2 || cands[i].set == 4) wide.push_back(i);
+		std::map<std::pair<int64_t, int64_t>, std::pair<size_t, size_t>> pr;
+		for (size_t x = 0; x < wide.size(); ++x)
+			for (size_t y = x + 1; y < wide.size(); ++y)
+				if (cands[wide[x]].obj != cands[wide[y]].obj)
+					pr[{(cands[wide[x]].a + cands[wide[y]].a) % M, (cands[wide[x]].b + cands[wide[y]].b) % M}] = {wide[x], wide[y]};
+		int s3 = 0;
+		for (size_t k : wide) {
+			auto f = pr.find({((ta - cands[k].a) % M + M) % M, ((tb - cands[k].b) % M + M) % M});
+			if (f == pr.end()) continue;
+			const auto [i, j] = f->second;
+			if (cands[k].obj == cands[i].obj || cands[k].obj == cands[j].obj) continue;
+			if (s3++ < 10) std::printf("    PSHIFT HIT (3): %s + %s + %s\n", name(cands[i]).c_str(), name(cands[j]).c_str(), name(cands[k]).c_str());
+		}
+		if (!s3) std::printf("    (no one-, two- or three-guy partial time shift)\n");
+	}
+}
+
 struct ReplayCommand {
 	bool supported = false;
 	sim::Command cmd;
 	std::string name;
+	int32_t mask_arg = 0;  // UNITMASK: the mask (applied by apply_unitmask, no Verb)
 };
 
 ReplayCommand to_command(const Json& c) {
@@ -611,6 +1104,7 @@ ReplayCommand to_command(const Json& c) {
 	ReplayCommand r;
 	const Json* nm = c.get("name");
 	r.name = nm ? nm->s : "?";
+	if (r.name == "UNITMASK") { if (const Json* ap0 = c.get("args")) r.mask_arg = int32_t(ap0->num("unitmask")); }
 	static const Json empty;
 	const Json* ap = c.get("args");
 	const Json& a = ap ? *ap : empty;
@@ -725,6 +1219,19 @@ ReplayCommand to_command(const Json& c) {
 		m.verb = n == "TRIBUTE" ? sim::Verb::Tribute : sim::Verb::DemandTribute;
 		m.who = int32_t(a.num("who")); m.whom = int32_t(a.num("whom")); m.good = int32_t(a.num("good")); m.amount = int32_t(a.num("amount"));
 		r.supported = true;
+	} else if (n == "ATTACK_GROUND" || n == "PATROL" || n == "LAUNCH_PATROL") {
+		m.verb = n == "ATTACK_GROUND" ? sim::Verb::AttackGround : n == "PATROL" ? sim::Verb::Patrol : sim::Verb::LaunchPatrol;
+		m.x = int32_t(a.num("to_x")); m.y = int32_t(a.num("to_y")); m.queued = int8_t(json_enum(a, "queued", queue, sim::kQueueNew));
+		m.shift = int32_t(a.num("shift")); m.ctrl = int32_t(a.num("ctrl")); m.alt = int32_t(a.num("alt"));
+		r.supported = true;
+	} else if (n == "FLIGHT") {
+		m.verb = sim::Verb::Flight;
+		m.ox = int32_t(a.num("ox")); m.whom = int32_t(a.num("whom")); m.shift = int32_t(a.num("shift")); m.ctrl = int32_t(a.num("ctrl")); m.alt = int32_t(a.num("alt"));
+		m.orders = int8_t(a.num("orders", 1));
+		r.supported = true;
+	} else if (n == "RECALL" || n == "SCRAMBLE") {
+		m.verb = n == "RECALL" ? sim::Verb::Recall : sim::Verb::Scramble;
+		r.supported = true;
 	} else if (n == "CLEAR_TRIBUTES" || n == "ACCEPT" || n == "REJECT") {
 		m.verb = n == "CLEAR_TRIBUTES" ? sim::Verb::ClearTributes : n == "ACCEPT" ? sim::Verb::Accept : sim::Verb::Reject;
 		m.who = int32_t(a.num("who")); m.whom = int32_t(a.num("whom"));
@@ -756,6 +1263,28 @@ std::map<int64_t, std::map<std::vector<uint32_t>, int>> all_check_sums(const std
 	}
 	return rows;
 }
+
+#ifdef RON_RNG_PROFILE_HOOK
+std::map<std::string, int64_t> g_rng_sites;
+void rng_hook_fn() {
+	void* fr[10];
+	const int n = backtrace(fr, 10);
+	std::string key;
+	for (int i = 1; i < n && i < 8; ++i) {
+		Dl_info di;
+		if (!dladdr(fr[i], &di) || !di.dli_sname) continue;
+		int st = 0;
+		char* dm = abi::__cxa_demangle(di.dli_sname, nullptr, nullptr, &st);
+		std::string nm = st == 0 && dm ? dm : di.dli_sname;
+		std::free(dm);
+		if (nm.find("Random::") != std::string::npos || nm.find("rnd") != std::string::npos) continue;
+		nm = nm.substr(0, nm.find('('));
+		key += (key.empty() ? "" : " < ") + nm;
+		if (key.size() > 150) break;
+	}
+	g_rng_sites[key]++;
+}
+#endif
 
 int replay_run(const std::string& path, const std::vector<uint8_t>& save, const std::string& game_dir, int64_t max_frames, const std::string& json_path,
                const std::string& csv_path, bool use_commands, bool verbose, const std::string& next_path = std::string(), bool no_art = false, const std::vector<std::string>& revert = {}) {
@@ -806,6 +1335,15 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 		game->anims = art.get();
 	}
 
+	// The game script the replay header names (the embedded save has none): "no_nukes" in the 2026.08.30 chain.
+	if (hdr && !std::getenv("RON_NO_SCRIPTS")) {
+		const Json* hs = hdr->get("scenarioScript");
+		if (hs && hs->t == Json::Str && !hs->s.empty()) {
+			std::string err;
+			if (sim::original_attach_game_script(*game, cache->files, hs->s, &err)) std::printf("  game script \"%s\" attached (Game::scripts created)\n", hs->s.c_str());
+			else std::printf("  game script \"%s\" not attached: %s\n", hs->s.c_str(), err.c_str());
+		}
+	}
 	auto rows = all_check_sums(csv_path, path);
 	if (rows.empty()) { std::printf("replay: no CHECK_SUMS rows for %s in %s\n", basename_of(path).c_str(), csv_path.c_str()); return 1; }
 	const int64_t start = game->frame;
@@ -860,6 +1398,9 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 		for (int k = 0; k < dw::kCheckPartCount; ++k) std::printf(" %s=%s", dw::kCheckPartNames[k], base.v[k] == e1[size_t(k)] ? "=" : "!");
 		std::printf("\n");
 	}
+#ifdef RON_RNG_PROFILE_HOOK
+	if (std::getenv("RON_RNG_PROFILE")) sim::g_rng_hook = rng_hook_fn;
+#endif
 	// stepping
 	sim::CommandPackage package;
 	size_t ri = 0;
@@ -868,6 +1409,9 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 	std::string first_unsupported;
 	int64_t cmds_run = 0;
 	std::unique_ptr<sim::Game> baseline;
+	std::unique_ptr<sim::Game> baseline_search;
+	if (std::getenv("RON_REVERT_SEARCH")) baseline_search = sim::load_original_save(cache->files, rules, nullptr, save, &rep);
+	sim::Game* baseline_for_search = baseline_search.get();
 	if (!revert.empty()) {
 		baseline = sim::load_original_save(cache->files, rules, nullptr, save, &rep);
 		std::printf("  experiment: after the first step the members");
@@ -885,6 +1429,370 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 			auto it = expect.find(f);
 			if (it != expect.end()) {
 				if (baseline && f == start + 1) std::printf("  (reverted %lld member values)\n", (long long)sim::revert_members(*game, *baseline, revert));
+				if (f == start + 1 && std::getenv("RON_GOODS_SEARCH")) {
+					// experiment: which single change of a good's ever_seen makes the goods part equal the original's?
+					for (size_t gi = 0; gi < game->goods.size(); ++gi) {
+						if (!game->goods[gi].alive()) continue;
+						const uint8_t old = game->goods[gi].ever_seen;
+						for (int m : {1, 2, 3, 0xff, 0}) {
+							game->goods[gi].ever_seen = m == 0 ? uint8_t(0) : uint8_t(old | m);
+							if (game->goods[gi].ever_seen == old) continue;
+							sim::EngineProvider ep2(*game);
+							dw::CheckSumParts t = dw::compute_check_sums(ep2);
+							if (t.v[10] == it->second[10]) std::printf("  GOODS HIT: good %zu type %d ever_seen %02x -> %02x\n", gi, game->goods[gi].type, old, game->goods[gi].ever_seen);
+						}
+						game->goods[gi].ever_seen = old;
+					}
+				}
+				if (const char* pe = std::getenv("RON_PATCH")) {
+					// experiment: RON_PATCH="Guy.des_x:1,22,0:+1024@18345" adds a delta to one member of one object at that boundary
+					char key[64] = {0};
+					int a = 0, b = 0, c = 0, at = 0;
+					long long dl = 0;
+					if (std::sscanf(pe, "%63[^:]:%d,%d,%d:%lld@%d", key, &a, &b, &c, &dl, &at) == 6 && f == at) {
+						for (const auto& mc : sim::members_of(*game, {key}))
+							if (mc.id.a == a && mc.id.b == b && mc.id.c == c) {
+								uint64_t v = 0;
+								for (size_t k = 0; k < mc.now.size() && k < 8; ++k) v |= uint64_t(mc.now[k]) << (8 * k);
+								v += uint64_t(dl);
+								std::vector<uint8_t> nb(mc.now.size());
+								for (size_t k = 0; k < nb.size() && k < 8; ++k) nb[k] = uint8_t(v >> (8 * k));
+								sim::apply_member_bytes(*game, mc, nb);
+								std::printf("  patched %s of (%d,%d,%d) by %+lld\n", key, a, b, c, dl);
+							}
+					}
+				}
+				if (std::getenv("RON_REVERT_SEARCH") && baseline_for_search && f == (std::getenv("RON_SEARCH_AT") ? std::atoll(std::getenv("RON_SEARCH_AT")) : start + 1)) {
+					// experiment: which single (object, member) put back to the save's value makes a differing part equal the original's?
+					const int part = std::atoi(std::getenv("RON_REVERT_SEARCH"));  // 0 units, 1 builds, 6 guys, ...
+					std::vector<sim::MemberChange> ch = sim::changed_members(*game, *baseline_for_search);
+					if (const char* inc = std::getenv("RON_REVERT_INCLUDE")) {  // comma list of exact keys: only those stay in the pool
+						std::vector<std::string> keep;
+						std::stringstream ss(inc);
+						std::string t;
+						while (std::getline(ss, t, ',')) keep.push_back(t);
+						ch.erase(std::remove_if(ch.begin(), ch.end(), [&](const sim::MemberChange& c) { return std::find(keep.begin(), keep.end(), c.key) == keep.end(); }), ch.end());
+					}
+					if (const char* ex = std::getenv("RON_REVERT_EXCLUDE")) {  // comma list of class prefixes ("Guy.") left out of the pool
+						std::vector<std::string> pre;
+						std::stringstream ss(ex);
+						std::string t;
+						while (std::getline(ss, t, ',')) pre.push_back(t);
+						ch.erase(std::remove_if(ch.begin(), ch.end(), [&](const sim::MemberChange& c) {
+							for (const auto& q : pre) if (c.key.compare(0, q.size(), q) == 0) return true;
+							return false;
+						}), ch.end());
+					}
+					std::printf("  revert search over %zu changed (object, member) pairs for part %s\n", ch.size(), dw::kCheckPartNames[part]);
+					PartTrace t0;
+					{
+						sim::EngineProvider ep0(*game);
+						trace_part(ep0, part, t0);
+					}
+					const uint32_t h0 = adler_of(t0.bytes), want = it->second[size_t(part)];
+					const int64_t M = 65521;
+					auto sub = [&](uint32_t x, uint32_t y) { return std::pair<int64_t, int64_t>{(int64_t(x & 0xffff) - int64_t(y & 0xffff) + M) % M, (int64_t(x >> 16) - int64_t(y >> 16) + M) % M}; };
+					const auto target = sub(want, h0);
+					std::vector<std::pair<int64_t, int64_t>> eff(ch.size());
+					std::vector<char> usable(ch.size(), 0);
+					for (size_t i = 0; i < ch.size(); ++i) {
+						sim::apply_member(*game, ch[i], true);
+						sim::EngineProvider ep2(*game);
+						PartTrace tr;
+						if (trace_part(ep2, part, tr) && tr.bytes.size() == t0.bytes.size()) {
+							eff[i] = sub(adler_of(tr.bytes), h0);
+							usable[i] = eff[i].first != 0 || eff[i].second != 0;
+							if (eff[i] == target) std::printf("    HIT (1): reverting %s of object (%d,%d,%d)\n", ch[i].key.c_str(), ch[i].id.a, ch[i].id.b, ch[i].id.c);
+						}
+						sim::apply_member(*game, ch[i], false);
+					}
+					std::printf("  target delta (a=%lld b=%lld); effects computed\n", (long long)target.first, (long long)target.second);
+					auto key = [&](std::pair<int64_t, int64_t> v) { return uint64_t(v.first) << 32 | uint64_t(v.second); };
+					auto addp = [&](std::pair<int64_t, int64_t> x, std::pair<int64_t, int64_t> y) { return std::pair<int64_t, int64_t>{(x.first + y.first) % M, (x.second + y.second) % M}; };
+					auto subp = [&](std::pair<int64_t, int64_t> x, std::pair<int64_t, int64_t> y) { return std::pair<int64_t, int64_t>{(x.first - y.first + M) % M, (x.second - y.second + M) % M}; };
+					// Each changed member as a small integer: where its bytes sit in the stream, then the deltas that would fix the hash.
+					if (std::getenv("RON_DELTA_SEARCH")) {
+						const int D = std::atoi(std::getenv("RON_DELTA_SEARCH"));
+						const int64_t N = int64_t(t0.bytes.size());
+						int found = 0;
+						for (size_t i = 0; i < ch.size(); ++i) {
+							const auto& c = ch[i];
+							const size_t n = c.now.size();
+							if (n == 0 || n > 8) continue;
+							std::vector<uint8_t> inv(n);
+							for (size_t k = 0; k < n; ++k) inv[k] = uint8_t(~c.now[k]);
+							sim::apply_member_bytes(*game, c, inv);
+							sim::EngineProvider ep3(*game);
+							PartTrace t1;
+							const bool ok = trace_part(ep3, part, t1) && t1.bytes.size() == t0.bytes.size();
+							sim::apply_member_bytes(*game, c, c.now);
+							if (!ok) continue;
+							std::vector<int64_t> pos(n, -1);
+							bool clean = true;
+							for (size_t q = 0; q < t0.bytes.size(); ++q)
+								if (t0.bytes[q] != t1.bytes[q]) {
+									size_t k = 0;
+									for (; k < n; ++k) if (t0.bytes[q] == c.now[k] && t1.bytes[q] == inv[k] && pos[k] < 0) break;
+									if (k == n) { clean = false; break; }
+									pos[k] = int64_t(q);
+								}
+							if (!clean) continue;
+							uint64_t v = 0;
+							for (size_t k = 0; k < n; ++k) v |= uint64_t(c.now[k]) << (8 * k);
+							const uint64_t mod = n == 8 ? 0 : (uint64_t(1) << (8 * n));
+							for (int dl = -D; dl <= D; ++dl) {
+								if (dl == 0) continue;
+								const uint64_t nv = n == 8 ? v + uint64_t(int64_t(dl)) : (v + mod + uint64_t(int64_t(dl) % int64_t(mod)) ) % mod;
+								int64_t sa = 0, sb = 0;
+								for (size_t k = 0; k < n; ++k) {
+									if (pos[k] < 0) continue;
+									const int e = int((nv >> (8 * k)) & 0xff) - int(c.now[k]);
+									sa += e;
+									sb += int64_t(e) * (N - pos[k]);
+								}
+								if (((sa % M) + M) % M == target.first && ((sb % M) + M) % M == target.second) {
+									std::printf("    DELTA HIT: %s of object (%d,%d,%d) %+d (engine %llu -> original %llu)\n", c.key.c_str(), c.id.a, c.id.b, c.id.c, dl, (unsigned long long)v, (unsigned long long)nv);
+									++found;
+								}
+							}
+						}
+						std::printf("  delta search: %d hits over %zu members\n", found, ch.size());
+					}
+					// Several small deltas at once: every changed member of the pool with a delta in [-W, W], two or three of them together.
+					if (std::getenv("RON_MULTI_DELTA")) {
+						const int W = std::atoi(std::getenv("RON_MULTI_DELTA"));
+						const int64_t N = int64_t(t0.bytes.size());
+						struct Eff { size_t mi; int dl; int64_t a, b; };
+						std::vector<Eff> effs;
+						for (size_t i = 0; i < ch.size(); ++i) {
+							const auto& c = ch[i];
+							const size_t n = c.now.size();
+							if (n == 0 || n > 4) continue;
+							std::vector<uint8_t> inv(n);
+							for (size_t k = 0; k < n; ++k) inv[k] = uint8_t(~c.now[k]);
+							sim::apply_member_bytes(*game, c, inv);
+							sim::EngineProvider ep3(*game);
+							PartTrace t1;
+							const bool ok = trace_part(ep3, part, t1) && t1.bytes.size() == t0.bytes.size();
+							sim::apply_member_bytes(*game, c, c.now);
+							if (!ok) continue;
+							std::vector<int64_t> pos(n, -1);
+							int cnt = 0;
+							for (size_t q = 0; q < t0.bytes.size(); ++q) if (t0.bytes[q] != t1.bytes[q])
+								for (size_t k = 0; k < n; ++k) if (t0.bytes[q] == c.now[k] && t1.bytes[q] == inv[k] && !(cnt & (1 << k))) { pos[k] = int64_t(q); cnt |= 1 << k; break; }
+							if (cnt != (1 << n) - 1) continue;
+							uint64_t v = 0;
+							for (size_t k = 0; k < n; ++k) v |= uint64_t(c.now[k]) << (8 * k);
+							const uint64_t mod = uint64_t(1) << (8 * n);
+							for (int dl = -W; dl <= W; ++dl) {
+								if (dl == 0) continue;
+								const uint64_t nv = (v + mod + uint64_t(int64_t(dl) % int64_t(mod) + int64_t(mod))) % mod;
+								int64_t sa = 0, sb = 0;
+								for (size_t k = 0; k < n; ++k) {
+									const int e = int((nv >> (8 * k)) & 0xff) - int(c.now[k]);
+									sa += e;
+									sb += int64_t(e) * (N - pos[k]);
+								}
+								effs.push_back({i, dl, ((sa % M) + M) % M, ((sb % M) + M) % M});
+							}
+						}
+						std::printf("  multi-delta: %zu (member, delta) effects\n", effs.size());
+						std::unordered_map<uint64_t, std::vector<size_t>> by;
+						auto k2 = [](int64_t a, int64_t b) { return uint64_t(a) << 32 | uint64_t(b); };
+						for (size_t i = 0; i < effs.size(); ++i) by[k2(effs[i].a, effs[i].b)].push_back(i);
+						int shown = 0;
+						for (size_t i = 0; i < effs.size() && shown < 12; ++i) {
+							auto f = by.find(k2(((target.first - effs[i].a) % M + M) % M, ((target.second - effs[i].b) % M + M) % M));
+							if (f == by.end()) continue;
+							for (size_t j : f->second) if (j > i && effs[j].mi != effs[i].mi && shown < 12) {
+								std::printf("    MULTI HIT (2): %s (%d,%d,%d) %+d  and  %s (%d,%d,%d) %+d\n", ch[effs[i].mi].key.c_str(), ch[effs[i].mi].id.a, ch[effs[i].mi].id.b, ch[effs[i].mi].id.c, effs[i].dl,
+									ch[effs[j].mi].key.c_str(), ch[effs[j].mi].id.a, ch[effs[j].mi].id.b, ch[effs[j].mi].id.c, effs[j].dl);
+								++shown;
+							}
+						}
+						if (std::getenv("RON_MULTI3")) {
+							std::unordered_map<uint64_t, std::pair<size_t, size_t>> pr;
+							for (size_t i = 0; i < effs.size(); ++i) for (size_t j = i + 1; j < effs.size(); ++j) if (effs[i].mi != effs[j].mi)
+								pr[k2((effs[i].a + effs[j].a) % M, (effs[i].b + effs[j].b) % M)] = {i, j};
+							for (size_t k = 0; k < effs.size() && shown < 24; ++k) {
+								auto f = pr.find(k2(((target.first - effs[k].a) % M + M) % M, ((target.second - effs[k].b) % M + M) % M));
+								if (f == pr.end()) continue;
+								const auto [i, j] = f->second;
+								if (k > j && effs[k].mi != effs[i].mi && effs[k].mi != effs[j].mi) {
+									std::printf("    MULTI HIT (3): %s (%d,%d,%d) %+d, %s (%d,%d,%d) %+d, %s (%d,%d,%d) %+d\n", ch[effs[i].mi].key.c_str(), ch[effs[i].mi].id.a, ch[effs[i].mi].id.b, ch[effs[i].mi].id.c, effs[i].dl,
+										ch[effs[j].mi].key.c_str(), ch[effs[j].mi].id.a, ch[effs[j].mi].id.b, ch[effs[j].mi].id.c, effs[j].dl, ch[effs[k].mi].key.c_str(), ch[effs[k].mi].id.a, ch[effs[k].mi].id.b, ch[effs[k].mi].id.c, effs[k].dl);
+									++shown;
+								}
+							}
+						}
+					}
+					// Every (object, member) of a class as a small integer off by up to W: one trace per member kind with all objects inverted at once.
+					if (const char* ad = std::getenv("RON_ALL_DELTA")) {
+						const int W = std::atoi(ad);
+						const char* pref = std::getenv("RON_ALL_PREFIX") ? std::getenv("RON_ALL_PREFIX") : "Unit.*";
+						const int64_t N = int64_t(t0.bytes.size());
+						std::vector<sim::MemberChange> all = sim::members_of(*game, {pref});
+						std::map<std::string, std::vector<const sim::MemberChange*>> by_key;
+						for (const auto& c : all) if (c.now.size() > 0 && c.now.size() <= 4) by_key[c.key].push_back(&c);
+						int found = 0;
+						for (auto& kv : by_key) {
+							const size_t n = kv.second.front()->now.size();
+							// invert this member in all objects
+							for (const auto* c : kv.second) { std::vector<uint8_t> inv(n); for (size_t k = 0; k < n; ++k) inv[k] = uint8_t(~c->now[k]); sim::apply_member_bytes(*game, *c, inv); }
+							sim::EngineProvider ep3(*game);
+							PartTrace t1;
+							const bool okt = trace_part(ep3, part, t1) && t1.bytes.size() == t0.bytes.size();
+							for (const auto* c : kv.second) sim::apply_member_bytes(*game, *c, c->now);
+							if (!okt) continue;
+							// positions of changed bytes grouped by object (who, o) of the ranges
+							std::map<std::pair<int, int>, std::vector<int64_t>> pos;
+							size_t ri = 0;
+							for (size_t q = 0; q < t0.bytes.size(); ++q) {
+								while (ri + 1 < t0.ranges.size() && t0.ranges[ri].begin + t0.ranges[ri].len <= q) ++ri;
+								if (t0.bytes[q] != t1.bytes[q]) pos[{t0.ranges[ri].who, t0.ranges[ri].o}].push_back(int64_t(q));
+							}
+							for (const auto* c : kv.second) {
+								auto it6 = pos.find({c->id.a, c->id.b});
+								if (it6 == pos.end() || it6->second.size() != n) continue;
+								uint64_t v = 0;
+								for (size_t k = 0; k < n; ++k) v |= uint64_t(c->now[k]) << (8 * k);
+								const uint64_t mod = uint64_t(1) << (8 * n);
+								for (int dl = -W; dl <= W; ++dl) {
+									if (dl == 0) continue;
+									const uint64_t nv = (v + mod + uint64_t(int64_t(dl) % int64_t(mod) + int64_t(mod))) % mod;
+									int64_t sa = 0, sb = 0;
+									for (size_t k = 0; k < n; ++k) {
+										const int e = int((nv >> (8 * k)) & 0xff) - int(c->now[k]);
+										sa += e;
+										sb += int64_t(e) * (N - it6->second[k]);
+									}
+									if (((sa % M) + M) % M == target.first && ((sb % M) + M) % M == target.second) {
+										std::printf("    ALL-DELTA HIT: %s of object (%d,%d,%d) %+d (engine %llu -> original %llu)\n", c->key.c_str(), c->id.a, c->id.b, c->id.c, dl, (unsigned long long)v, (unsigned long long)nv);
+										++found;
+									}
+								}
+							}
+						}
+						std::printf("  all-delta search over %zu member kinds: %d hits\n", by_key.size(), found);
+					}
+					// One guy at another place: x / des_x / last_x moved by dx and y / des_y / last_y by dy (subsets of them).
+					if (std::getenv("RON_CLUSTER_SEARCH")) {
+						const int R = std::atoi(std::getenv("RON_CLUSTER_SEARCH"));
+						const int64_t N = int64_t(t0.bytes.size());
+						std::vector<std::string> keys = {"Guy.x", "Guy.y", "Guy.des_x", "Guy.des_y", "Guy.last_x", "Guy.last_y"};
+						std::vector<sim::MemberChange> all = sim::members_of(*game, keys);
+						std::map<std::tuple<int, int, int>, std::vector<const sim::MemberChange*>> by_obj;
+						std::set<std::tuple<int, int, int>> moved;
+						for (const auto& c : ch) if (c.key.rfind("Guy.", 0) == 0) moved.insert({c.id.a, c.id.b, c.id.c});
+						for (const auto& c : all) if (moved.count({c.id.a, c.id.b, c.id.c})) by_obj[{c.id.a, c.id.b, c.id.c}].push_back(&c);
+						int found = 0;
+						std::printf("  cluster search over %zu guys\n", by_obj.size());
+						for (auto& kv : by_obj) {
+							struct Mem { int kind; int64_t pos[4]; uint32_t v; bool ok; };
+							std::vector<Mem> mm;
+							for (const sim::MemberChange* c : kv.second) {
+								Mem m{};
+								m.ok = false;
+								if (c->now.size() != 4) continue;
+								const std::string& k = c->key;
+								m.kind = k == "Guy.x" ? 0 : k == "Guy.des_x" ? 1 : k == "Guy.last_x" ? 2 : k == "Guy.y" ? 3 : k == "Guy.des_y" ? 4 : 5;
+								std::vector<uint8_t> inv(4);
+								for (int q = 0; q < 4; ++q) inv[size_t(q)] = uint8_t(~c->now[size_t(q)]);
+								sim::apply_member_bytes(*game, *c, inv);
+								sim::EngineProvider ep3(*game);
+								PartTrace t1;
+								const bool okt = trace_part(ep3, part, t1) && t1.bytes.size() == t0.bytes.size();
+								sim::apply_member_bytes(*game, *c, c->now);
+								if (!okt) continue;
+								int cnt = 0;
+								for (size_t q = 0; q < t0.bytes.size(); ++q) if (t0.bytes[q] != t1.bytes[q]) {
+									for (int z = 0; z < 4; ++z) if (t0.bytes[q] == c->now[size_t(z)] && t1.bytes[q] == inv[size_t(z)] && !(cnt & (1 << z))) { m.pos[z] = int64_t(q); cnt |= 1 << z; break; }
+								}
+								m.v = uint32_t(c->now[0] | c->now[1] << 8 | c->now[2] << 16 | uint32_t(c->now[3]) << 24);
+								m.ok = cnt == 15;
+								if (m.ok) mm.push_back(m);
+							}
+							auto effect = [&](const Mem& m, int dv) {
+								const uint32_t nv = m.v + uint32_t(dv);
+								int64_t sa = 0, sb = 0;
+								for (int z = 0; z < 4; ++z) {
+									const int e = int((nv >> (8 * z)) & 0xff) - int((m.v >> (8 * z)) & 0xff);
+									sa += e;
+									sb += int64_t(e) * (N - m.pos[z]);
+								}
+								return std::pair<int64_t, int64_t>{((sa % M) + M) % M, ((sb % M) + M) % M};
+							};
+							// effects of shifting a subset of the x-kind (kinds 0..2) or y-kind (3..5) members
+							auto subset_effects = [&](int base) {
+								std::vector<std::tuple<int, int, std::pair<int64_t, int64_t>>> out;  // subset mask, shift, effect
+								for (int mask = 1; mask < 8; ++mask)
+									for (int dv = -R; dv <= R; ++dv) {
+										if (dv == 0) continue;
+										std::pair<int64_t, int64_t> e{0, 0};
+										bool ok = true;
+										for (int b = 0; b < 3; ++b) if (mask & (1 << b)) {
+											const Mem* mp = nullptr;
+											for (const Mem& m : mm) if (m.kind == base + b) mp = &m;
+											if (!mp) { ok = false; break; }
+											const auto ee = effect(*mp, dv);
+											e = {(e.first + ee.first) % M, (e.second + ee.second) % M};
+										}
+										if (ok) out.push_back({mask, dv, e});
+									}
+								return out;
+							};
+							if (std::getenv("RON_CLUSTER_VERBOSE")) std::printf("    guy (%d,%d,%d): %zu of %zu members located\n", std::get<0>(kv.first), std::get<1>(kv.first), std::get<2>(kv.first), mm.size(), kv.second.size());
+							const auto ex = subset_effects(0), ey = subset_effects(3);
+							auto keyp = [](std::pair<int64_t, int64_t> v) { return uint64_t(v.first) << 32 | uint64_t(v.second); };
+							std::unordered_map<uint64_t, size_t> ymap;
+							for (size_t i = 0; i < ey.size(); ++i) ymap[keyp(std::get<2>(ey[i]))] = i;
+							auto report = [&](int mx, int dx, int my, int dy) {
+								std::printf("    CLUSTER HIT: guy (%d,%d,%d) x-members %d shifted %+d, y-members %d shifted %+d\n", std::get<0>(kv.first), std::get<1>(kv.first), std::get<2>(kv.first), mx, dx, my, dy);
+								++found;
+							};
+							for (const auto& e1 : ex) {
+								if (std::get<2>(e1) == target) report(std::get<0>(e1), std::get<1>(e1), 0, 0);
+								const std::pair<int64_t, int64_t> need{((target.first - std::get<2>(e1).first) % M + M) % M, ((target.second - std::get<2>(e1).second) % M + M) % M};
+								auto it5 = ymap.find(keyp(need));
+								if (it5 != ymap.end()) report(std::get<0>(e1), std::get<1>(e1), std::get<0>(ey[it5->second]), std::get<1>(ey[it5->second]));
+							}
+							for (const auto& e2 : ey) if (std::get<2>(e2) == target) report(0, 0, std::get<0>(e2), std::get<1>(e2));
+						}
+						std::printf("  cluster search: %d hits\n", found);
+					}
+					std::unordered_map<uint64_t, std::vector<size_t>> single;
+					for (size_t i = 0; i < ch.size(); ++i) if (usable[i]) single[key(eff[i])].push_back(i);
+					int shown2 = 0;
+					for (size_t i = 0; i < ch.size() && shown2 < 20; ++i) {
+						if (!usable[i]) continue;
+						auto it2 = single.find(key(subp(target, eff[i])));
+						if (it2 == single.end()) continue;
+						for (size_t j : it2->second) if (j > i && shown2++ < 20)
+							std::printf("    HIT (2): revert %s (%d,%d,%d) + %s (%d,%d,%d)\n", ch[i].key.c_str(), ch[i].id.a, ch[i].id.b, ch[i].id.c, ch[j].key.c_str(), ch[j].id.a, ch[j].id.b, ch[j].id.c);
+					}
+					std::unordered_map<uint64_t, std::pair<size_t, size_t>> pairs;
+					for (size_t i = 0; i < ch.size(); ++i) if (usable[i]) for (size_t j = i + 1; j < ch.size(); ++j) if (usable[j]) pairs[key(addp(eff[i], eff[j]))] = {i, j};
+					int shown3 = 0;
+					for (size_t k = 0; k < ch.size() && shown3 < 20; ++k) {
+						if (!usable[k]) continue;
+						auto it3 = pairs.find(key(subp(target, eff[k])));
+						if (it3 == pairs.end()) continue;
+						const auto [i, j] = it3->second;
+						if (i == k || j == k) continue;
+						if (k < i && shown3++ < 20)
+							std::printf("    HIT (3): revert %s (%d,%d,%d) + %s (%d,%d,%d) + %s (%d,%d,%d)\n", ch[k].key.c_str(), ch[k].id.a, ch[k].id.b, ch[k].id.c, ch[i].key.c_str(), ch[i].id.a, ch[i].id.b, ch[i].id.c, ch[j].key.c_str(), ch[j].id.a, ch[j].id.b, ch[j].id.c);
+					}
+					int shown4 = 0;
+					for (const auto& kv : pairs) {
+						if (shown4 >= 10) break;
+						const auto p1 = std::pair<int64_t, int64_t>{int64_t(kv.first >> 32), int64_t(kv.first & 0xffffffffu)};
+						auto it4 = pairs.find(key(subp(target, p1)));
+						if (it4 == pairs.end()) continue;
+						const auto a = kv.second, b = it4->second;
+						if (a.first < b.first && a.first != b.second && a.second != b.first && a.second != b.second && shown4++ < 10)
+							std::printf("    HIT (4): %s(%d,%d,%d) %s(%d,%d,%d) %s(%d,%d,%d) %s(%d,%d,%d)\n", ch[a.first].key.c_str(), ch[a.first].id.a, ch[a.first].id.b, ch[a.first].id.c, ch[a.second].key.c_str(), ch[a.second].id.a, ch[a.second].id.b, ch[a.second].id.c, ch[b.first].key.c_str(), ch[b.first].id.a, ch[b.first].id.b, ch[b.first].id.c, ch[b.second].key.c_str(), ch[b.second].id.a, ch[b.second].id.b, ch[b.second].id.c);
+					}
+				}
 				sim::EngineProvider ep(*game);
 				dw::CheckSumParts got = dw::compute_check_sums(ep);
 				if (!got.ok) { step_error = "check sums: " + got.error; break; }
@@ -898,6 +1806,27 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 					if (verbose && !same) std::printf("  frame %lld part %-16s engine %10u expected %10u\n", (long long)f, dw::kCheckPartNames[k], got.v[k], it->second[size_t(k)]);
 				}
 				all_match += m == dw::kCheckPartCount;
+				if (f == g_solve_at) {
+					for (int k : {0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11}) {
+						if (got.v[k] == it->second[size_t(k)]) continue;
+						PartTrace tr;
+						if (trace_part(ep, k, tr)) solve_single_byte(tr, it->second[size_t(k)], dw::kCheckPartNames[k]);
+					}
+				}
+			}
+			if (g_pshift_at >= 0 && f >= g_pshift_at - 8 && f <= g_pshift_at + 8) {
+				std::map<std::pair<std::tuple<int, int, int>, std::string>, std::vector<uint8_t>> snap;
+				for (const auto& mc : sim::members_of(*game, {"Guy.*"})) snap[{{mc.id.a, mc.id.b, mc.id.c}, mc.key}] = mc.now;
+				g_pshift_vals[f] = std::move(snap);
+				if (f == g_pshift_at + 8) partial_shift_search(*game, g_pshift_at, expect.at(g_pshift_at)[6]);
+			}
+			if (g_shift_part >= 0 && g_shift_at >= 0 && f >= g_shift_at - 10 && f <= g_shift_at + 10) {
+				sim::EngineProvider eps(*game);
+				PartTrace tr;
+				if (trace_part(eps, g_shift_part, tr)) g_shift_traces[f] = std::move(tr);
+				if (f == g_shift_at + 10 && it != expect.end()) {}
+				auto bt = expect.find(g_shift_at);
+				if (f == g_shift_at + 10 && bt != expect.end()) shift_search(bt->second[size_t(g_shift_part)]);
 			}
 			// the records of this frame, before the step
 			while (recs && ri < recs->a.size() && recs->a[ri].num("frame") <= f) {
@@ -913,6 +1842,11 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 					bool skip = false;
 					for (const char* i : ignored) skip = skip || rc.name == i;
 					if (skip) continue;
+					if (rc.name == "UNITMASK" && use_commands) {
+						apply_unitmask(*game, package.group, uint32_t(rc.mask_arg));
+						++cmds_run;
+						continue;
+					}
 					if (!rc.supported || !use_commands) {
 						++unsupported[rc.name];
 						if (first_unsupported_frame < 0) { first_unsupported_frame = f; first_unsupported = rc.name; }
@@ -928,6 +1862,16 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 	} catch (const std::exception& e) {
 		step_error = e.what();
 	}
+#ifdef RON_RNG_PROFILE_HOOK
+	if (sim::g_rng_hook) {
+		std::vector<std::pair<int64_t, std::string>> v;
+		int64_t tot = 0;
+		for (auto& kv : g_rng_sites) { v.push_back({kv.second, kv.first}); tot += kv.second; }
+		std::sort(v.rbegin(), v.rend());
+		std::printf("  RNG draws by site (%lld in %d frames):\n", (long long)tot, game->frame - int(start));
+		for (size_t i = 0; i < v.size() && i < 30; ++i) std::printf("    %8lld  %s\n", (long long)v[i].first, v[i].second.c_str());
+	}
+#endif
 	std::printf("  simulated to frame %d (%lld turn boundaries compared, %lld with all 15 parts equal), %lld commands executed\n", game->frame, (long long)boundaries,
 		(long long)all_match, (long long)cmds_run);
 	if (!step_error.empty()) std::printf("  STOPPED: %s\n", step_error.c_str());
@@ -948,6 +1892,21 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 		// 15 parts of both states at the same frame
 		sim::EngineProvider e1(*game), e2(*truth);
 		dw::CheckSumParts a1 = dw::compute_check_sums(e1), a2 = dw::compute_check_sums(e2);
+		{
+			// The distance between the two generator states, in draws: how many draws the engine made more (+) or fewer (-) than the original.
+			const uint32_t a = 0x19660Du, c = 0x3C6EF35Fu, ainv = [] { uint32_t x = 0x19660Du; for (int i = 0; i < 5; ++i) x *= 2 - 0x19660Du * x; return x; }();
+			const uint32_t eng = game->rng.seed(), org = truth->rng.seed();
+			int64_t dist = INT64_MIN;
+			uint32_t f = eng, b = eng;
+			for (int64_t n = 0; n <= 4000000; ++n) {
+				if (f == org) { dist = -n; break; }  // the original is n draws ahead of the engine
+				if (b == org) { dist = n; break; }
+				f = f * a + c;
+				b = (b - c) * ainv;
+			}
+			if (dist == INT64_MIN) std::printf("  game_random: engine 0x%08x original 0x%08x: more than 4,000,000 draws apart\n", eng, org);
+			else std::printf("  game_random: engine 0x%08x original 0x%08x: the engine made %+lld draws against the original\n", eng, org, (long long)dist);
+		}
 		std::printf("  at frame %lld, engine against the next save:", (long long)next_frame);
 		for (int k = 0; k < dw::kCheckPartCount; ++k) std::printf(" %s=%s", dw::kCheckPartNames[k], a1.v[k] == a2.v[k] ? "=" : "!");
 		std::printf("\n");
@@ -1008,6 +1967,9 @@ int main(int argc, char** argv) {
 		else if (a == "--json" && i + 1 < argc) json_path = argv[++i];
 		else if (a == "--no-commands") use_commands = false;
 		else if (a == "--verbose") verbose = true;
+		else if (a == "--solve-at" && i + 1 < argc) g_solve_at = std::atoll(argv[++i]);
+		else if (a == "--pshift-search" && i + 1 < argc) g_pshift_at = std::atoll(argv[++i]);
+		else if (a == "--shift-search" && i + 2 < argc) { g_shift_part = std::atoi(argv[++i]); g_shift_at = std::atoll(argv[++i]); }
 		else if (a == "--step-diff" && i + 1 < argc) step_diff = std::atoll(argv[++i]);
 		else if (a == "--compare-next" && i + 1 < argc) next_replay = argv[++i];
 		else if (a == "--no-art") no_art = true;
@@ -1106,6 +2068,132 @@ int main(int argc, char** argv) {
 		std::unique_ptr<sim::AssetAnimSource> art;
 		if (!no_art) { art = sim::load_anim_source(cache->files, *gb->rules); gb->anims = art.get(); }
 		for (int64_t k = 0; k < step_diff; ++k) gb->do_frame();
+		if (const char* ch = std::getenv("RON_DUMP_CHAIN")) {
+			int who = 0, o = 0;
+			std::sscanf(ch, "%d,%d", &who, &o);
+			for (sim::Game* gg : {ga.get(), gb.get()}) {
+				const sim::Object* ob = gg->object(who, o);
+				if (!ob) continue;
+				const int32_t wx = sim::wcoord_of(ob->x), wy = sim::wcoord_of(ob->y);
+				std::printf("frame %d: object (%d,%d) up %d/%d down %d/%d in wcoord (%d,%d); chain from WData.down:", gg->frame, who, o, ob->up, ob->up_who, ob->down, ob->down_who, wx, wy);
+				const sim::WData& d = gg->world.w(wx, wy);
+				int32_t co = d.down, cw = d.down_who;
+				for (int guard = 0; co >= 0 && guard < 64; ++guard) {
+					std::printf(" (%d,%d)", cw, co);
+					const sim::Object* c = gg->object(cw, co);
+					if (!c) break;
+					co = c->down;
+					cw = c->down_who;
+				}
+				std::printf(" end %d/%d\n", co, cw);
+			}
+		}
+		if (const char* fnn = std::getenv("RON_HDR_HIST")) {
+			// histogram of the header ranges (container headers) of one walk function in the units part, original (loaded) vs engine-stepped
+			for (sim::Game* gg : {ga.get(), gb.get()}) {
+				sim::EngineProvider epx(*gg);
+				PartTrace tr;
+				trace_part(epx, 0, tr);
+				const dw::Description& dd = dw::Description::get();
+				std::map<std::string, int> h;
+				for (const auto& r : tr.ranges) {
+					const int fnc = dd.step_function(r.step);
+					if (fnc < 0 || std::strcmp(dd.function_name(fnc), fnn) != 0) continue;
+					char buf[96];
+					std::string k;
+					for (size_t q = 0; q < r.len && q < 12; ++q) { std::snprintf(buf, sizeof buf, "%02x ", tr.bytes[r.begin + q]); k += buf; }
+					h[std::to_string(r.len) + ": " + k]++;
+				}
+				std::printf("-- %s headers at frame %d:\n", fnn, gg->frame);
+				for (const auto& kv : h) std::printf("   %6d x %s\n", kv.second, kv.first.c_str());
+			}
+		}
+		if (std::getenv("RON_ANIM_HIST")) {
+			std::map<std::tuple<int, int, int>, int> hist;  // (type, anim, end_time) -> count
+			for (int who = 0; who < 8; ++who)
+				for (int o = 0; o < ga->objects[size_t(who)].unit_mark; ++o) {
+					sim::Unit* u0 = ga->unit(who, o);
+					if (!u0 || !u0->alive()) continue;
+					for (const sim::Guy& gy : u0->guys) hist[{u0->type, gy.cur_anim, int(gy.end_time)}]++;
+				}
+			for (const auto& kv : hist) std::printf("hist type %d anim %d end %d: %d guys\n", std::get<0>(kv.first), std::get<1>(kv.first), std::get<2>(kv.first), kv.second);
+		}
+		if (std::getenv("RON_ANIM_TABLE")) {
+			// every guy whose animation changed between the two states: before -> after (with the remaining frames before)
+			for (int who = 0; who < sim::kNumLeaders; ++who)
+				for (int o = 0; o < ga->objects[size_t(who)].unit_mark; ++o) {
+					sim::Unit* u0 = ga->unit(who, o);
+					sim::Unit* u1 = gb->unit(who, o);
+					if (!u0 || !u1 || !u0->alive()) continue;
+					for (size_t k = 0; k < u0->guys.size() && k < u1->guys.size(); ++k) {
+						const sim::Guy& a = u0->guys[k];
+						const sim::Guy& b = u1->guys[k];
+						if (a.cur_anim == b.cur_anim && a.end_time == b.end_time) continue;
+						std::printf("guy %d/%d/%zu %s anim %d t %u/%u -> anim %d t %u/%u (gpiece %d)\n", who, o, k, sim::to_utf8(u0->ptype->type_name).c_str(), a.cur_anim, a.cur_time, a.end_time, b.cur_anim, b.cur_time, b.end_time, b.gpiece);
+					}
+				}
+		}
+		if (const char* sw = std::getenv("RON_SCAN_UNITS")) {
+			const int who = std::atoi(sw);
+			for (int o = 0; o < ga->objects[size_t(who)].unit_mark; ++o) {
+				sim::Unit* u = ga->unit(who, o);
+				if (!u || !u->alive()) continue;
+				std::printf("u%d/%d type %d %s pos %d,%d orders:", who, o, u->type, sim::to_utf8(u->ptype->type_name).c_str(), u->x, u->y);
+				for (const sim::Order& od : u->orders) std::printf(" [t%d ox %d whom %d bt %d bt_there %d wait %d g %d,%d]", int(od.type), od.ox, od.whom, od.build_type, od.been_there, od.wait, od.g_tx, od.g_ty);
+				std::printf(" group %d\n", u->group);
+			}
+		}
+		if (std::getenv("RON_SCAN_GUYS")) {
+			int n = 0, odd = 0;
+			for (int who = 0; who < sim::kNumLeaders; ++who)
+				for (int o = 0; o < ga->objects[size_t(who)].unit_mark; ++o) {
+					sim::Unit* u = ga->unit(who, o);
+					if (!u || !u->alive()) continue;
+					for (const sim::Guy& gy : u->guys) {
+						++n;
+						if (gy.stopped && (gy.des_x != gy.x || gy.des_y != gy.y)) {
+							++odd;
+							if (odd < 30) std::printf("stopped guy %d/%d g%d type %d anim %d des %d,%d at %d,%d (diff %d,%d) time %u/%u\n", who, o, gy.guy_num, u->type, gy.cur_anim, gy.des_x, gy.des_y, gy.x, gy.y, gy.des_x - gy.x, gy.des_y - gy.y, gy.cur_time, gy.end_time);
+						}
+					}
+				}
+			std::printf("guys %d, stopped with des != pos: %d\n", n, odd);
+			int offn = 0;
+			for (int who = 0; who < sim::kNumLeaders; ++who)
+				for (int o = 0; o < ga->objects[size_t(who)].unit_mark; ++o) {
+					sim::Unit* u = ga->unit(who, o);
+					if (!u || !u->alive()) continue;
+					for (const sim::Guy& gy : u->guys)
+						if ((gy.off_x != 0 || gy.off_y != 0) && offn++ < 15)
+							std::printf("guy with offset %d/%d type %d anim %d off %d,%d pos %d,%d des %d,%d\n", who, o, u->type, gy.cur_anim, gy.off_x, gy.off_y, gy.x, gy.y, gy.des_x, gy.des_y);
+				}
+			std::printf("guys with a nonzero offset: %d\n", offn);
+		}
+		if (const char* du = std::getenv("RON_DUMP_UNIT")) {
+			int who = 0, o = 0;
+			std::sscanf(du, "%d,%d", &who, &o);
+			for (sim::Game* gg : {ga.get(), gb.get()}) {
+				sim::Unit* u = gg->unit(who, o);
+				if (!u) continue;
+				std::printf("unit %d/%d type %d (%s) frame %d: x %d y %d angle %08x flags %02x idle %d orders %zu path %zu cara %d collide %d masks %08x guys %zu guy_mark %d\n", who, o, u->type, sim::to_utf8(u->ptype->type_name).c_str(), gg->frame, u->x, u->y,
+					u->angle, u->flags, u->idle, u->orders.size(), u->path.size(), u->cara, u->collide, u->unit_masks, u->guys.size(), u->guy_mark);
+				for (const sim::Guy& gy : u->guys)
+					std::printf("   guy %d: anim %d stopped %d cur_time %u end_time %u last_time %d x %d y %d spd %d/%d flags %04x\n", gy.guy_num, gy.cur_anim, gy.stopped, gy.cur_time, gy.end_time, gy.last_time, gy.x, gy.y, gy.last_speed, gy.avg_speed, gy.guy_flags);
+				for (const sim::Guy& gy : u->guys)
+					std::printf("      gpiece %d des %d,%d des_angle %08x angle %08x last %d,%d off %d,%d track %d,%d z %d\n", gy.gpiece, gy.des_x, gy.des_y, gy.des_angle, gy.angle, gy.last_x, gy.last_y, gy.off_x, gy.off_y, gy.track_dx, gy.track_dy, gy.z);
+			}
+		}
+		if (std::getenv("RON_DUMP_GOODS")) {
+			for (size_t i = 0; i < gb->goods.size(); ++i) {
+				const auto& g0 = ga->goods[i];
+				const auto& g1 = gb->goods[i];
+				if (!g1.alive()) continue;
+				const int32_t fx = sim::fcoord_of(g1.x), fy = sim::fcoord_of(g1.y);
+				const size_t fi = size_t(fy) * size_t(gb->world.fog_xs) + size_t(fx);
+				std::printf("good %zu type %d at %d,%d ever_seen %02x -> %02x seen2 %02x seen %02x res %d\n", i, g1.type, g1.x, g1.y, g0.ever_seen, g1.ever_seen,
+					gb->world.seen2[fi], gb->world.seen[fi], int(gb->world.in_t(g1.x / 192, g1.y / 192) && (gb->world.t(g1.x / 192, g1.y / 192) & sim::tmask::kResource)));
+			}
+		}
 		std::vector<sim::AuditLine> d = sim::diff_mapped_state(*ga, *gb);
 		std::sort(d.begin(), d.end(), [](const sim::AuditLine& x, const sim::AuditLine& y) { return x.mismatches > y.mismatches; });
 		std::printf("%s: %lld frames from save frame %d: members changed by the engine (count of objects, of the number bound)\n", basename_of(path).c_str(), (long long)step_diff, ga->frame);

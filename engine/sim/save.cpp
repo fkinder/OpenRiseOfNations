@@ -40,9 +40,9 @@ static_assert(sizeof(PathNode) == 40 && sizeof(SavedSearch) == 176, "the pathfin
 static_assert(sizeof(ObjectList) == 64, "ObjectList changed: update walk_objects()");
 static_assert(sizeof(Groups) == 1282084, "Groups changed: update walk_groups()");
 static_assert(sizeof(Regions) == 10248, "Regions changed: update the REGN section in walk_body()");
-// 1647392 + 16: Game::original (the original-save shadow, sim/original_save.hpp) is derived state the native save never writes.
-static_assert(sizeof(Game) == 1647408, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
-// 1608 + 8: ScriptHost::ctw (the Conquer the World campaign the scripts run for, sim/ctw.hpp) is a run-time pointer, never saved.
+// 1647392 + 16 (+ 32: Game::herds with its padding): Game::original (the original-save shadow, sim/original_save.hpp) is derived state the native save never writes.
+static_assert(sizeof(Game) == 1647440, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
+// 1608 + 8: ScriptHost::ctw (the Conquer the World campaign the scripts run for, sim/ctw.hpp) is a run-time link the native battle save never writes.
 static_assert(sizeof(ScriptHost) == 1616, "ScriptHost changed: update walk_scripts()");
 #endif
 
@@ -559,7 +559,7 @@ void walk_body(Ar& top, Game& g, bool has_scripts) {
 	top.section("REGN", [&](auto& ar) { fields(ar, g.regions.r, g.regions.sea, g.regions.land); });
 	top.section("LEAD", [&](auto& ar) { fields(ar, g.leaders); });
 	top.section("OBJS", [&](auto& ar) { walk_objects(ar, g); });
-	top.section("GOOD", [&](auto& ar) { fields(ar, g.goods, g.items); });
+	top.section("GOOD", [&](auto& ar) { fields(ar, g.goods, g.items, g.herds); });
 	top.section("CITY", [&](auto& ar) {
 		fields(ar, g.cities, g.forts, g.wonder_records, g.unbuilt_cities, g.unbuilt_forts, g.unbuilt_wonders, g.wonders,
 		       g.terra_cotta_total, g.world_pop, g.world_cities, g.starting, g.supplies, g.caravans, g.farms,

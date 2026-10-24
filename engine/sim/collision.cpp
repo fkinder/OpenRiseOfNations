@@ -453,7 +453,10 @@ void resolve_unit_collision(Game& g, Unit& u, int32_t x, int32_t y) {
 				return;
 			}
 			Order* cur = update_order(u);
-			if (act->mandatory == 0 && !(cur && order_is_group(cur->type)) && is_enemy(g, u.who, bw)) {
+			// (the byte at order +0x1c: AttackOrder::mandatory, but CastOrder::paid for a CAST_SPELL action: a paid cast is not
+			// dropped for a colliding enemy)
+			const int32_t mand_byte = act->type == kCastSpell ? act->paid : act->mandatory;
+			if (mand_byte == 0 && !(cur && order_is_group(cur->type)) && is_enemy(g, u.who, bw)) {
 				if (u.o_up >= 0) {
 					Unit* cap = g.unit(u.who, obj_captain(g, u));
 					if (cap && action_type(*cap) == kAttack) {
@@ -622,7 +625,8 @@ int32_t detect_boat_collision(Game& g, Unit& u, int32_t x, int32_t y, bool mutua
 	(void)mutual;
 	if (u.who >= 8 || u.ptype->push_size == 0) return 1;
 	// TODO(pushers): Objects::find_units candidates, push_circles overlap, push or block (docs/movement-spec.md
-	// section 10.5). Until then a pusher with a push_size is never blocked by the push test and falls through to
+	// section 10.5; spells-spec 5: a blocker that is a packer is pushed only while PACKED and never while
+	// cast_is_unpacking, nor when entrenched or cargo). Until then a pusher with a push_size is never blocked by the push test and falls through to
 	// the ordinary footprint check.
 	return 0;
 }

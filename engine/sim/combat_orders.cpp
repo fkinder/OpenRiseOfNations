@@ -11,7 +11,9 @@
 #include "sim/guys.hpp"
 #include "sim/movement.hpp"
 #include "sim/orders.hpp"
+#include "sim/production.hpp"
 #include "sim/search.hpp"
+#include "sim/spells.hpp"
 #include "sim/trig.hpp"
 
 namespace ron::sim {
@@ -320,8 +322,7 @@ int32_t check_target_path(Game& g, Unit& u, Order& act) {
 	Object* T = obj_at(g, ox, whom);
 	if (!T || !obj_is_seen(g, *T, u.who, 0)) return 0;
 	if (t == kCastSpell) {
-		// TODO(spells): SpellTypeData::is_valid_target.
-		if (!T->alive()) {
+		if (!T->alive() || (is_spell_type(act.spell) && !spell_is_valid_target(g, act.spell, u.who, ox, whom, nullptr))) {
 			repath(g, u);
 			kill_current_order(g, u);
 			return 1;
@@ -936,8 +937,24 @@ void group_action_attack(Game& g, Group& gr, int32_t ox, int32_t whom, int32_t m
 				const Order* f = M->front();
 				if (f && order_is_move(f->type) && is_in_range(g, *M, ox, whom, f->x, f->y, 0, nullptr)) continue;
 			}
-			const bool pk = false;  // TODO(packers): is_packing_or_unpacking
-			if (!pk || q != kQueueNew) {
+			const bool pk = cast_is_packing_or_unpacking(*M);
+			if (pk && q == kQueueNew) {
+				// A packing / unpacking packer (orders-spec 2.5 step 5, combat-spec 3.3.1 step 8): with a seen target it drops its
+				// orders, unpacks when already in range or packs again when out of range, and attacks behind that cast; an unseen
+				// target only gets the move (and a capture attempt), behind a PACK when it was packing.
+				if (!unseen) {
+					const bool packing = cast_is_packing(*M);
+					clear_orders(g, *M);
+					const bool in = is_in_range(g, *M, ox, whom, M->x, M->y, 0, nullptr);
+					if (!packing && in) add_cast_order(g, *M, -1, -1, -1, -1, 0x28c, kQueueNew, false);
+					else if (packing && !in) add_cast_order(g, *M, -1, -1, -1, -1, 0x28b, kQueueNew, false);
+					add_attack_order(g, *M, ox, whom, kQueueLast, mandatory, true);
+				} else {
+					if (!T.is_unit && is_in_range(g, *M, ox, whom, 0)) check_capture(g, T, M->o, gr.who);
+					if (cast_is_packing(*M)) add_cast_order(g, *M, -1, -1, -1, -1, 0x28b, kQueueNew, false);
+					add_move_order(g, *M, T.x, T.y, 1, false, kQueueLast, false, -1, -1);
+				}
+			} else if (!pk || q != kQueueNew) {
 				if (T.is_unit || is_wall(T)) {
 					if (T.is_unit) {
 						if (unseen) add_move_order(g, *M, T.x, T.y, 1, false, q, false, -1, -1);

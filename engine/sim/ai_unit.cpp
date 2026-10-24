@@ -1,5 +1,5 @@
 // Per-unit AI (docs/ai-spec.md 12.6): the AI branches of Unit::think after the economy part, Unit::think_scout
-// (T1-T6), Unit::think_spellcaster (the S1 draw; casting is not simulated), Unit::find_goody_box and
+// (T1-T6), Unit::think_spellcaster (the S1 draw and the spy / special casts), Unit::find_goody_box and
 // Unit::explore_goody (G1 draws).
 //
 // Evidence (local, gitignored): re/decomp/ai/Unit_think@005f6e40.c, Unit_think_scout@005f6010.c,
@@ -10,6 +10,7 @@
 #include "sim/ai_internal.hpp"
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
+#include "sim/fog.hpp"
 #include "sim/heroes.hpp"
 #include "sim/orders.hpp"
 #include "sim/spells.hpp"
@@ -61,14 +62,38 @@ int32_t base_type_of(const Game& g, const Unit& u) {  // UnitType vslot 0xe4 (ba
 	return t;
 }
 
-// Unit::think_spellcaster @5f27a0. Spell casting (SpellTypeData::is_castable, mana, add_cast_order) is not simulated:
-// every "castable" test is false here, so the function returns 0 but makes the S1 draw where the original does for
-// special units. TODO(spells): the human COUNTERINTEL branch, spies, the hero S2 coin, the casts.
+// Unit::think_spellcaster @5f27a0 (ai-spec 12.6.1, heroes-spec 4.7, spells-spec 8): `ok(s)` = SpellTypeData::is_castable(s)
+// non-zero and mana() >= mana_burn + the craft's mana; `cast` = add_cast_order(QUEUE_FIRST, not explicit). The only
+// game_random draw is the special units' `% 3` one (S1).
 int32_t think_spellcaster(Game& g, Unit& u) {
 	const Leader& L = LD(g, u.who);
-	if (L.flags & leaderflag::kHuman) return 0;  // (is_special && castable 631 && target: not simulated)
+	auto ok = [&](int32_t sp) {
+		return spell_is_castable(g, sp, u.o, u.who, 0) != 0 && unit_mana(g, u) >= u.mana_burn + g.type(sp).mana;
+	};
+	auto cast = [&](int32_t sp, int32_t t, int32_t tw) {
+		add_cast_order(g, u, t, tw, u.x, u.y, sp, kQueueFirst, false);
+		return 1;
+	};
+	if (L.flags & leaderflag::kHuman) {
+		// A human's special forces counter-spy by themselves: COUNTERINTEL on the nearest planted / enemy-spy object.
+		if (!is_special(u) || !ok(0x277)) return 0;
+		const int32_t t = spell_find_target(g, 0x277, u.who, u.x, u.y, search::kAll, spell_get_range(g, 0x277, u.who, -1, -1), false, false);
+		if (t < 0) return 0;
+		return cast(0x277, t, g.find_who);
+	}
 	if (get_diff(g, u.who) < 2 || (u.unit_masks & umask::kDecoy)) return 0;
-	if (type_is(*u.ptype, ptype::kSpy)) return 0;  // needs is_cloaked and castable spells
+	if (type_is(*u.ptype, ptype::kSpy)) {
+		if (!unit_is_cloaked(u)) return 0;
+		if (ok(0x277)) {  // find a plant on a friendly object within 5 x the range
+			const int32_t t = spell_find_target(g, 0x277, u.who, u.x, u.y, search::kFriendly, 5 * spell_get_range(g, 0x277, u.who, -1, -1), false, false);
+			if (t >= 0) return cast(0x277, t, g.find_who);
+		}
+		if (ok(0x275)) {  // bribe the nearest enemy combat unit
+			const int32_t t = spell_find_target(g, 0x275, u.who, u.x, u.y, search::kEnemy, 5 * spell_get_range(g, 0x275, u.who, -1, -1), true, true);
+			if (t >= 0) return cast(0x275, t, g.find_who);
+		}
+		return 0;
+	}
 	if (!is_special(u)) {
 		// A general (heroes-spec 4.7, decompile @5f27a0; the spec's "two draws" belongs to the special path below): idle ->
 		// DECOY unless a decoy already exists; moving (guy 0 with a non-zero avg_speed) -> FORCED MARCH on a coin
@@ -99,10 +124,18 @@ int32_t think_spellcaster(Game& g, Unit& u) {
 		add_cast_order(g, u, -1, -1, u.x, u.y, sp, kQueueFirst, false);
 		return 1;
 	}
-	// SNIPER (641) not castable; then the S1 draw (always made here).
+	// Special units (commandos, scouts ...): SNIPER an enemy combat unit in range; else the S1 draw (always made here), then
+	// COUNTERINTEL.
+	if (ok(0x281)) {
+		const int32_t t = spell_find_target(g, 0x281, u.who, u.x, u.y, search::kEnemy, spell_get_range(g, 0x281, u.who, -1, -1), true, true);
+		if (t >= 0) return cast(0x281, t, g.find_who);
+	}
 	const int32_t r = rnd_raw(g);
 	if (r % 3 != 0 && object_get_army(g, u) < 0) return 0;
-	return 0;  // COUNTERINTEL (631) not castable
+	if (!ok(0x277)) return 0;
+	const int32_t t = spell_find_target(g, 0x277, u.who, u.x, u.y, search::kAll, spell_get_range(g, 0x277, u.who, -1, -1), false, false);
+	if (t < 0) return 0;
+	return cast(0x277, t, g.find_who);
 }
 
 int32_t find_goody_box(Game& g, Unit& u) {  // Unit::find_goody_box @5f2540
@@ -133,6 +166,8 @@ int32_t find_goody_box(Game& g, Unit& u) {  // Unit::find_goody_box @5f2540
 }
 
 }  // namespace
+
+int32_t ai_think_spellcaster(Game& g, Unit& u) { return think_spellcaster(g, u); }
 
 // ---------------------------------------------------------------- explore_goody (G1)
 

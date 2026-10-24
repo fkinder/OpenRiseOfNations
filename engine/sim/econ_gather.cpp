@@ -5,6 +5,7 @@
 #include <algorithm>
 
 #include "sim/ai.hpp"
+#include "sim/spells.hpp"
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
 #include "sim/garrison.hpp"
@@ -792,7 +793,8 @@ void think_economy(Game& g, Unit& u) {
 	if (l.flags & leaderflag::kHuman) {
 		if (!(u.unit_masks & umask::kAutoExplore)) {
 			if (u.ptype->unit_flags2 & 0x10) {
-				// TODO(spells): think_spellcaster on the first idle frame or every 32 frames.
+				// A human's special forces counter-spy on the first idle frame or every 32 frames (ai-spec 12.6 step 8).
+				if ((u.idle == 1 || (u.o + g.frame) % 32 == 0) && ai_think_spellcaster(g, u)) return done();
 				if (u.idle == 1 && (u.group < 0 || g.groups.g[size_t(u.group)].num == 1) &&
 				    (u.unit_masks & umask::kMultimove))
 					u.unit_masks &= ~umask::kMultimove;  // (the "scout idle" message: presentation)
@@ -890,7 +892,8 @@ void group_action_gather(Game& g, Group& gr, int32_t ox, QueuePos q) {
 				i--;
 				continue;
 			}
-			worker = is_peasant_t(u->type) || (transport && count_inside_type(g, *u, ptype::kPeasants, false) != 0);
+			worker = is_peasant_t(u->type) || spell_is_castable(g, ptype::kCivilianSpell, mo, who, 0) != 0 ||
+			         (transport && count_inside_type(g, *u, ptype::kPeasants, false) != 0);
 		} else {
 			worker = sch;
 		}
@@ -932,12 +935,15 @@ void group_action_gather(Game& g, Group& gr, int32_t ox, QueuePos q) {
 				const int32_t no = ob->down, nw = ob->down_who;
 				if (lw == who && !ob->is_unit && (ob->flags & objflag::kActive) && is_gather_type(*ob->ptype)) {
 					u->group = -1;
+					const bool can_civ = spell_is_castable(g, ptype::kCivilianSpell, mo, who, 0) != 0;
 					if (q2 == kQueueLast) {
-						// (the civilian spell cast QUEUE_LAST first: TODO(spells))
+						// an armed citizen disarms first (CIVILIAN, QUEUE_LAST), then gathers
+						if (can_civ) add_cast_order(g, *u, -1, -1, u->x, u->y, ptype::kCivilianSpell, kQueueLast, true);
 						add_gather_order(g, *u, lo, kQueueLast, true);
 					} else {
 						add_gather_order(g, *u, lo, kQueueNew, true);
-						// (editor-only oil-platform boarding; the civilian spell QUEUE_FIRST: TODO(spells))
+						if (can_civ) add_cast_order(g, *u, -1, -1, u->x, u->y, ptype::kCivilianSpell, kQueueFirst, true);
+						// (else: editor-only oil-platform boarding)
 					}
 					group_kill(g, gr, mo, who, 0, 0);
 					assigned = true;

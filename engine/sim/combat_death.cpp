@@ -12,6 +12,7 @@
 #include "sim/orders.hpp"
 #include "sim/pathfinder.hpp"
 #include "sim/production.hpp"
+#include "sim/spells.hpp"
 
 namespace ron::sim {
 
@@ -126,7 +127,7 @@ void unit_close(Game& g, Unit& u, int32_t death, int32_t gpiece, float deg) {
 		const int32_t t = u.type;
 		if (t == 0x3d || t == 0x3e || t == 400) {
 			if (who < kNumLeaders) g.leaders[size_t(who)].flags |= leaderflag::kRecompute;
-			if (!(u.unit_masks & umask::kPacked)) {  // TODO: && !is_packing() (packing is not simulated)
+			if (!(u.unit_masks & umask::kPacked) && !cast_is_packing(u)) {  // (a merchant mid-pack still holds its block)
 				// An unpacked merchant's 2x2 market block is released; no death animation.
 				const int32_t tx = tcoord_of(u.x), ty = tcoord_of(u.y);
 				const int32_t cx[4] = {tx, tx - 1, tx, tx - 1}, cy[4] = {ty, ty, ty - 1, ty - 1};

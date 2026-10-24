@@ -16,6 +16,7 @@
 #include "sim/orders.hpp"
 #include "sim/production_internal.hpp"
 #include "sim/search.hpp"
+#include "sim/spells.hpp"
 #include "sim/trig.hpp"
 
 namespace ron::sim {
@@ -236,8 +237,8 @@ int32_t build_can_make(const Game& g, const Build& b, int32_t t, int32_t p) {
 		return a;
 	}
 	if (is_spell_type(t)) {
-		// TODO(spells): SpellTypeData::is_castable for owned spells.
-		if (LD(g, b.who).has_tech_bit(t)) return t == ptype::kDisband ? a : 0;
+		// LeaderData::has_spell(t): an owned (type_avail) craft is queued when it is castable by this building.
+		if (leader_has_spell(g, b.who, t)) return spell_is_castable(g, t, b.o, b.who, 0) == 3 ? a : 0;
 		return type_is(*b.ptype, g.type(t).where) ? a : 0;
 	}
 	if (is_build_type(t) && b.city >= 0 && is_t(g, t, ptype::kTown)) {
@@ -996,12 +997,9 @@ int32_t build_finished(Game& g, Build& b, int32_t t) {
 		build_train(g, b, t);
 		return 1;
 	}
-	if (is_spell_type(t) && l.has_tech_bit(t)) {
-		// SpellType::cast(o, who): TODO(spells). DISBAND demolishes the building.
-		if (t == ptype::kDisband) {
-			if (b.alive() && (b.flags & objflag::kActive)) build_plunder(g, b, who);  // SpellType::cast_disband @671ed0
-			build_disband(g, b, false);
-		}
+	if (is_spell_type(t) && leader_has_spell(g, who, t)) {
+		// SpellType::cast(o, who): DISBAND demolishes the building (cast_disband), DEPOPULATE disbands a city centre.
+		spell_cast(g, t, b.o, who, 0, 0);
 		return 1;
 	}
 	if (is_build_type(t) && !(g.type(t).build_flags & 4)) {

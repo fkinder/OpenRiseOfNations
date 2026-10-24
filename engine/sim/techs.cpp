@@ -594,7 +594,9 @@ void track_unit_type(Game& g, int32_t who, int32_t t, int32_t d, int32_t o) {
 	else if (t == ptype::kScholars || t == ptype::kScholarsKorean) l.scholars += d;    // TypeData::is_scholar
 	else if (ty.role & 0x10) l.scouts += d;
 	if (o >= 0 && is_t(g, t, ptype::kMilitia)) {
-		// UnitData +0x54 (the type the militia was made from): TODO(spells) — no unit records it yet.
+		// UnitData +0x54 made_from (Unit::rare in the port; set by cast_to_arms): militia made from scholars are counted.
+		const Unit* mu = g.unit(who, o);
+		if (mu && mu->rare > 0 && mu->rare < kNumTypes && is_t(g, mu->rare, ptype::kScholars)) l.scholar_militia += d;
 		return;
 	}
 	if (is_t(g, t, 0x4b /*SPECIALFORCES*/)) {

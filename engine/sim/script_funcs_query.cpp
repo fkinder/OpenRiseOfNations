@@ -721,7 +721,9 @@ void install_query_funcs(ScriptHost& h) {
 		if (!valid_object(g, w, c.arg_int(1))) return make_string(U16());
 		const Unit* u = unit_at(g, w, c.arg_int(1));
 		if (!u || u->orders.empty() || u->orders.front().type != kCastSpell) return make_string(U16());
-		return make_string(U16());  // TODO(spells): CastSpellOrder's spell type (+0x20) is not kept
+		const int32_t sp = u->orders.front().spell;  // CastOrder +0x20: the spell type (its name at Type +0x60)
+		if (sp < 0 || sp >= kNumTypes) return make_string(U16());
+		return make_string(g.type(sp).name);
 	});
 	def("get_ending_age", [&g](NativeCall&) { return make_int(g.info.ending_technology + 1); });
 	def("get_time_limit", [&g](NativeCall&) {  // @9e5bf0

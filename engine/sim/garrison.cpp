@@ -18,6 +18,7 @@
 #include "sim/orders.hpp"
 #include "sim/production.hpp"
 #include "sim/search.hpp"
+#include "sim/spells.hpp"
 #include "sim/transport.hpp"
 #include "sim/trig.hpp"
 
@@ -502,8 +503,24 @@ void group_action_garrison(Game& g, Group& gr, int32_t ox, int32_t whom, QueuePo
 			}
 		}
 		QueuePos q2 = q;
-		if (is_worker_type(m->type)) q2 = kQueueFirst;  // a worker keeps its work behind the garrison order
-		// (a packer that is packing keeps its last order first: packing is not simulated)
+		if (is_worker_type(m->type)) {
+			q2 = kQueueFirst;  // a worker keeps its work behind the garrison order
+		} else if (q == kQueueNew && (m->ptype->unit_flags2 & 4) && cast_is_packing_or_unpacking(*m)) {
+			// A packer that is packing keeps its last order (the pack cast) and garrisons behind it; one that is unpacking is
+			// simply re-ordered (spells-spec 5, @700a00..700b60).
+			if (!cast_is_unpacking(*m)) {
+				if (!m->orders.empty()) {
+					const Order keep = m->orders.front();  // LinkListBase::tail() is the current order (head->prev)
+					m->orders.pop_front();
+					clear_orders(g, *m);
+					m->orders.push_back(keep);
+					unit_update_gpiece(g, *m);
+				}
+				q2 = kQueueLast;
+			} else {
+				q2 = kQueueNew;
+			}
+		}
 		add_garrison_order(g, *m, b, whom, find, q2, true);
 	}
 }
@@ -593,7 +610,9 @@ void eject_contents(Game& g, Object& ob, int32_t kill_if_stuck, int32_t type, in
 		}
 		if (no_orders == 0) {
 			if (get_action(*u)) repath(g, *u);
-			// TODO(spells): a militia unit with spell 0xa4c castable casts 0x293 (disarm) at the building (QUEUE_FIRST).
+			// An armed citizen (a militia) casts CIVILIAN (0x293, spell 0xa4c) at the building's position, QUEUE_FIRST.
+			if (unit_is(g, *u, kTypeMilitia) && spell_is_castable(g, ptype::kCivilianSpell, u->o, u->who, 0) != 0)
+				add_cast_order(g, *u, -1, -1, ob.x, ob.y, ptype::kCivilianSpell, kQueueFirst, true);
 		} else {
 			clear_orders(g, *u);
 		}

@@ -10,6 +10,7 @@
 #include "sim/placement.hpp"
 #include "sim/script_host.hpp"
 #include "sim/search.hpp"
+#include "sim/spells.hpp"
 
 namespace ron::sim {
 
@@ -114,11 +115,8 @@ bool started_visible_wonder(const Object& ob) {
 }
 bool is_gaia_animal(const Object& ob) { return ob.is_unit && ob.type >= kGaia && ob.type < kEndGaia; }
 
-// UnitData::is_packing @60aa60: TODO(packers) — no packing orders exist yet (as groups.cpp).
-bool unit_is_packing(const Unit& u) {
-	(void)u;
-	return false;
-}
+// UnitData::is_packing @60aa60: the current order is a CAST_SPELL of a pack spell (sim/spells.hpp).
+bool unit_is_packing(const Unit& u) { return cast_is_packing(u); }
 // ObjectData::has_general @646b00 (sim/heroes.hpp).
 int32_t object_has_general(const Game& g, const Unit& u, int32_t mask, int32_t type) {
 	return has_general(g, u, uint32_t(mask), type);
@@ -831,10 +829,24 @@ bool object_is_seen(const Game& g, const Object& ob, int32_t who, bool ignore_cl
 	const Unit& u = static_cast<const Unit&>(ob);
 	int32_t fx, fy;
 	if (is_gaia_animal(u)) {
-		// AnimalData::is_seen @5d8160, non-herd animals not attached to an object (TODO(herds): herd animals).
+		// AnimalData::is_seen @5d8160.
 		if (g.info.reveal_map == 3) return true;
 		if (!fog_cell_of(g, u, &fx, &fy)) return false;
-		return was_seen(g, fx, fy, who);
+		if (u.cara == -1) {
+			// not a herd animal: a pen animal asks its farm, the others the fog cell
+			if (who < 0 || u.animal_ox < 0) return was_seen(g, fx, fy, who);
+			const Object* farm = g.object(u.animal_whom, u.animal_ox);
+			return farm ? object_is_seen(g, *farm, who, false) : false;
+		}
+		// a herd animal is seen once its herd's good was discovered by `who`, else like the good (fish / whales: the cell
+		// really seen; Spanish / Nubians: seen before; the rest: really seen)
+		if (size_t(u.cara) < g.herds.size() && g.herds[size_t(u.cara)].good_o >= 0 && size_t(g.herds[size_t(u.cara)].good_o) < g.goods.size()) {
+			const GoodObj& gd = g.goods[size_t(g.herds[size_t(u.cara)].good_o)];
+			if (who >= 0 && who < 32 && (gd.ever_seen & (1u << uint32_t(who)))) return true;
+			if (gd.type == fogtype::kFish || gd.type == fogtype::kWhales || who < 0) return was_really_seen(g, fx, fy, who);
+			if (has_tribe_bonus(g, who, 9) || has_tribe_bonus(g, who, 4)) return was_seen(g, fx, fy, who);
+		}
+		return was_really_seen(g, fx, fy, who);
 	}
 	if (!ignore_cloak && unit_is_cloaked(u) && !(u.unit_masks & umask::kBlowCover) && !unit_is_detected(g, u, who))
 		return false;

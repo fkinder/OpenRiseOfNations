@@ -84,6 +84,42 @@ const ClassMap& map_items_array() {
 	return m;
 }
 
+// ---- herds: the global PtrArray<Herd> --------------------------------------------------------------------------------------
+
+const ClassMap& map_herd() {
+	static const ClassMap m = [] {
+		ClassMap m;
+		Builder<Game::Herd> b(m, "Herd", "Herd");
+		b.walks({"Herd::walk_data"}).resolve([](Game& g, const Seg& s) -> Game::Herd* { return size_t(s.a) < g.herds.size() ? &g.herds[size_t(s.a)] : nullptr; });
+		b.f("cx", &Game::Herd::cx).f("cy", &Game::Herd::cy).f("wx", &Game::Herd::wx).f("wy", &Game::Herd::wy).f("t", &Game::Herd::t);
+		b.f("good_o", &Game::Herd::good_o).f("herd", &Game::Herd::herd).f("herd_flags", &Game::Herd::herd_flags);
+		m.finish();
+		return m;
+	}();
+	return m;
+}
+
+const ClassMap& map_herds_array() {
+	static const ClassMap m = [] {
+		ClassMap m;
+		m.name = "herds";
+		m.cls = "";
+		m.resolve = [](Game& g, const Seg&) -> void* { return &g; };
+		const dw::Description& d = dw::Description::get();
+		const int step = d.find_step(d.find_function("PtrArray<Herd>::walk_data"), dw::StepKind::Container);
+		m.array_fn = [step](const Game& g, const Seg&, int st, int64_t base, ArraySpec& spec) {
+			if (st != step || base != 0) return false;
+			spec.count = int32_t(g.herds.size());
+			spec.child = &map_herd();
+			spec.child_id = [](int32_t i) { return Seg{i, 0, 0}; };
+			spec.grow_only = true;
+			return true;
+		};
+		return m;
+	}();
+	return m;
+}
+
 // ---- the per-player record lists --------------------------------------------------------------------------------------
 
 namespace {

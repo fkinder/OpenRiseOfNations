@@ -12,6 +12,7 @@
 // category (the original cannot run like that: "No Animation Packet").
 #include "sim/ai.hpp"
 #include "sim/aircraft.hpp"
+#include "sim/animals.hpp"
 #include "sim/guys.hpp"
 
 #include <algorithm>
@@ -24,6 +25,8 @@
 #include "sim/garrison.hpp"
 #include "sim/groups.hpp"
 #include "sim/movement.hpp"
+#include "sim/orders.hpp"
+#include "sim/production.hpp"
 #include "sim/spells.hpp"
 #include "sim/transport.hpp"
 #include "sim/trig.hpp"
@@ -360,7 +363,7 @@ int32_t unit_set_new_location(Game& g, Unit& u, int32_t x, int32_t y, bool p3, b
 		add_to_world(g, u);
 		// @5f90e7: Unit::explore_goody (ruins) for non-decoy ground units (not gaia animals: vslot 0x30) entering a GOODY
 		// wcoord (the test reads WData.flags as a short: < 0 is FLAG_GOODY 0x8000).
-		if (u.who != kGaiaWho && !(u.unit_masks & umask::kDecoy) && u.ptype->domain == 0 &&
+		if (!is_animal_who(u.who) && !(u.unit_masks & umask::kDecoy) && u.ptype->domain == 0 &&
 		    (g.world.w(wcoord_of(x), wcoord_of(y)).flags & 0x8000))
 			explore_goody(g, u);
 	}
@@ -786,9 +789,23 @@ void guy_move(Game& g, Unit& u, Guy& gy) {
 			else if (m & 0x08000000u) anim = kAnimWalkWithWood;
 			else if (m & 0x40000000u) anim = kAnimWalkToOre;
 			else if (m & 0x20000000u) anim = kAnimWalkWithOre;
-			// TODO(@5d9454): a GATHER action whose (update_action) target object passes vfuncs +0x10/+0xb0/+0x90 and
-			// target byte +0x27 gets +0x7a incremented and 0x800 set at +0x60 of its vfunc +0xac data, once
-			// (gatherer bookkeeping; gathering is not implemented).
+			// @5d9454: a worker walking for wood or ore whose action is a GATHER order that has been at its building
+			// (been_there) marks the active gather building as in use: recharging++ and build_masks 0x800, once a frame
+			// (Wall::process clears the bit). Without it the camp's counter lags the original by the walking frames.
+			const Order* act0 = get_action(u);
+			if (act0 && act0->type == kGather) {
+				const Order* act = update_action(g, u);
+				if (act && act->ox >= 0 && act->whom >= 0 && act->been_there != 0) {
+					Object* tb = g.object(act->whom, act->ox);
+					if (tb && !tb->is_unit && (tb->flags & objflag::kActive) && is_gather_type(*tb->ptype)) {
+						Build& bb = static_cast<Build&>(*tb);
+						if (!(bb.build_masks & bmask::kInUse)) {
+							bb.recharging++;
+							bb.build_masks |= bmask::kInUse;
+						}
+					}
+				}
+			}
 		}
 		if (!(gy.guy_flags & 0x40) && (!(t.unit_flags2 & 4) || (u.unit_masks & umask::kPacked)))
 			guy_set_anim(g, u, gy, anim, 0, 1);

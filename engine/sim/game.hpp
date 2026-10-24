@@ -99,6 +99,7 @@ struct Leader {
 	int32_t score_combat = 0, units_killed = 0, units_lost = 0, buildings_razed = 0, buildings_lost = 0;
 	int32_t frame_attacked = 0, retarget_budget = 0;
 	int16_t deaths_current_frame = 0, kills_current_frame = 0, hits_current_frame = 0;
+	int16_t units_bribed = 0;  // LeaderData +0x8f4 (cast_bribe counts every converted unit; spells-spec 4.1). Fills the padding after the three counters above; not in the save walk
 	std::array<int32_t, 8> attack_stamp{}, raid_stamp{};
 
 	// ---- production (docs/production-spec.md section 11; plain values, the original keeps the LeaderDataEncrypt
@@ -497,6 +498,18 @@ public:
 	// ---- goods, items and fog state outside the grids (sim/fog.hpp; docs/fog-spec.md)
 	std::vector<GoodObj> goods, items;  // global arrays in creation order (Objects::init_good / init_item)
 	int32_t good_mark = 0;              // Objects +0x154: highest good index + 1
+	// Herds (herds.obj, 0x24 bytes each; docs/randommap-resources.md section 8): the animals of a herd good wander around
+	// (cx, cy) towards the target (wx, wy) (sim/animals.cpp).
+	struct Herd {
+		int32_t cx = 0, cy = 0;  // +0x00 / +0x04: the herd cell (wcoords)
+		int32_t wx = 0, wy = 0;  // +0x08 / +0x0c: the wander target
+		int32_t t = 0;           // +0x10: the animal's unit type
+		int32_t good_o = -1;     // +0x14: slot of the herd's good in `goods` (-1 none)
+		int16_t herd = 0;        // +0x18: the herd id (its slot)
+		uint8_t herd_flags = 0;  // +0x1a: bit 0 valid
+		bool valid() const { return (herd_flags & 1) != 0; }
+	};
+	std::vector<Herd> herds;  // Herds: PtrArray<Herd>, a slot whose valid bit is clear is reused by Herds::init_herd
 	uint32_t everyone_mask = 0;         // Game.everyone_mask: bit of every scenario leader
 	struct RevealPoint {
 		int32_t tx = 0, ty = 0, radius = 0;  // tcoords

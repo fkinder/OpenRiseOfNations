@@ -116,6 +116,10 @@ template <class Ar> void walk(Ar& ar, GoodObj& v) {
 	FIELDS(ar, v.type, v.x, v.y, v.flags, v.ever_seen);
 }
 
+template <class Ar> void walk(Ar& ar, Game::Herd& v) {
+	FIELDS(ar, v.cx, v.cy, v.wx, v.wy, v.t, v.good_o, v.herd, v.herd_flags);
+}
+
 template <class Ar> void walk(Ar& ar, Game::Supply& v) {
 	FIELDS(ar, v.o, v.unit, v.flags, v.who);
 }
@@ -354,6 +358,7 @@ static_assert(sizeof(GameDaemon) == 36, "GameDaemon changed: update its walk() i
 static_assert(sizeof(Market) == 124, "Market changed: update its walk() in save_walk.inc");
 static_assert(sizeof(FarmRec) == 92, "FarmRec changed: update its walk() in save_walk.inc");
 static_assert(sizeof(CaravanRec) == 14, "CaravanRec changed: update its walk() in save_walk.inc");
+static_assert(sizeof(Game::Herd) == 28, "Game::Herd changed: update its walk() in save_walk.inc");
 static_assert(sizeof(GoodObj) == 16, "GoodObj changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Game::Supply) == 6, "Game::Supply changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Game::RevealPoint) == 12, "Game::RevealPoint changed: update its walk() in save_walk.inc");

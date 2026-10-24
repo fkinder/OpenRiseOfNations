@@ -7,6 +7,8 @@
 
 #include "sim/ai.hpp"
 #include "sim/combat.hpp"
+#include "sim/combat_internal.hpp"
+#include "sim/fog.hpp"
 #include "sim/economy.hpp"
 #include "sim/game.hpp"
 #include "sim/groups.hpp"
@@ -95,19 +97,29 @@ void update_speed(Game& g, Unit& u0) {
 	if (t.domain == 1 && (t.unit_flags & 0x10)) base += mil * c.at(0x3c);  // military_transport_bonus
 	if (u.unit_masks2 & umask2::kMarineTransport) base += mil * c.at(0x86c);  // americans_marine_speed_bonus
 	int32_t s = c.at(0x4) * base;  // unit_move_speed
-	// TODO(leader): objmask 0x2000 with the leader's whales bit: s = (whales_ships_move + 100) * s / 100
+	// objmask 0x2000 (ships) with the whales rare resource (TypeIndex 31: byte 3 bit 1 of the rare masks): whales_ships_move.
+	const Leader& L = g.leaders[size_t(u.who)];
+	if ((t.obj_masks & 0x2000) && ((L.rare[3] & 2) || (L.rare_conquest[3] & 2))) s = ((RON_K(g, "whales_ships_move") + 100) * s) / 100;
 	if (unit_is(g, u, 0x68)) s = s * 36 / 32;
 	else if (unit_is(g, u, 0x66)) s = s * 34 / 32;
 	else if (unit_is(g, u, 100)) s = s * 32 / 27;
 	else if (unit_is(g, u, 0x62)) s = s * 30 / 24;
-	// TODO(tribe bonuses, wonders, techs), in this order: Bantu (tribe bonus 3; where 0x1ab, types 50/51 or is 0x42)
-	// (bantu_units_move + 100) * s / 100; where 0x1ae/0x1af: French (bonus 10) french_siege_move, Versailles (wonder
-	// 0x218) versailles_units_move; air with the aluminum bit aluminum_air_speed; is 0x3a: s += spy_upgrade * s / 4;
-	// heroes: general_upgrade; supply: supply_upgrade; types 50/51 with tribe bonus 0: aztec_move_speed.
-	if (unit_is_hero(u)) {  // heroes: s += general_upgrade * s / 4 (the terms above do not apply to heroes)
-		const int32_t gu = get_general_upgrade(g, u.who) * s;
-		s += (gu + ((gu >> 31) & 3)) >> 2;
+	// The tribe, wonder and tech terms, in the original's order (@6055c0). Bantu: the type's `where` 0x1ab, types 50 / 51 or is 0x42.
+	if ((t.where == 0x1ab || u.type == 0x32 || u.type == 0x33 || unit_is(g, u, 0x42)) && has_tribe_bonus(g, u.who, 3))
+		s = ((RON_K(g, "bantu_units_move") + 100) * s) / 100;
+	if (t.where == 0x1ae || t.where == 0x1af) {  // siege: French and Versailles
+		if (has_tribe_bonus(g, u.who, 10)) s = ((RON_K(g, "french_siege_move") + 100) * s) / 100;
+		if (has_wonder(g, u.who, 0x218)) s = ((RON_K(g, "versailles_units_move") + 100) * s) / 100;
 	}
+	if (t.domain == 2 && ((L.rare[3] & 1) || (L.rare_conquest[3] & 1))) s = ((RON_K(g, "aluminum_air_speed") + 100) * s) / 100;  // aluminum (TypeIndex 30)
+	auto upgrade = [&](int32_t up) {
+		const int32_t v = up * s;
+		s += (v + ((v >> 31) & 3)) >> 2;
+	};
+	if (unit_is(g, u, 0x3a)) upgrade(get_spy_upgrade(g, u.who));
+	if (unit_is_hero(u)) upgrade(get_general_upgrade(g, u.who));
+	if (t.unit_flags2 & utflag2::kSupply) upgrade(get_supply_upgrade(g, u.who));
+	if ((u.type == 0x32 || u.type == 0x33) && has_tribe_bonus(g, u.who, 0)) s = ((RON_K(g, "aztec_move_speed") + 100) * s) / 100;
 	u.myspeed = int16_t(s);
 	for (int32_t d = u.o_down; d >= 0;) {
 		Unit* f = g.unit(u.who, d);

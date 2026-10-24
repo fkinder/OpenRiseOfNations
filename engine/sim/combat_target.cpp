@@ -15,6 +15,7 @@
 #include "sim/movement.hpp"
 #include "sim/orders.hpp"
 #include "sim/search.hpp"
+#include "sim/spells.hpp"
 #include "sim/trig.hpp"
 
 namespace ron::sim {
@@ -726,8 +727,14 @@ int32_t think_attack(Game& g, Unit& u) {
 	}
 	if (L.flags2 & leaderflag2::kCombatAiOff) player_style = true;
 	if ((u.ptype->unit_flags2 & utflag2::kPacker) && (u.unit_masks & umask::kPacked) && !type_is(*u.ptype, 62, true)) {
-		// TODO(packers): get_packer_stance; PACKER_AUTO casts UNPACK after an idle threshold. Packing is not
-		// simulated, so packed packers behave as PACKER_NEVER.
+		// PACKER_AUTO unpacks once the unit has been idle long enough (combat-spec 2.3 step 2).
+		if (unit_packer_stance(u) == packer::kAuto) {
+			const int32_t threshold = unit_is(g, u, 123 /*MACHINEGUN*/) ? 3 : (leader_human(g, u.who) ? 7 : 21);
+			if (u.idle >= threshold) {
+				add_cast_order(g, u, -1, -1, -1, -1, 0x28c, kQueueFirst, false);
+				return 0;
+			}
+		}
 		if (player_style) return 0;
 	}
 	int32_t R = -1;
@@ -804,7 +811,10 @@ void think_combat(Game& g, Unit& u) {
 		if (!on_tick) {
 			if (u.near_o >= 0 && u.near_who >= 0 && get_combat_stance(g, u) < kHoldFire &&
 			    alive_at(g, u.near_o, u.near_who) && is_in_range(g, u, u.near_o, u.near_who, 0)) {
-				// TODO(packers): a PACKED packer with a non-AUTO packer stance only clears NEW_THINK.
+				if ((u.ptype->unit_flags2 & utflag2::kPacker) && (u.unit_masks & umask::kPacked) && unit_packer_stance(u) != packer::kAuto) {
+					u.flags &= uint8_t(~objflag::kNewThink);  // a packed packer that was told not to unpack stays put
+					return;
+				}
 				add_attack_order(g, u, u.near_o, u.near_who, kQueueNew, 0, false);
 				u.flags &= uint8_t(~objflag::kNewThink);
 				return;
@@ -812,8 +822,8 @@ void think_combat(Game& g, Unit& u) {
 		} else {
 			bool r = false;
 			if (type_is(*u.ptype, 62, true)) {
-				// Dutch armed merchants: a packed one thinks as a merchant first. TODO(packers): is_packing_or_unpacking.
-				r = ((u.unit_masks & umask::kPacked) && think_merchant(g, u) != 0) || think_attack(g, u) != 0;
+				// Dutch armed merchants: a packed one thinks as a merchant first.
+				r = ((u.unit_masks & umask::kPacked) && think_merchant(g, u) != 0) || (!cast_is_packing_or_unpacking(u) && think_attack(g, u) != 0);
 			}
 			if (!r && u.ptype->attack != 0 && (u.ptype->role & role::kCombat)) r = think_attack(g, u) != 0;
 			if (r) {
@@ -883,7 +893,9 @@ void target_opportunity(Game& g, Unit& u0, int32_t ox, int32_t whom, bool from_g
 	Unit& u = *up;
 	if (!valid_target(g, u, ox, whom, nullptr)) return;
 	if (get_combat_stance(g, u) == kHoldFire) return;
-	const bool pk = false;  // TODO(packers): PACKER_NEVER and (PACKED or packing)
+	// pk = packer && get_packer_stance() == PACKER_NEVER && (PACKED || is_packing()) (combat-spec 4.4)
+	const bool pk = (u.ptype->unit_flags2 & utflag2::kPacker) && unit_packer_stance(u) == packer::kNever &&
+	                ((u.unit_masks & umask::kPacked) || cast_is_packing(u));
 	const OrderType ot0 = u.order_type();
 	if (ot0 == kStrafe || ot0 == kAirPatrol || ot0 == kAirAttackGround) return;
 	Object& T = *g.object(whom, ox);
@@ -928,16 +940,18 @@ void target_opportunity(Game& g, Unit& u0, int32_t ox, int32_t whom, bool from_g
 		switched = true;
 		a = update_action(g, u);
 	} else if (a && a->type == kCastSpell) {
-		// TODO(spells): SABOTAGE casts halve spell_time when the attacker is neither the cast's target.
+		// A SABOTAGE cast is hurried (spell_time halved) when the attacker is not the cast's target; any other cast ignores it
+		// (spells-spec 4.5).
+		if (a->spell != 0x280) return;
+		if (a->ox == ox || a->whom == whom) return;
+		u.spell_time = int16_t(u.spell_time / 2);
 		return;
 	}
 	if (!switched && !moving) {
-		if (!a) {
-			// TODO(spells): spies cast BRIBE, commandos SABOTAGE on their attacker.
-		}
+		if (!a && spell_reactive_cast(g, u, ox, whom)) return;  // spies cast BRIBE, commandos SABOTAGE on their attacker
 		const bool worker_or_idle = is_worker_type(u.type) || u.orders.empty();
 		if (((has_objmask(u, objmask::kCivilian) && raw_max_range(g, *u.ptype) == 0) || u.ptype->attack == 0 || pk) &&
-		    worker_or_idle && (!(u.ptype->unit_flags2 & utflag2::kPacker) || (u.unit_masks & umask::kPacked)) &&
+		    worker_or_idle && (!(u.ptype->unit_flags2 & utflag2::kPacker) || (!cast_is_packing(u) && (u.unit_masks & umask::kPacked))) &&
 		    !((u.ptype->unit_flags2 & utflag2::kHero) && (u.unit_masks & (umask::kCloakRunning | umask::kMarchRunning)))) {
 			int32_t dist = 0x600;
 			if ((u.ptype->unit_flags2 & utflag2::kHero) || (u.ptype->unit_flags2 & utflag2::kSupply))

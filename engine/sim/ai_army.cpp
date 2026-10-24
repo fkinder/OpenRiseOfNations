@@ -1291,12 +1291,23 @@ bool do_transporting(Game& g, Army& A) {  // @6f4690
 	return true;
 }
 
-// use_generals / use_spies / use_scouts @6f4c30 / @6f4af0 / @6f49a0: the first active member of the kind whose
-// think_spellcaster returns non-zero ends the walk. TODO(spells): Unit::think_spellcaster (casting is not simulated).
+// use_generals / use_spies / use_scouts @6f4c30 / @6f4af0 / @6f49a0 (kind 0 / 1 / 2): walk the army's groups and members in
+// list order; the first live member that is a hero / a spy (is(SPY, 0)) / a special unit for which Unit::think_spellcaster
+// returns non-zero ends the walk.
 void use_casters(Game& g, Army& A, int32_t kind) {
-	(void)g;
-	(void)A;
-	(void)kind;
+	for (int32_t gi = 0; gi < A.num_groups && gi < 16; gi++) {
+		const int32_t gidx = A.list[size_t(gi)];
+		if (gidx < 0 || size_t(gidx) >= g.groups.g.size()) continue;
+		for (int32_t k = 0; k < g.groups.g[size_t(gidx)].num; k++) {  // (the member count is re-read: casting may change the group)
+			const int32_t mo = g.groups.g[size_t(gidx)].list[size_t(k)];
+			if (mo < 0) continue;
+			Unit* u = g.unit(A.who, mo);
+			if (!u || !u->alive()) continue;
+			const bool match = kind == 0 ? (u->ptype->unit_flags2 & 0x20) != 0
+			                             : kind == 1 ? type_is(*u->ptype, ptype::kSpy, false) : (u->ptype->unit_flags2 & 0x10) != 0;
+			if (match && ai_think_spellcaster(g, *u) != 0) return;
+		}
+	}
 }
 
 // ---------------------------------------------------------------- Army::process (12.2)

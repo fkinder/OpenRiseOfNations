@@ -16,6 +16,7 @@
 #include "sim/movement.hpp"
 #include "sim/orders.hpp"
 #include "sim/search.hpp"
+#include "sim/spells.hpp"
 #include "sim/trig.hpp"
 
 // Ammo flight math is single-precision with the original's operation order; no fused multiply-add.
@@ -901,8 +902,21 @@ int32_t fight(Game& g, Unit& u, int32_t ox, int32_t whom, int32_t p3, int32_t p4
 		// ---- packers and packable siege
 		if (!p5 && (u.ptype->unit_flags2 & utflag2::kPacker) && !type_is(*u.ptype, 62, true)) {
 			if (u.unit_masks & umask::kPacked) {
-				// TODO(packers): AI siege repositioning; add_cast_order(UNPACK 0x28c). Packing is not simulated:
-				// packed packers fire as they are (a known deviation).
+				// An AI siege weapon out-ranging a building that can shoot back first looks for a better spot; every other
+				// packed packer unpacks before it fires (combat-spec 4.3.7).
+				const Object* TT = g.object(whom, ox);
+				if ((u.unit_masks & umask::kAiControl) && type_is_siege(*u.ptype) && TT && !TT->is_unit && TT->ptype->attack != 0) {
+					const int32_t mine = obj_max_range(g, u), theirs = obj_max_range(g, *TT);
+					if (theirs + 1 < mine && is_in_range(g, *TT, u.o, u.who, 0)) {
+						int32_t apx = 0, apy = 0;
+						if (find_attack_pos(g, u, ox, whom, 0, &apx, &apy, 0) != 0 && (apx != u.x || apy != u.y)) {
+							add_move_order(g, u, apx, apy, 1, false, kQueueNew, false, -1, -1);
+							return 0;
+						}
+					}
+				}
+				add_cast_order(g, u, -1, -1, -1, -1, 0x28c, kQueueFirst, false);
+				return 0;
 			} else if (g.object(whom, ox)->is_unit && type_is_siege(*u.ptype)) {
 				// TODO(attack ground): unpacked siege attacks units by ATTACK_GROUND at the target's position.
 			}

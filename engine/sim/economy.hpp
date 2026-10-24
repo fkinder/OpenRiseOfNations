@@ -209,7 +209,10 @@ bool unit_is_merchant(const Unit& u);       // UnitData::is_merchant @46d370 (61
 bool unit_is_rare_collector(const Game& g, const Unit& u);  // @46fae0
 // Unit::do_gather(out, owned, collected, check_only, ...) @5fce20 -> UnitData::calc_gather @609180: 1 when the unit
 // collects something (out filled).
-int32_t unit_collect(Game& g, Unit& u, int32_t* out, std::array<uint8_t, 8>* owned, int32_t* collected, bool check_only);
+// px / py (-1: the unit's position) and p8 (-1: = check_only) are calc_gather's position override and "count unpacking
+// neighbours" flag (good_merchant_spot, spells-spec 5).
+int32_t unit_collect(Game& g, Unit& u, int32_t* out, std::array<uint8_t, 8>* owned, int32_t* collected, bool check_only,
+                     int32_t px = -1, int32_t py = -1, int32_t p8 = -1);
 int32_t think_fish(Game& g, Unit& u);       // Unit::think_fish @5f4c60 (G8)
 int32_t think_merchant(Game& g, Unit& u);   // Unit::think_merchant @5f4740
 int32_t unpack_merchant(Game& g, Unit& u, int32_t mode);  // Unit::unpack_merchant @6038e0

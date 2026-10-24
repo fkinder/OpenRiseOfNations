@@ -232,7 +232,9 @@ if frame % 32 == 0:
 
 Points that matter for determinism:
 - **The unit pass starts at player `frame % 10`** and wraps; buildings and walls always go 0..7. Gaia (9) and slot 8 units
-  are processed in the unit pass; buildings/walls of slots 8 and 9 never are.
+  are processed in the unit pass; buildings/walls of slots 8 and 9 never are. Slots 8 (the herd animals of `Herd::create_units`) and 9 (the birds
+  of the top-up below and the pen animals of `Farms::add_animals`; the list is not saved) are `Animal`s: their `process` is `Animal::process` @5d72c0
+  (`Animal::work` + the guys: none of §9's countdowns, healing or attrition), see docs/sim-implementation.md "Fidelity log".
 - The loop bounds are re-read, so objects appended at the end of a list during the pass (e.g. a unit created by
   `Objects::init_unit` in a slot ≥ the current index) are processed in the same pass; objects placed in a reused slot
   below the cursor are not (slot reuse rules: §8).

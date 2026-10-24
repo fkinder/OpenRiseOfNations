@@ -37,7 +37,12 @@
 // kept). --list prints `inside N` on a building (and on a unit) with a garrison. Transports (docs/transport-spec.md):
 // --transport / --set-transport / --board (see parse_transport); RON_TRANSPORT_TRACE=1 logs casts, barges and landings.
 // Heroes (docs/heroes-spec.md): --cast WHO:o@SPELL[@FRAME] issues GROUP + SPELL (verb 23, ox / whom -1, x / y at the unit) for
-// a general's power (SPELL: a craft index such as 0x27b, or DECOY / AMBUSH / MARCH / ENTRENCH / SUPPLIES); --heroes-every K
+// a general's power (SPELL: a craft index such as 0x27b, or DECOY / AMBUSH / MARCH / ENTRENCH / SUPPLIES). Crafts
+// (docs/spells-spec.md): --cast WHO:o@SPELL@TO:TWHO[@FRAME] casts a targeted craft on object TO of leader TWHO (BRIBE, COUNTERINTEL,
+// INFORMER, SABOTAGE, SNIPER), @X,Y an area craft; PACK / UNPACK / CIVILIAN / TOARMS / DISBAND / DEPOPULATE need no target;
+// RON_SPELL_TRACE=1 (+ RON_CAST_LOG=1) logs refused casts and every cast order created, RON_HERO_TRACE=1 every SpellType::cast;
+// --teleport WHO:o@X,Y[@FRAME] moves a unit (a test aid); --spells-every K [--spells-all WHO] lists the casters, packers, merchants and
+// planted buildings; --spell-fixtures [--verbose] runs the section 9 acceptance checks on the loaded scenario. --heroes-every K
 // prints per leader every hero (radius in tiles, running powers), the units under cover and the decoys; --list shows each
 // hero's radius and powers.
 // --attack issues GROUP + ATTACK (target object TO of leader TWHO). --combat-every prints a combat summary (alive
@@ -98,6 +103,9 @@
 #include "sim/garrison.hpp"
 #include "sim/guys.hpp"
 #include "sim/heroes.hpp"
+#include "sim/economy.hpp"
+#include "sim/spells.hpp"
+#include "sim/combat_internal.hpp"
 #include "sim/rules.hpp"
 #include "sim/save.hpp"
 #include "sim/script_host.hpp"
@@ -111,7 +119,7 @@ using namespace ron::sim;
 struct Script {
 	enum Kind { Move, Halt, Form, Attack, Build, Queue, Rally, Swarm, Disband, Unqueue, Gather, CityGather, Buy, Sell,
 		        Tribute, Respond, Peasants, Select, Option, Garrison, EjectAll, Transport, SetTransport, Board, Cast, Flight,
-		        AirPatrol, LaunchPatrol, AttackGround, Scramble, Recall, Kill, Stock } kind = Move;
+		        AirPatrol, LaunchPatrol, AttackGround, Scramble, Recall, Kill, Stock, Teleport } kind = Move;
 	int32_t who = 0;
 	std::vector<int32_t> objs;
 	int32_t x = 0, y = 0, frame = 0, form = -1, queue = 2, rotate = 0;
@@ -343,24 +351,53 @@ Script parse_transport(const std::string& a, Script::Kind kind) {
 	return s;
 }
 
-// --cast WHO:o@SPELL[@FRAME]: SPELL is a craft index (0x27b, 635) or a name.
+std::vector<std::string> split(const std::string& s, char c);
+
+// --cast WHO:o1,o2@SPELL[@TO:TWHO | @X,Y][@FRAME]: SPELL is a craft index (0x27b, 635) or a name (DECOY, AMBUSH, MARCH, ENTRENCH,
+// SUPPLIES, BRIBE, COUNTERINTEL, INFORMER, SABOTAGE, SNIPER, DEPOPULATE, TRANSPORT, PACK, UNPACK, CIVILIAN, TOARMS, DISBAND).
+// TO:TWHO names the target object (a targeted craft); X,Y the area of an area craft; both default to the caster's position.
 Script parse_cast(const std::string& a) {
 	Script s;
 	s.kind = Script::Cast;
 	const size_t colon = a.find(':'), at = a.find('@');
-	if (colon == std::string::npos || at == std::string::npos || at < colon) throw std::runtime_error("bad --cast (WHO:o@SPELL[@FRAME]) " + a);
+	if (colon == std::string::npos || at == std::string::npos || at < colon) throw std::runtime_error("bad --cast (WHO:o@SPELL[@TO:TWHO|@X,Y][@FRAME]) " + a);
 	s.who = int32_t(std::strtol(a.substr(0, colon).c_str(), nullptr, 0));
 	s.objs = parse_list(a.substr(colon + 1, at - colon - 1));
-	std::string rest = a.substr(at + 1);
-	const size_t at2 = rest.find('@');
-	std::string name = rest.substr(0, at2);
-	if (at2 != std::string::npos) s.frame = int32_t(std::strtol(rest.c_str() + at2 + 1, nullptr, 0));
+	const std::vector<std::string> parts = split(a.substr(at + 1), '@');
+	std::string name = parts.empty() ? std::string() : parts[0];
+	for (size_t i = 1; i < parts.size(); i++) {
+		const std::string& p = parts[i];
+		const size_t c2 = p.find(':'), cm = p.find(',');
+		if (c2 != std::string::npos) {  // TO:TWHO
+			s.num = int32_t(std::strtol(p.substr(0, c2).c_str(), nullptr, 0));
+			s.twho = int32_t(std::strtol(p.c_str() + c2 + 1, nullptr, 0));
+			s.action = 1;
+		} else if (cm != std::string::npos) {  // X,Y
+			s.x = int32_t(std::strtol(p.c_str(), nullptr, 0));
+			s.y = int32_t(std::strtol(p.c_str() + cm + 1, nullptr, 0));
+			s.action = 2;
+		} else {
+			s.frame = int32_t(std::strtol(p.c_str(), nullptr, 0));
+		}
+	}
 	for (char& ch : name) ch = char(std::toupper(static_cast<unsigned char>(ch)));
 	if (name == "DECOY") s.to = 0x27a;
 	else if (name == "AMBUSH") s.to = 0x27b;
 	else if (name == "MARCH") s.to = 0x27c;
 	else if (name == "ENTRENCH") s.to = 0x27d;
 	else if (name == "SUPPLIES") s.to = 0x27e;
+	else if (name == "BRIBE") s.to = 0x275;
+	else if (name == "COUNTERINTEL") s.to = 0x277;
+	else if (name == "INFORMER") s.to = 0x27f;
+	else if (name == "SABOTAGE") s.to = 0x280;
+	else if (name == "SNIPER") s.to = 0x281;
+	else if (name == "DEPOPULATE") s.to = 0x286;
+	else if (name == "TRANSPORT") s.to = 0x28a;
+	else if (name == "PACK") s.to = 0x28b;
+	else if (name == "UNPACK") s.to = 0x28c;
+	else if (name == "CIVILIAN") s.to = 0x293;
+	else if (name == "TOARMS") s.to = 0x294;
+	else if (name == "DISBAND") s.to = 0x29a;
 	else s.to = int32_t(std::strtol(name.c_str(), nullptr, 0));
 	return s;
 }
@@ -584,6 +621,11 @@ uint64_t digest(const Game& g) {
 				f.add(gy.x), f.add(gy.y), f.add(gy.z), f.add(gy.angle), f.add(int32_t(gy.cur_anim));
 				f.add(gy.cur_time), f.add(gy.end_time), f.add(gy.avg_speed);
 			}
+			if (std::getenv("RON_DIGEST_UNITS"))
+				std::fprintf(stderr, "f%d unit %d:%d %016llx type %d pos %d,%d masks %x/%x orders %d%s damage %d idle %d\n", g.frame, who, o,
+				             (unsigned long long)f.h, u->type, u->x, u->y, u->unit_masks, u->unit_masks2, int(u->orders.size()),
+				             u->orders.empty() ? "" : (" front " + std::to_string(int(u->orders.front().type)) + " spell " + std::to_string(u->orders.front().spell)).c_str(),
+				             u->damage, int(u->idle));
 		}
 	}
 	PART("units");
@@ -844,6 +886,8 @@ struct FogOpts {
 	int32_t ai_every = 0;    // --ai-every K (AI summary)
 	int32_t air_every = 0;   // --air-every K (aircraft and their containers: air_describe)
 	int32_t heroes_every = 0;  // --heroes-every K (heroes summary)
+	int32_t spells_every = 0;  // --spells-every K[:WHO] (spies, special forces, packers, merchants, casting units; WHO: every unit of that leader)
+	int32_t spells_all = -1;
 	int32_t starting_resources = -1;  // --starting-resources N (GameInfo setting before loading)
 	int32_t difficulty = -1;          // --difficulty N (GameInfo difficulty, the lobby setting; 0 easiest .. 5)
 	bool scripts = true;              // --no-scripts: no scenario / general powers / AI production scripts
@@ -1263,6 +1307,294 @@ void print_heroes(const Game& g) {
 	}
 }
 
+// --spells-every K (docs/spells-spec.md): the units a craft can touch. Per leader: special forces (spies, commandos), packers,
+// merchants, every unit with a CAST_SPELL order or a cloak / casting bit, and every building a spy has planted; with
+// --spells-all WHO every unit and building of that leader.
+void print_spells(const Game& g, int32_t all_who) {
+	for (int32_t who = 0; who < 8; who++) {
+		const Leader& l = g.leaders[size_t(who)];
+		if (!(l.flags & leaderflag::kValid)) continue;
+		for (int32_t o = 0; o < g.objects[size_t(who)].unit_mark; o++) {
+			const Unit* u = g.unit(who, o);
+			if (!u || !u->alive()) continue;
+			const Order* f = u->front();
+			const bool cast = f && f->type == kCastSpell;
+			const bool interesting = (u->ptype->unit_flags2 & (0x10 | 4)) || unit_is_merchant(*u) ||
+			                         (u->unit_masks & (umask::kPacked | umask::kCasting | umask::kUnderCover | umask::kBlowCover)) || cast ||
+			                         who == all_who;
+			if (!interesting) continue;
+			std::printf("  f%-5d %d:%-4d %-18s (%6d,%6d) hits %d/%d mana_burn %d masks %08x/%x%s%s", g.frame, who, o,
+			            type_name(g, u->type).c_str(), u->x, u->y, obj_hits(g, *u) - u->damage, obj_hits(g, *u), int(u->mana_burn),
+			            u->unit_masks, u->unit_masks2, (u->unit_masks & umask::kPacked) ? " PACKED" : "", u->on_map() ? "" : " inside");
+			if (cast)
+				std::printf(" CAST 0x%x target %d:%d paid %d time %d", unsigned(f->spell), int(f->whom), int(f->ox), int(f->paid), int(u->spell_time));
+			else if (f)
+				std::printf(" order %d", int(f->type));
+			if (u->orders.size() > 1) std::printf(" (+%d)", int(u->orders.size() - 1));
+			std::printf("\n");
+		}
+		for (int32_t o = kBuildBase; o < g.objects[size_t(who)].build_mark; o++) {
+			const Build* b = g.build(who, o);
+			if (!b || !b->alive() || (b->infiltrated == 0 && who != all_who)) continue;
+			std::printf("  f%-5d %d:%-4d %-18s (%6d,%6d) infiltrated by mask %02x hits %d/%d\n", g.frame, who, o, type_name(g, b->type).c_str(),
+			            b->x, b->y, unsigned(uint8_t(b->infiltrated)), obj_hits(g, *b) - b->damage, obj_hits(g, *b));
+		}
+		if (l.units_bribed || l.buildings_razed)
+			std::printf("  f%-5d L%d units_bribed %d units_killed %d buildings_razed %d score_combat %d\n", g.frame, who, int(l.units_bribed),
+			            l.units_killed, l.buildings_razed, l.score_combat);
+	}
+}
+
+// --spell-fixtures (docs/spells-spec.md section 9, acceptance 1 and 2): is_castable and get_job_time on objects made for the
+// first two valid leaders of the loaded scenario. Prints one line per check and the failure count.
+int run_spell_fixtures(Game& g, bool verbose) {
+	int fails = 0, total = 0;
+	auto check = [&](const char* what, int32_t got, int32_t want) {
+		total++;
+		if (got != want) fails++;
+		if (got != want || verbose) std::printf("  %s %-58s got %d, want %d\n", got == want ? "ok  " : "FAIL", what, got, want);
+	};
+	int32_t me = -1, other = -1;
+	for (int32_t w = 0; w < 8; w++) {
+		if (!(g.leaders[size_t(w)].flags & leaderflag::kValid)) continue;
+		if (me < 0) me = w;
+		else if (other < 0) other = w;
+	}
+	if (me < 0 || other < 0) {
+		std::printf("spell fixtures: the scenario needs two leaders\n");
+		return 1;
+	}
+	// A spot on own land and on the other leader's land (a city centre of each).
+	auto city_pos = [&](int32_t w, int32_t* x, int32_t* y, int32_t* co) {
+		for (int32_t c = 0; c < g.leaders[size_t(w)].city_mark && size_t(c) < g.cities[size_t(w)].size(); c++) {
+			const City& C = g.cities[size_t(w)][size_t(c)];
+			if (!C.valid()) continue;
+			*x = C.x, *y = C.y, *co = c;
+			return true;
+		}
+		return false;
+	};
+	int32_t mx = 0, my = 0, mc = -1, ox = 0, oy = 0, oc = -1;
+	if (!city_pos(me, &mx, &my, &mc) || !city_pos(other, &ox, &oy, &oc)) {
+		std::printf("spell fixtures: the scenario needs a city for each of the first two leaders\n");
+		return 1;
+	}
+	auto mk = [&](const char* name, int32_t who, int32_t x, int32_t y) {
+		const int32_t t = find_type(g, name);
+		if (t < 0) {
+			std::printf("  FAIL unknown type %s\n", name);
+			fails++;
+			return -1;
+		}
+		return init_unit(g, who, t, x, y, -1, -1, -1);
+	};
+	const int32_t spy = mk("Spy", me, mx + 200, my), cat = mk("Catapult", me, mx + 400, my), kat = mk("Katyusha Rocket", me, mx + 600, my),
+	              rocket = mk("Rocket Artillery", me, mx + 800, my), hmg = mk("Heavy Machine Gun", me, mx + 1000, my),
+	              mg = mk("Machine Gun", me, mx + 1200, my), commando = mk("Commando", me, mx + 1400, my),
+	              citizen = mk("Citizen", me, mx + 1600, my), merchant = mk("Merchant", me, mx + 1800, my);
+	if (spy < 0 || cat < 0 || citizen < 0) return 1;
+	std::printf("spell fixtures on %s (leader %d / %d)\n", "the loaded scenario", me, other);
+	auto cast = [&](int32_t sp, int32_t o, int32_t p3 = 0) { return spell_is_castable(g, sp, o, me, p3); };
+	// the owner chain and the decoy rule
+	check("BRIBE by a spy", cast(0x275, spy), 3);
+	check("BRIBE by a catapult (FROM mismatch)", cast(0x275, cat), 0);
+	check("SABOTAGE by a commando", cast(0x280, commando), 3);
+	Unit* decoy = g.unit(me, spy);
+	decoy->unit_masks |= umask::kDecoy;
+	check("BRIBE by a decoy spy", cast(0x275, spy), 0);
+	decoy->unit_masks &= ~umask::kDecoy;
+	// packers: packed / unpacked x the pack spells
+	struct PK { int32_t o; int32_t pack, unpack; const char* n; } pk[] = {{cat, 0x28b, 0x28c, "catapult"}, {mg, 0x28d, 0x28e, "machine gun"},
+	                                                                       {merchant, 0x28f, 0x290, "merchant"}};
+	for (const PK& k : pk) {
+		if (k.o < 0) continue;
+		Unit* u = g.unit(me, k.o);
+		u->unit_masks &= ~umask::kPacked;
+		char w[96];
+		std::snprintf(w, sizeof w, "PACK %s unpacked", k.n);
+		check(w, cast(k.pack, k.o), 3);
+		std::snprintf(w, sizeof w, "UNPACK %s unpacked", k.n);
+		check(w, cast(k.unpack, k.o), 0);
+		u->unit_masks |= umask::kPacked;
+		std::snprintf(w, sizeof w, "PACK %s packed", k.n);
+		check(w, cast(k.pack, k.o), 0);
+		std::snprintf(w, sizeof w, "UNPACK %s packed", k.n);
+		check(w, cast(k.unpack, k.o), 3);
+		u->unit_masks &= ~umask::kPacked;
+	}
+	// TO ARMS: without / with the militia techs, on own / foreign land
+	{
+		const int32_t mil = tribe_can_type(g, me, 66) ? 66 : get_graft(g, me, 66);
+		const int32_t mm = tribe_can_type(g, me, 67) ? 67 : get_graft(g, me, 67);
+		const int32_t pa = tribe_can_type(g, me, 68) ? 68 : get_graft(g, me, 68);
+		const bool had = g.leaders[size_t(me)].has_tech_bit(mil), had2 = g.leaders[size_t(me)].has_tech_bit(mm), had3 = g.leaders[size_t(me)].has_tech_bit(pa);
+		g.leaders[size_t(me)].set_tech_bit(mil, false), g.leaders[size_t(me)].set_tech_bit(mm, false), g.leaders[size_t(me)].set_tech_bit(pa, false);
+		check("TO ARMS without a militia tech", cast(0x294, citizen), 0);
+		g.leaders[size_t(me)].set_tech_bit(mil, true);
+		g.unit(me, citizen)->x = mx, g.unit(me, citizen)->y = my;
+		check("TO ARMS with the tech on own land", cast(0x294, citizen), 3);
+		g.unit(me, citizen)->x = ox, g.unit(me, citizen)->y = oy;
+		check("TO ARMS with the tech on enemy land", cast(0x294, citizen), 0);
+		g.leaders[size_t(me)].set_tech_bit(mil, had), g.leaders[size_t(me)].set_tech_bit(mm, had2), g.leaders[size_t(me)].set_tech_bit(pa, had3);
+		g.unit(me, citizen)->x = mx + 1600, g.unit(me, citizen)->y = my;
+	}
+	// cities: DISBAND / DEPOPULATE on a city centre
+	{
+		City& C = g.cities[size_t(me)][size_t(mc)];
+		Build* B = g.build(me, C.o);
+		const uint16_t saved = C.city_flags;
+		const uint8_t saved_was = C.was_capital_flags;
+		C.city_flags = uint16_t(C.city_flags & ~cityflag::kCapital);
+		C.was_capital_flags = 0;
+		check("DISBAND on a city centre", spell_is_castable(g, 0x29a, C.o, me, 0), 3);
+		C.city_flags |= cityflag::kCapital;
+		check("DISBAND on the capital", spell_is_castable(g, 0x29a, C.o, me, 0), 0);
+		C.city_flags = uint16_t(C.city_flags & ~cityflag::kCapital);
+		// a former capital of an active rival
+		C.was_capital_flags = uint8_t(1u << other);
+		check("DISBAND on a former capital of an active rival", spell_is_castable(g, 0x29a, C.o, me, 0), 0);
+		C.was_capital_flags = 0;
+		check("DEPOPULATE with nothing queued (DISBAND rule)", spell_is_castable(g, 0x286, C.o, me, 0), 3);
+		B->build_queue.set_queue(B->queued, 0x286, nullptr, false);
+		B->queued++;
+		check("DEPOPULATE with a DEPOPULATE queued (p3 0)", spell_is_castable(g, 0x286, C.o, me, 0), 1);
+		B->queued--;
+		B->build_queue.un_queue(B->queued, B->queued + 1);
+		// a plain building with a DISBAND queued: p3 0 -> 0, p3 1 -> 3
+		for (int32_t o = C.o; o >= 0;) {
+			Build* nb = g.build(me, o);
+			if (!nb) break;
+			const int32_t next = nb->city_down;
+			if (!(nb->flags & objflag::kCity) && nb->alive() && (nb->flags & objflag::kActive) && !(nb->ptype->build_flags & 0x10) && nb->queued < nb->build_queue.queue_size) {
+				check("DISBAND on a building, nothing queued (p3 0)", spell_is_castable(g, 0x29a, nb->o, me, 0), 3);
+				nb->build_queue.set_queue(nb->queued, 0x29a, nullptr, false);
+				nb->queued++;
+				check("DISBAND with a DISBAND queued (p3 0)", spell_is_castable(g, 0x29a, nb->o, me, 0), 0);
+				check("DISBAND with a DISBAND queued (p3 1)", spell_is_castable(g, 0x29a, nb->o, me, 1), 3);
+				nb->queued--;
+				nb->build_queue.un_queue(nb->queued, nb->queued + 1);
+				break;
+			}
+			o = next;
+		}
+		C.city_flags = saved;
+		C.was_capital_flags = saved_was;
+		check("LOCK GATE", cast(0x288, spy), 0);
+		check("UNLOCK GATE", cast(0x289, spy), 0);
+	}
+	// job times
+	auto jt = [&](int32_t sp, int32_t o) { return spell_job_time(g, sp, o, me); };
+	check("job time PACK catapult", jt(0x28b, cat), 80);
+	if (kat >= 0) check("job time PACK Katyusha", jt(0x28b, kat), 40);
+	if (rocket >= 0) check("job time PACK Rocket Artillery", jt(0x28b, rocket), 20);
+	if (hmg >= 0) check("job time PACK Heavy Machine Gun", jt(0x28d, hmg), 25);
+	check("job time BRIBE", jt(0x275, spy), 100);
+	{
+		const bool had = g.leaders[size_t(me)].has_tech_bit(0x304);
+		g.leaders[size_t(me)].set_tech_bit(0x304, true);
+		check("job time BRIBE with SPIES_CRAFT_FASTER", jt(0x275, spy), has_preq(g, me, 0x304) ? 50 : 100);
+		g.leaders[size_t(me)].set_tech_bit(0x304, had);
+	}
+	check("job time SABOTAGE", jt(0x280, commando), has_tribe_bonus(g, me, 9) ? 75 : 150);
+	check("job time SNIPER", jt(0x281, commando), has_tribe_bonus(g, me, 9) ? 30 : 60);
+	check("range BRIBE (spy, no upgrade)", spell_get_range(g, 0x275, me, -1, -1), 6 * 192 + get_spy_upgrade(g, me) * RON_K(g, "spy_bribe_upgrade_range") * 192);
+	// ---- acceptance 3-5: the cast bodies (docs/spells-spec.md section 9)
+	{
+		Leader& LM = g.leaders[size_t(me)];
+		Unit* sp = g.unit(me, spy);
+		// BRIBE refunds exactly min(mana_burn, MANA) on the own object, on an ally (teams unlocked), on a CEO-less... see below
+		sp->mana_burn = 1000;
+		cast_bribe(g, 0x275, spy, me, citizen, me);
+		check("BRIBE on an own object refunds the mana", sp->mana_burn, 0);
+		sp->mana_burn = 300;
+		cast_bribe(g, 0x275, spy, me, citizen, me);
+		check("BRIBE refund is min(mana_burn, MANA)", sp->mana_burn, 0);
+		const int32_t o_inf = mk("Infantry", other, ox + 400, oy);
+		const int32_t d0 = g.leaders[size_t(other)].diplos(me), d1 = g.leaders[size_t(me)].diplos(other);
+		const uint8_t ts = g.info.team_style;
+		g.leaders[size_t(other)].diplos(me);  // (read only)
+		g.leaders[size_t(me)].diplo[size_t(other)] = 2;
+		g.leaders[size_t(other)].diplo[size_t(me)] = 2;
+		g.info.team_style = 0;  // teams unlocked
+		sp->mana_burn = 1000;
+		cast_bribe(g, 0x275, spy, me, o_inf, other);
+		check("BRIBE on an ally with teams unlocked refunds", sp->mana_burn, 0);
+		g.info.team_style = ts;
+		g.leaders[size_t(me)].diplo[size_t(other)] = d1;
+		g.leaders[size_t(other)].diplo[size_t(me)] = d0;
+		// a real bribe: war, the unit keeps its damage ratio, units_bribed + 1
+		g.leaders[size_t(me)].diplo[size_t(other)] = 0;
+		g.leaders[size_t(other)].diplo[size_t(me)] = 0;
+		Unit* ev = g.unit(other, o_inf);
+		ev->damage = obj_hits(g, *ev) / 2;
+		const int32_t ratio_before = (ev->damage << 8) / obj_hits(g, *ev);
+		const int32_t bribed0 = LM.units_bribed, marks = g.objects[size_t(me)].unit_mark;
+		cast_bribe(g, 0x275, spy, me, o_inf, other);
+		check("BRIBE counts units_bribed", LM.units_bribed - bribed0, 1);
+		check("BRIBE kills the old unit", g.unit(other, o_inf) && g.unit(other, o_inf)->alive() ? 1 : 0, 0);
+		int32_t nu = -1;
+		(void)marks;
+		for (int32_t o = 0; o < g.objects[size_t(me)].unit_mark; o++)
+			if (const Unit* u = g.unit(me, o); u && u->alive() && u->o_up < 0 && u->type == g.type(find_type(g, "Infantry")).type && u->damage != 0 &&
+			                                   (u->damage << 8) / obj_hits(g, *u) == ratio_before)
+				nu = o;
+		if (nu >= 0) {
+			const Unit& U = *g.unit(me, nu);
+			check("BRIBE: the new unit belongs to the briber", U.who, me);
+			check("BRIBE: hit ratio kept (1/256)", (U.damage << 8) / obj_hits(g, U), ratio_before);
+		} else {
+			check("BRIBE: the new unit exists", 0, 1);
+		}
+		// SABOTAGE on a building: half the hits (at least COMMANDO_MIN_DAMAGE), SNIPER on infantry: die(2) + counters
+		Build* tb = nullptr;
+		for (int32_t o = kBuildBase; o < g.objects[size_t(other)].build_mark && !tb; o++) {
+			Build* b = g.build(other, o);
+			if (b && b->alive() && (b->flags & objflag::kActive) && !(b->flags & objflag::kCity) && obj_hits(g, *b) >= 1000) tb = b;
+		}
+		if (tb) {
+			tb->damage = obj_hits(g, *tb) - 1000;
+			cast_sabotage(g, 0x280, commando, me, tb->o, other);
+			check("SABOTAGE on a 1000-hit building: damage 500", obj_hits_left(g, *tb), 500);
+			tb->damage = obj_hits(g, *tb) - 100;
+			const int32_t razed0 = LM.buildings_razed;
+			const int32_t tb_o = tb->o;
+			cast_sabotage(g, 0x280, commando, me, tb_o, other);
+			check("SABOTAGE on a 100-hit building (floor 200) destroys it", g.build(other, tb_o) && g.build(other, tb_o)->alive() ? 1 : 0, 0);
+			check("SABOTAGE counts buildings_razed", LM.buildings_razed - razed0, 1);
+		} else {
+			std::printf("  (no 1000-hit building of leader %d for the SABOTAGE checks)\n", other);
+		}
+		const int32_t o_inf2 = mk("Heavy Machine Gun", other, ox + 600, oy);  // (a single-member chain: the counters need curr_uber_size == 1)
+		const int32_t kills0 = LM.units_killed, deaths0 = g.leaders[size_t(other)].deaths_current_frame, kc0 = LM.kills_current_frame,
+		              score0 = LM.score_combat, lost0 = g.leaders[size_t(other)].units_lost;
+		const int32_t kv = get_kill_value(g, g.unit(other, o_inf2)->type, other) / 5;
+		cast_sabotage(g, 0x281, commando, me, o_inf2, other);
+		check("SNIPER kills infantry", g.unit(other, o_inf2) && g.unit(other, o_inf2)->alive() ? 1 : 0, 0);
+		check("SNIPER: units_killed + 1", LM.units_killed - kills0, 1);
+		check("SNIPER: deaths_current_frame (+0xa58) + 1", g.leaders[size_t(other)].deaths_current_frame - deaths0, 1);
+		check("SNIPER: kills_current_frame (+0xa5a) + 1", LM.kills_current_frame - kc0, 1);
+		check("SNIPER: score_combat += kill value / 5", LM.score_combat - score0, kv);
+		(void)lost0;
+		// COUNTERINTEL: an enemy spy dies without units_lost; the plants on own objects are cleared. INFORMER plants one.
+		const int32_t o_spy = mk("Spy", other, ox + 800, oy);
+		const int32_t kills1 = LM.units_killed, lost1 = g.leaders[size_t(other)].units_lost;
+		cast_counterintel(g, spy, me, o_spy, other);
+		check("COUNTERINTEL kills an enemy spy", g.unit(other, o_spy) && g.unit(other, o_spy)->alive() ? 1 : 0, 0);
+		check("COUNTERINTEL: units_killed + 1", LM.units_killed - kills1, 1);
+		check("COUNTERINTEL: no units_lost for the victim", g.leaders[size_t(other)].units_lost - lost1, 0);
+		Build* mb = g.build(me, g.cities[size_t(me)][size_t(mc)].o);
+		mb->infiltrated = int8_t(1u << other);
+		cast_counterintel(g, spy, me, mb->o, me);
+		check("COUNTERINTEL clears the plants on an own object", int(mb->infiltrated), 0);
+		Build* eb = g.build(other, g.cities[size_t(other)][size_t(oc)].o);
+		cast_double_agent(g, spy, me, eb->o, other);
+		check("INFORMER sets the plant bit of the caster", (eb->infiltrated >> me) & 1, 1);
+		check("INFORMER: the building is seen by the caster", object_is_seen(g, *eb, me, false) ? 1 : 0, 1);
+	}
+	std::printf("spell fixtures: %d checks, %d failed\n", total, fails);
+	return fails;
+}
+
 // Production summary (--prod-every K, and --list): per leader the stockpile and population, per building the
 // construction progress, the queue with progress, and the rally points.
 void print_production(const Game& g, bool full) {
@@ -1593,10 +1925,30 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 				if (print) std::printf("  f%-5d SET_TRANSPORT %d:%d%s = %d\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0],
 				                       s.objs.size() > 1 ? "+" : "", s.num != 0);
 			} else if (s.kind == Script::Cast) {
-				const Unit* cu = s.objs.empty() ? nullptr : g->unit(s.who, s.objs[0]);
-				cm.issue_spell(*g, s.objs, s.to, -1, -1, cu ? cu->x : 0, cu ? cu->y : 0);
-				if (print) std::printf("  f%-5d CAST %d:%d%s spell 0x%x\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0],
-				                       s.objs.size() > 1 ? "+" : "", unsigned(s.to));
+				const Object* cu = s.objs.empty() ? nullptr : g->object(s.who, s.objs[0]);
+				const bool targeted = s.action == 1;
+				const Object* tg = targeted ? g->object(s.twho, s.num) : nullptr;
+				int32_t cx = cu ? cu->x : 0, cy = cu ? cu->y : 0;
+				if (s.action == 2) cx = s.x, cy = s.y;
+				else if (tg) cx = tg->x, cy = tg->y;
+				// PACK / UNPACK name the artillery craft; the UI sends the variant of the selection's type (machine guns 0x28d / 0x28e,
+				// merchants 0x28f / 0x290, fishermen 0x291 / 0x292), which the artillery craft's FROM would refuse.
+				int32_t sp = s.to;
+				if ((sp == 0x28b || sp == 0x28c) && cu && cu->is_unit) {
+					const Unit& cuu = static_cast<const Unit&>(*cu);
+					const int32_t add = sp == 0x28c ? 1 : 0;
+					if (unit_is(*g, cuu, 0x7b)) sp = 0x28d + add;
+					else if (cuu.type == 0x3d || cuu.type == 0x3e || cuu.type == 400) sp = 0x28f + add;
+					else if (unit_is(*g, cuu, 0x13d)) sp = 0x291 + add;
+				}
+				cm.issue_spell(*g, s.objs, sp, targeted ? s.num : -1, targeted ? s.twho : -1, cx, cy);
+				if (print) {
+					std::printf("  f%-5d CAST %d:%d%s spell 0x%x", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0],
+					            s.objs.size() > 1 ? "+" : "", unsigned(s.to));
+					if (targeted) std::printf(" -> %d:%d", s.twho, s.num);
+					else if (s.action == 2) std::printf(" at (%d,%d)", cx, cy);
+					std::printf("\n");
+				}
 			} else if (s.kind == Script::Flight) {
 				cm.issue_flight(*g, s.objs, s.to, s.twho, s.order, (s.num & 1) != 0, (s.num & 2) != 0, (s.num & 4) != 0);
 				if (print) std::printf("  f%-5d FLIGHT %d:%d%s -> %s %d:%d\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0],
@@ -1622,6 +1974,14 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 				// A test aid, not a game command: the objects die at once (aircraft acceptance tests: a base lost in flight).
 				for (int32_t o : s.objs)
 					if (Object* ob = g->object(s.who, o); ob && ob->alive()) object_die(*g, *ob, 0, -1, 0.0f);
+			} else if (s.kind == Script::Teleport) {
+				// A test aid, not a game command: the units (and their followers) appear at (x, y) (spells acceptance tests).
+				for (int32_t o : s.objs) {
+					if (Unit* u = g->unit(s.who, o); u && u->alive()) {
+						unit_set_new_location(*g, *u, s.x, s.y, true, true);
+						if (print) std::printf("  f%-5d TELEPORT %d:%d -> (%d,%d)\n", g->frame, s.who, o, s.x, s.y);
+					}
+				}
 			} else if (s.kind == Script::Recall) {
 				cm.issue_recall(*g, s.objs);
 				if (print) std::printf("  f%-5d RECALL %d:%d%s\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0], s.objs.size() > 1 ? "+" : "");
@@ -1729,6 +2089,7 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 			for (int32_t who = 0; who < kNumLeaders; who++)
 				for (const std::string& l : air_describe(*g, who)) std::printf("  f%-5d %s\n", g->frame, l.c_str());
 		if (print && fo.heroes_every > 0 && g->frame % fo.heroes_every == 0) print_heroes(*g);
+		if (print && fo.spells_every > 0 && g->frame % fo.spells_every == 0) print_spells(*g, fo.spells_all);
 		if (print && prod_every > 0 && g->frame % prod_every == 0) {
 			print_production(*g, false);
 			print_new_units(*g, rr.initial_uids);
@@ -1903,6 +2264,7 @@ int main(int argc, char** argv) {
 				if (p1.size() > 1) st.frame = int32_t(std::strtol(p1[1].c_str(), nullptr, 0));
 				scripts.push_back(st);
 			}
+			else if (std::strcmp(argv[i], "--teleport") == 0) scripts.push_back(parse_air(Script::Teleport, argv[i + 1], "teleport"));  // WHO:o1,o2@X,Y[@FRAME]
 			else if (std::strcmp(argv[i], "--kill") == 0) scripts.push_back(parse_air(Script::Kill, argv[i + 1], "kill"));  // WHO:o1,o2[@FRAME]
 			else if (std::strcmp(argv[i], "--eject-all") == 0) scripts.push_back(parse_eject_all(argv[i + 1]));
 			else if (std::strcmp(argv[i], "--transport") == 0) scripts.push_back(parse_transport(argv[i + 1], Script::Transport));
@@ -1941,6 +2303,13 @@ int main(int argc, char** argv) {
 		const char* ra = arg_value(argc, argv, "--reveal");
 		const int32_t reveal =
 		    ra ? int32_t(std::strtol(ra, nullptr, 0)) : (sc.reveal_map >= 0 && sc.reveal_map <= 3 ? sc.reveal_map : 1);
+		if (has_flag(argc, argv, "--spell-fixtures")) {
+			Game g;
+			g.anims = art.get();
+			g.info.reveal_map = uint8_t(reveal);
+			g.load(files, sc, rules, seed);
+			return run_spell_fixtures(g, has_flag(argc, argv, "--verbose")) == 0 ? 0 : 1;
+		}
 		if (has_flag(argc, argv, "--list")) {
 			Game g;
 			g.anims = art.get();
@@ -1991,6 +2360,8 @@ int main(int argc, char** argv) {
 		if (const char* ae = arg_value(argc, argv, "--ai-every")) fo.ai_every = int32_t(std::strtol(ae, nullptr, 0));
 		if (const char* ai = arg_value(argc, argv, "--air-every")) fo.air_every = int32_t(std::strtol(ai, nullptr, 0));
 		if (const char* he = arg_value(argc, argv, "--heroes-every")) fo.heroes_every = int32_t(std::strtol(he, nullptr, 0));
+		if (const char* se = arg_value(argc, argv, "--spells-every")) fo.spells_every = int32_t(std::strtol(se, nullptr, 0));
+		if (const char* sa = arg_value(argc, argv, "--spells-all")) fo.spells_all = int32_t(std::strtol(sa, nullptr, 0));
 		if (const char* sr = arg_value(argc, argv, "--starting-resources"))
 			fo.starting_resources = int32_t(std::strtol(sr, nullptr, 0));
 		if (const char* df = arg_value(argc, argv, "--difficulty")) fo.difficulty = int32_t(std::strtol(df, nullptr, 0));

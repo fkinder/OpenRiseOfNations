@@ -4,6 +4,7 @@
 #include <algorithm>
 
 #include "sim/aircraft.hpp"
+#include "sim/animals.hpp"
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
 #include "sim/game.hpp"
@@ -379,6 +380,7 @@ void unit_init(Game& g, Unit& u, int32_t who, int32_t type, int32_t o, int32_t x
 		u.hero = int16_t(specials_init_special(g, who, o));  // (the original's +0x86 "special"; see objects.hpp)
 	}
 	u.damage_frac = 0;
+	if (who < 8) g.leaders[size_t(who)].flags |= 0x800000u;  // LEADER_NEW_UNITS (Unit::init @612d83; compute_score clears it)
 	unit_update_hits(g, u);   // Unit::update_hits @60e930 (combat-spec 5.1)
 	unit_update_los(g, u);
 	unit_update_armor(g, u);  // Unit::update_armor @6054c0
@@ -522,7 +524,7 @@ void spawn_birds(Game& g) {
 		const int32_t tx = g.rnd(w.xs), ty = g.rnd(w.ys);
 		if (w.w(tx, ty).flags & 0x20) {
 			const int32_t o = init_unit(g, kGaiaWho, kBird, tx * 768 + 384, ty * 768 + 384, -1, -1, -1);
-			(void)o;  // TODO(frame-spec 6): add_air_patrol_order(x, y, -1, -1, 0) — air units are not simulated yet
+			if (o >= 0) add_air_patrol_order(g, *g.unit(kGaiaWho, o), tx * 768 + 384, ty * 768 + 384, -1, -1, false);
 		}
 	}
 }
@@ -537,7 +539,10 @@ void objects_process_all(Game& g) {
 		for (int32_t o = 0; o < g.objects[size_t(who)].unit_mark; o++) {  // the mark is re-read every iteration
 			Unit* u = g.unit(who, o);
 			if (!u) continue;
-			if (u->alive()) unit_process(g, *u);  // TODO: Animal::process for gaia animals
+			if (u->alive()) {
+				if (is_animal_who(who)) animal_process(g, *u);  // Animal::process @5d72c0 (gaia: herds, birds)
+				else unit_process(g, *u);
+			}
 			else if (u->hold_frames) u->hold_frames--;
 		}
 	}
@@ -562,7 +567,7 @@ void objects_process_all(Game& g) {
 	// 3. gaia birds and herds
 	if (g.frame % 32 == 0) {
 		spawn_birds(g);
-		// TODO(frame-spec 6): every 64 frames Herd::process(herds[(frame / 64) % max(5, herds.length)]).
+		herds_process(g);  // every 64 frames Herd::process(herds[(frame / 64) % max(5, herds.length)])
 	}
 }
 

@@ -1,13 +1,16 @@
-// Spell casting (docs/transport-spec.md section 4): Unit::add_cast_order, Unit::do_cast (untargeted branch),
-// SpellTypeData::is_castable / get_job_time, SpellType::pay_cast_costs / unpay_cast_costs and the SpellType::cast
-// dispatch. The TRANSPORT spell (0x28a) and the five general powers (heroes-spec 4: DECOY 0x27a, AMBUSH 0x27b, FORCED
-// MARCH 0x27c, ENTRENCH 0x27d, SUPPLIES 0x27e) are simulated; the rest is TODO(spells): bribe, pilfer, assimilate,
-// pack / unpack, sabotage, depopulate, move capital, gates, civilian / to arms, disband, ...
+// Spell casting (docs/transport-spec.md section 4, docs/spells-spec.md): Unit::add_cast_order, Unit::do_cast (the untargeted
+// branch: general powers, TRANSPORT, PACK / UNPACK, CIVILIAN ...; the targeted one: range walk, facing, cloak rules, job
+// time), SpellTypeData::is_castable / is_valid_target / get_range / get_job_time, SpellType::pay_cast_costs /
+// unpay_cast_costs, the SpellType::cast dispatch, the five general powers (heroes-spec 4) and Group::action_spell.
+// The other cast bodies are spells_cast.cpp (spies, special forces, conversions, city casts, the AI's target search) and
+// packers.cpp (PACK / UNPACK, the merchant spots, the pack predicates). RON_SPELL_TRACE=1 logs refused / killed casts,
+// RON_CAST_LOG=1 (with it) every cast order created, RON_HERO_TRACE=1 every SpellType::cast.
 #include "sim/spells.hpp"
 #include <cstdio>
 #include <cstdlib>
 
 #include "sim/ai.hpp"
+#include "sim/aircraft.hpp"
 #include "sim/fog.hpp"
 #include "sim/movement.hpp"
 #include "sim/pathfinder.hpp"
@@ -22,9 +25,26 @@
 #include "sim/production.hpp"
 #include "sim/production_internal.hpp"
 #include "sim/search.hpp"
+#include "sim/economy.hpp"
+#include "sim/garrison.hpp"
 #include "sim/transport.hpp"
 
 namespace ron::sim {
+
+namespace {
+// RON_SPELL_TRACE=1 prints why a cast order is refused or dies (and the casts that run) on stderr.
+bool spell_trace_on() {
+	static const bool on = std::getenv("RON_SPELL_TRACE") != nullptr || std::getenv("RON_HERO_TRACE") != nullptr;
+	return on;
+}
+#define SPT(...)                                  \
+	do {                                          \
+		if (spell_trace_on()) {                   \
+			std::fprintf(stderr, "[spell] " __VA_ARGS__); \
+			std::fputc('\n', stderr);             \
+		}                                         \
+	} while (0)
+}  // namespace
 
 bool spell_is_pack(int32_t t) { return t == 0x28b || t == 0x28d || t == 0x28f || t == 0x291; }
 bool spell_is_unpack(int32_t t) { return t == 0x28c || t == 0x28e || t == 0x290 || t == 0x292; }
@@ -56,13 +76,60 @@ Order* add_cast_order(Game& g, Unit& u, int32_t ox, int32_t whom, int32_t x, int
 	c.spell = sp;
 	c.paid = 0;
 	c.flags = expl ? uint8_t(orderflag::kExplicit) : uint8_t(0);
+	if (spell_trace_on() && std::getenv("RON_CAST_LOG"))
+		std::fprintf(stderr, "[cast-order] f%d %d:%d type %d spell 0x%x target %d:%d queue %d%s\n", g.frame, u.who, u.o, u.type, unsigned(sp), whom, ox, int(q), expl ? " explicit" : "");
 	return add_order(g, u, c, q);
 }
 
 // ---------------------------------------------------------------- castability (4.2)
 
+namespace {
+
+// terr_owner: the W-cell owner under (x, y), -1 for none / off the map.
+int32_t terr_owner_at(const Game& g, int32_t x, int32_t y) {
+	const int32_t wx = wcoord_of(x), wy = wcoord_of(y);
+	return g.world.in_w(wx, wy) ? int32_t(g.world.w(wx, wy).who) : -1;
+}
+
+// LeaderData::is_peace @6e1200.
+bool is_peace_lead(const Game& g, int32_t a, int32_t b) {
+	if (a < 0 || a >= kNumLeaders || b < 0 || b >= kNumLeaders || a == b) return false;
+	const int32_t d1 = g.leaders[size_t(a)].diplos(b), d2 = g.leaders[size_t(b)].diplos(a);
+	return !(d1 == 0 || d2 == 0 || (d1 == 2 && d2 == 2));
+}
+
+// Game::teams_locked @594880.
+bool teams_locked(const Game& g) {
+	const uint8_t ts = g.info.team_style;
+	return !(ts == 0 || ts == 8 || ts == 11);
+}
+
+bool leader_active(const Game& g, int32_t p) { return p >= 0 && p < kNumLeaders && (g.leaders[size_t(p)].flags & leaderflag::kActive) != 0; }
+
+bool is_map_unit(const Object& ob) { return ob.is_unit && ob.alive() && static_cast<const Unit&>(ob).on_map(); }
+
+// CityData::is_disbanding @7380a0: the DISBAND items queued in the city's buildings (finished, not the "no disband" types).
+int32_t city_is_disbanding(const Game& g, int32_t who, int32_t c) {
+	int32_t n = 0;
+	for (int32_t o = g.cities[size_t(who)][size_t(c)].o, guard = 0; o >= 0 && guard < kUnitLimit; guard++) {
+		const Build* b = g.build(who, o);
+		if (!b) break;
+		const int32_t next = b->city_down;
+		if (b->alive() && (b->flags & objflag::kActive) && !(b->ptype->build_flags & 0x10)) n += build_count_queue(g, *b, 1, spell::kDisband);
+		o = next;
+	}
+	return n;
+}
+
+// CityData::depop_can_queue @738060: the city building has no DEPOPULATE queued.
+bool city_depop_can_queue(const Game& g, int32_t who, int32_t c) {
+	const Build* b = g.build(who, g.cities[size_t(who)][size_t(c)].o);
+	return b && build_count_queue(g, *b, 1, 0x286) == 0;
+}
+
+}  // namespace
+
 int32_t spell_is_castable(const Game& g, int32_t sp, int32_t o, int32_t who, int32_t p3) {
-	(void)p3;
 	const Object* ob = who >= 0 && who < kNumLeaders && o >= 0 ? g.object(who, o) : nullptr;
 	if (!ob || !ob->ptype || sp < 0 || sp >= kNumTypes) return 0;
 	const Type& S = g.type(sp);
@@ -77,7 +144,7 @@ int32_t spell_is_castable(const Game& g, int32_t sp, int32_t o, int32_t who, int
 		return 0;
 	switch (sp) {
 	case 0x27e: {  // SUPPLIES: only inside an own city (dead in the shipped data: craft FROM none)
-		if (!ob->is_unit || !ob->alive() || !static_cast<const Unit&>(*ob).on_map()) return 0;  // is_map_unit
+		if (!is_map_unit(*ob)) return 0;
 		const int32_t wx = wcoord_of(ob->x), wy = wcoord_of(ob->y), tx = tcoord_of(ob->x), ty = tcoord_of(ob->y);
 		if (!g.world.in_t(tx, ty) || !(g.world.t(tx, ty) & tmask::kCity) || !g.world.in_w(wx, wy) || g.world.w(wx, wy).who != who)
 			return 2;
@@ -85,17 +152,198 @@ int32_t spell_is_castable(const Game& g, int32_t sp, int32_t o, int32_t who, int
 		if (c < 0 || g.cities[size_t(who)][size_t(c)].race != who) return 2;
 		return 3;
 	}
+	case 0x284: {  // PARADROP: allied land (dead: FROM none)
+		if (!is_map_unit(*ob)) return 0;
+		const int32_t ow = terr_owner_at(g, ob->x, ob->y);
+		return (ow >= 0 && is_ally(g, who, ow)) ? 3 : 2;
+	}
+	case 0x286: {  // DEPOPULATE: a building queue item
+		if (ob->is_unit) return 0;
+		const Build& b = static_cast<const Build&>(*ob);
+		if (b.city >= 0 && p3 == 0 && size_t(b.city) < g.cities[size_t(who)].size() && !city_depop_can_queue(g, who, b.city)) return 1;
+		return spell_is_castable(g, spell::kDisband, o, who, p3);
+	}
+	case 0x287: {  // MOVE CAPITAL (the scenario editor's only)
+		if (ob->is_unit) return 0;
+		const Build& b = static_cast<const Build&>(*ob);
+		if (is_unassimilated(g, b)) return 0;
+		if (p3 == 0 && researching(g, who, 0x287, o, true, false)) return 0;
+		if (b.city < 0 || size_t(b.city) >= g.cities[size_t(who)].size()) return 0;
+		const City& C = g.cities[size_t(who)][size_t(b.city)];
+		const int32_t f = C.founder;
+		if (((C.was_capital_flags >> (f & 31)) & 1) && f != who && leader_active(g, f)) return 0;
+		return 3;
+	}
+	case 0x288:
+	case 0x289:
+		return 0;  // never castable (transport-spec merged them with 0x28a)
 	case spell::kTransport:
 		return object_is_cargo(g, *ob) ? 3 : 0;
-	case 0x27a:
-	case 0x27b:
-	case 0x27c:
-	case 0x27d:
-		return 3;  // no case in the switch: castable once the owner chain passed
-	default:
-		// TODO(spells): DISBAND (researching, is_building, city disbanding checks), pack / unpack, the spies' spells ...
+	case 0x28b: case 0x28d: case 0x28f: case 0x291:  // PACK
+		if (!is_map_unit(*ob)) return 0;
+		return (static_cast<const Unit&>(*ob).unit_masks & umask::kPacked) ? 0 : 3;
+	case 0x28c: case 0x28e: case 0x290: case 0x292:  // UNPACK
+		if (!is_map_unit(*ob)) return 0;
+		return (static_cast<const Unit&>(*ob).unit_masks & umask::kPacked) ? 3 : 0;
+	case 0x294: {  // TO ARMS: citizens / scholars with a militia line tech, on own / allied / unowned land
+		if (!is_map_unit(*ob)) return 0;
+		auto tribe_type = [&](int32_t t) { return tribe_can_type(g, who, t) ? t : get_graft(g, who, t); };
+		if (!has_tech(g, who, tribe_type(ptype::kMilitia)) && !has_tech(g, who, tribe_type(ptype::kMinuteman)) &&
+		    !has_tech(g, who, tribe_type(ptype::kPartisan)))
+			return 0;
+		const int32_t ow = terr_owner_at(g, ob->x, ob->y);
+		if (ow < 0 || ow == who || is_ally(g, who, ow)) return 3;
 		return 0;
 	}
+	case 0x297:
+	case 0x298:
+		return is_map_unit(*ob) ? 3 : 0;
+	case spell::kDisband: {
+		if (p3 == 0 && researching(g, who, spell::kDisband, o, true, false)) return 0;
+		if (ob->is_unit) return 0;  // !is_building
+		const Build& b = static_cast<const Build&>(*ob);
+		if (!(b.ptype->build_flags & 0x10) || (b.flags & objflag::kCity)) {
+			const int32_t c = b.city;
+			if (c >= 0 && size_t(c) < g.cities[size_t(who)].size()) {
+				const City& C = g.cities[size_t(who)][size_t(c)];
+				if (!(b.flags & objflag::kCity)) {
+					if (city_is_disbanding(g, who, c) > (p3 != 0 ? 1 : 0)) return 0;
+				} else {
+					if (C.city_flags & cityflag::kCapital) return 0;
+					for (int32_t i = 0; i < 8; i++)
+						if (i != who && ((C.was_capital_flags >> i) & 1) && leader_active(g, i)) return 0;
+				}
+			}
+		}
+		return 3;
+	}
+	default:
+		return 3;  // no case in the switch: castable once the owner chain passed
+	}
+}
+
+// ---------------------------------------------------------------- targets and range (spells-spec 2.2, 2.3)
+
+namespace {
+bool unit_flag_vehicle(const Object& ob) { return (uint32_t(ob.ptype->obj_masks) & 0x200000u) != 0; }
+bool obj_is_infiltrated(const Object& ob, int32_t p) {
+	// ObjectData::is_infiltrated(p) @script 9f9180: another leader's plant (p < 0: any).
+	const uint8_t m = uint8_t(ob.infiltrated);
+	return p != ob.who && m != 0 && (p < 0 || (m & (1u << (p & 31))));
+}
+}  // namespace
+
+int32_t spell_is_valid_target(const Game& g, int32_t sp, int32_t who, int32_t o, int32_t tw, int32_t* reason) {
+	if (reason) *reason = 0;
+	const Type& S = g.type(sp);
+	const uint32_t F = S.spell_flags;
+	if ((F & 0xe) == 0 || (F & 8)) return 1;
+	const Object* T = (tw >= 0 && tw < kNumLeaders && o >= 0) ? g.object(tw, o) : nullptr;
+	if (!T || !T->ptype) return 0;
+	auto rs = [&](int32_t r) {
+		if (reason) *reason = r;
+	};
+	if (T->is_unit && !(F & 2) && sp == 0x280 && !unit_flag_vehicle(*T)) {
+		rs(1);
+		return 0;
+	}
+	if (!T->is_unit && !(F & 4)) {
+		rs(2);
+		return 0;
+	}
+	if (who == tw) {
+		if (!(F & 0x10)) {
+			rs(3);
+			return 0;
+		}
+	} else if (is_enemy(g, who, tw)) {
+		if (!(F & 0x20)) {
+			rs(6);
+			return 0;
+		}
+	} else if (is_ally(g, who, tw)) {
+		if (!(F & 0x80)) {
+			rs(4);
+			return 0;
+		}
+	} else if (is_peace_lead(g, who, tw)) {
+		if (!(F & 0x400)) {
+			rs(5);
+			return 0;
+		}
+	}
+	rs(8);
+	if (T->is_unit) {
+		if ((F & 0x100) && !unit_flag_vehicle(*T)) return 0;
+		if ((F & 0x200) && unit_flag_vehicle(*T)) return 0;
+	}
+	const Unit* TU = T->is_unit ? static_cast<const Unit*>(T) : nullptr;
+	if (sp == 0x276) {
+		if (!(!T->is_unit && (T->flags & objflag::kActive)) || !(T->flags & objflag::kCity)) return 0;
+	}
+	if (sp == 0x27f && obj_is_infiltrated(*T, who)) return 0;
+	if (sp == 0x275) {
+		if (has_general(g, *T, 0, hero::kTheCeo) >= 0) return 0;
+		if (TU && unit_is_gov_hero(*TU)) return 0;
+		if (tw == who) return 0;
+		if (is_ally(g, who, tw)) {
+			if (!teams_locked(g)) return 0;
+			if (leader_active(g, tw)) return 0;
+		} else {
+			if (!is_enemy(g, who, tw)) return 0;
+			if (TU) {
+				if (type_is(*T->ptype, ptype::kSpy, false)) return 0;
+				if (obj_attack(g, *T) == 0 && !unit_is_hero(*TU)) return 0;
+				if (unit_is_caravan(*TU)) return 0;
+				if (combat_detail::is_worker_type(TU->type)) return 0;
+				if (T->ptype->unit_flags2 & 0x40) return 0;  // is_supply
+				if (unit_is_merchant(*TU)) return 0;
+				if (T->ptype->domain != 0) return 0;
+			} else if (terr_owner_at(g, T->x, T->y) != who) {
+				return 0;
+			}
+		}
+	}
+	if (sp == 0x281) {
+		if (has_general(g, *T, 0, hero::kTheCeo) >= 0) return 0;
+		if (TU && unit_is_gov_hero(*TU)) return 0;
+		if (T->ptype->domain != 0) return 0;
+		const bool supply = (T->ptype->unit_flags2 & 0x40) != 0;
+		if (obj_attack(g, *T) == 0 && !(TU && unit_is_hero(*TU)) && !supply) {
+			if (!type_is(*T->ptype, 0x45, false)) return 0;
+		}
+		if (TU && unit_is_caravan(*TU)) return 0;
+		if (TU && combat_detail::is_worker_type(TU->type)) return 0;
+		if (TU && unit_is_merchant(*TU)) return 0;
+	}
+	if (sp == 0x277) {
+		bool ok = false;
+		if (!object_is_seen(g, *T, who, false)) ok = false;
+		else if (tw == who) ok = obj_is_infiltrated(*T, -1);
+		else if (is_ally(g, who, tw)) ok = obj_is_infiltrated(*T, -1) && !obj_is_infiltrated(*T, who);
+		else if (is_enemy(g, who, tw)) ok = type_is(*T->ptype, ptype::kSpy, false);
+		if (ok) rs(0);
+		return ok ? 1 : 0;
+	}
+	rs(0);
+	return 1;
+}
+
+int32_t spell_get_range(const Game& g, int32_t sp, int32_t who, int32_t to, int32_t tw) {
+	int32_t R = g.type(sp).spell_range;
+	if (R == 0) return 0;
+	const Object* T = (to >= 0 && tw >= 0 && tw < kNumLeaders) ? g.object(tw, to) : nullptr;
+	if (sp == 0x275 || sp == 0x277) {
+		R += get_spy_upgrade(g, who) * RON_K(g, "spy_bribe_upgrade_range") * 0xc0;
+		if (has_wonder(g, who, 0x211)) R += RON_K(g, "terra_cotta_range") * 0xc0;
+		if (T && (type_is_siege(*T->ptype) || (T->ptype->unit_flags2 & 0x40) || !T->is_unit)) R = 0xc0;
+	}
+	if (sp == 0x27f) {
+		R += get_spy_upgrade(g, who) * RON_K(g, "spy_informer_upgrade_range") * 0xc0;
+		if (T && !T->is_unit) R = (R + 1) / 2;
+	}
+	if (sp == 0x281 && T && T->is_unit && unit_flag_vehicle(*T)) R = 0xc0;
+	return R;
 }
 
 // ---------------------------------------------------------------- costs (4.3)
@@ -163,39 +411,36 @@ int32_t spell_job_time(const Game& g, int32_t sp, int32_t o, int32_t who) {
 
 // ---------------------------------------------------------------- the handler (4.5)
 
-int32_t do_cast(Game& g, Unit& u, Order& ord) {
-	// @5ebfe0
-	const int32_t sp = ord.spell;
-	const bool is_spell = is_spell_type(sp);
-	const int32_t eff = is_spell ? sp : spell::kDefault;
-	if (!is_spell) {
-		// TODO(spells): an order whose "spell" is a unit type (upgrade by casting: set_type(current_upgrade) and a walk
-		// into a building at the unit's tile). Never created.
-		kill_current_order(g, u, false);
-		return 0;
-	}
-	if (eff != spell::kDefault && (g.type(eff).spell_flags & 0xe) != 0) {
-		// TODO(spells): the targeted branch (range walk, facing, animations, cloak, job time, SpellType::cast with the
-		// target). No targeted spell is created yet.
-		kill_current_order(g, u, false);
-		return 0;
-	}
-	if (ord.paid == 0) {
-		if (pay_cast_costs(g, sp, u.o, u.who) != 0) {
-			// (console: S_INVALID_ORDER and a red feedback line)
-			kill_current_order(g, u, false);
-			return 0;
-		}
-		ord.paid = 1;
-	}
+namespace {
+
+// The untargeted branch of Unit::do_cast (spells-spec 3.2): the general powers, TRANSPORT, PACK / UNPACK, CIVILIAN ...
+// Returns false when the order was killed (the caller returns 0).
+int32_t do_cast_untargeted(Game& g, Unit& u, Order& ord, int32_t sp, int32_t eff) {
 	if (u.spell_time == 0) {  // the first frame of the cast
-		if (spell_is_pack(sp) || spell_is_unpack(sp)) {
-			// TODO(spells): CHAR_PACK / CHAR_UNPACK, the merchants' gpiece, the rare collector's merchant spot.
-			kill_current_order(g, u, false);
-			return 0;
-		}
 		int32_t anim = kCharDefault, p3 = 1;
-		if (u.ptype->unit_flags2 & utflag2::kHero) {  // UnitData::is_hero
+		if (spell_is_pack(sp)) {
+			if (u.unit_masks & umask::kPacked) {
+				kill_current_order(g, u, false);
+				return 0;
+			}
+			if (unit_is_merchant(u)) unit_update_gpiece(g, u);  // (scene.recalc_builds: presentation)
+			unit_set_angle(g, u, u.guys.empty() ? u.angle : u.guys[0].angle, false);
+			anim = kCharPack;
+		} else if (spell_is_unpack(sp)) {
+			if (!(u.unit_masks & umask::kPacked)) {
+				kill_current_order(g, u, false);
+				return 0;
+			}
+			if (unit_is_rare_collector(g, u)) {
+				if (!good_merchant_spot(g, u, tcoord_of(u.x), tcoord_of(u.y))) {
+					kill_current_order(g, u, false);  // (feedback INVALID; the cost is refunded by the kill)
+					return 0;
+				}
+				unit_set_new_location(g, u, ucoord_of(u.x) * 48 + 24, ucoord_of(u.y) * 48 + 24, true, true);
+			}
+			unit_set_angle(g, u, u.guys.empty() ? u.angle : u.guys[0].angle, false);
+			anim = kCharUnpack;
+		} else if (u.ptype->unit_flags2 & utflag2::kHero) {  // UnitData::is_hero
 			if (sp == 0x27b) anim = kCharAttack1, p3 = 0;
 			else if (sp == 0x27c) anim = kCharAttack2, p3 = 0;
 			else if (sp == 0x279) anim = kCharAttack3, p3 = 0;
@@ -211,7 +456,10 @@ int32_t do_cast(Game& g, Unit& u, Order& ord) {
 			}
 		}
 	}
-	// (pack: a general with the right power nearby speeds the pack up: TODO(spells))
+	// A pack / unpack by a siege weapon next to THE MONARCH runs twice as fast (spell_time advances by two; the guys'
+	// animation clock +0x74 / +0x78 is presentation).
+	if ((spell_is_pack(eff) || spell_is_unpack(eff)) && type_is_siege(*u.ptype) && has_general(g, u, 0, hero::kTheMonarch) >= 0)
+		u.spell_time = int16_t(u.spell_time + 1);
 	u.spell_time = int16_t(u.spell_time + 1);
 	if (u.spell_time < int16_t(spell_job_time(g, eff, u.o, u.who))) return 0;
 	if (sp == spell::kTransport && u.o_up >= 0) {  // a follower waits for its captain
@@ -222,11 +470,169 @@ int32_t do_cast(Game& g, Unit& u, Order& ord) {
 		}
 	}
 	u.spell_time = 0;
-	spell_cast(g, sp, u.o, u.who, 0, 0);
+	if (is_spell_type(sp)) {
+		spell_cast(g, sp, u.o, u.who, 0, 0);
+	} else if (u.o_up < 0) {
+		// "Upgrade by casting" (spells-spec 3.3): the captain takes the current upgrade of the unit type. (The walk into a
+		// University on the unit's tile, TData 3, is not ported: no command creates such an order.)
+		unit_set_type(g, u, current_upgrade(g, u.who, sp), 0);
+	}
 	if (sp == spell::kTransport) return 0;  // the order now lives on the barge (cast_transport)
 	ord.paid = 0;
 	kill_current_order(g, u, false);
 	return 0;
+}
+
+// The targeted branch (spells-spec 3.1).
+int32_t do_cast_targeted(Game& g, Unit& u, Order& ord, int32_t sp) {
+	const Type& S = g.type(sp);
+	const uint32_t F = S.spell_flags;
+	int32_t ox = ord.ox, tw = ord.whom;
+	if (tw < 0 || tw >= kNumLeaders || ox < 0 || !g.object(tw, ox)) {
+		// ❓ spells-spec 11 (13): the original indexes objects[whom][ox] without a guard.
+		if (!(F & 8) || tw < 0 || tw >= kNumLeaders) {
+			SPT("f%d %d:%d cast 0x%x: order killed (#1)", g.frame, u.who, u.o, unsigned(sp));
+			kill_current_order(g, u, false);
+			return 0;
+		}
+	}
+	Object* T = (ox >= 0 && tw >= 0 && tw < kNumLeaders) ? g.object(tw, ox) : nullptr;
+	if (T && !T->alive()) {  // follow the chain top
+		const int32_t c = obj_captain(g, *T);
+		if (c != ox) {
+			ox = c;
+			ord.ox = c;
+			if (Object* N = g.object(tw, c)) {
+				ord.uid = N->uid;
+				T = N;
+			}
+		}
+	}
+	if (T && T->is_unit && !static_cast<Unit*>(T)->on_map()) {  // target the container
+		int32_t cw = -1;
+		const int32_t c = unit_get_inside(g, *static_cast<Unit*>(T), &cw);
+		ox = c;
+		tw = cw;
+		ord.ox = c;
+		ord.whom = cw;
+		if (c < 0 || cw < 0) {
+			SPT("f%d %d:%d cast 0x%x: order killed (#2)", g.frame, u.who, u.o, unsigned(sp));
+			kill_current_order(g, u, false);
+			return 0;
+		}
+		T = g.object(cw, c);
+		ord.uid = T ? T->uid : uint16_t(0xffff);
+	}
+	int32_t why = 0;
+	if (!spell_is_valid_target(g, sp, u.who, ox, tw, &why)) {
+		SPT("f%d %d:%d cast 0x%x: target %d:%d invalid (reason %d)", g.frame, u.who, u.o, unsigned(sp), tw, ox, why);
+		SPT("f%d %d:%d cast 0x%x: order killed (#3)", g.frame, u.who, u.o, unsigned(sp));
+			kill_current_order(g, u, false);
+		return 0;
+	}
+	if (sp == 0x275 && unit_is(g, u, hero::kTheSenator, true)) {  // the Senator bribes only on own / allied land
+		const int32_t ow = T ? terr_owner_at(g, T->x, T->y) : -1;
+		if (ow < 0 || !is_ally(g, u.who, ow)) {
+			SPT("f%d %d:%d cast 0x%x: order killed (#4)", g.frame, u.who, u.o, unsigned(sp));
+			kill_current_order(g, u, false);
+			return 0;
+		}
+	}
+	u.cavarch_o = int16_t(ox);  // spell_target_o / who / uid (+0xa2 / +0xa8 / +0xa6)
+	u.cavarch_who = int8_t(tw);
+	u.cavarch_uid = ox < 0 ? uint16_t(0xffff) : (T ? T->uid : uint16_t(0xffff));
+	int32_t tx, ty, radius = 0;
+	if (!(F & 8)) {
+		if (!T || !T->alive()) {
+			SPT("f%d %d:%d cast 0x%x: order killed (#5)", g.frame, u.who, u.o, unsigned(sp));
+			kill_current_order(g, u, false);
+			return 0;
+		}
+		tx = T->x;
+		ty = T->y;
+		radius = T->is_unit ? T->ptype->big_radius : (T->ptype->x_size + T->ptype->y_size) * 0x30;
+	} else {
+		tx = ord.x;
+		ty = ord.y;
+	}
+	const int32_t R = spell_get_range(g, sp, u.who, ox, tw);
+	if (R != 0 && vector_dist(u.x - tx, u.y - ty) > R + radius) {  // walk into range
+		const uint32_t a = find_angle(u.x - tx, u.y - ty);
+		int32_t nx = 0, ny = 0;
+		if (find_nearby_spot(g, *u.ptype, tx, ty, &nx, &ny, R + radius - 0xc0, R + radius - 0x30, 0, a, kFilterNotMe, u.o, u.who, 0, 0,
+		                     -1, 0, -1) != 0)
+			return 0;  // keeps the order
+		if (vector_dist(nx - tx, ny - ty) > R + radius) return 0;
+		add_move_order(g, u, nx, ny, 1, false, kQueueFirst, false, -1, -1);
+		return 0;
+	}
+	if (tw != u.who && ox >= 0) {  // reveal and face
+		if (!T || !object_is_seen(g, *T, u.who, false)) {
+			SPT("f%d %d:%d cast 0x%x: target %d:%d not seen", g.frame, u.who, u.o, unsigned(sp), tw, ox);
+			SPT("f%d %d:%d cast 0x%x: order killed (#6)", g.frame, u.who, u.o, unsigned(sp));
+			kill_current_order(g, u, false);
+			return 0;
+		}
+		u.flags |= objflag::kAttacking;
+		if (!(u.visible & (1 << (tw & 7)))) {
+			if (!is_seen(g, fcoord_of(u.x), fcoord_of(u.y), tw)) {
+				u.visible = int8_t(u.visible | (1 << (tw & 7)));
+				object_update_local_seen(g, u);
+			} else {
+				u.visible = int8_t(u.visible | (1 << (tw & 7)));
+			}
+		}
+		unit_set_angle(g, u, find_angle(T->x - u.x, T->y - u.y), true);
+	}
+	// the cast animation
+	int32_t anim, p3 = 0;
+	const bool target_spy = T && type_is(*T->ptype, ptype::kSpy, false);
+	if (unit_is(g, u, ptype::kSpy)) {
+		if (sp == 0x275) anim = kCharAttack3;
+		else if (sp == 0x27f) anim = kCharAttackWalk;
+		else anim = target_spy ? kCharAttack2 : kCharAttack1;
+	} else if (unit_is(g, u, 0x45)) {
+		if (sp == 0x280) anim = kCharAttackWalk;
+		else if (sp == 0x281) anim = kCharAttack3;
+		else anim = target_spy ? kCharAttack2 : kCharAttack1;
+	} else {
+		anim = kCharAttack1;
+		p3 = 1;
+	}
+	unit_set_anim(g, u, anim, 0, p3);
+	if (!(u.unit_masks & umask::kCasting)) u.unit_masks |= umask::kCasting;  // (the enemy-sees-you sound and bubble: UI)
+	if (unit_is_cloaked(u) && !(F & 0x800) && sp != 0x281 && !unit_is(g, u, ptype::kSpy)) u.unit_masks |= umask::kBlowCover | umask::kCoverBlown;
+	if (sp == 0x275) u.unit_masks2 |= 0x60;  // ❓ both bits, every frame (decayed by process_cloak)
+	u.spell_time = int16_t(u.spell_time + 1);
+	if (u.spell_time < int16_t(spell_job_time(g, sp, u.o, u.who))) return 0;
+	if (unit_is_cloaked(u) && !(F & 0x800)) u.unit_masks |= umask::kBlowCover | umask::kCoverBlown;  // at completion: no exemption
+	u.spell_time = 0;
+	if (!(F & 8)) spell_cast(g, sp, u.o, u.who, ox, tw);
+	else spell_cast(g, sp, u.o, u.who, ord.x, ord.y);
+	// the order may have been killed (the caster died, or its orders were cleared): only touch it when it is still ours
+	if (!u.orders.empty() && &u.orders.front() == &ord) ord.paid = 0;
+	SPT("f%d %d:%d cast 0x%x: done", g.frame, u.who, u.o, unsigned(sp));
+	if (u.alive()) kill_current_order(g, u, false);
+	return 0;
+}
+
+}  // namespace
+
+int32_t do_cast(Game& g, Unit& u, Order& ord) {
+	// @5ebfe0
+	const int32_t sp = ord.spell;
+	const bool is_spell = is_spell_type(sp);
+	const int32_t eff = is_spell ? sp : spell::kDefault;
+	if (ord.paid == 0) {
+		if (pay_cast_costs(g, sp, u.o, u.who) != 0) {
+			// (console: S_INVALID_ORDER and a red feedback line)
+			kill_current_order(g, u, false);
+			return 0;
+		}
+		ord.paid = 1;
+	}
+	if (eff == spell::kDefault || (g.type(eff).spell_flags & 0xe) == 0) return do_cast_untargeted(g, u, ord, sp, eff);
+	return do_cast_targeted(g, u, ord, sp);
 }
 
 // ---------------------------------------------------------------- the general powers (heroes-spec 4)
@@ -455,8 +861,58 @@ void spell_cast(Game& g, int32_t sp, int32_t o, int32_t who, int32_t p3, int32_t
 	case spell::kTransport:
 		cast_transport(g, o, who);
 		return;
+	case 0x275:
+		cast_bribe(g, sp, o, who, p3, p4);
+		return;
+	case 0x277:
+		if (spell_is_valid_target(g, sp, who, p3, p4, nullptr)) cast_counterintel(g, o, who, p3, p4);
+		return;
+	case 0x27f:
+		cast_double_agent(g, o, who, p3, p4);
+		return;
+	case 0x280:
+	case 0x281:
+		cast_sabotage(g, sp, o, who, p3, p4);
+		return;
+	case 0x285:  // RESEARCH PROJECT (dead): +50 knowledge
+		g.leaders[size_t(who)].bucket[ptype::kKnowledge] += 50;
+		return;
+	case 0x286:
+		cast_depopulate(g, sp, o, who);
+		return;
+	case 0x287:
+		cast_move_capital(g, o, who);
+		return;
+	case 0x28b: case 0x28d: case 0x28f: case 0x291:
+		cast_pack(g, o, who);
+		return;
+	case 0x28c: case 0x28e: case 0x290: case 0x292:
+		cast_unpack(g, o, who);
+		return;
+	case 0x293:
+		cast_civilian(g, o, who);
+		return;
+	case 0x294:
+		cast_to_arms(g, o, who);
+		return;
+	case 0x297:
+	case 0x298:
+		cast_immortal(g, sp, o, who);
+		return;
+	case 0x299:  // radar UPGRADE (dead): the building takes the current AIRDEFENSE type
+		if (Build* b = g.build(who, o)) wall_set_type(g, *b, current_upgrade(g, who, ptype::kAirDefense), 0);
+		return;
+	case 0x29a:
+		cast_disband(g, o, who);
+		return;
+	case 0x282:  // BLOW TREAD (dead): a spared unit takes one hit point of damage
+		if (Unit* t = g.unit(p4, p3)) {
+			if (t->damage == 0) t->damage = 1;
+		}
+		return;
 	default:
-		// TODO(spells): cast_bribe .. cast_disband.
+		// Dead crafts without a cast body: PILFER 0x276, ASSIMILATE 0x278, RALLY 0x279, JAM RADAR 0x283, PARADROP 0x284
+		// (aircraft-spec 9), LOCK / UNLOCK GATE 0x288 / 9 (never castable). TODO(spells): their bodies (spells-spec 4.6).
 		return;
 	}
 }
@@ -481,66 +937,121 @@ int32_t scenario_cast_spell(Game& g, int32_t who, int32_t unit_o, int32_t ox, in
 
 namespace {
 
-// UnitData::is_casting(spell): the current order is a CAST_SPELL for it.
-bool unit_is_casting(const Unit& u, int32_t sp) { return u.order_type() == kCastSpell && u.orders.front().spell == sp; }
-
-// UnitData::mana_left: the unmet mana of the unit, with the mana of the cast it is running given back.
-int32_t unit_mana_left(const Game& g, const Unit& u) {
-	int32_t running = 0;
-	if (u.order_type() == kCastSpell) running = g.type(u.orders.front().spell).mana;
-	const int32_t m = unit_mana(g, u);
-	int32_t left = std::max(0, m - u.mana_burn);
-	left += running;
-	return left < m ? left : m;
+// GroupOut::validate_spell @7095e0, simulation side. The function is the UI's pre-flight: every rejection it makes either
+// repeats a test the per-member loop of Group::action_spell makes again (is_valid_target: own object, allies, the
+// vehicle / building flags, the infiltrated test of INFORMER) or only picks the feedback message (the "no one can cast"
+// counters). ❓ spells-spec 11 (6): the ENTRENCH / PARADROP per-member land checks are not reproduced.
+bool validate_spell(const Game& g, const Group& gr, int32_t sp, int32_t ox, int32_t whom) {
+	(void)g;
+	(void)gr;
+	(void)sp;
+	(void)ox;
+	(void)whom;
+	return false;
 }
 
 }  // namespace
 
 void group_action_spell(Game& g, Group& gr, int32_t sp, int32_t ox, int32_t whom, int32_t x, int32_t y) {
+	// @6fe1a0
+	gr.disband = 0;  // action_begin (vslot 0x14)
+	if (validate_spell(g, gr, sp, ox, whom)) return;
+	gr.form = -1;  // group +0x10
 	if (sp < 0 || sp >= kNumTypes) return;
 	const bool is_spell = is_spell_type(sp);
-	const int32_t eff = is_spell ? sp : spell::kDefault;
-	if (!is_spell || sp == spell::kTransport) return;  // TODO(spells): upgrade-by-cast, BUILDAIR, TRANSPORT
-	const Type& S = g.type(eff);
-	if (S.spell_flags & 0xe) return;  // TODO(spells): targeted spells (is_valid_target, range)
 	const int32_t who = gr.who;
-	// "Only one caster" (spell flag 0x1000): the member with the most mana left casts.
+	const Type& PT = g.type(sp);
+	// "Only one caster" (spell flag 0x1000, not with the "use craft as group" option): the member with the most mana left.
 	int32_t best = -1, best_mana = 0;
-	if ((S.spell_flags & 0x1000) && !(g.leaders[size_t(who)].options_flags & 1)) {
+	if (is_spell && !(g.leaders[size_t(who)].options_flags & 1) && (PT.spell_flags & 0x1000)) {
 		for (int32_t i = 0; i < gr.num; i++) {
-			const Unit* m = g.unit(who, gr.list[size_t(i)]);
-			if (!m || !m->alive() || !m->on_map() || unit_is_casting(*m, sp)) continue;
-			if (spell_is_castable(g, sp, m->o, who, 0) != 3) continue;
-			const int32_t left = unit_mana_left(g, *m);
+			const Object* ob = g.object(who, gr.list[size_t(i)]);
+			if (!ob || !ob->alive() || !ob->is_unit || !static_cast<const Unit*>(ob)->on_map()) continue;
+			const Unit& m = *static_cast<const Unit*>(ob);
+			if (unit_is_casting_spell(m, sp)) continue;
+			if (spell_is_castable(g, sp, m.o, who, 0) != 3) continue;
+			const int32_t left = unit_mana_left(g, m);  // UnitData::mana_left (aircraft.hpp)
 			if (best_mana < left) {
 				best_mana = left;
 				best = i;
 			}
 		}
 	}
-	for (int32_t i = 0; i < gr.num; i++) {
-		Unit* m = g.unit(who, gr.list[size_t(i)]);
-		if (!m || !m->alive() || !m->on_map()) continue;
-		if (eff != spell::kDisband && eff != 0x286 && spell_is_castable(g, eff, m->o, who, 0) == 0) continue;
-		if (best >= 0 && best != i) continue;
-		if (S.mana != 0 && unit_mana_left(g, *m) < S.mana) continue;  // "not enough craft"
-		if (can_pay_cost(g, eff, who, -1, m->o, 1) == 0) continue;
-		if (unit_is_casting(*m, sp)) continue;
-		// (busy test: UnitData::is_busy, not ported)
-		if (ox != m->cavarch_o || whom != m->cavarch_who) {
+	if (is_unit_type(sp) && g.type(sp).domain == 2) return;  // TODO(spells): the aircraft carrier's queue (BUILDAIR, aircraft-spec 7)
+	if (sp == spell::kTransport) {
+		for (int32_t i = 0; i < gr.num; i++) {
+			Unit* m = g.unit(who, gr.list[size_t(i)]);
+			if (!m || !m->alive() || !m->on_map()) continue;
+			if (m->ptype->domain == kDomainSea || m->ptype->domain == kDomainAir || cast_is_busy(*m)) continue;
+			if (spell_is_castable(g, spell::kTransport, m->o, who, 0) != 3 || !leader_has_spell(g, who, spell::kTransport)) continue;
+			const Type& T = g.type(spell::kTransport);
+			if (T.mana != 0 && unit_mana_available(g, *m) < T.mana) continue;
+			if (can_pay_cost(g, spell::kTransport, who, -1, m->o, 1) == 0) continue;
+			int32_t sx = 0, sy = 0;
+			if (find_nearby_spot(g, g.type(ptype::kTransportBarge), m->x, m->y, &sx, &sy, 0, K("unit_board_distance"), 0, 0x55555555,
+			                     kFilterNotMe, -1, -1, 0, 0, -1, 0, -1) != 0)
+				continue;  // no water spot
+			if (m->order_type() == kCastSpell && m->orders.front().spell == spell::kTransport) continue;  // already casting it
 			m->spell_time = 0;
-			m->cavarch_o = int16_t(ox);
-			m->cavarch_who = int8_t(whom);
-			if (ox >= 0) {
-				if (const Object* t = g.object(whom, ox)) m->cavarch_uid = t->uid;
+			add_cast_order(g, *m, ox, whom, x, y, spell::kTransport, kQueueNew, true);
+		}
+		return;
+	}
+	const int32_t eff = is_spell ? sp : spell::kDefault;  // local_34
+	const Type& S = g.type(eff);
+	for (int32_t i = 0; i < gr.num; i++) {
+		const int32_t mo = gr.list[size_t(i)];
+		Object* ob = g.object(who, mo);
+		if (!ob || !ob->alive()) continue;
+		if (ob->is_unit && !static_cast<Unit*>(ob)->on_map()) continue;
+		if (eff != spell::kDisband && eff != 0x286 && spell_is_castable(g, eff, mo, who, 0) == 0) {
+			SPT("f%d %d:%d not castable 0x%x", g.frame, who, mo, unsigned(eff));
+			continue;
+		}
+		if (best >= 0 && best != i) continue;
+		if (ob->is_unit) {
+			Unit& m = *static_cast<Unit*>(ob);
+			if (S.mana != 0 && unit_mana_available(g, m) < S.mana) {  // "not enough craft"
+				SPT("f%d %d:%d mana %d < %d", g.frame, who, mo, unit_mana_available(g, m), S.mana);
+				continue;
 			}
 		}
-		QueuePos q = kQueueNew;
-		if (S.spell_flags & 0x40) {
-			while (m->order_type() == kCastSpell) kill_current_order(g, *m, false);
-			q = kQueueFirst;
+		if (can_pay_cost(g, sp, who, -1, mo, 1) == 0) {
+			SPT("f%d %d:%d cannot pay 0x%x", g.frame, who, mo, unsigned(sp));
+			continue;
 		}
-		add_cast_order(g, *m, ox, whom, x, y, sp, q, true);
+		int32_t why = 0;
+		if (!spell_is_valid_target(g, eff, who, ox, whom, &why)) {
+			SPT("f%d %d:%d invalid target %d:%d (reason %d)", g.frame, who, mo, whom, ox, why);
+			continue;
+		}
+		// (the wrong packed state and "already casting" tests of the original only count for the feedback message)
+		if (ob->is_unit) {
+			Unit& m = *static_cast<Unit*>(ob);
+			if (cast_is_busy(m)) continue;
+			if (ox != m.cavarch_o || whom != m.cavarch_who) {
+				m.spell_time = 0;
+				m.cavarch_o = int16_t(ox);
+				m.cavarch_who = int8_t(whom);
+				if (ox >= 0) {
+					if (const Object* t = g.object(whom, ox)) m.cavarch_uid = t->uid;
+				}
+			}
+			QueuePos q = kQueueNew;
+			if (S.spell_flags & 0x40) {
+				while (m.order_type() == kCastSpell) kill_current_order(g, m, false);
+				q = kQueueFirst;
+			}
+			add_cast_order(g, m, ox, whom, x, y, sp, q, true);
+		} else {
+			Build& b = static_cast<Build&>(*ob);
+			if (spell_job_time(g, sp, mo, who) == 0) {
+				pay_cast_costs(g, sp, mo, who);
+				spell_cast(g, sp, mo, who, 0, 0);
+			} else {
+				build_queue_up(g, b, sp, 1);
+			}
+		}
 	}
 }
 

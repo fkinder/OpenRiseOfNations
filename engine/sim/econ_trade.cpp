@@ -8,6 +8,7 @@
 #include "sim/orders.hpp"
 #include "sim/production_internal.hpp"
 #include "sim/search.hpp"
+#include "sim/spells.hpp"
 #include "sim/trig.hpp"
 
 namespace ron::sim {
@@ -52,10 +53,16 @@ bool unit_is_rare_collector(const Game& g, const Unit& u) { return unit_is_merch
 
 // ---------------------------------------------------------------- UnitData::calc_gather (3.7)
 
-int32_t unit_collect(Game& g, Unit& u, int32_t* out, std::array<uint8_t, 8>* owned, int32_t* collected, bool check_only) {
+int32_t unit_collect(Game& g, Unit& u, int32_t* out, std::array<uint8_t, 8>* owned, int32_t* collected, bool check_only,
+                     int32_t px, int32_t py, int32_t p8_arg) {
 	// Unit::do_gather(out, owned, collected, check_only, p5 = check_only) @5fce20 -> UnitData::calc_gather @609180
-	// (callers pass p5 equal to check_only: 1 from think, 0 from Leader::calc_gather).
-	const bool p8 = check_only;
+	// (callers pass p5 equal to check_only: 1 from think, 0 from Leader::calc_gather). calc_gather(.., p7 = check_only,
+	// p8 = count the packed neighbours that are unpacking, x, y): good_merchant_spot @6068a0 passes (1, 1, tile corner).
+	const bool p8 = p8_arg < 0 ? check_only : p8_arg != 0;
+	if (px == -1) {  // (-1, -1): the unit's own position
+		px = u.x;
+		py = u.y;
+	}
 	int32_t crowded = 0;
 	for (int32_t k = 0; k < 6; k++) out[k] = 0;
 	u.rare = -1;
@@ -66,7 +73,7 @@ int32_t unit_collect(Game& g, Unit& u, int32_t* out, std::array<uint8_t, 8>* own
 	};
 	if (unit_is_rare_collector(g, u) && (u.unit_masks & umask::kPacked) && !check_only) return finish(0);
 	const int32_t R = unit_gather_radius(g, u.type);
-	const int32_t tx0 = tcoord_of(u.x), ty0 = tcoord_of(u.y);
+	const int32_t tx0 = tcoord_of(px), ty0 = tcoord_of(py);
 	const Circles& C = circles();
 	const World& w = g.world;
 	const bool merchant = unit_is_merchant(u);
@@ -113,7 +120,7 @@ int32_t unit_collect(Game& g, Unit& u, int32_t* out, std::array<uint8_t, 8>* own
 	calc_rare(g, u.who, good, out, in_territory);
 	// Crowding: own units of the same type within (their radius + mine) * 192, over the 5x5-ish W-cell circle.
 	int32_t n = 0;
-	const int32_t wx0 = wcoord_of(u.x), wy0 = wcoord_of(u.y);
+	const int32_t wx0 = wcoord_of(px), wy0 = wcoord_of(py);
 	for (int32_t i = 0; i < C.radius[2]; i++) {
 		const int32_t wx = C.x[size_t(i)] + wx0, wy = C.y[size_t(i)] + wy0;
 		if (!w.in_w(wx, wy)) continue;
@@ -125,11 +132,11 @@ int32_t unit_collect(Game& g, Unit& u, int32_t* out, std::array<uint8_t, 8>* own
 			if (ow == u.who && ob->is_unit && ob->alive() && static_cast<const Unit*>(ob)->on_map() &&
 			    type_is(*ob->ptype, u.type)) {
 				const Unit& v = *static_cast<const Unit*>(ob);
-				// Packed units are skipped (with p8: unless unpacking; UnitData::is_unpacking is TODO(packers), false).
+				// Packed units are skipped (with p8: unless unpacking).
 				const bool packed = (v.unit_masks & umask::kPacked) != 0;
-				const bool skip = p8 ? packed : packed;
+				const bool skip = packed && !(p8 && cast_is_unpacking(v));
 				if (!skip && o != u.o) {
-					const int32_t d = vector_dist(iabs(v.x - u.x), iabs(v.y - u.y));
+					const int32_t d = vector_dist(iabs(v.x - px), iabs(v.y - py));
 					if (d < (unit_gather_radius(g, v.type) + R) * 0xc0) n++;
 				}
 			}
@@ -159,12 +166,8 @@ int32_t leader_collect_units(Game& g, int32_t who, int32_t* out) {
 }
 
 int32_t unpack_merchant(Game& g, Unit& u, int32_t mode) {
-	// Unit::unpack_merchant @6038e0: find_merchant_spot, then the UNPACK cast (spell 652) and a move. TODO(packers):
-	// packing is not simulated (no CAST_SPELL orders), so merchants never unpack.
-	(void)g;
-	(void)u;
-	(void)mode;
-	return 0;
+	// Unit::unpack_merchant @6038e0 (spells-spec 5, packers.cpp): find_merchant_spot, then the UNPACK cast and a move.
+	return unpack_merchant_spot(g, u, mode);
 }
 
 int32_t think_fish(Game& g, Unit& u) {
@@ -203,8 +206,10 @@ int32_t think_fish(Game& g, Unit& u) {
 	if (bi > 0x120) bi = int32_t(g.rng.get(0, 0xffff) % 0x79) + 0x19;  // (unreachable)
 	const int32_t tx = move_x[size_t(bi)] + uwx, ty = move_y[size_t(bi)] + uwy;
 	if (tx == uwx && ty == uwy) {
-		// TODO(packers): a packed packer boat casts UNPACK (spell 652, QUEUE_FIRST) and returns 1.
-		return 0;
+		// A packed packer boat (fishermen) casts UNPACK where it floats (spells-spec 5).
+		if (!(u.ptype->unit_flags2 & 4) || !(u.unit_masks & umask::kPacked)) return 0;
+		add_cast_order(g, u, -1, -1, -1, -1, 0x28c, kQueueFirst, false);
+		return 1;
 	}
 	add_move_order(g, u, tx * 0x300 + 0x180, ty * 0x300 + 0x180, 1, false, kQueueNew, false, -1, -1);
 	return 1;

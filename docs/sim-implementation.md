@@ -30,7 +30,9 @@ exists), so "ported" means "from the spec and the decompiles", not "verified". S
 | `economy.hpp`, `econ_income.cpp`, `econ_gather.cpp`, `econ_market.cpp`, `econ_trade.cpp` | economy ([economy-spec.md](economy-spec.md)): starting stockpiles, income pipeline, gather rates, gatherer lists, GATHER order and handlers, auto-gather, farms, oil wells, markets, tribute, fishermen / merchants, caravans | ported (see "Economy") |
 | `capture.{hpp,cpp}` | capture, elimination, victory ([capture-spec.md](capture-spec.md)): `Build::check_capture`, `Cities::capture_city`, `City::capture`, `Build` / `Wall` / `Unit::swap_team`, `Leader::lost_a_city` / `lost_capital` / `recapture_capital` / `defeat` / `defeat_by` / `victory`, `Game::check_victory` / `defeat_all` / `retake_capital`, `process_elimination`, the victory clocks, `GameDaemon::process_victory`, the city's 64-frame capture poll | ported (see "Capture and victory") |
 | `script_host.{hpp,cpp}`, `script_funcs*.cpp`, `script_ui.hpp`, `scenario_data.hpp` | scripts ([script-spec.md](script-spec.md) §6, §7): the game's `bhs::Runtime` (engine/script), scenario / general powers / AI production script loading and call points, `ScriptTimers`, find counters, the builtins on the simulation, `ScenarioData`, the presentation queue / seat-local input view | ported (see "Scripts") |
-| `spells.{hpp,cpp}`, `transport.{hpp,cpp}` | spells and transports ([transport-spec.md](transport-spec.md)): `add_cast_order`, `do_cast` (untargeted branch), `spell_is_castable` / `pay_cast_costs` / `spell_job_time`, `spell_cast`; the who-may-be-carried predicates, `cast_transport`, `same_damage`, BOARD_SHIP / AWAIT_BOARD (`do_board`, `do_await_board`, `check_meet_ship`), the TRANSPORT / SET_TRANSPORT / BOARD_SHIP group actions | ported (see "Transports") |
+| `spells.{hpp,cpp}`, `spells_cast.cpp`, `packers.cpp`, `transport.{hpp,cpp}` | spells and transports ([transport-spec.md](transport-spec.md), [spells-spec.md](spells-spec.md)): `add_cast_order`, `do_cast` (both branches), `spell_is_castable` / `spell_is_valid_target` / `spell_get_range` / `spell_job_time` / `pay_cast_costs`, `spell_cast`, `group_action_spell`; the spies' and special forces' casts, conversions and city casts (`spells_cast.cpp`); PACK / UNPACK and the merchant spots (`packers.cpp`); the who-may-be-carried predicates, `cast_transport`, `same_damage`, BOARD_SHIP / AWAIT_BOARD, the TRANSPORT / SET_TRANSPORT / BOARD_SHIP group actions | ported (see "Transports", "Spells") |
+| `replay.{hpp,cpp}` | the `.rcx` reader ([replay-spec.md](replay-spec.md)): gzip / plain, header, embedded save, random info, rules block, package records with the multiplayer de-XOR and padding, the 82-verb table, `replay_to_engine` / `engine_to_wire` between wire commands and `Command` | done (see "Multiplayer") |
+| `engine/net/` | the lockstep layer ([multiplayer-spec.md](multiplayer-spec.md) §8): `Session`, `Transport` (loopback, TCP), `Lobby`, `GameHooks` over `Game` | done (see "Multiplayer") |
 | `apps/sim/main.cpp` | `build/ron-sim` harness | done |
 
 Renderer integration: `#include "sim/game.hpp"`, `"sim/commands.hpp"`, `"sim/view.hpp"`, `"sim/anim_assets.hpp"`.
@@ -400,7 +402,7 @@ disassembly at 5f8f77 xors EAX and returns; the barge-leaving branch also return
 speed bonus multiplies `LeaderDataEncrypt.epoch[0]` (military library level), not the transport level;
 `collision.cpp:382` is the pack-spell soft collider, not the 0x28a wait (that is `:535`).
 
-Stubbed (TODO in code): the targeted branch of `do_cast` and every spell but TRANSPORT (`TODO(spells)`), the group machinery
+Stubbed (TODO in code): (the targeted branch of `do_cast` and the other crafts are done, see "Spells"), the group machinery
 for chains landing from a barge (`TODO(groups)`: `reset_move_orders` + the temporary group; the orders and path go to the
 captain instead), `is_entering_or_exiting` / `unpay_cast_costs` in `kill_current_order`, aircraft cargo in `can_carry`,
 the AI's ferrying (`think_civilian_transport`, `do_transporting`), sounds, the console selection and `replace_hotunit`, the
@@ -935,6 +937,102 @@ caravan repath of City::close.
 - Harness: `ron-sim --cast WHO:o@SPELL[@FRAME]`, `--heroes-every K`, `--list` (hero radius and powers); `RON_HERO_TRACE=1` logs casts.
 
 
+## Spells (docs/spells-spec.md; engine/sim/spells.cpp, spells_cast.cpp, packers.cpp)
+
+Everything the original does with `SpellType::cast_*` that is not TRANSPORT or a general's power (2026-10-24).
+- **Predicates** (`spells.cpp`): `spell_is_castable` follows the jump table of @675bc0 case by case (owner chain with the tribe
+  graft, decoys, SUPPLIES / PARADROP, DEPOPULATE -> the DISBAND rule, MOVE CAPITAL, gates 0, TRANSPORT, the eight pack spells by
+  `kPacked`, TO ARMS' three militia techs on own / allied / unowned land, the immortals, DISBAND with the capital, former-capital
+  and `is_disbanding` rules; everything else 3). `spell_is_valid_target` is @6763c0 (reason codes included), `spell_get_range` @676a80
+  (spy upgrades, Terra Cotta, adjacent for siege / supply / buildings, INFORMER halved on buildings, SNIPER 1 tile on vehicles),
+  `spell_job_time` as before.
+- **`do_cast`**: the cost is paid before either branch (a failing target check refunds through `kill_current_order`, which now
+  does `unpay_cast_costs` for a paid CAST_SPELL order and refreshes a packing merchant's gpiece). Untargeted: the first-frame
+  PACK / UNPACK work (`kPacked` test, the merchant spot test and the snap to the 48-cell centre, CHAR_PACK / CHAR_UNPACK), the
+  Monarch's extra `spell_time` tick for siege, TRANSPORT as before. Targeted (flags & 0xe): follow the dead target's chain top,
+  target the container of a unit that is inside, `is_valid_target`, the Senator's own-or-allied-land rule for BRIBE, the
+  spell-target fields (`cavarch_o / who / uid`), the range walk (`find_nearby_spot` + a MOVE_TO in front), `is_seen`, facing, the
+  per-craft animation, `kCasting`, the cloak rules (blown cover every frame except spies and SNIPER, at completion for all),
+  `unit_masks2 |= 0x60` for BRIBE, then `SpellType::cast` with the target (or the area's x / y for flag 8).
+- **Casts** (`spells_cast.cpp`): BRIBE (`units_bribed`, `unit_swap_team`; a building: `build_swap_team`, close the old one, activate
+  the copy, `mask_me`; a dead teammate's city: `cities_capture_city`), COUNTERINTEL (`die(2)` + counters on an enemy spy,
+  or `infiltrated = 0`), INFORMER (`infiltrated |= 1 << who`, `update_seen`), SABOTAGE (half the hit points, at least
+  `COMMANDO_MIN_DAMAGE`, `take_damage(.., SPLODED, quiet)`; a vehicle dies with `die(3)`) / SNIPER (`die(2)`), DEPOPULATE (a finished
+  city centre -> DISBAND, else refund), DISBAND (`build_plunder` + `Object::disband`), MOVE CAPITAL, CIVILIAN / TO ARMS / the
+  immortals (`Unit::rare` is `made_from`; hits ratio kept at 1/256), RESEARCH PROJECT, BLOW TREAD, radar UPGRADE. Dead: PILFER,
+  ASSIMILATE, RALLY, JAM RADAR, SUPPLIES (the old port), PARADROP (aircraft-spec 9), the gates. War prices are `ai_diplo.cpp`'s
+  `pay_dow` / `afford_dow`.
+- **Packers** (`packers.cpp`): `cast_pack` / `cast_unpack` (the merchants' 2x2 market block, `kRecompute`, LOS / seen / gpiece /
+  relocation), `good_merchant_spot` (the four tiles + `unit_collect` at the corner, with `unit_collect`'s new `px / py` override and the
+  "unpacking neighbours count" flag, without its writes into the unit), `find_merchant_spot` (square spiral, `invalid_loc`,
+  `detect_unit_collision`), `unpack_merchant_spot` (UNPACK cast + a MOVE_TO in front; `econ_trade.cpp:unpack_merchant` calls it),
+  `cast_is_packing / unpacking / packing_or_unpacking / entering_or_exiting / busy`, `unit_is_casting_spell` (@60a530: the March /
+  Ambush mask bits, not the order), `unit_packer_stance`, `unit_mana_available`.
+- **Issuing**: `group_action_spell` (@6fe1a0) = the "one caster" pick (flag 0x1000), the TRANSPORT branch, the per-member loop
+  (castable != 0 unless DISBAND / DEPOPULATE, mana incl. the running cast, `can_pay_cost`, `is_valid_target`, `is_busy`, the
+  target fields, flag 0x40 replaces running casts, QUEUE_NEW / FIRST) and, for buildings, `pay_cast_costs` + `spell_cast` (job time
+  0) or `build_queue_up`. `validate_spell` is only the UI pre-flight (every rejection is repeated per member): not ported.
+- **AI**: `think_spellcaster` now has the human COUNTERINTEL branch (also called from `think_economy` for a human's special units),
+  the spy branch (COUNTERINTEL on a plant within 5 x range, else BRIBE on the nearest undamaged enemy combat unit), the special units'
+  SNIPER, the S1 `% 3` draw (still the only draw) and COUNTERINTEL; `spell_find_target` is `ObjectsData::find` / `find_unit` with
+  FILTER_SPELL_TARGET (@67e385: `is_valid_target` + `damage == 0` for BRIBE / SNIPER). `use_casters` is `Army::use_generals /
+  use_spies / use_scouts` (walk the army's groups; the first hero / spy / special unit whose `think_spellcaster` returns non-zero
+  ends the walk): this also switches on the AI generals' DECOY / FORCED MARCH / AMBUSH (heroes-spec 4.7) and gives every special unit
+  of an army one more S1 draw every 128 frames.
+- **Reactive casts** (`target_opportunity`): an idle spy BRIBEs, an idle commando SABOTAGEs the ground unit that attacks it; a running
+  SABOTAGE halves `spell_time` when the attacker is not its target.
+- **Packers in combat / orders**: `think_attack` unpacks a packed PACKER_AUTO packer after 3 (machine guns) / 7 (human) / 21 idle
+  frames; a packed packer with a non-AUTO stance ignores near attackers; `Unit::fight` unpacks a packed packer in range (an AI siege
+  weapon that out-ranges a shooting building looks for a better spot first); `work()` packs an unpacked packer before it moves
+  (a lone move ending inside its block radius is rewritten to end where it stands, a move to its own 48-cell is dropped);
+  `Group::action_attack` / `action_garrison` have their packing / unpacking branches; the flee test of `target_opportunity`,
+  `combat_death` (a packing merchant keeps its market block), `fog` (LOS while packing), `unit_collect` use `cast_is_packing`.
+- **Civilians**: an armed citizen (`CIVILIAN` castable = it `is(MILITIA)`) is a worker for `Group::action_swarm_around` /
+  `action_gather` (a CIVILIAN cast QUEUE_LAST / FIRST before the work) and casts CIVILIAN when it leaves a garrison;
+  `scholar_militia` counts militia made from scholars (`track_unit_type`).
+- **Queues**: `build_can_make` asks `spell_is_castable` for owned crafts, `build_finished` calls `spell_cast` (DISBAND / DEPOPULATE).
+- **Harness**: `--cast WHO:o1,o2@SPELL[@TO:TWHO | @X,Y][@FRAME]` (SPELL: BRIBE, COUNTERINTEL, INFORMER, SABOTAGE, SNIPER, DEPOPULATE,
+  TRANSPORT, PACK, UNPACK (the artillery craft is mapped to the machine gun / merchant / fisherman variant), CIVILIAN, TOARMS, DISBAND or
+  a craft index; `TO:TWHO` is object o of leader TWHO), `--teleport WHO:o@X,Y[@FRAME]` (a test aid), `--spells-every K`
+  [`--spells-all WHO`] (specials, packers, merchants, casters, planted buildings, the bribe / razing counters), `--spell-fixtures`
+  (acceptance 1-5: 59 checks on units and buildings made for the first two leaders: `is_castable` / `get_job_time` / `get_range`, the
+  BRIBE refunds and conversion, SABOTAGE 500 / 200, SNIPER and COUNTERINTEL counters, INFORMER; `--verbose` lists them; run it on a scenario
+  where both have a city, e.g. `conquest/ColdWar/korea.scx`). `RON_SPELL_TRACE=1` logs every refused
+  / killed cast, `RON_CAST_LOG=1` (with it) every cast order created, `RON_HERO_TRACE=1` every `SpellType::cast`, `RON_DIGEST_UNITS=1`
+  the running hash per unit.
+- **Runs**: BRIBE converts a unit (`conquest/ColdWar/bribe.scx --teleport 0:6@19600,20300@500 --cast 0:6@BRIBE@12:1@502`: spy 0:6 casts
+  100 frames, `L0 units_bribed 1`, 1:12 is gone from leader 1); SABOTAGE on a building (`conquest/ColdWar/infiltrate.scx --cast
+  0:7@SABOTAGE@2009:1@600`: the smelter 1:2009 drops 1350 -> 675 after the 150-frame cast); SNIPER kills a machine gun
+  (`--teleport 0:6@14300,24500@600 --cast 0:6@SNIPER@8:1@602`); a merchant packs and unpacks on a rare (`conquest/ColdWar/colombia.scx
+  --cast 6:0@PACK@200 --cast 6:0@UNPACK@500`: the PACK takes 148 frames, the human merchant then moves to a rare spot and unpacks there
+  by itself, the corner position is `tile * 192`); DISBAND through the cast (`infiltrate.scx --cast 1:2009@DISBAND@10`: the smelter is
+  gone at f20); TO ARMS then CIVILIAN (`conquest/Napoleon/transylvania.scx --cast 1:0@TOARMS@100 --cast 1:0@CIVILIAN@300`: Citizen ->
+  Minuteman -> Citizen, damage 0). `--roundtrip` passes across an active BRIBE (f540) and SABOTAGE (f1180) cast.
+- **Validated** (2026-10-24, scratch build with the build-mac.sh flags, zero warnings): `ron-check` 0 failures; `sim-all`
+  600 frames `--ai-every 8`: 156 / 156 self-check OK; against a build of the tree before the port 91 scenarios are identical and
+  65 changed, each by a new mechanism (in the 63 with cast orders the first diverging frame is the first cast order's frame + 1).
+  By the first cause: 33 packers (the AI's packed machine guns / howitzers / catapults unpack in range and pack before moving:
+  0x28b..0x28e), 25 merchants / fishermen unpacking on a rare or fishing spot (0x290 / 0x292, many at frame 0 for human leaders),
+  5 AI generals casting DECOY / FORCED MARCH through `use_generals` (0x27a / 0x27c; 12 scenarios cast a DECOY at some point), 2 with
+  no cast order whose RNG moves at frame 282 / 410 (montenotte4, ulm: `use_scouts` calls `think_spellcaster`, one more S1 draw).
+  Also in the set: one BRIBE (transylvania, f589) and one SNIPER (cemicrowars, f415) by the AI's spies / commandos.
+- **Differences from docs/spells-spec.md** (the exe wins): (1) `Group::action_spell` (@6fe1a0) does not skip a member that
+  `is_casting(spell)` or has the wrong packed state, those tests only bump the UI counters (the wrong packed state is already
+  `is_castable == 0`); (2) `UnitData::mana_left` is aircraft.hpp's `mana - mana_burn`; the action's inline formula (adding the running
+  cast's mana) is `unit_mana_available`; (3) `Search::valid_filter` FILTER_SPELL_TARGET (index 0x14 @67e385) also requires `damage == 0`
+  for BRIBE / SNIPER and sends 0x276 and every other craft to 0; (4) the byte at order +0x1c read by `resolve_unit_collision` @5f9d30 is
+  `CastOrder::paid` for a CAST_SPELL action (collision.cpp used `mandatory`): a paid cast is no longer dropped for a colliding enemy;
+  (5) `Unit::work` @60d180: a move to the packer's own 48-cell is killed and `work` returns; (6) the building BRIBE closes the old
+  building before it activates the copy (@672d00; `check_capture` activates first); (7) `kill_current_order` refunds only while
+  `game.playing && !loading`; (8) the spec's "two draws" of `think_spellcaster`: the spy path draws nothing, the special path draws once.
+- **Not ported / ❓**: `Unit::do_guard` (the GUARD order is not simulated: its idle auto-unpack and `Unit::think`'s guard use);
+  `detect_boat_collision`'s packer / `is_unpacking` shove tests (the shove itself is a stub, collision.cpp); `GroupOut::validate_spell`
+  beyond the UI messages (❓ 6); BUILDAIR / unit-type "spells" of the group verb (aircraft carrier queue, ❓ 12, aircraft-spec 7); the
+  "upgrade by casting" University walk (`do_cast` 3.3: set_type only); Unit `+0x14c` (-1 on pack / unpack, no reader) and the guys'
+  `+0x74 / +0x78` Monarch clock (only the extra `spell_time` tick is simulated); `FILTER_SPELL_TARGET` for INFORMER (a building that is
+  active with hits left, ❓ vslot +0x178); `unit_masks2` 0x60 decay (heroes.cpp); `units_bribed` fills the padding of `Leader` (a new
+  `int32` would change the size the save walk asserts) and is not saved; the radar UPGRADE and the dead crafts have no harness tests.
+
 ## Random games (docs/randommap-spec.md section 1; engine/sim/newgame.{hpp,cpp}, mapgen*.cpp)
 
 `new_random_game(files, rules, anims, setup, &extras)` is `Setup::build_game` for a random map on top of the generator
@@ -1009,3 +1107,241 @@ argument: `RandomGameSetup s = default_random_setup(); std::string e = parse_ran
 `s.nation[i].human`; `--town N`, `--resources N`, `--age N`, `--end-age N`, `--teams a,b,..`, `--randomize-starts`, `--reveal N`
 set the matching fields; save with `save_game(*g, random_setup_string(x.setup), x.setup.seed, path)`. `--frames`, `--ai-every`, the
 digests and `--load` of such a save (which regenerates by itself) work unchanged.
+
+
+## Multiplayer (docs/multiplayer-spec.md section 8; engine/net/, engine/sim/replay.{hpp,cpp}, apps/net/)
+
+Lockstep as the original does it, in four pieces. Nothing in `engine/sim` changed: the layer sits around `CommandPackage::process`, `Game::do_frame` and
+the DataWalk check sums.
+
+- **Replay reader** (`sim/replay.hpp`). `read_replay(path, Replay&, error)` decodes any `.rcx` of the corpus (95 / 95 identical to `rcxdump.mjs`: packages, commands, CHECK_SUMS rows, frames,
+  where the stream starts, per-verb counts and a fingerprint of every record, `node apps/net/rcxcompare.mjs <dir> <ron-net survey --json file>`); 1.1 s instead of 28 s for the 59 multiplayer files. A package's `plain` bytes are
+  what `process_all` sees after the de-XOR; `wire()` gives the commands without the padding. `replay_to_engine` / `engine_to_wire` convert the 36 verbs the engine has a `Command` for (the field mapping of
+  `apps/sav`'s `--replay`), the others stay raw. Each wire command is `opcode + packed arguments`; `replay_command_length` walks a package without decoding. `ron-net survey --codec`: 104,206 engine commands round-trip byte for byte (2 LEADER_OPTIONS differ in a word `Command` does not keep), 172,278 obfuscated packages round-trip.
+- **Session** (`net/lockstep.hpp`). One per peer; `submit` / `step`. Turns and stamps, `turn_length` from the TURN_DATA rule (6 at speed 2, 2-5 humans), speed changes, CHECK_SUMS / TURN_DATA / CAMERA written by the layer,
+  the late-package wait, pause with stamps going on, drops with a final-stamp agreement (REPLACE_WITH_AI / DROP_PLAYER / DIPLOMACY / SURVIVAL), resign and quit, desync detection with the failure threshold, observers.
+  `SimHooks` is the whole contract with the simulation: `frame`, `step_frame`, `checksums` (15 + `all`), `begin_package` / `execute(slot, cmd, len)` / `end_package`.
+- **Transports**. `LoopbackHub` (N endpoints in one process, deterministic delay and jitter, `hold` / `kill` / `kill_after_sends` for stall and drop tests), `TcpTransport` (sockets only, host = slot 0 relays),
+  both reliable and ordered per sender; `Lobby` is the host's key/value table, ready flags, START with the host's seed, a barrier.
+- **Engine binding** (`net/game_link.hpp`). `GameHooks(Game&, seat_who, ChecksumMode, ExecPolicy)`: commands run through `CommandPackage::process(g, cmd, play, who)` (the group state resets per package); `ChecksumMode::Original`
+  = the 15 DataWalk parts of a game loaded from an original save (`EngineProvider`), `Native` = the CRC-32s of the sections of the engine's own save (any game, e.g. a random game); `ExecPolicy::sav_compatible()` leaves out the
+  aircraft verbs `ron-sav` does not feed, `all_engine()` also runs RESIGN / QUIT / drops on the leaders (`leader_defeat`, `kHuman` cleared for an AI takeover).
+
+Harness (`build/ron-net`, `build-mac.sh` builds it last):
+
+```
+ron-net survey <file.rcx|dir> [--json out.jsonl]      reader numbers (compare with rcxdump: apps/net/rcxcompare.mjs)
+ron-net timing <file.rcx|dir> [--delay a,b]           turn clock only: Session over loopback fed the stamps / PAUSE / RESIGN of the replay must reproduce the frame of every record
+ron-net replay <file.rcx> [--game DIR] [--frames N] [--delay a,b] [--observers K] [--all-verbs] [--no-art] [--verbose]
+                                                      engine instances in lockstep, one per human, each fed its own player's packages; prints the lines of ron-sav --replay and
+                                                      "lockstep: ... the instances agree on all 15 parts at every turn" + "final state ... identical" (exit 1 if not)
+ron-net selftest [--seed N] [--trials K]              toy simulation: agreement, stall, duplicate / gap, pause, speed, resign, drops x 4 options, desync + threshold, delay independence
+ron-net host <port> --random STYLE,SIZE,SEED,NATIONS | --scenario FILE [--seed S]  [--humans N] [--frames N] [--save F]
+ron-net join <port> [--address A] [--frames N] [--save F]       a LAN game of N processes (127.0.0.1 by default); a bot plays each seat; the saves must be byte-identical
+```
+
+Results (this session): `ron-net timing` on the 59 multiplayer replays: 172,276 packages, 86,144 turns, 0 frame differences. `ron-net replay` on the 45 replays with an embedded save: instances agree 45 / 45 (15,334
+turns, delivery delays 0..3 and 0..25 ms), final states identical 45 / 45, the fidelity lines `diff`-equal to `ron-sav --replay` for 45 / 45 (still 0 turns with all 15 parts equal: the engine's fidelity work is the other task).
+`ron-net selftest` 23 / 23 (seeds 1..10, 30 drop trials per option). LAN: 2 processes 600 frames, 3 processes 1500 frames, scenario, and a `kill -9` of one of three processes (20,000 frames): saves identical.
+
+Not done: OOS recovery from the authority's snapshot, writing `.rcx` segments of a live session (the `on_package` callback is the hook), the x86-64 / arm64 soak, the 14 replays that start without an embedded save
+(only the turn clock covers them), diplomacy / team reset of the DIPLOMACY and SURVIVAL drops in the engine. Build note: `build-mac.sh` has no `-ffp-contract=off` (multiplayer-spec §8.3).
+
+
+## Conquer the World (docs/ctw-spec.md; engine/sim/ctw*.cpp, script_funcs_ctw.cpp; 2026-10-24)
+
+Roadmap phase 7. The strategic layer is **not lockstep** (spec section 0): it runs on one machine between battles with its own
+`Random`; only the battle it hands off (`new_random_game` / `Game::load`) is the bit-exact simulation. Nothing here touches
+`Game::do_frame`: `sim-all 600 --ai-every 8` gives the same final digest on all 156 stock scenarios with and without the CTW
+builtins installed (checked by building `ron-sim` twice from one tree, the second without the `install_ctw_funcs` call).
+
+| File | What |
+|---|---|
+| `ctw.hpp` | the whole API: rules / campaign data, `ConquestGame` (spec 2.1), `LinkChoice`, `StyleChoice`, `BattleDef`, `DiploOffer` |
+| `ctw_data.cpp` | `load_conquest_rules` (Data/conquestrules.xml: 38 card types with their six DATA, stances, attitude bands, 18 default styles, ARMIES, BUILDINGS_*, RESOURCEBONUS_*, MIN_NO_ATTACK), `load_campaign` (ROOT attributes, COUNTRY / LINK, COLONY / RARE, CONTINENTS, BONUSCARDDECK, VALID_NATION, TRIBES with the nation files' names / LEADERS / CITIES, CONQUESTSTYLES), `validate_campaign` |
+| `ctw.cpp` | setup (2.2), the round (2.3: `end_turn_player`, `begin_ai_round`, `ai_step`, `finish_round`, `advance_round`), armies and supply (2.4: `army_cap`, `place_new_armies`, `move_army`, `can_drop_army`), `find_available_links` (5.1), `transfer_to` / `defeat` / continents / allied victory, `check_income`, `assign_bonuses` (2.5) |
+| `ctw_diplo.cpp` | stance matrix and setters, attitudes (`get_attitude`, names by band), the cost functions (3), `buy_war / peace / ally / vassal / territory / fortification`, `demand_tribute`, `offer_bribe` (the spec's accept probabilities), the AI's diplomacy |
+| `ctw_cards.cpp` | the 38 cards (4): names and variants (Oath 24 per tribe, Eureka 5, Economic Boom 5), the shuffled deck (`make_card_list`), `buy_card`, `card_targets`, `play_strategic_card` (Wonder, Sabotage, Treachery, Commandeer Transport, Brigands, Memnon, Spitamenes, Colony Blockade, Continental System, Letter of Marque, Fouche, Talleyrand, Paoli), tactical selection, the AI's card use |
+| `ctw_ai.cpp` | `plan_strategy` (heuristic), AI-vs-AI attack resolution (6: 95 / 98 / 80 / 20 %, overruns), army repositioning |
+| `ctw_battle.cpp` | `pick_style` (5.1, own seeded Random per link), `make_battle` (5.2: `GameInfo`-shaped `BattleDef` + `RandomGameSetup`), `build_battle` (5.3), `process_results` (6), `resolve_player_defense` |
+| `ctw_script.cpp` | the campaign's own script host (`ScriptRuntime`: a never-simulated `Game` + a `ScriptHost` whose `ctw` points at the campaign) and the hooks, deal structs, script statics for the save |
+| `script_funcs_ctw.cpp` | ~110 builtins (below) on the campaign state, installed last by `install_script_funcs` so they replace the stand-alone answers |
+| `ctw_save.cpp` | the campaign save (7) |
+
+Hooks in existing files: `RandomGameSetup::ctw` (+ `g.ctw = S.ctw` in `new_random_game`; not part of the text form), `ScriptHost::ctw`
+(`script_host.hpp`; `save.cpp`'s size assertion became 1616 for the extra pointer, the pointer is run-time only), one call in
+`script_funcs.cpp`, one declaration in `script_funcs_internal.hpp`.
+
+**Campaign state.** `ConquestGame` keeps the spec's saved subset: scalars (`cur_round`, `cur_age`, `difficulty`, `seed`,
+`turns_no_attack`, `game_end`, `style_index1/2`, `defcon_level`, ...), `leaders[24]` indexed by slot (stances / `stance_time` /
+`attitude_base` / `no_attack_time` / `bribe_paid` matrices, `vassal_of`, hand and selected cards, rare resources, wonders, no-attack
+lists), `nodes` (owner, level 0..7, `turns_held`, flags 1 fortified / 2 capital / 4 supply depot / 8 visible / 0x10 priority,
+links with their `sea` flag **per direction**, bonus card, tileset, tech category), `colonies`, `pieces[24]` (armies, at most one
+per node), `reinforcements`, `valid_tribes` (the AI order of the round in progress), `stored_ints / stored_strs / deals`, news,
+the deck and its shuffled draw pile, the style table's `times_played`. `random` is the campaign stream: `rget(lo, hi)` is
+**inclusive** (the spec's note; `sim::Random::get` is half-open, `rget` adds one). Not saved: the files (re-read on load), the
+available links (recomputed), the script runtime (rebuilt on demand).
+
+**Setup** (`setup`): nodes in file order, `tech_cat = (i + rget(0,5000)) & 3`; the card pool shuffled by a key `rget(0,5000)` per
+variant; `tribute` / `rare` / `wonder` / `card` of a country resolve `random` as the spec says (rare 6..49 re-rolled on 20, and on
+6 / 31 with random bonuses; wonder = a building type 526..542; tribute `(rget(0,5)+1) x 10`); owners are remapped by a permutation
+keyed by `rget(0,1000)` when random nations are asked and the campaign allows them; every slot owning a country or colony gets a
+leader (stances peace, `attitude_base = rget(0,5) + 10 - 2`, tribute 25, a name from the nation file's LEADERS, the nation's
+start cards, `inherent_skill` from SKILL or `rget(1,100)`); capitals take level `size` (0 -> `ctw_capital_starting_infra` 2),
+other owned nodes `size`; the first army on the capital (`base_armies > 0`), supply depots add armies; the player slot is the
+chosen one or random among `VALID_NATION`; `turns_no_attack = MIN_NO_ATTACK[difficulty]`; the initialization script runs.
+`cur_round` starts at the campaign's `starting_round` (Alexander 1, World 2), so a campaign plays `length() - starting_round` rounds
+(`length() = (ending_age - starting_age + 1) x turns_per_age` = 19 / 21 / 18 / 14 / 24 as in the spec).
+
+**The round.** The player moves (`move_army` along links, attacks through `find_available_links`, cards, diplomacy), then
+`end_turn_player` (the skip bonus `min((turns_skipped+1) x 25, 100)`, doubled by an Antipater card; `check_income`), `begin_ai_round`
+(`valid_tribes` shuffled by `rget(0,0x7fff)`), and `ai_step()` until it reports `kDone`: per tribe the AI plays cards, does its
+diplomacy, runs the campaign's `strategy` script **once**, then `plan_strategy` until it finds no attack. An attack on the player
+returns `kPlayerAttacked` (the UI plays the battle or auto-resolves, then `resolve_player_defense(won)` and `ai_step()` continues
+the same tribe); AI-vs-AI attacks resolve at once (`resolve_ai_vs_ai`). `finish_round` = `assign_bonuses`, `adjust_attitudes`,
+`advance_round` (age step every `scen_per_age` rounds: `+1` level on every owned node that is not in its owner's `new_nodes`;
+`turns_held`; stance clocks; `no_attack_time` countdown; Talleyrand's reversal; all nodes visible from age 6), `place_new_armies`
+for everyone, the `post_ai` and `post_turn` hooks, `check_allied_victory`, the time-over check.
+
+**AI (the spec's "?").** What is spec: the move order, the legal attacks, the player's immunity window (`turns_no_attack`,
+`no_attack_time`), the AI-vs-AI win probabilities, overruns (attacker side outnumbers by 2), the army cap, the 98 % rule against
+client states, tribute demands (35 % / 50 %), bribes, alliance breaking (`attitude x 5 %` after 4 rounds). What is a heuristic
+(`ctw_ai.cpp`, `ctw_diplo.cpp do_ai_diplomacy`, `ctw_cards.cpp play_ai_cards`): which legal attack (score = value + tribute/2 + card +
+capital 25 + priority 15 - 6 x level + supporter terms, taken with 75 %), army repositioning toward the nearest enemy, when an AI
+declares war (35 % when at war with no neighbour, on the most hated neighbour; free of charge), when it makes peace (15 % after 3
+rounds), its card use (50 % per strategic card, no Commandeer Transport), where a new army appears (capital, depots, border). The
+campaign scripts' `strategy` / `post_ai` / `diplo_offer` replace parts of this exactly as in the original.
+
+**Battle hand-off** (`pick_style` -> `make_battle` -> `build_battle`):
+- *Style.* Category = Offensive (player attacks), Barbarian (against barbarians), Defensive (player defends); candidates per 5.1;
+  `Random(seed + to x 0x25 + from x 0x11)` keys `get(0,101)`; a campaign's `battle_script` may name a CUSTOM style
+  (`battle_override(from, to, player, enemy, turn, age, strength, reinf, enemy_reinf, allies, enemy_allies, ref info, ref goal1,
+  ref goal2)` is called through the script host). A campaign without `CONQUESTSTYLES` (World) uses the 18 defaults of conquestrules.xml.
+- *Seats* (`BattleDef.seats`): player first (human, team 0), the other main nation (team 1), in default styles the link's supporters
+  (up to 3 per side, allies of the player on team 0), `add_opponents[difficulty]` barbarians; barbarian seats take the first free tribe
+  index; at most 8. Special styles drop the supporters (`allied_punks`).
+- *Parameters* (`RandomGameSetup`): `starting_technology = cur_age`, `ending_technology = cur_age + 1` below the campaign's last age,
+  `starting_town` 2 when the player attacks (0 for the No City / Custom map styles), `map_size` 3 (2-3 seats) or 4 (>= 4), +1 for a
+  sea link, or the style's `mapsizes`; the style's `eliminations / victories / revealmaps / rushrules / startingresources / gamerules`
+  by category name; `time_limit = 8` (custom) with minutes `min_victory + get(0, max-min+1)` in `scen.custom_time_limit`.
+  The battle `seed` is derived per link and round (the original reuses `conquest_game.seed` for every battle; documented deviation).
+- *Map.* Custom styles load their `.scx` with `Game::load` (the scenario's player records get the campaign tribes / names), the rest use
+  `new_random_game` with the generator style **1 (Random Land) / 2 (Random Sea)**. **TODO(ctw 24-26):** `MapConquest::make` /
+  `MapConquestSea` / `MapScenario` (the node-shaped terrain, `check_starting_loc`, `check_sea_map`) are not in the generator.
+- *After the build:* the campaign stances become team diplomacy, base rates / rare bits from `assign_bonuses`, the defender's
+  start-city build-out from `BUILDINGS_<difficulty>[level]` (`alt` substitutes, age-gated, the player defends with
+  `DEFAULT_BUILD_DIFF`) and the resource multiplier, one `<ARMIES>` composition per army (upgraded with `current_upgrade`), the hero of
+  `hero_unit` (default styles, land links), the style's `setup` script once and its `runtime` as the scenario script, `g.scripts->ctw`.
+- *Tactical cards applied:* Oath, Propaganda (`conquest_racial_powers`), Eureka (techs of a library line; variant 4 = all four),
+  Economic Boom (`num_ctw_rate_bonuses`), Mercenaries (+1 army), Skill Bonus (+100 of each good: **?** the real amount is the style's
+  `bonus` script), Spy Network (leader flag 0x1000), Cultural Dominance / Political Dissidents (`flags2` 0x40 / 0x800 on the other side),
+  Warpath (2 military techs, Barracks, Stable, Siege Factory). `num_bonus_cards[type]++` is set for all, so the simulation's readers see
+  them; **? not wired:** the rate readers of Great Thinker / Merchant Guild / Logistics / Partisans / Trade Embargo / Missionaries,
+  the card units (elephants, generals, spies, citizens, commandos, Traitors' informers).
+- *Reinforcements* are computed (2..4 minute steps per side) into `reinforcements` but **not spawned** in the battle (TODO).
+- *Outcomes* (`process_results(kind, won, link, style)`): kind 0 played, 1 attacker wins without a battle, 2 forced loss; selected cards are
+  consumed (Parmenio stays after its first play); player attacks + wins -> `transfer_to` (tribute once, card), the army moves in, a client
+  state becomes a vassal, `has_fought_barbarian`; loses -> the AI defender gets 50 tribute; player defends + wins -> `need_defensive_bonus`
+  and the failed army is lost; loses -> the node goes to the attacker (the capital: elimination, `game_end = 2`).
+
+**Scripts** (`ScriptRuntime`). Hooks and entry points: `init_script()`, `links(string tribe)` (true = only the links added with
+`ctw_add_link`), `strategy(string tribe)` (true = the script played the turn; `ctw_ai_set_attack` / `ctw_ai_move_army`), `post_ai()`,
+`post_turn(int turn)`, `battle_override(...)`, `diplo_response(ref ConquestDiploOffer)` (the deal evaluator: `Peace / Ally /
+Vassal / Exchange`, sets `accepted / response / counter_offer`), `diplo_offer(ref ConquestDiploOffer)` (story offers of the AI nations,
+stored in `proposals`). The struct values are built from the compiled script's parameter type id and `type_hash("string[]")`. `rand_int`
+inside a hook draws from the campaign stream (the hook's `Game::rng` is seeded from it and written back), `popup_dialog` / notices
+become `ConquestGame::messages`, the scripts' `static` variables are saved (`script_statics`). Builtins implemented: stored values
+(`get/set_ctw_int / str`, `clear_ctw_val(s)`), clock (`get_turn / get_age / get_ctw_campaign / ctw_get_num_campaign_turns /
+get_ctw_seed / get_difficulty`), ownership (`get_country_owner`, `get_territory_owner` x2, `get_num_territories`,
+`ctw_territory_list`, `ctw_get_nation_capital`, `ctw_give_territory`, `ctw_territory_captured`), tribes and stances (`ctw_is_war / peace /
+ally / vassal / defeated`, `ctw_get_master`, `ctw_set_war / peace / ally / vassal`, `ctw_buy_*`, `ctw_get_num_allies`,
+`ctw_ai_no_declare_war`, `set_no_attack` x4 overloads, `ctw_set_leader_name`), tribute and cards (`get_num_tribute`,
+`give_player_ctw_tribute`, `give_ctw_tribute`, `give_player_bonus_card`, `ctw_bonus_card_list`, values), armies and links
+(`ctw_give_army`, `ctw_remove_army`, `ctw_remove_all_armies`, `ctw_territory_has_army`, `ctw_add_link`, `ctw_territory_link`, strength get / set,
+`set_territory_display_name`), colonies, deals (`ctw_deal_accepted`, `ctw_set_deal_accepted`, `ctw_clear_offer`, `ctw_reject_bribes`,
+`ctw_clear_bribes`, `set_player_no_negotiate`), the end (`ctw_game_over` x2, `ctw_custom_end_screen`, `ctw_set_sub_goals`,
+`ctw_center_camera`), UI switches, Cold War numbers (defcon, nukes, `ctw_build_nuke`), battle reads (`get_attack_to / from /
+terr_str`, `get_starting_loc_x / y`, `enable_type_by_tribe_with_type_name`). **Not implemented / ?:** the Cold War launch rules
+(`ctw_ai_launch_nukes` returns 0), espionage, `ctw_reinforcements_arrived`, `get_conquest_invasion_dir`.
+
+**Save** (`ctw_save.cpp`): the engine's archive (`save_archive.hpp`: header string `RonCTWMapSave` + version 0x10, then CRC-checked
+sections `CTWG` scalars + RNG state, `CTWL` leaders, `CTWN` nodes, `CTWC` colonies, `CTWP` armies / reinforcements / AI order,
+`CTWD` deck, `CTWV` the script statics, `CTWS` script storage / news / style play counts / proposals), one `walk` per struct for both
+directions. Not the original's layout (state-walk.md). Load re-attaches the files and recomputes the links; a save/load/save is
+byte-identical and the loaded game plays on identically.
+
+**Tools and results** (`ronmap`, no window): `--ctw-check` loads the five campaigns (countries 26 / 51 / 32 / 47 / 59 in list order
+Alexander, Napoleon, New World, Cold War, World; links 106 / 232 / 128 / 182 / 218, all resolving; colonies 0 / 14 / 0 / 0 / 0; styles
+44 / 52 / 55 / 60 / 0; rounds 19 / 21 / 18 / 14 / 24) and sets each up; `--ctw-sim CAMPAIGN [--seed S] [--rounds N] [--ctw-out FILE]`
+plays AI rounds (same seed -> identical save bytes for all five, 3 rounds); `--ctw-saveload CAMPAIGN`; `--ctw-selftest` (21 checks:
+costs, determinism, `pick_style` purity, lengths / income / age steps, the six outcome cases, battle description, save round trip);
+`--ctw-battle CAMPAIGN:auto|auto:N|FROM>TO --frames N [--all-ai] [--snapshot x.png]` builds the hand-off battle in the real renderer
+(`CTW_CARDS="Warpath,..."` gives and selects cards). 60 hand-off battles (12 links x 5 campaigns, all style kinds incl. 2-8 seats,
+custom maps, sea links) ran 600 frames each; the style scripts run (about 1200 script runs per battle, 0 failures). Builtins the
+battle scripts still hit unported: `group_guard_order`, `set_difficulty`, `num_good_collected`, `resource_cap_warning`,
+`citizen_to_militia` (not CTW-specific: the scripts task).
+
+**Spec notes / contradictions found.** (1) `<LINK from="0|1">` in the Cold War file is a flag, not an origin territory; ignored (?).
+(2) `Random::get` inclusive vs the engine's half-open `get`: `rget`. (3) `starting_round` means a campaign plays fewer rounds than
+`length()`. (4) the fortification price is spec "20 + 10 x level" but the constant is named `CTW_BUILD_COST_TIME_HELD_X`: the spec's
+level is used. (5) `Elephant Army` is the card type's name but `Elephant Brigade` its key (campaign files use the key); keys are used
+for lookup. (6) a country's `rare="random"` range 6..50: goods end at 49, so 6..49. (7) World has no `CONQUESTSTYLES`: the
+conquestrules.xml defaults are used (the spec's "styles 0"). (8) the `diplo_offer` default script is `return false`; only
+Napoleon / New World / Cold War scripts make offers.
+
+## Fidelity log (Phase 0: the engine against the original's frames; docs/original-save.md sections 6 - 7; 2026-10-24)
+
+Method: `ron-sav <rcx> --replay` steps a save-based multiplayer replay from the embedded save and compares the 15 CHECK_SUMS parts at every turn
+boundary; `--step-diff N` (what the engine changes), `--compare-next` (full-state and RNG-distance comparison with the next segment's save) and the
+Adler-32 searches of docs/original-save.md 6.1 (`--solve-at B`, `RON_REVERT_SEARCH`, ...) turn a differing hash into an object and a member. The
+originals are decompiled with `re/tools/ghidra-run.sh DecompileFunctions.java re/jobs/fid_*.txt` into `re/decomp/fidelity/` (jobs in `re/jobs/fid_*.txt`).
+"Before -> after" is the first differing boundary of `21'23'34` (frames 7 - 18,338) unless said otherwise.
+
+1. **Gaia animals and herds** (`engine/sim/animals.{hpp,cpp}`, `Game::herds`). Diff: `--step-diff 1` listed `Unit.flags` 0x01 -> 0x09, `idle`,
+   `orders_x/y`, `dest_angle` on 234 of 256 gaia animals; `goods` differed at the first boundary although no engine member of a Good changed. The original runs
+   `Animal::process` @5d72c0 (not `Unit::process`): `Animal::work` @5d7330 = the order machine's `do_job` (no `Unit::work` preamble), then for a herd animal every
+   16 frames (`(o + frame) % 16`) `goods[herd.good].ever_seen |= bit(p)` for the players that `is_seen` the animal's fog cell; `Animal::do_idle` @5d7460 (vslot
+   +0x184) instead of `Unit::do_idle`: `set_anim(DEFAULT)`, `collide = 0`, nothing for naval animals (fish, whales: `domain != 0`); a land herd animal whose guy
+   is on the last frame of its cycle draws `% 10 < 3` and then either walks back to a free spot near the herd point (more than 0x180 away:
+   `find_nearby_spot(0xc0, -1, 0, 0x55555555, NOT_ME)`) or takes a 1 - 4 ucoord step in a random direction (three draws: direction, x length, y length,
+   `detect_unit_collision` then `add_move_order(QUEUE_NEW)`); `Herds::process` @741cc0 (inside the `frame % 32` block of `Objects::process_all`) moves the
+   herd's target one wcoord with two draws every 64 frames. The engine had no `Herd` records at all: `Game::Herd` (cx, cy, wx, wy, t, good_o, herd, flags) is
+   loaded from the save (`map_herds_array`), emitted again by `EngineProvider` (the `herds` verify entry), saved natively (section GOOD) and walked
+   by `herds_process`. `is_animal_who(who >= 8)` selects the Animal path in `objects_process_all` and `do_job`. Result: `goods` 8 -> 2,318 (38 of 45
+   replays now keep `goods` equal, was 36), the animals' flags/idle/orders_x/y no longer move. Native games: animals created by `newgame.cpp`
+   (`create_herds`, forbidden file) are list 9 with no `Herd` record, so they stand still; the generator owner should call a `Herds::init_herd`
+   equivalent (the record layout is `Game::Herd`) and create the herd animals in list 8 with `cara = herd id`.
+2. **Bird flight, pen animals, leader slot 9.** `objects_process_all` now gives the new birds their air patrol (`add_air_patrol_order(x, y, -1, -1, 0)`) and
+   `animal_think_bird` (@5d79e0, vslot +0x180, the first call of `do_air_patrol` for gaia: patrol point jitter every 8 frames, a new region cell every ~800 frames, 2 - 62
+   draws) runs from `do_job(kAirPatrol)`; the loader makes `leaders[9]` valid (not in the save; without it the birds were never processed);
+   `think_farm_animal` @5d7700 is ported (pen animals pick a pen cell every `128 / (aid + 1)` frames; `clear_orders` + `add_move_facing_order`). Diff: the
+   draw distance of `21'49'39 -> 21'50'35` was -881 after item 1, -644 after this (the birds draw about 1 per 3 frames).
+3. **`LEADER_NEW_UNITS` (0x800000)** set by `Unit::init` @612d83 (leaders 0 - 7; `Unit::close` already did) and cleared by `compute_score`. Diff: `--solve-at 200` named one byte
+   of `leader_flags` of leader 0 (engine 0x08, original 0x88). `leaders` 200 -> 566 (then `LeaderData.explored` +4 for player 1: scouts).
+4. **Walking gatherers mark their building in use** (`Guy::move` @5d9541, the TODO in `guy_move`): a unit with a wood / ore carry mask whose action is a GATHER order
+   with `been_there` and an active gather building does `recharging++` and sets `build_masks` 0x800 once a frame. Diff: `--solve-at 8/14` named
+   `BuildData` byte +10 (`recharging`) of both players' woodcutter camps, +1 at boundary 8 and +2 from 14 on, constant to 62. `builds` 8 -> 50 (the
+   rest at 50 is the order of the camp's cell, item "open").
+5. **Idling of moving units** (`Unit::work` LAB_0060d733): the IDLING flag is cleared for move orders too (the engine cleared it only for the other orders).
+   Found by reading, no effect in the three replays.
+6. **`Unit::update_speed` @6055c0 complete**: whales (objmask 0x2000 with the rare bit), Bantu, French and Versailles siege, aluminum air speed, spy, hero, supply and
+   Aztec terms in the original's order (the engine had the type tweaks and the hero term only). The compare-next of a segment showed `Unit.myspeed` 26 vs 25 on 59 units.
+7. **`AnimalData::is_seen` @5d8160**: the herd branch (the herd good's `ever_seen`, fish / whales / Spanish / Nubian rules) and the pen animals ask their farm;
+   `explore_goody` is skipped for both gaia lists.
+8. **The replay driver** (`apps/sav`): the game script of the header (`no_nukes`) is compiled for the loaded game (`original_attach_game_script`), `UNITMASK` is
+   applied (`Group::action_unitmask`), the aircraft verbs are mapped. New diagnostics: `--solve-at`, `--shift-search`, `--pshift-search`, the `RON_*`
+   searches, the draw distance and the call-site profile (docs/original-save.md 6.1). `engine/sim/random.hpp` has a profiling hook compiled only with
+   `-DRON_RNG_PROFILE_HOOK`.
+
+**Checks** (scratch build of HEAD + these files with the build-mac.sh flags, zero warnings): `ron-check` 0 failures; `ron-sim ... --frames 600 --ai-every 8` on
+the 156 stock scenarios 156/156 self-check OK; `--roundtrip 200` 156/156 OK; `ron-sav --engine-roundtrip` 69/69 PASS (10 saves + 59 embedded; 0 verify mismatches).
+**Digests**: 152 of the 156 final digests changed (`porkchop`, `newmontenotte`, `cegeneral3`, `capture` did not; 15 scenarios end at frame 1). Reasons, by switching
+the files back one at a time (measured before items 2 and 7 were added): item 4 (`guys.cpp`) alone accounts for 120 (`Build.recharging` is in the digest), the
+`orders.cpp` changes (animals' `do_idle`, items 1 and 5) for 31 more, `LEADER_NEW_UNITS` for one, `update_speed` (item 6) for none (no stock scenario has a tribe or tech term
+on a moving unit at frame 600); the bird flight and pen animals add the scenarios with gaia birds. None of the changes touches determinism (the self-check passes).
+
+**Open / blocked** (see docs/original-save.md section 7): the first mismatch of `21'23'34` is the movement of ten walkers in frames 8 - 14 (`units` at 8 has no single-member
+explanation; `guys` / `world` match at 8 and differ at 14), and the other two replays start in a fight with many differences in the first step; the engine
+under-draws by 1 - 2 random draws per 10 frames in quiet segments (not-yet-ported call sites, e.g. `Unit::think_scout`, `Objects::add_flock`); `GUARD` / `FOLLOW` have no verb
+(`commands.*` belongs to another owner); the leader statistics, command counters and Guy pitch / bank are still frozen (no first mismatch points at them: the first
+MOVE_TO of `21'23'34` is at frame 3,320, the first fight later than the first mismatch of `leaders`); the capacity rules of the containers are in docs/original-save.md section 7.

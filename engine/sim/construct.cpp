@@ -16,6 +16,7 @@
 #include "sim/orders.hpp"
 #include "sim/production_internal.hpp"
 #include "sim/search.hpp"
+#include "sim/spells.hpp"
 #include "sim/trig.hpp"
 
 namespace ron::sim {
@@ -372,9 +373,10 @@ void group_action_swarm_around(Game& g, Group& gr, int32_t ox, int32_t whom, Que
 			if (dom != pass || dom == 2) continue;
 			if (skip_gatherers != 0 && action_type(*u) == kGather) continue;
 			if (unit_is_busy(*u)) continue;
-			// TODO(spells): SpellTypeData::is_castable(CIVILIANSPELL 659) is taken as 0.
+			// An armed citizen (a militia) casts CIVILIAN first (SpellTypeData::is_castable(CIVILIANSPELL 659)).
+			const bool can_civ = spell_is_castable(g, ptype::kCivilianSpell, mo, who, 0) != 0;
 			if (order == kBuildAt || order == kRepair) {
-				if (!is_peasant_type(u->type) && count_inside(g, *u, kCountPeasants, 0) == 0) {
+				if (!is_peasant_type(u->type) && count_inside(g, *u, kCountPeasants, 0) == 0 && !can_civ) {
 					group_add(g, tmp, mo, who, 0, 0);
 					continue;
 				}
@@ -383,6 +385,7 @@ void group_action_swarm_around(Game& g, Group& gr, int32_t ox, int32_t whom, Que
 				bool worker = false;
 				if (t == 52 || t == 53) worker = type_is(*T->ptype, ptype::kUniversity);
 				else if (t == 50 || t == 51) worker = !type_is(*T->ptype, ptype::kUniversity);
+				else worker = can_civ;
 				if (!worker) {
 					group_add(g, tmp, mo, who, 0, 0);
 					continue;
@@ -414,9 +417,11 @@ void group_action_swarm_around(Game& g, Group& gr, int32_t ox, int32_t whom, Que
 			if ((order == kBuildAt || order == kRepair) && q == kQueueLast && action_type(*u) == kGather && expl) q2 = kQueueNew;
 			add_move_facing_order(g, *u, sx / 48, sy / 48, a2, kind, false, q2, false, -1, -1, -1, false);
 			if (order == kBuildAt) {
+				if (can_civ) add_cast_order(g, *u, -1, -1, u->x, u->y, ptype::kCivilianSpell, kQueueLast, expl);
 				add_build_order(g, *u, ox, whom, kQueueLast, expl);
 				if (!T->is_unit) static_cast<Build*>(T)->build_masks &= ~bmask::kOrphan;
 			} else if (order == kRepair) {
+				if (can_civ) add_cast_order(g, *u, -1, -1, u->x, u->y, ptype::kCivilianSpell, kQueueLast, expl);
 				add_repair_order(g, *u, ox, whom, kQueueLast, expl);
 			}
 			// (GATHER: the move only)
