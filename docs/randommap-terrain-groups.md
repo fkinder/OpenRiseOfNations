@@ -142,8 +142,8 @@ One clump of `size` tiles for player `p` (a mountain range, a forest, a rock gro
 3. By type at the first accepted `c`:
    - mountains (5): `Mountains::add_mountain(size = shape, c.x, c.y, 5, mount_space, forest_space, rock_space, coast_space, start_min)` (shape = the
      `get_range` value passed in; ❓ add_mountain not decoded), done after one success.
-   - cliffs (8): when the size ≠ 4, `Cliffs::verify_defensive_position(c, start, cliff_face)` must pass; `Cliffs::position_cliff(c, size, start, …,
-     cliff_face)` ❓ (not decoded).
+   - cliffs (8): with the size index `s = shape − 1` (`local_54`): unless `s == 4`, `Cliffs::verify_defensive_position(c, start, cliff_face)` must pass;
+     then `Cliffs::position_cliff(c, s, start, mode = (s == 4), cliff_face)` (decoded: docs/randommap-spec.md "Fifth pass"; `mapgen_cliffs.cpp`).
    - trees (4) with a recorded shape (`shapeX.count ≠ 0`, i.e. an earlier call already grew one): **copy**: **draw** `d = rnd&3`, `(mx, my) =
      corner_x/y[d + 1]` (a mirror / rotation), then for each recorded offset `(ox, oy)`: tile `(c.x + mx·ox, c.y + my·oy)` must pass
      `available_rough_tile(…, 0x20, spaces)`; all must pass, then every tile is `drop_tile`d; a failing copy falls back to growing.
@@ -184,7 +184,7 @@ when the whole region was walked.
   - mountains (5): `Mountains::add_mountain(shape, x, y, 4, spaces, start_min)` ❓.
   - rocks (6): `available_rough_tile(x, y, 8, …)`, tile set with `| 8`.
   - oil (7): `World::set_oil_at(x, y, 1)`, success (the sea checks were done by the caller).
-  - cliffs (8): `Cliffs::position_cliff(x, y, shape − 1, −1, −1, 0, FACE_WORLD_CENTER)` ❓.
+  - cliffs (8): `Cliffs::position_cliff(x, y, shape − 1, −1, −1, 0, FACE_WORLD_CENTER)` (docs/randommap-spec.md "Fifth pass").
 - `available_rough_tile(x, y, kind, mount_sp, forest_sp, rock_sp, coast_sp)` @6a24d0: the cell must be in bounds, **not water**, `flags & 0x28 == 0`, not
   `WorldData::is_edge`, `flags & 0x10 == 0`, not a start city cell (`start_city_wcoord`), `flags & 0x44 == 0` (the decompiler dropped the `return 0`
   of each failed test; read as such ❓). Then keep-away rings (offsets `circle[circle_radius[0] .. circle_radius[space])`, i.e. all within radius
@@ -614,7 +614,7 @@ marks the unit types that become available). That belongs to the conquest campai
 2. The primitives of §B1 (`point` returns, `stamp`, `large_stamp`'s 16 patterns and its 1–3 draws, `grow_region`'s return and give-up rule, `land_dist`, `invert_land`, `fix_lakes`, `scale_land_area`'s float division).
 3. One function per recipe following §B3 with the draws in the order listed; the ones checked in the asm (B3.1, B3.2, B3.4, B3.6, B3.10, B3.11) can be ported now; B3.3, B3.5, B3.7–B3.9 and B3.12 need a further disassembly pass for the ❓ counters before a bit-exact claim. B3.1 and B3.2 are enough for a first playable land map (Old World family).
 4. `TerrainGroups`: the `GROUPENTRY` reader (with `scale_number`), `fill_fertile` (own noise: `Fractal`), `place_all` with the grouping roll, clump draws, the `help_lowest_index` fairness and the four patterns; the two placers (the LFSR cell walk is exact), `drop_tile`, `available_rough_tile`, `place_oil_deposits`; then `nubify_forest`, the three base changers, `fix_transitions` / `nubify_transitions`, `add_doobers` and `treeify_mountains` **including their draws** (they shift every later `game_random` value).
-5. Not decoded here and needed for exactness: `Mountains::add_mountain` (+ the mountain range data), `Cliffs::position_cliff / verify_defensive_position`, `World::set_oil_at / set_blocked_at / is_edge_of_region`, `WorldData::is_edge / start_city_wcoord / has_mountain_tcoords`, `Doober::add_doober / has_doobers`, `MapFairness` (Warring States).
+5. Not decoded here and needed for exactness: `Mountains::add_mountain` (+ the mountain range data), (`Cliffs::position_cliff / verify_defensive_position`: decoded in the fifth pass of randommap-spec.md) `World::set_oil_at / set_blocked_at / is_edge_of_region`, `WorldData::is_edge / start_city_wcoord / has_mountain_tcoords`, `Doober::add_doober / has_doobers`, `MapFairness` (Warring States).
 6. Validation: record a random game's seed, style, size and players on the Windows build and compare the land mask, start locations and group tiles; until then only plausibility checks apply.
 
 ## D. Evidence

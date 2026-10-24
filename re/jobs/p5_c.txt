@@ -1,0 +1,5 @@
+re/decomp/mapgen_p5/callers_terraform.txt
+3
+TerrainOut::terraform_for_building
+TerrainOil::add_rocky_patch
+TerrainOil::create_doobers

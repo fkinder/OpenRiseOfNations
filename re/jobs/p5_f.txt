@@ -1,0 +1,10 @@
+re/decomp/mapgen_p5/asm
+Cliffs::position_cliff
+Cliffs::verify_placement
+Cliffs::place_cliff
+Cliffs::add_cliff
+Cliffs::verify_defensive_position
+TerrainOut::has_plus_slope
+TerrainOut::is_clear_land
+CliffsOut::init_templates
+Cliffs::assess_wcoord

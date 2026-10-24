@@ -1,0 +1,4 @@
+re/decomp/mapgen_p5/tg
+TerrainGroup::place_player_group
+TerrainGroup::drop_tile
+TerrainGroup::place_region_group

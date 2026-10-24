@@ -2,7 +2,7 @@
 //
 // Usage: ron-mapgen <game dir> --style N|NAME --size N --seed S --nations K [--teams a,b,..] [--randomize]
 //                   [--town N] [--tribes a,b,..] [--png out.png] [--scale N] [--dump out.txt] [--quiet]
-//        ron-mapgen <game dir> --compare <file.SVX> [--style N] [--side out.png] [--quiet]
+//        ron-mapgen <game dir> --compare <file.SVX> [--style N] [--game] [--side out.png] [--quiet]   (--game: compare the world of new_random_game, start cities included)
 //        ron-mapgen <game dir> --all [--seed S] [--jobs N] [--styles a-b] [--sizes a-b] [--nations a-b] [--quiet] [--no-conquest]
 //        ron-mapgen <game dir> --ctw CAMPAIGN:LINK [--style 24|25] [--difficulty D] [--seed S] [--png out.png] [--dump out.txt] [--quiet]
 //        ron-mapgen <game dir> --png-check [DIR]
@@ -859,6 +859,34 @@ int run_compare(const GameFiles& files, const Rules& rules, const char* save_pat
 		std::fprintf(stderr, "generation failed: %s\n", g.res.error.c_str());
 		return 1;
 	}
+	if (has_flag(argc, argv, "--game")) {
+		// --game: compare the world of new_random_game (generator + start cities + the setup's own passes) instead of the generator's alone,
+		// so the effects of the starting cities (val, blocked, bad, solid, roads, building flags) are in the generated side.
+		RandomGameSetup S = default_random_setup(std::max(2, nations));
+		S.map_style = lobby_style;
+		S.map_size = p.size;
+		S.seed = p.seed;
+		S.num_nations = nations;
+		S.starting_town = eg->info.starting_town;
+		S.starting_resources = eg->info.starting_resources;
+		S.starting_technology = setup.starting_technology;
+		S.ending_technology = setup.ending_technology;
+		S.reveal_map = eg->info.reveal_map;
+		S.no_tribe_powers = (eg->info.flags & 4) != 0;
+		for (int i = 0; i < nations; i++) {
+			S.nation[size_t(i)].tribe = p.tribe[size_t(i)];
+			S.nation[size_t(i)].team = p.team[size_t(i)] >= 0 && p.team[size_t(i)] < 8 ? p.team[size_t(i)] : -1;
+			S.nation[size_t(i)].human = i == 0;
+		}
+		RandomExtras ex;
+		std::unique_ptr<Game> ng = new_random_game(files, rules, nullptr, S, &ex);
+		if (!ng) {
+			std::fprintf(stderr, "new_random_game failed: %s\n", ex.error.c_str());
+			return 1;
+		}
+		g.world = ng->world;
+		std::printf("(--game: the world of new_random_game, frame %d)\n", ng->frame);
+	}
 	const World& E = eg->world;
 	const World& G = g.world;
 	std::printf("generated: picked style %d (save %d)%s, %dx%d, world.seed %u (save %d), sea_map %d (save %d), tileset %s, %llu draws\n", g.res.picked_style,
@@ -1657,6 +1685,7 @@ int main(int argc, char** argv) {
 			            p.seed, p.nations, g.seconds, (unsigned long long)g.res.draws, g.goods.size(), g.items.size(), g.res.rivers.size(),
 			            g.res.starts.size(), g.res.fallback ? " [fallback layout]" : "");
 			for (const auto& ph : g.res.phases) std::printf("  %-20s %llu draws\n", ph.first.c_str(), (unsigned long long)ph.second);
+			for (const std::string& n : g.res.notes) std::printf("  note: %s\n", n.c_str());
 		}
 		if (const char* d = arg_value(argc, argv, "--dump")) {
 			FILE* f = std::fopen(d, "wb");

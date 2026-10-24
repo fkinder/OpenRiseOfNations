@@ -91,6 +91,15 @@ struct GroupRun {
 
 constexpr int kEntire = 0, kEdges = 1, kCorners = 2;  // eliminate_pools modes
 
+struct CliffTemplate {  // one <CLIFF> of Data/Cliffs.xml (CliffsOut::init_templates)
+	int orientation = -1;                  // 1 NW, 2 NE, 3 SE, 4 SW
+	std::vector<float> heights;            // side x side, blue byte / 255 * 480
+	std::vector<std::array<int, 2>> cells; // the template's cliff wcoords (WCoordList), row by row
+};
+struct PlacedCliff {
+	int x = 0, y = 0, size = 0, idx = 0;
+};
+
 class Gen {
 public:
 	Gen(Context& ctx, const Params& p, Result& out);
@@ -288,8 +297,23 @@ public:
 	std::array<int, 5> lowest_player{};
 	void randomize_orthogs(int* ro, int* rc);
 
+
+	// ---- mapgen_cliffs.cpp (Cliffs of the original: placement during the terrain groups, the world effect at the end of Terrain::init)
+	const std::vector<CliffTemplate>* cliff_templates(int size);
+	bool verify_cliff_placement(int x, int y, int size, int idx, int mode);
+	bool cliff_clear_land(int x, int y, unsigned mask);
+	int add_cliff(int x, int y, int size, int idx, int mode);
+	int position_cliff(int x, int y, int size, int sx, int sy, int mode, int facing);
+	bool verify_defensive_position(int cx, int cy, int sx, int sy, int facing);
+	void cliffs_init();
+	void move_goody_at(int x, int y);  // Terrain::move_goody (mapgen_terrain_init.cpp)
+	std::vector<CliffTemplate> cliff_tpl[5];
+	bool cliffs_loaded = false;
+	std::vector<PlacedCliff> placed_cliffs;
+
 	// ---- mapgen_terrain_init.cpp
 	void terrain_init();
+	void mountain_heights();  // TerrainOut::adjust_for_mountains(0): the template z added to the heights (mapgen_mountains.cpp)
 	void river_geometry();  // RiversOut::calculate_all: the river sections, their trough tiles and heights (randommap-rivers section 9)
 	std::vector<uint16_t> coord_flags;  // TerrainOut's per-wcoord CoordInfo.flags after Terrain::init's coast pass (bit 4 = coastal)
 

@@ -1149,7 +1149,7 @@ and a `Scenario` snapshot (terrain + the finished objects as scenario records) t
 - Terrain heights are synthesised (`synthesize_terrain`): land 250 +- noise, rivers carved, the template z of each mountain
   added (adjust_for_mountains(0) rule), and the shoreline made from a blurred water indicator because the generator's coastlines
   follow wcoord edges (no shelf / half-water cells yet). `TerrainOut` heights were never decoded. The land doobers are
-  placed by a hash (the generator only counts them). No cliffs. The sim reads these heights for z only.
+  placed by a hash (the generator only counts them). The generator's own height grid (`Result::heights`: land, shelf, river troughs, mountain z, oil-site plateaus, cliffs, randommap-spec.md fifth pass) is not used here yet. The sim reads these heights for z only.
 - Not ported: `Herds::process` (herd animals stand still), `Setup::mark_forest`, `Leader::reset_score`, `game.start_index`, the
   Spanish `EXPLORE_MAP` flag and the `info.flags & 4` farm / granary build flags of `build_empire`, the 8-seat "team 8" special
   case of team style 7, CtW maps, `BLANK_MAP` / `SCENARIO_MAP` / `CONQUEST` styles (`new_random_game` takes 0..23).

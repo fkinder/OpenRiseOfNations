@@ -55,11 +55,32 @@ struct RandomGameSetup {
 	int game_speed = 1;                      // GameInfo.game_speed (presentation; not read by the simulation)
 	bool randomize_starts = false;           // map->randomize_starts: shuffle the start locations
 	bool no_tribe_powers = false;            // GameInfo.flags & 4
-	bool ctw = false;                        // Conquer the World battle (semaphore byte2 & 2: sim/ctw.hpp builds these); not in the text form
+	bool ctw = false;                        // Conquer the World battle (semaphore byte2 & 2: sim/ctw.hpp builds these); text key ctw=1 when set
+	// The conquest map input of a Conquer the World battle (mapgen::ConquestInput, encoded by conquest_input_string): the square of the
+	// two countries' silhouettes, the starts and the extra opponents. Empty for every other game. new_random_game generates the
+	// battle's conquest map (styles 24 / 25) from it when no ConquestScope is open, so a save of a battle (which stores this setup
+	// text) regenerates the same map. Text key conq=...
+	std::string conquest;
+	// A Conquer the World battle's style scripts (BattleDef::runtime_script / setup_script, game-relative paths): new_random_game compiles
+	// them after the base scripts, as ConquestGame::build_battle does (without running the setup script), so a loaded battle save has
+	// the same compiled script files as the battle it was taken from. Text keys btrt=... / btsu=...
+	std::string battle_runtime, battle_setup;
 };
 
 // Seats 0..7 default: seat 0 human with a random tribe, the others AI.
 RandomGameSetup default_random_setup(int num_nations = 2);
+
+// The text form of mapgen::ConquestInput: a '.'-separated record (version, flags, node ids, supporters, countries, tileset) and the
+// land bitmap as alternating run lengths (water first). No ';' or '=' inside, so it nests in the setup text. parse returns false on
+// anything malformed.
+std::string conquest_input_string(const mapgen::ConquestInput& in);
+bool parse_conquest_input(const std::string& text, mapgen::ConquestInput& out);
+
+// The setup text of the Conquer the World battle most recently built in this process (ctw_battle.cpp sets it, with the conquest
+// input inside when the map is a conquest map). The ronmap battle keeps the placeholder scenario path "ctw:battle"; scenario_rel_path
+// (save.cpp) swaps it for this text, so the save's scenario slot can regenerate the map.
+void set_battle_setup_text(const std::string& text);
+std::string battle_setup_text();
 
 // The text form (the scenario-path slot of a save): "random:" + key=value pairs separated by ';'. Round-trips every
 // field. parse returns false on a malformed string.

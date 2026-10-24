@@ -1,0 +1,2 @@
+re/decomp/mapgen_p5/tg
+TerrainGroups::place_all

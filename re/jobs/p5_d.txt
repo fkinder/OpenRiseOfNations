@@ -1,0 +1,7 @@
+re/decomp/mapgen_p5
+CliffsOut::init_templates
+CliffsOut::init_class
+TerrainOut::is_clear_land
+CliffsData::.*
+Cliff::init
+Cliffs::init

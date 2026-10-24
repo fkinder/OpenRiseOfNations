@@ -1499,6 +1499,102 @@ struct TerrainInit {
 		}
 	}
 
+	// ---- TerrainOut::terraform_for_building @875210 (as TerrainOil::add_rocky_patch @8a2b30 calls it: tcoord (4 wx, 4 wy), 4 x 4)
+	// Averages the heights of the 8 x 8 vertices from (tx - 1, ty - 1) (the far corner left out) and writes the average on the 5 x 5
+	// vertices of the wcoord and the mean of the old height and the average on the ring around them; nothing changes when any sampled
+	// height is not above 0 (water), a tcoord next to a mountain / cliff tcoord is left alone, and so are ocean wcoords and
+	// wcoords with a good on a resource tcoord.
+	void terraform_for_building(int tx, int ty, int tw, int th) {
+		if (tx == 0 || ty == 0 || tx == txs - 1 || ty == g.ys * 4 - 1) return;
+		const int x0 = std::max(tx - 1, 0), y0 = std::max(ty - 1, 0);
+		int y1 = th + ty + 2, x1 = tw + tx + 2;
+		if (g.ys * 4 <= y1) y1 = g.ys * 4 - 1;
+		if (txs <= x1) x1 = txs - 1;
+		float sum = 0.0f;
+		int count = 0;
+		for (int y = y0; y < y1; y++) {
+			const float v = h(x1, y);
+			sum = sum + v;
+			if (v <= 0.0f) return;
+			count++;
+		}
+		for (int x = x0; x < x1; x++) {
+			const float v = h(x, y1);
+			sum = sum + v;
+			if (v <= 0.0f) return;
+			count++;
+		}
+		for (int y = y0; y < y1; y++) {
+			for (int x = x0; x < x1; x++) {
+				const float v = h(x, y);
+				sum = sum + v;
+				if (v <= 0.0f) return;
+				count++;
+			}
+		}
+		const float avg = sum / float(count);
+		for (int y = y0; y < y1; y++) {
+			for (int x = x0; x < x1; x++) {
+				const int wx = x >> 2, wy = y >> 2;
+				const WData& d = W(wx, wy);
+				if ((d.flags & 0x100) == 0 && (d.land == 1 || d.land == 2)) continue;  // open water
+				bool next_to_mountain = false;
+				for (int k = 0; k < 9 && !next_to_mountain; k++) {
+					const int nx = x + move_x[k], ny = y + move_y[k];
+					if (nx < 0 || ny < 0) continue;
+					if (nx < w.tile_xs && ny < w.tile_ys) {
+						const uint16_t m = w.t(nx, ny) & 3;
+						if (m == 2 || m == 1) next_to_mountain = true;
+					}
+				}
+				if (next_to_mountain) continue;
+				if (d.land != 0) continue;
+				if (w.t(x, y) & tmask::kResource) {
+					bool good_here = false;
+					for (const GoodObj& go : g.c.goods) {
+						if (go.alive() && wcoord_of(go.x) == wx && wcoord_of(go.y) == wy) good_here = true;
+					}
+					if (good_here) continue;
+				}
+				float nv = avg;
+				if (y == y0 || y == y1 - 1 || x == x0 || x == x1 - 1) nv = (h(x, y) + avg) * 0.5f;
+				h(x, y) = nv;
+			}
+		}
+	}
+
+	// ---- TerrainOil::create_doobers @8a28e0: the oil deposits' rocky patches (the doober geometry is cosmetic and uses another random
+	// stream); what the generator keeps is the rock flag an ocean wcoord loses and the terraform under an oil wcoord.
+	void create_doobers() {
+		for (int y = 0; y < ys; y++) {
+			for (int x = 0; x < xs; x++) {
+				WData& d = W(x, y);
+				bool patch = false;
+				const bool ocean = (d.flags & 0x100) == 0 && (d.land == 1 || d.land == 2);
+				bool good_here = false;
+				for (const GoodObj& go : g.c.goods) {
+					if (go.alive() && wcoord_of(go.x) == x && wcoord_of(go.y) == y) good_here = true;
+				}
+				// LeaderData::type_avail(console leader, the good's type, 1) == 0 and not the editor: assumed for every good (the oracle's
+				// oil wcoords all carry the rock flag, so the oil / rock outcome does not depend on it)
+				if (good_here && !ocean) patch = true;
+				if (d.flags & 8) {
+					if (ocean) {
+						d.flags = uint16_t(d.flags & 0xfff7);
+						if (patch) add_rocky_patch(x, y);
+					} else {
+						add_rocky_patch(x, y);
+					}
+				} else if (patch) {
+					add_rocky_patch(x, y);
+				}
+			}
+		}
+	}
+	void add_rocky_patch(int x, int y) {
+		if (W(x, y).flags & 0x800) terraform_for_building(4 * x, 4 * y, 4, 4);
+	}
+
 	void run() {
 		coast_base = g.tgd.coast_base;
 		fa = TFractal(txs + 1, g.ys * 4 + 1, 5, 2, g.world_seed);
@@ -1511,6 +1607,7 @@ struct TerrainInit {
 		adjust_aquatic_height();
 		relax_aquatic_verts();
 		check_and_set_halfland();
+		create_doobers();
 		convert_beach_to_sandy();
 	}
 };
@@ -1529,6 +1626,12 @@ void Gen::terrain_init() {
 	rg.clear_all(w);
 	rg.find_all(w);
 	sync_regions();
+}
+
+void Gen::move_goody_at(int x, int y) {
+	TerrainInit ti(*this);
+	ti.cf = coord_flags;
+	ti.move_goody(x, y, false);
 }
 
 void Gen::river_geometry() {

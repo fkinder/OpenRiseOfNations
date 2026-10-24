@@ -1,0 +1,2 @@
+re/decomp/mapgen_p5/types_cliffs.txt
+^(Cliffs|CliffsData|CliffsOut|Cliff|CliffMiningData|WCoordList|OilPatchData|Mountains|MountainRange|MountainRangeData)$

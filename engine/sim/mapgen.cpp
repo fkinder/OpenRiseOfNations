@@ -161,6 +161,14 @@ void Gen::build_game() {
 	phase("terrain_init");
 	make_rivers();
 	phase("make_rivers");
+	mountain_heights();  // Terrain::init ends with TerrainOut::adjust_for_mountains(0) ...
+	cliffs_init();       // ... and Cliffs::init
+	if (!placed_cliffs.empty()) {
+		int cw = 0, ct = 0;
+		for (const WData& d : w.wdata) cw += (d.flags & wflag::kCliff) != 0;
+		for (uint16_t m : w.tdata) ct += (m & tmask::kLowField) == tmask::kCliff;
+		note(std::to_string(placed_cliffs.size()) + " cliffs placed: " + std::to_string(cw) + " cliff wcoords, " + std::to_string(ct) + " cliff tcoords");
+	}
 	build_empires();
 	create_herd_units();
 	phase("herds");

@@ -392,7 +392,9 @@ void Gen::run_group(size_t gi, int nc, const std::vector<int>& sizes, const std:
 					}
 					if (res) won[size_t(region)] = 1;
 				} else {
-					res = place_region_group(g, sizes[size_t(i)], region, -1, oils[size_t(i)], run);
+					// place_all @6a8205: a cliff's shape is its size - 1 (at least 1); the other types pass nothing
+					const int shape = g.type == kCliffs ? std::max(sizes[size_t(i)] - 1, 1) : -1;
+					res = place_region_group(g, sizes[size_t(i)], region, shape, oils[size_t(i)], run);
 				}
 				i++;
 				pos = (pos + 1) % len;
@@ -477,7 +479,6 @@ void Gen::place_all() {
 				oils[size_t(i)] = 0;
 			}
 		}
-		if (g.type == kCliffs) continue;  // Cliffs::position_cliff is not decoded
 		run_group(gi, nc, sizes, oils);
 	}
 	add_doobers();

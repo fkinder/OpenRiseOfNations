@@ -13,6 +13,8 @@
 #include "sim/combat.hpp"
 #include "sim/commands.hpp"
 #include "sim/game.hpp"
+#include "sim/newgame.hpp"
+#include "sim/save.hpp"
 #include "sim/production.hpp"
 #include "sim/rules.hpp"
 #include "sim/rules_xml.hpp"
@@ -1008,6 +1010,53 @@ int selftest(const std::string& game_dir) {
 		t.check(!k.load_bytes(files, rules, broken).empty(), "a corrupted save is refused");
 	}
 	selftest2(files, rules, t);
+	{  // ---- a native save of a generated battle regenerates the battle's conquest map (newgame.hpp: the setup text carries the conquest input)
+		auto art = load_anim_source(files, rules);
+		auto b = build_with(files, rules, art.get(), "CTW_World_Map_01", 21, {});
+		if (!b || !b->B.custom_map.empty()) {
+			t.check(false, "built a generated World battle for the save checks");
+		} else {
+			sim::Game& G = *b->game;
+			sim::CommandManager cm;
+			cm.play = 0;
+			cm.play_who = 0;
+			for (int f = 0; f < 40; f++) {
+				cm.process_turn(G);
+				G.do_frame();
+			}
+			const uint32_t seed = b->ex.setup.seed;
+			const std::string rel = sim::scenario_rel_path(files, "ctw:battle");  // what F5 stores for the battle
+			sim::RandomGameSetup S;
+			t.check(sim::is_random_scenario(rel) && sim::parse_random_setup(rel, S) && S.ctw && !S.conquest.empty() && sim::random_setup_string(S) == rel,
+			        "the battle's scenario slot is a random: setup text with ctw=1 and the conquest input; it round-trips through the parser");
+			mapgen::ConquestInput ci;
+			t.check(sim::parse_conquest_input(S.conquest, ci) && ci.valid && ci.side > 0 && sim::conquest_input_string(ci) == S.conquest,
+			        "the conquest input round-trips through its text form (" + std::to_string(S.conquest.size()) + " characters, square of " + std::to_string(ci.side) + ")");
+			const std::vector<uint8_t> bytes = sim::save_game_bytes(G, rel, seed);
+			bool same_bytes = false, same_map = false, plain_differs = false;
+			std::string why;
+			try {
+				sim::SaveInfo info;
+				std::unique_ptr<sim::Game> H = sim::load_game_bytes(files, rules, art.get(), bytes, &info);
+				same_bytes = H && sim::save_game_bytes(*H, rel, seed) == bytes;
+				if (H) {
+					same_map = H->world.tdata == G.world.tdata && H->world.wdata.size() == G.world.wdata.size();
+					for (size_t i = 0; same_map && i < G.world.wdata.size(); i++) same_map = H->world.wdata[i].land == G.world.wdata[i].land && H->world.wdata[i].flags == G.world.wdata[i].flags;
+				}
+				// the negative control: the same text without the conquest input regenerates a plain random map
+				sim::RandomGameSetup P = S;
+				P.conquest.clear();
+				sim::RandomExtras px;
+				std::unique_ptr<sim::Game> plain = sim::new_random_game(files, rules, art.get(), P, &px);
+				plain_differs = plain && plain->world.tdata != G.world.tdata;
+			} catch (const std::exception& e) {
+				why = e.what();
+			}
+			t.check(same_bytes, "a loaded battle save re-saves byte-identical" + (why.empty() ? std::string() : ": " + why));
+			t.check(same_map, "the loaded battle's map equals the battle's (land, flags, tcoords)");
+			t.check(plain_differs, "without the conquest input the setup text regenerates a different (plain random) map");
+		}
+	}
 	std::printf("selftest: %d checks, %d failed\n", t.n, t.bad);
 	return t.bad ? 1 : 0;
 }

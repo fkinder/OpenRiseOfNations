@@ -1,0 +1,9 @@
+re/decomp/mapgen_p5
+TerrainOut::fill_mountain_data
+TerrainOut::has_plus_slope
+Mountains::add_range
+Mountains::add_mountain
+Mountains::set_edge_flags
+Mountains::set_behind_flags
+Mountains::init
+MountainRange::init

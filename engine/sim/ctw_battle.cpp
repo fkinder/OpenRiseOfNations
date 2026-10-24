@@ -461,10 +461,21 @@ std::unique_ptr<sim::Game> ConquestGame::build_battle(const GameFiles& F, const 
 		const bool have_conquest = conquest_battle_input(*this, F, B, &conquest, &conquest_err);
 		if (!have_conquest) std::fprintf(stderr, "ctw: no conquest map (%s): a plain random map is generated\n", conquest_err.c_str());
 		mapgen::ConquestScope conquest_scope(have_conquest ? &conquest : nullptr);
-		gp = new_random_game(F, R, anims, B.setup, &X);
+		// The setup the battle is generated from also carries the conquest map input (and the CtW flag): the text form of X.setup is what a
+		// native save of the battle keeps in its scenario slot, and loading it regenerates the same map (newgame.hpp, conquest_input_string).
+		RandomGameSetup S = B.setup;
+		S.ctw = true;
+		if (have_conquest) S.conquest = conquest_input_string(conquest);
+		gp = new_random_game(F, R, anims, S, &X);
 		if (!gp) {
 			if (error) *error = X.error;
 			return nullptr;
+		}
+		{  // the text a save of the battle keeps: the resolved setup, the conquest input and the style's scripts
+			RandomGameSetup T = X.setup;
+			T.battle_runtime = B.runtime_script;
+			T.battle_setup = B.setup_script;
+			set_battle_setup_text(random_setup_string(T));
 		}
 	} else {
 		const std::string path = F.resolve(B.custom_map);

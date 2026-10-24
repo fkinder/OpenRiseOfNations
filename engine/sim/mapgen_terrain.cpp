@@ -1,6 +1,6 @@
 // TerrainGroups::place_all and the passes after it (docs/randommap-terrain-groups.md part A): forests, mountains, rocks and
 // oil, doobers (draws only), mountain fringe trees, nubified forest edges, tileset base changes and subtype transitions.
-// Cliffs are not placed: Cliffs::position_cliff / verify_defensive_position were never decoded (see the report).
+// Cliffs are placed by mapgen_cliffs.cpp (Cliffs::position_cliff and friends).
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -330,6 +330,10 @@ bool Gen::drop_tile(const GroupEntry& g, GroupRun& run, int x, int y, int stay_n
 		set_oil_at(x, y, true);
 		run.tiles.push_back({x, y});
 		return true;
+	case kCliffs:  // Cliffs::position_cliff(x, y, shape - 1, -1, -1, 0, FACE_WORLD_CENTER): a region group's cliff
+		if (position_cliff(x, y, range_index - 1, -1, -1, 0, 0) == 0) return false;
+		run.tiles.push_back({x, y});
+		return true;
 	default: return false;
 	}
 }
@@ -601,7 +605,12 @@ bool Gen::place_player_group(const GroupEntry& g, int type_t, int size, int p, i
 					if (add_mountain(range_index, x, y, g, g.mount_space, g.forest_space, g.rock_space, g.coast_space, g.start_min, 5))
 						return true;
 				} else if (g.type == kCliffs) {
-					// Cliffs::position_cliff / verify_defensive_position are not decoded
+					// place_player_group @6a4190: the size index is the clump size - 1; the largest (4) skips the defensive test and
+					// places in the lenient mode
+					const int cs = size - 1;
+					const bool mode = cs == 4;
+					if ((mode || verify_defensive_position(x, y, st.x, st.y, g.cliff_face)) && position_cliff(x, y, cs, st.x, st.y, mode ? 1 : 0, g.cliff_face) != 0)
+						return true;
 				} else if (g.type == kTrees && shape && !shape->ox.empty()) {
 					const int dm = r.mask(3);
 					const int mx = kCornerX[dm], my = kCornerY[dm];

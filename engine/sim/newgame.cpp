@@ -37,6 +37,157 @@ RandomGameSetup default_random_setup(int num_nations) {
 	return s;
 }
 
+// ---------------------------------------------------------------- the conquest map input in the setup text
+
+namespace {
+
+std::string pct_encode(const std::string& v) {
+	std::string o;
+	for (unsigned char c : v) {
+		if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '-') {
+			o += char(c);
+		} else {
+			static const char* hex = "0123456789abcdef";
+			o += '%';
+			o += hex[c >> 4];
+			o += hex[c & 15];
+		}
+	}
+	return o;
+}
+
+bool pct_decode(const std::string& v, std::string& out) {
+	out.clear();
+	for (size_t i = 0; i < v.size(); i++) {
+		if (v[i] != '%') {
+			out += v[i];
+			continue;
+		}
+		if (i + 2 >= v.size()) return false;
+		auto hv = [](char c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1; };
+		const int a = hv(v[i + 1]), b = hv(v[i + 2]);
+		if (a < 0 || b < 0) return false;
+		out += char(a * 16 + b);
+		i += 2;
+	}
+	return true;
+}
+
+std::vector<std::string> split_text(const std::string& s, char sep) {
+	std::vector<std::string> out;
+	size_t p = 0;
+	for (;;) {
+		const size_t e = s.find(sep, p);
+		if (e == std::string::npos) {
+			out.push_back(s.substr(p));
+			return out;
+		}
+		out.push_back(s.substr(p, e - p));
+		p = e + 1;
+	}
+}
+
+bool to_int(const std::string& s, long long* v) {
+	if (s.empty()) return false;
+	char* end = nullptr;
+	*v = std::strtoll(s.c_str(), &end, 10);
+	return end && *end == 0;
+}
+
+}  // namespace
+
+std::string conquest_input_string(const mapgen::ConquestInput& in) {
+	std::ostringstream o;
+	o << "1." << (in.sea ? 1 : 0) << '.' << in.side << '.' << in.node_a << '.' << in.node_b << '.' << in.who_b << '.' << in.who_a << '.'
+	  << (in.swap ? 1 : 0) << '.' << in.barbarians << '.' << (in.no_rare ? 1 : 0) << '.' << pct_encode(in.tileset) << '.';
+	for (size_t i = 0; i < in.supporters.size(); i++)
+		o << (i ? "_" : "") << (in.supporters[i].near_second ? 1 : 0) << ':' << in.supporters[i].armies;
+	o << '.';
+	for (size_t i = 0; i < in.ids.size() && i < in.xs.size() && i < in.ys.size(); i++) o << (i ? "_" : "") << in.ids[i] << ':' << in.xs[i] << ':' << in.ys[i];
+	o << '.';
+	// the land bitmap: alternating run lengths, water first
+	bool cur = false;
+	size_t run = 0;
+	bool first = true;
+	for (uint8_t v : in.land) {
+		const bool b = v != 0;
+		if (b == cur) {
+			run++;
+			continue;
+		}
+		o << (first ? "" : ",") << run;
+		first = false;
+		cur = b;
+		run = 1;
+	}
+	o << (first ? "" : ",") << run;
+	return o.str();
+}
+
+bool parse_conquest_input(const std::string& text, mapgen::ConquestInput& out) {
+	const std::vector<std::string> f = split_text(text, '.');
+	if (f.size() != 14 || f[0] != "1") return false;
+	long long v[10];
+	const int idx[9] = {1, 2, 3, 4, 5, 6, 7, 8, 9};
+	for (int i = 0; i < 9; i++) {
+		if (!to_int(f[size_t(idx[i])], &v[i])) return false;
+	}
+	mapgen::ConquestInput c;
+	c.sea = v[0] != 0;
+	c.side = int(v[1]);
+	c.node_a = int(v[2]);
+	c.node_b = int(v[3]);
+	c.who_b = int(v[4]);
+	c.who_a = int(v[5]);
+	c.swap = v[6] != 0;
+	c.barbarians = int(v[7]);
+	c.no_rare = v[8] != 0;
+	if (c.side <= 0 || c.side > 8192) return false;
+	if (!pct_decode(f[10], c.tileset)) return false;
+	if (!f[11].empty()) {
+		for (const std::string& e : split_text(f[11], '_')) {
+			const std::vector<std::string> p = split_text(e, ':');
+			long long a, b;
+			if (p.size() != 2 || !to_int(p[0], &a) || !to_int(p[1], &b)) return false;
+			mapgen::ConquestSupporter sp;
+			sp.near_second = a != 0;
+			sp.armies = int(b);
+			c.supporters.push_back(sp);
+		}
+	}
+	if (!f[12].empty()) {
+		for (const std::string& e : split_text(f[12], '_')) {
+			const std::vector<std::string> p = split_text(e, ':');
+			long long a, b, d;
+			if (p.size() != 3 || !to_int(p[0], &a) || !to_int(p[1], &b) || !to_int(p[2], &d)) return false;
+			c.ids.push_back(int(a));
+			c.xs.push_back(int(b));
+			c.ys.push_back(int(d));
+		}
+	}
+	const size_t cells = size_t(c.side) * size_t(c.side);
+	c.land.assign(cells, 0);
+	size_t pos = 0;
+	bool cur = false;
+	for (const std::string& e : split_text(f[13], ',')) {
+		long long n;
+		if (!to_int(e, &n) || n < 0 || pos + size_t(n) > cells) return false;
+		if (cur) std::fill(c.land.begin() + std::ptrdiff_t(pos), c.land.begin() + std::ptrdiff_t(pos + size_t(n)), uint8_t(1));
+		pos += size_t(n);
+		cur = !cur;
+	}
+	if (pos != cells) return false;
+	c.valid = true;
+	out = std::move(c);
+	return true;
+}
+
+namespace {
+std::string g_battle_setup_text;
+}
+void set_battle_setup_text(const std::string& text) { g_battle_setup_text = text; }
+std::string battle_setup_text() { return g_battle_setup_text; }
+
 std::string random_setup_string(const RandomGameSetup& s) {
 	std::ostringstream o;
 	o << "random:style=" << s.map_style << ";size=" << s.map_size << ";seed=" << s.seed << ";n=" << s.num_nations
@@ -46,6 +197,10 @@ std::string random_setup_string(const RandomGameSetup& s) {
 	  << ";poplimit=" << s.pop_limit << ";techcost=" << s.tech_cost << ";rush=" << s.rush_rules << ";reveal=" << s.reveal_map
 	  << ";rules=" << s.game_rules << ";speed=" << s.game_speed << ";randstarts=" << (s.randomize_starts ? 1 : 0)
 	  << ";nopowers=" << (s.no_tribe_powers ? 1 : 0);
+	if (s.ctw) o << ";ctw=1";
+	if (!s.conquest.empty()) o << ";conq=" << s.conquest;
+	if (!s.battle_runtime.empty()) o << ";btrt=" << pct_encode(s.battle_runtime);
+	if (!s.battle_setup.empty()) o << ";btsu=" << pct_encode(s.battle_setup);
 	for (int i = 0; i < 8; i++) {
 		const NationSetup& n = s.nation[size_t(i)];
 		o << ";p" << i << "=" << n.tribe << "," << n.team << "," << (n.human ? 1 : 0) << "," << n.difficulty << "," << n.color;
@@ -88,6 +243,10 @@ bool parse_random_setup(const std::string& text, RandomGameSetup& out) {
 		else if (k == "speed") s.game_speed = int(n);
 		else if (k == "randstarts") s.randomize_starts = n != 0;
 		else if (k == "nopowers") s.no_tribe_powers = n != 0;
+		else if (k == "ctw") s.ctw = n != 0;
+		else if (k == "conq") s.conquest = v;
+		else if (k == "btrt") { if (!pct_decode(v, s.battle_runtime)) return false; }
+		else if (k == "btsu") { if (!pct_decode(v, s.battle_setup)) return false; }
 		else if (k.size() == 2 && k[0] == 'p' && k[1] >= '0' && k[1] <= '7') {
 			NationSetup& ns = s.nation[size_t(k[1] - '0')];
 			int f[5] = {-1, -1, 0, 2, -1};
@@ -654,6 +813,16 @@ std::unique_ptr<Game> new_random_game(const GameFiles& files, const Rules& rules
 		p.team[size_t(i)] = i < n && S.nation[size_t(i)].team >= 0 ? S.nation[size_t(i)].team : 8;
 		p.tribe[size_t(i)] = i < n ? S.nation[size_t(i)].tribe : i;
 	}
+	// A save of a Conquer the World battle (or the battle builder, which keeps its own scope open) supplies the conquest map input.
+	mapgen::ConquestInput conquest_in;
+	std::unique_ptr<mapgen::ConquestScope> conquest_scope;
+	if (!S.conquest.empty() && !mapgen::conquest_input()) {
+		if (!parse_conquest_input(S.conquest, conquest_in)) {
+			X.error = "malformed conquest map input in the setup";
+			return nullptr;
+		}
+		conquest_scope = std::make_unique<mapgen::ConquestScope>(&conquest_in);
+	}
 	X.result = mapgen::generate_into(g, files, p);
 	const mapgen::Result& res = X.result;
 	if (!res.ok) {
@@ -780,6 +949,22 @@ std::unique_ptr<Game> new_random_game(const GameFiles& files, const Rules& rules
 	snapshot_objects(g, S, X.scenario);
 	Scenario no_scripts;
 	script_host_load(g, files, std::string(), no_scripts);
+	if (g.scripts && (!S.battle_runtime.empty() || !S.battle_setup.empty())) {
+		// ConquestGame::build_battle's style scripts: the runtime script every frame, the setup script (not run here: its effects are in a save)
+		ScriptHost& h = *g.scripts;
+		auto base_name = [](std::string p) {
+			for (char& c : p) {
+				if (c == '\\') c = '/';
+			}
+			const size_t slash = p.find_last_of('/');
+			if (slash != std::string::npos) p = p.substr(slash + 1);
+			const size_t dot = p.find_last_of('.');
+			return dot == std::string::npos ? p : p.substr(0, dot);
+		};
+		std::string err;
+		if (!S.battle_runtime.empty() && h.compile(S.battle_runtime, &err)) h.scenario_script = bhs::to_u16(base_name(S.battle_runtime));
+		if (!S.battle_setup.empty()) h.compile(S.battle_setup, &err);
+	}
 	return gp;
 }
 

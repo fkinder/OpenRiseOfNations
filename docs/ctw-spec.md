@@ -280,6 +280,13 @@ script and the CtW setup script; `Map::place_resources` skips goods with `exclud
 (`Object::do_damage`, `Unit::close` when the unit type is `hero_type` and it is the console player's); `Unit::close` bumps `CommandPackage::random_seeds`. The flag is
 cleared in `ConquestGame::close` @79adc0; **where it is set is ❓** (window code).
 
+**Conquest map styles 24 / 25 exist in the port** (`mapgen_conquest.cpp`, docs/randommap-spec.md fourth pass; the campaign layer feeds them through
+`conquest_battle_input` in `ctw_battle.cpp`: the square of the two countries' silhouettes from the PNG pieces, `start_who`, the supporters, the
+barbarians, the tileset, `no_rare`). A generated battle is therefore on the conquest map, not on a plain random one, and a native save of the battle keeps
+that input in its `random:` setup text (`ctw=1;conq=...;btrt=...;btsu=...`, `RandomGameSetup`, fifth pass of randommap-spec.md), so loading it
+regenerates the same map; style 26 is the campaign's own `.scx`, loaded by `build_battle` as a scenario. No recording of a conquest battle exists here: the
+maps are checked by reading (`ron-mapgen --ctw`).
+
 **Start positions.** `MapConquest::add_additional_players` places the extra nations near the main two (`game_random` draw); `check_starting_loc` / `check_sea_map` validate land/sea. 
 `build_cities` @796140 (per seat `who`): none when `starting_town == 0`, nation flag 0x80, or by map style (1 No City, 8 Custom: none; 2 only seat 0; 3 only seat 1; 6/7 only seats 0..1);
 a CITY at the start; name from the node's `capital_name` or `get_city_name` (rotates through the nation's `CITIES`, `city_name_mark[slot]`); `small/large_city_buildings`; then for the
@@ -398,4 +405,4 @@ per-node/leader/army state above, the per-link `available_links` is recomputed. 
 `ConquestDiploOffer` internals and the `.bhs` bodies beyond what the runtime executes; where the CtW flag is set and the campaign list is built
 (`ConquestSetupWin`/`ConquestWin`); `VALID_NATION` effect beyond the player pick; `common_res*`; the CtW replay header; `game_end = 9`; the `distance` /
 `battle_cat` link fields; the player's own nuke targets and retaliation choice (UI, a priority-node heuristic is used); the espionage missions' exact
-enemy seats (they come from the style map); `adjust_attitudes` (no effect in shipped order). Map styles 24-26 belong to the map generator.
+enemy seats (they come from the style map); `adjust_attitudes` (no effect in shipped order). Map styles 24-26 belong to the map generator (24 / 25 implemented, see §5.3).

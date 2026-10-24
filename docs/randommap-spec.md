@@ -404,8 +404,8 @@ Result of the third pass on the seven worlds (`ron-mapgen --compare`, differing 
   nearest influence point sits at the generator cell plus the jitter of its LAST neighbour (`jn`) for the two cases examined closely ((42,36), (37,34))
   while the majority (155) is right with the generator's own jitter, and forcing `jn` for all, the first neighbour, the target cell's own jitter or
   a shared jitter are each much worse. The rule that selects them is not found.
-- `Cliffs::init` and `TerrainOut::adjust_for_mountains` are not ported (mountain height faces, `has_plus_slope`): the remaining land-height
-  differences (11105 of 82104 vertices) and the 51 `blocked` cells.
+- `Cliffs::init` and `TerrainOut::adjust_for_mountains` were not ported at the time (mountain heights); done in the fifth pass below, which
+  also corrects the attribution of `val` / `blocked` / `bad` / `solid` to them: those are the start cities.
 
 ### Fourth pass (2026-10-24): the conquest map styles (24 / 25), the PNG reader, the lake-corner heights
 
@@ -484,9 +484,125 @@ Result (`ron-mapgen --compare`; differing cells / bit-exact vertices, before -> 
 | shore vertices (-30 .. 60) | 9218 -> 32183 / 32610 | 4501 -> 33878 / 36554 | 3828 -> 29701 / 34660 | 3206 -> 18839 / 21883 | 7366 / 7483 | 7810 / 7927 | 6313 / 6375 |
 | land vertices >= 60 | 70999 -> 72103 / 82104 | 15621 -> 15920 / 29946 | 9418 -> 9645 / 28357 | 6003 -> 6218 / 15592 | 71904 / 92897 | 70621 / 92148 | 78715 / 94528 |
 
-Open on the height grid: the 2 shelf vertices of `current 2` that are 0.01 off, the shore vertices under river troughs (max 29, e.g. (283, 91)) and the mountains / cliffs (`Cliffs::init`, `TerrainOut::adjust_for_mountains`,
-still not ported: `val` 756, `blocked` / `bad` / `solid` 51 / 87 / 51 in `current 2` are unchanged). The two remaining rock-flag cells are moved derricks (above).
+Open on the height grid: the 2 shelf vertices of `current 2` that are 0.01 off and the shore vertices under river troughs (max 29, e.g. (283, 91)). (The mountains and the
+cliffs were ported in the fifth pass below, which also shows that `val` / `blocked` / `bad` / `solid` come from the start cities; the two rock-flag cells were `TerrainOil::create_doobers`.)
 
-What remains of the conquest part: no oracle (no recording of a conquest battle on this Mac), so the maps are checked by reading, not against a save; a native battle save (`ronmap` F5) of a CtW battle regenerates
-its map from the setup text, which does not carry the conquest input (a battle resumed from such a save is on a plain random map: the setup text would need the link, or the input itself); style 4-7 battles leave the other
+What remains of the conquest part: no oracle (no recording of a conquest battle on this Mac), so the maps are checked by reading, not against a save; a native battle save (`ronmap` F5) of a CtW battle
+carries the conquest input in its setup text since the fifth pass; style 4-7 battles leave the other
 seat without a city (as the original's start lists do); `Map::force_continent_spacing` is now in the port but only the conquest path calls it (the recipes of the shipped styles do not).
+
+### Fifth pass (2026-10-24): mountain heights, the oil terraform, cliffs; the `val` / `blocked` premise corrected; conquest battle saves
+
+**The `val` / `blocked` / `bad` / `solid` differences are not mountains or cliffs.** The seven saves hold no cliff at all (no WData flag 0x40, no
+cliff tcoord), and in `current 2.SVX` (the only fresh game, frame 189) every one of the 756 `val` differences lies 8 to 11 wcoords from a start
+(`ron-mapgen --compare` compares the generator's world, which has no starting cities): `City::fix_world_vals` @735aa0 (`>>= 2` inside the city
+radius, `>>= 1` on the ring beyond it, called by `Cities::init_city`; ported in `cities.cpp`) lowers `val` around every start city, and the town's
+buildings, roads and cleared trees are the `blocked` / `bad` / `solid` / flag 0x80 / flag 0x4000 cells (all within 5 wcoords of a start). `ron-mapgen
+--compare ... --game` (new) compares the world of `new_random_game` instead (generator + start cities):
+
+| | current 2 | current RN | east indies 2 | East indies final surround | DO NOT DELETE | DO NOT DELETE 2 | curent dec 14 |
+|---|---|---|---|---|---|---|---|
+| val | 756 -> 92 | 1572 -> 1497 | 1544 -> 1513 | 825 -> 762 | 4041 -> 4000 | 3719 -> 3691 | 3023 -> 2815 |
+| blocked | 51 -> 48 | 813 -> 810 | 1066 -> 1051 | 869 -> 857 | 460 -> 453 | 607 -> 598 | 555 -> 551 |
+| bad | 87 -> 103 | 1498 -> 1493 | 1934 -> 1927 | 1461 -> 1447 | 767 -> 755 | 867 -> 862 | 854 -> 847 |
+| solid | 51 -> 48 | 813 -> 810 | 1066 -> 1051 | 869 -> 857 | 460 -> 453 | 607 -> 598 | 555 -> 551 |
+| WData.flags (all bits) | 132 -> 137 | 1628 -> 1614 | 2320 -> 2288 | 1281 -> 1259 | 1357 -> 1340 | 1337 -> 1322 | 1079 -> 1068 |
+
+(`current 2`: 756 -> 92 `val` cells; the late-game saves keep their farms, roads, AI buildings and felled trees. The 92 left in `current 2` are the
+ring of the Indians' seat: the save's city radius is 20 where `get_radius` gives 24 (`indians_city_radius`, tribe bonus 0x15), i.e. the bonus is not
+active yet when the original founds the start city; forcing 20 there leaves 41 cells. `cities.cpp` / `techs.cpp` are not part of this pass. `bad`
+in `current 2` is 87 -> 103: our town has other buildings than the save's after 189 frames of AI building.)
+
+**Terrain::init's order** (`Terrain::init` @850f70), the part after the half-land check: `TerrainOil::create_doobers` @8a28e0 (oil patches) ->
+`generate_skirts` -> ... -> `convert_beach_to_sandy` -> `Map::make_rivers` @692fb0 -> `RiversOut::calculate_all` -> **`TerrainOut::adjust_for_mountains(0)`
+@8703c0** -> **`Cliffs::init` @8a8020** (`param_2 == 0`).
+
+**Mountain heights** (`engine/sim/mapgen_mountains.cpp`, `Gen::mountain_heights`, called after `make_rivers`). `adjust_for_mountains(0)` walks the placed
+mountains in placement order (`Mountains::add_mountain` @89c2e0 stores the stamp location `(768 wx, 768 wy)` as floats, the range index in the list
+at +0xc4/+0xd0); for every face wcoord of the range (the distinct wcoords of its complete cells, list +0x50/+0x6c) it calls `TerrainOut::fill_mountain_data`
+@869380 twice (the 8-pixel LOD set with `param_6 = 1`, then the 4-pixel set with `param_6 = 0`); only the second writes the heights: for each of the 5 x 5
+grid vertices `(tx, ty)` of the wcoord, the template vertex with `|x + loc.x - 192 tx| < 0.01` and `|y + loc.y - 192 ty| < 0.01` that has not been
+emitted for this mountain yet adds its z: `height[ty * (4 xs + 1) + tx] = height + z` (single precision; overlapping mountains add one after the other).
+The template z is `MountainRange::init` @8998b0: `((float)blue + 0.0) * (height * 3.0) / 255.0` on the lattice `x = ox + 4 i`, `y = oy + 4 j`
+(`ox = (W/2) mod 16`), alpha != 0, position `((x - W/2) * 192 * 0.25, (y - H/2) * 192 * 0.25)`; `height` is the `<MOUNTAIN height>` of
+`effects_graphics.xml`. The same function marks the covered CoordInfo (flag 2, peak flag 0x200 with the snowcap offsets, `mountain_number`) and builds
+the render face lists: renderer data, not ported.
+
+**Oil sites are terraformed** (`TerrainOil::create_doobers` @8a28e0 -> `add_rocky_patch` @8a2b30 -> `TerrainOut::terraform_for_building` @875210; the same
+function also runs from `Build::init` / `Wall::init`, so buildings level the ground in a game). `create_doobers` walks the wcoords y outer / x inner: a
+wcoord that stands on open water (land 1 / 2 without 0x100) loses its rock flag 0x8 (this was the "moved derrick" rock flag of `(16, 36)`); a rock
+wcoord that stays rock, or a wcoord with a good that the console leader cannot use yet (`type_avail == 0`, assumed for every good) and is not open water,
+gets a rocky patch, and the patch of a wcoord with the OIL flag 0x800 calls `terraform_for_building(4 wx, 4 wy, 4, 4)`: the heights of the vertices
+`[tx - 1, tx + 6] x [ty - 1, ty + 6]` except the far corner (a vertex of height <= 0 aborts), summed in the order column x1 / row y1 / block, give an average;
+each tcoord `[tx - 1, tx + 5] x [ty - 1, ty + 5]` whose wcoord is not open water, with no mountain / cliff tcoord (`mask & 3` = 2 / 1) among itself and its
+8 neighbours, `land == 0`, and no good on a resource tcoord (0x200), gets the average on its NW vertex, or the mean of the old height and the average on
+the outer ring of the block. Result: a flat 5 x 5 plateau under every oil site (`current 2` (2, 1): 276.3 everywhere). Ported in
+`mapgen_terrain_init.cpp` (`TerrainInit::create_doobers`, between the half-land check and `convert_beach_to_sandy`). The doober geometry itself uses
+`internal_random`, not `game_random`: no draw.
+
+Result (`ron-mapgen --compare`, generator only, before -> after; bit-exact vertices / total):
+
+| | current 2 | current RN | east indies 2 | East indies final surround | DO NOT DELETE | DO NOT DELETE 2 | curent dec 14 |
+|---|---|---|---|---|---|---|---|
+| land vertices >= 60 bit-exact | 72103 -> 80636 / 82104 | 15920 -> 19329 / 29946 | 9645 -> 13531 / 28357 | 6218 -> 8458 / 15592 | 71904 -> 76676 / 92897 | 70621 -> 74038 / 92148 | 78715 -> 83691 / 94528 |
+| shore vertices (-30 .. 60) bit-exact | 32183 -> 32504 / 32610 | 33878 -> 34175 / 36554 | 29701 -> 30216 / 34660 | 18839 -> 19281 / 21883 | 7366 -> 7432 / 7483 | 7810 -> 7862 / 7927 | 6313 -> 6375 / 6375 |
+| shelf vertices (-250 .. -30) bit-exact | 15384 -> 15384 / 15386 | 29790 -> 29797 / 29797 | 29482 -> 29492 / 29492 | 19710 -> 19720 / 19720 | 2648 -> 2653 / 2661 | 2952 -> 2954 / 2966 | 2138 -> 2138 / 2138 |
+| rock flag 0x8 differing cells | 1 -> 0 | 2 -> 0 | 0 -> 0 | 1 -> 0 | 0 -> 0 | 0 -> 0 | 0 -> 0 |
+| WData.flags (all bits) differing cells | 132 -> 131 | 1628 -> 1627 | 2320 -> 2320 | 1281 -> 1281 | 1357 -> 1357 | 1337 -> 1337 | 1079 -> 1079 |
+| game_random draws of the generator | 53769 -> 53769 | 58209 -> 58209 | 53854 -> 53854 | 42487 -> 42487 | 15661 -> 15661 | 14089 -> 14089 | 12625 -> 12625 |
+
+What is left on the land vertices of `current 2` (1468 of 82104): 1257 lie within 2 wcoords of the save's town (buildings and roads: `terraform_for_building` of
+`Build::init`, a game-time step the generator does not run), 211 up to 14 wcoords away (roads); the rest of the table is the same kind (the late games'
+towns). Shelf: every vertex is exact on three of the East Indies worlds and `curent dec 14` (the ten off in the final surround and the seven in current RN
+were mountain vertices over the shelf); the 2 shelf vertices of `current 2` that are 0.01 off and the shore vertices under river troughs (max 22) remain.
+The generator's draw counts are unchanged on all seven worlds (mountains, the oil terraform and `Cliffs::init` draw nothing; the styles of the seven worlds
+have no cliff group), so the 189-frame check of `current 2` (`--play189`) is unaffected.
+
+**Cliffs** (`engine/sim/mapgen_cliffs.cpp`; only `SOUTHWESTMESA.xml` has cliff groups, `default.xml`'s two entries are replaced by every style's own
+`<TERRAIN_GROUPS>`; there is no oracle). Data: `CliffsOut::init_templates` @8a71a0 reads `Data/Cliffs.xml` (124 `<CLIFF path orientation>`: 36 each of 8 / 16 / 32
+pixels with orientation 1, 4 each of 64 pixels with orientations 1..4), the TGA of each is `D x D`, **size index** 4 / 3 / 2 / 1 for D = 64 / 32 / 16 / 8
+(0 otherwise); per pixel `height = blue * 0.003921569 * 480`; the template's **cliff wcoords** (a `WCoordList`, row by row) are the 4 x 4 pixel blocks that
+contain an alpha-0 pixel, or, when the image has none, the blocks whose 6 x 5 height window (x `4bx - 1 .. 4bx + 4`, y `4by - 1 .. 4by + 3`, outside = 0)
+spans more than 192. Tables: `offtable` @af2fb0 = {0, -1, -2, -4, -8} (the template origin in wcoords), `index_to_size` @af2fd0 = {4, 8, 16, 32, 64} (the
+side in tcoords). The `Cliffs` object keeps, per size index, three arrays (stride 0x1c, bases 0xe894b0 heights, 0xe8953c orientations, 0xe895c8
+WCoordLists) and the placed list (16-byte records `x, y, size, template`, 0xe89654).
+- `place_player_group` @6a4190 (cliff branch): size index `s = shape - 1` (`local_54`); `mode = (s == 4)`; unless `s == 4` the candidate must pass
+  `verify_defensive_position(c, start, cliff_face)` @8a8680: facing 2 (`FACE_ANY`) passes; facing 0 compares the direction start -> `(xs/2, ys/2)` with
+  start -> c: normalised in single precision (`1 / sqrtf`), `acos` in double, `|angle| < 22.5` degrees; any other facing (1, and the default -1) uses the
+  integer mean of the starts and `17.5`. Then `position_cliff(c, s, start, mode, cliff_face)`.
+- `drop_tile` @6a2ab0 case 8 (region groups): `position_cliff(x, y, shape - 1, -1, -1, 0, FACE_WORLD_CENTER)`; `place_all` @6a70d0 passes
+  `shape = size` for the continent pattern and `max(size - 1, 1)` for the world patterns, so the size index is `size - 1` there and `size - 2` in the
+  world patterns (size index 0 has no template: such a cliff always fails).
+- `position_cliff` @8a8bc0: wanted orientation: mode 0 with a start: NW 1 / NE 2 / SE 3 / SW 4 by the sign of `y - sy` and `x - sx` (the table {1, 2, 4, 3} is
+  indexed by `(dy < 0 ? -2 : 0) + (dx >= 0 ? 1 : 0)` from -2); mode 0 without a start: any; mode 1 with `facing < 2` (unsigned compare): the same
+  quadrant rule on `(xs/2 - sx, xs/2 - sy)`; mode 1 otherwise: orientation 1 only. Every template of the size with that orientation that passes
+  `verify_placement` @8a6310 is a candidate; **one `game_random` draw `Random::get(0, 0xffff) % n` when there are several**, none for one; no candidate
+  returns 0; `add_cliff` @8a6690 places it.
+- `verify_placement(x, y, s, i, mode)`: for each cliff wcoord `(x + off + lx, y + off + ly)`: off the map fails in mode 0 and is skipped in mode 1; the first
+  on-map cell passes at once in mode 1; else none of the 48 cells around may have a cliff flag 0x40 (the first 8 not a forest 0x20 either), and the cell
+  itself no mountain / forest / rock / oil, not open water, no river 0x1000, no cliff, `blocked == 0`.
+- `add_cliff`: records the placement and sets the cliff flag 0x40 on every template wcoord that `TerrainOut::is_clear_land` @874b60 accepts with mask 2
+  (mode 0) or 0x22 (mode 1) (no mountain / forest / rock / oil / open water / river / cliff (0x22 lets a cliff stand) and `blocked == 0` unless the mask has
+  one of 0x165). Bit 7 of the mask turns the goody / good tests ON in that function (`TEST BL,BL; JNS`): `TerrainInit::is_clear_land_oil` in
+  `mapgen_terrain_init.cpp` applies them when the bit is CLEAR; its oil results are exact on the seven worlds, so it was left alone.
+- `Cliffs::init` @8a8020 (end of `Terrain::init`): `place_cliff` @8a7ea0 adds the template heights (index running over the `D x D` pixels of every placed
+  cliff in order, even when off the map) on mountain-free, non-ocean, non-river, non-coastal (CoordInfo bit 4) wcoords; then `assess_wcoord` @8a6a40 for every
+  wcoord with flag 0x40 (y outer): each of its 16 tcoords on a wcoord that is not coast (0x4), not land 1 / 2 and not a mountain tcoord, and whose four corner
+  heights differ by more than `tan(25 deg) * 192` (`TerrainOut::has_plus_slope` @869790), becomes a blocked cliff tcoord (`mask = (mask & ~2) | 1`) and so do
+  its 8 neighbours (whose wcoords' goods go through `Terrain::move_goody`); a flagged wcoord with no such tcoord loses 0x40.
+  Not ported: `Cliff::init` (render pieces, `CliffMiningData`) and `Cliffs::set_edge_flags` (TData 0x8000 on the mining tcoords).
+- Southwest Mesa, size 3, 4 nations: seed 3: 19 cliffs, 500 cliff wcoords, 7157 cliff tcoords; seed 5: 14 / 370 / 5340. `ron-mapgen --all`: ok 882, error 0,
+  nondeterministic 0. Unverified against an original recording (none exists on this Mac).
+
+**Conquest battle saves.** A native save (`ronmap` F5) of a Conquer the World battle on a generated map regenerates the map from the scenario slot, as
+every random game does. The slot now carries what the battle builder gave `new_random_game`: `RandomGameSetup` has `ctw`, `conquest` (the encoded
+`mapgen::ConquestInput`: square side, land bitmap as run lengths, the countries' centres, nodes, `start_who`, supporters, barbarians, tileset,
+`no_rare`; about 2.7 kB for a 315 x 315 square) and `battle_runtime` / `battle_setup` (the style's scripts, compiled after the base scripts exactly as
+`build_battle` does, so the loaded game has the same compiled script files), text keys `ctw=1;conq=...;btrt=...;btsu=...`. `new_random_game` opens a
+`ConquestScope` from `conquest` when none is open. The ronmap battle keeps the placeholder scenario path `ctw:battle`; `scenario_rel_path` (save.cpp)
+swaps it for the text `build_battle` registered (`battle_setup_text()`, newgame.hpp). The binary save layout is unchanged (no `kSaveVersion`
+bump); older builds refuse the new keys. `ronmap --ctw-selftest` checks the text round trip, a battle save -> load -> save byte identity, the equal map
+and that the same text without the conquest input regenerates a different map. Still not carried: the campaign link (`ScriptHost::ctw` is a run-time
+link a native save never writes), so a resumed battle reports its outcome to no campaign; custom-map (`.scx`) battles. `ronmap`'s F9 compares the
+save's scenario slot with `_scenarioPath` (`ctw:battle`) before loading and would refuse such a save: `main.mm` should store
+`random_setup_string(extras.setup)`-style text (or `battle_setup_text()`) in `_scenarioPath` for a battle.

@@ -664,6 +664,10 @@ SaveInfo read_header(Reader& top) {
 std::string scenario_rel_path(const GameFiles& files, const std::string& file) {
 	namespace fs = std::filesystem;
 	if (is_random_scenario(file)) return file;  // a random game: the setup text (sim/newgame.hpp)
+	if (file == "ctw:battle") {  // a Conquer the World battle on a generated map: the setup text, conquest map input included
+		const std::string text = battle_setup_text();
+		if (!text.empty()) return text;
+	}
 	std::error_code ec;
 	std::string root = fs::weakly_canonical(files.root(), ec).string();
 	const std::string abs = fs::weakly_canonical(file, ec).string();

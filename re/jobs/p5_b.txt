@@ -1,0 +1,7 @@
+re/decomp/mapgen_p5
+TerrainOil::.*
+TerrainOut::terraform_for_building
+TerrainOut::terraform_for_nuke
+Terrain::terraform_for_building
+Terrain::add_rocky.*
+World::set_oil_at
