@@ -8,7 +8,9 @@
 //   node re/tools/rcxdump.mjs <file> --summary                         header + per-verb counts only
 //   node re/tools/rcxdump.mjs <file> --json out.json                   full decode as JSON
 //   node re/tools/rcxdump.mjs <file> --hex                             also hex-dump each package payload
-//   node re/tools/rcxdump.mjs --survey <dir>                           one line per .rcx under <dir>
+//   node re/tools/rcxdump.mjs --survey <dir> [--checksums out.csv] [--tsv out.tsv]   one line per .rcx under <dir>;
+//                                                                       --checksums writes every CHECK_SUMS package
+//   node re/tools/rcxdump.mjs <file> --checksums out.csv                one file's CHECK_SUMS packages as CSV
 //
 // .rcx files are gzip (RecordGame::finalize recompresses the plain stream on close); a replay whose game crashed
 // is left uncompressed. Both are accepted, as is an already-decompressed dump.
@@ -20,7 +22,7 @@ import { pathToFileURL } from 'node:url';
 // ---------------------------------------------------------------------------------------------------------------
 // Byte reader
 
-class Reader {
+export class Reader {
   constructor(buf, pos = 0) { this.b = buf; this.p = pos; }
   need(n) { if (this.p + n > this.b.length) throw new RangeError(`read past end at ${this.p} (+${n}, size ${this.b.length})`); }
   u8() { this.need(1); return this.b[this.p++]; }
@@ -58,9 +60,14 @@ const SETUP_FIELDS = ['team_style', 'map_style', 'map_size', 'players', 'max_obs
 const SEM = { MULTIPLAYER: [0, 0x04], RECORDING: [0, 0x08], PLAYBACK: [0, 0x10], CONQUEST: [2, 0x02] };
 
 export function readHeader(r) {
-  const h = {};
   r.tag('Game', TAG.Game);
-  // GameInfo::walk_data
+  const h = readGameInfo(r);
+  return readHeaderTail(r, h);
+}
+
+// GameInfo::walk_data (also the first thing in a save after the magic and version, and again inside Game::walk_data).
+export function readGameInfo(r) {
+  const h = {};
   r.tag('GameInfo', TAG.GameInfo);
   h.versionString = r.str();                       // "(Version: 00.2024.06.2000)"
   h.version = r.u32();                             // GameInfo.version (packed Version)
@@ -93,6 +100,11 @@ export function readHeader(r) {
   h.scenarioDir = r.str();
   h.modWorkshopId = r.u64hex();
   h.modPath = r.str();
+  return h;
+}
+
+// The rest of Game::walk_data, then (replay header only) String save_name. A save's Game::walk_data stops after graphic_tick.
+export function readHeaderTail(r, h, withSaveName = true) {
   // Game: [frame, balance) = Game+0x550..0x6e4
   const g = r.bytes(0x194);
   h.frame = g.readInt32LE(0x00);
@@ -104,7 +116,7 @@ export function readHeader(r) {
   h.semaphore = Buffer.from(r.bytes(size));
   h.semaphoreBits = bits;
   h.graphicTick = r.i32();
-  h.saveName = r.str();
+  h.saveName = withSaveName ? r.str() : '';
   const sem = (k) => (h.semaphore[SEM[k][0]] & SEM[k][1]) !== 0;
   h.multiplayer = sem('MULTIPLAYER');
   h.conquest = sem('CONQUEST');
@@ -156,12 +168,22 @@ export function readRules(r) {
   return out;
 }
 
-// RecordGame::write_random_game_info: per active player (flags&1, who<8): team (1 byte) + leader field (+0x0c, 4 bytes);
-// then World+0x30 (4 bytes).
+// RecordGame::write_random_game_info: per player of the *running* game (team (1 byte) + leader field +0x0c (4 bytes)),
+// then World+0x30 (4 bytes). The header's player list is written earlier and is NOT always the same set: in games where
+// players are added after the header (lobby/custom AI games) the block has more entries than the header has flags&1
+// players (observed: 2 header players, 5 or 8 entries). The count is therefore probed (see rgiCount).
 function rgiSize(h) { return 5 * h.players.filter((p) => (p.flags & 1) && p.who < 8).length + 4; }
-export function readRandomGameInfo(r, h) {
+// Number of 5-byte entries for a block starting at `p` that is followed by the 0x92 rules tag (no embedded save).
+export function rgiCount(buf, p, h) {
+  const expect = h.players.filter((q) => (q.flags & 1) && q.who < 8).length;
+  const order = [expect, ...[...Array(9).keys()].filter((n) => n !== expect)];
+  for (const n of order) if (p + 5 * n + 4 < buf.length && buf[p + 5 * n + 4] === TAG.GameRules) return n;
+  return expect;
+}
+export function readRandomGameInfo(r, h, n) {
+  if (n === undefined) n = h.players.filter((p) => (p.flags & 1) && p.who < 8).length;
   const entries = [];
-  for (const p of h.players) if ((p.flags & 1) && p.who < 8) entries.push({ slot: p.slot, team: r.i8(), leaderValue: r.i32() });
+  for (let i = 0; i < n; i++) entries.push({ slot: i, team: r.i8(), leaderValue: r.i32() });
   return { entries, world30: r.i32() };
 }
 
@@ -359,15 +381,22 @@ function readRecord(r) {
   return { at, frame, play, valid, stamp, size, data };
 }
 
-// Try to parse the command stream from `pos` to EOF; returns records or throws.
-function readStream(buf, pos, h, strict = true) {
+// Try to parse the command stream from `pos` to EOF; returns records or throws. A game that crashed leaves a plain
+// (uncompressed) file whose last record is cut short; that partial record is reported in `recs.truncated`
+// ({at, have, need}) instead of failing.
+function readStream(buf, pos, h, strict = true, minFrame = h.frame) {
   const r = new Reader(buf, pos);
   const recs = [];
-  let lastFrame = h.frame;   // records are written during play, which starts at the header frame
+  let lastFrame = minFrame;   // records are written during play, which starts at the loaded game's frame
   while (r.left > 0) {
+    const at = r.p;
+    if (r.left < 18) { recs.truncated = { at, have: r.left, need: 18 }; break; }
+    const size = buf.readInt16LE(at + 16);
+    if (size >= 0 && size <= 0x200 && at + 18 + size > buf.length) { recs.truncated = { at, have: r.left, need: 18 + size }; break; }
     const rec = readRecord(r);
     if (strict) {
       if (rec.play < 0 || rec.play > 7) throw new Error(`bad play ${rec.play} at ${rec.at}`);
+      if (rec.size < 1) throw new Error(`empty package at ${rec.at}`);
       if (rec.frame < lastFrame) throw new Error(`frame ${rec.frame} before ${lastFrame} at ${rec.at}`);
     }
     lastFrame = rec.frame;
@@ -379,24 +408,45 @@ function readStream(buf, pos, h, strict = true) {
   return recs;
 }
 
+// Frame of the game stored in a save, read from the start of WalkDataGame::walk_data (GameInfo, 182 raw bytes of Console and
+// object ranges, then Game::walk_data whose first raw field is Game.frame). `at` points just after magic + version.
+export function embeddedSaveFrame(buf, at) {
+  try {
+    const r = new Reader(buf, at);
+    const gi = readGameInfo(r); void gi;
+    r.bytes(182);
+    r.tag('Game', TAG.Game);
+    return readHeaderTail(r, readGameInfo(r), false).frame;
+  } catch { return null; }
+}
+
 // Embedded save: String magic ("RoNSave" / "RoNMultiSave" / "RoNCTWSave"), u32 sGameSaveVersion, then
 // WalkDataGame::walk_data (not decoded here). The command stream is located by scanning for the earliest offset
 // whose records chain exactly to EOF and which is preceded by the random-game-info block whose team bytes match
 // the header.
-function locateStreamAfterSave(buf, start, h) {
-  const rgi = rgiSize(h);
+function locateStreamAfterSave(buf, start, h, minFrame) {
+  const expect = h.players.filter((p) => (p.flags & 1) && p.who < 8).length;
   const teams = h.players.filter((p) => (p.flags & 1) && p.who < 8).map((p) => p.team);
-  for (let o = start + rgi; o <= buf.length; o++) {
-    // cheap prefilter on the first record header
-    if (o < buf.length) {
-      if (o + 18 > buf.length) continue;
+  const counts = [expect, ...[...Array(9).keys()].filter((n) => n !== expect)];
+  for (let o = start; o <= buf.length; o++) {
+    // cheap prefilter on the first record header (a record cut short by a crash is accepted by readStream)
+    if (o + 18 <= buf.length) {
       const play = buf.readInt32LE(o + 4), size = buf.readInt16LE(o + 16);
-      if (play < 0 || play > 7 || size < 0 || size > 0x200) continue;
+      if (play < 0 || play > 7 || size < 1 || size > 0x200) continue;   // size 0 never occurs; rejecting it also stops zero runs in the save from chaining
     }
-    let ok = true;
-    for (let i = 0; i < teams.length; i++) if (buf.readInt8(o - rgi + 5 * i) !== teams[i]) { ok = false; break; }
-    if (!ok) continue;
-    try { const recs = readStream(buf, o, h); return { pos: o, recs, rgiAt: o - rgi }; } catch { /* keep scanning */ }
+    for (const n of counts) {
+      const rgiAt = o - (5 * n + 4);
+      if (rgiAt < start) continue;
+      let ok = true;
+      if (n === expect) { for (let i = 0; i < teams.length; i++) if (buf.readInt8(rgiAt + 5 * i) !== teams[i]) { ok = false; break; } }
+      else for (let i = 0; i < n; i++) { const t = buf.readInt8(rgiAt + 5 * i), l = buf.readInt32LE(rgiAt + 5 * i + 1); if (t < -1 || t > 8 || l < 0 || l > 255) { ok = false; break; } }
+      if (!ok) continue;
+      try {
+        const recs = readStream(buf, o, h, true, minFrame);
+        if (recs.length === 0 && !recs.truncated) continue;
+        return { pos: o, recs, rgiAt, n };
+      } catch { /* keep scanning */ }
+    }
   }
   return null;
 }
@@ -421,19 +471,20 @@ export function decodeReplay(buf) {
   if (savePresent && !h.conquest) {
     const sr = new Reader(buf, r.p);
     out.save = { at: r.p, magic: sr.str(), version: sr.u32(), dataAt: sr.p };
-    const loc = locateStreamAfterSave(buf, sr.p, h);
+    out.save.frame = embeddedSaveFrame(buf, sr.p);   // frame of the game inside the embedded save (may differ from the header's)
+    const loc = locateStreamAfterSave(buf, sr.p, h, out.save.frame ?? h.frame);
     if (!loc) throw new Error('could not locate the command stream after the embedded save');
     out.save.size = loc.rgiAt - out.save.at;
     const rr = new Reader(buf, loc.rgiAt);
-    out.randomGameInfo = readRandomGameInfo(rr, h);
+    out.randomGameInfo = readRandomGameInfo(rr, h, loc.n);
     out.streamAt = loc.pos; out.records = loc.recs;
     out.located = 'scan';
   } else if (h.conquest) {
-    const loc = locateStreamAfterSave(buf, r.p, h);
+    const loc = locateStreamAfterSave(buf, r.p, h, h.frame);
     if (!loc) throw new Error('could not locate the command stream');
     out.streamAt = loc.pos; out.records = loc.recs; out.located = 'scan';
   } else {
-    out.randomGameInfo = readRandomGameInfo(r, h);   // present when GameInfo.version > 03.02.03.2905 (all EE builds)
+    out.randomGameInfo = readRandomGameInfo(r, h, rgiCount(buf, r.p, h));   // present when GameInfo.version > 03.02.03.2905 (all EE builds)
     const rules = readRules(r);
     out.rules = { at: rules.start, size: rules.end - rules.start, types: rules.types.length,
       sample: rules.types.filter((t, i) => [0, 50, 414, 543, 544, 629, 684].includes(i)).map((t) => `${t.index}:${t.cls}:${t.name}`) };
@@ -468,7 +519,8 @@ function printSummary(file, d, compressed, opts) {
   }
   if (h.scenarioPath || h.scenarioScript || h.modPath) log(`  scenario=${JSON.stringify(h.scenarioPath)} script=${JSON.stringify(h.scenarioScript)} mod=${JSON.stringify(h.modPath)}`);
   log(`  save_name=${JSON.stringify(h.saveName)}  header ends @${d.headerEnd}`);
-  if (d.save) log(`  embedded save @${d.save.at}: ${JSON.stringify(d.save.magic)} version=${d.save.version} size=${d.save.size}`);
+  if (d.save) log(`  embedded save @${d.save.at}: ${JSON.stringify(d.save.magic)} version=${d.save.version} size=${d.save.size} game frame=${d.save.frame}${d.save.frame !== h.frame ? ` (header says ${h.frame})` : ''}`);
+  if (d.records.truncated) log(`  warning: truncated last record @${d.records.truncated.at} (${d.records.truncated.have} of ${d.records.truncated.need} bytes): the game crashed or was killed while recording`);
   if (d.randomGameInfo) log(`  random game info: ${d.randomGameInfo.entries.map((e) => `p${e.slot}:team=${e.team},leader+0c=${e.leaderValue}`).join(' ')} world+30=${d.randomGameInfo.world30}`);
   if (d.rules) log(`  rules @${d.rules.at}: ${d.rules.size} bytes, ${d.rules.types} types (${d.rules.sample.join(', ')})`);
   for (const w of d.warnings) log(`  warning: ${w}`);
@@ -487,28 +539,77 @@ function printSummary(file, d, compressed, opts) {
   }
 }
 
-function survey(dir) {
+// One survey row per replay (no player names): see docs/oracle-corpus.md.
+export function describeReplay(file) {
+  const { buf, compressed } = loadReplay(file);
+  const d = decodeReplay(buf);
+  const h = d.header, recs = d.records;
+  const sums = [];
+  for (const rec of recs) for (const c of rec.cmds) if (c.op === 57) sums.push({ frame: rec.frame, play: rec.play, v: Object.values(c.args) });
+  const players = h.players.filter((p) => p.flags & 1).length;
+  return {
+    file: path.basename(file), gz: compressed, bytes: buf.length,
+    mode: h.multiplayer ? 'MP' : 'SP', teamStyle: h.setup.team_style, mapStyle: h.setup.map_style, mapSize: h.setup.map_size,
+    players, slots: d.randomGameInfo ? d.randomGameInfo.entries.length : players,
+    scenarioType: h.setup.scenario_type, scenario: !!h.scenarioPath, script: h.scenarioScript, ctw: h.conquest,
+    save: d.save ? d.save.size : 0, startFrame: d.save?.frame ?? h.frame, headerFrame: h.frame, firstFrame: recs.length ? recs[0].frame : null,
+    pkgs: recs.length, cmds: recs.reduce((n, r) => n + r.cmds.length, 0),
+    nSums: sums.length, firstSum: sums.length ? sums[0].frame : null, lastSum: sums.length ? sums.at(-1).frame : null,
+    lastFrame: recs.length ? recs.at(-1).frame : h.frame,
+    located: d.located, truncated: recs.truncated ?? null, exact: d.located === 'exact' && !recs.truncated,
+    seed: h.seed, sums,
+  };
+}
+
+function walkRcx(dir) {
   const files = [];
-  const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (/\.rcx$/i.test(e.name)) files.push(p); } };
+  const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (/\.rcx$/i.test(e.name)) files.push(p); } };
   walk(dir);
-  let ok = 0;
+  return files;
+}
+
+const CSV_HEAD = ['frame', 'play', 'units', 'builds', 'walls', 'ammo', 'deaths', 'groups', 'guys', 'leaders', 'cities', 'items', 'goods', 'world', 'rules', 'scenario_data', 'script_run_time', 'all'];
+
+// opts.csv: write every CHECK_SUMS package (file,frame,play,16 x u32) to this path.
+function survey(dir, opts = {}) {
+  const files = walkRcx(dir);
+  const rows = [];
+  const csv = opts.csv ? [['file', ...CSV_HEAD].join(',')] : null;
+  let ok = 0, exact = 0, trunc = 0;
   for (const f of files) {
     try {
-      const { buf, compressed } = loadReplay(f);
-      const d = decodeReplay(buf);
-      const n = d.records.reduce((s, r) => s + r.cmds.length, 0);
-      console.log(`OK   ${f}${compressed ? '' : ' (plain)'}  ${d.header.multiplayer ? 'MP' : 'SP'} pkgs=${d.records.length} cmds=${n} lastFrame=${d.records.at(-1)?.frame ?? 0} ${d.located}`);
-      ok++;
-    } catch (e) { console.log(`FAIL ${f}: ${e.message}`); }
+      const x = describeReplay(f);
+      const rel = path.relative(dir, f);
+      rows.push({ ...x, rel });
+      if (csv) for (const s of x.sums) csv.push([JSON.stringify(rel), s.frame, s.play, ...s.v].join(','));
+      delete x.sums;
+      const tail = x.truncated ? ` TRUNCATED(last record @${x.truncated.at}: ${x.truncated.have}/${x.truncated.need} bytes)` : '';
+      console.log(`OK   ${rel}${x.gz ? '' : ' (plain)'}  ${x.mode} style=${x.mapStyle} size=${x.mapSize} players=${x.players}/${x.slots} scn=${x.scenarioType}${x.scenario ? '+scx' : ''}${x.script ? ` script=${x.script}` : ''}${x.ctw ? ' CTW' : ''} save=${x.save ? x.save : 'no'} pkgs=${x.pkgs} cmds=${x.cmds} sums=${x.nSums}${x.nSums ? `[${x.firstSum}..${x.lastSum}]` : ''} frames=${x.startFrame}..${x.lastFrame} ${x.located}${x.exact ? ' exact' : ''}${tail}`);
+      ok++; if (x.exact) exact++; if (x.truncated) trunc++;
+    } catch (e) { console.log(`FAIL ${path.relative(dir, f)}: ${e.message}`); }
   }
-  console.log(`${ok}/${files.length} replays decoded`);
+  console.log(`${ok}/${files.length} replays decoded (${exact} exact end-to-end, ${trunc} with a truncated last record)`);
+  if (csv) { fs.writeFileSync(opts.csv, csv.join('\n') + '\n'); console.log(`wrote ${csv.length - 1} CHECK_SUMS rows to ${opts.csv}`); }
+  if (opts.tsv) {
+    const cols = ['rel', 'mode', 'mapStyle', 'mapSize', 'players', 'slots', 'scenarioType', 'scenario', 'script', 'save', 'startFrame', 'headerFrame', 'firstFrame', 'pkgs', 'nSums', 'firstSum', 'lastSum', 'lastFrame', 'located', 'exact', 'seed'];
+    fs.writeFileSync(opts.tsv, [cols.join('\t'), ...rows.map((r) => cols.map((c) => r[c]).join('\t'))].join('\n') + '\n');
+  }
 }
 
 function main(argv) {
-  if (argv[0] === '--survey') return survey(argv[1]);
+  if (argv[0] === '--survey') {
+    const opt = (n) => { const k = argv.indexOf(n); return k >= 0 ? argv[k + 1] : undefined; };
+    return survey(argv[1], { csv: opt('--checksums'), tsv: opt('--tsv') });
+  }
   const file = argv[0];
   if (!file) { console.error('usage: node re/tools/rcxdump.mjs <file.rcx> [--summary] [--hex] [--json out.json] | --survey <dir>'); process.exit(2); }
   const opts = { summary: argv.includes('--summary'), hex: argv.includes('--hex') };
+  const ci = argv.indexOf('--checksums');
+  if (ci >= 0) {          // single file: write its CHECK_SUMS packages as CSV
+    const x = describeReplay(file);
+    fs.writeFileSync(argv[ci + 1], [['file', ...CSV_HEAD].join(','), ...x.sums.map((q) => [JSON.stringify(x.file), q.frame, q.play, ...q.v].join(','))].join('\n') + '\n');
+    console.log(`wrote ${x.sums.length} CHECK_SUMS rows to ${argv[ci + 1]}`);
+  }
   const ji = argv.indexOf('--json');
   const { buf, compressed } = loadReplay(file);
   const d = decodeReplay(buf);
@@ -519,4 +620,4 @@ function main(argv) {
   printSummary(file, d, compressed, opts);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) main(process.argv.slice(2));
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) main(process.argv.slice(2));

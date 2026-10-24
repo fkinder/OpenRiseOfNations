@@ -1,17 +1,20 @@
 # Replays (`.rcx`), the command stream, turn timing, checksums and RNG
 
 Status: ✅ container, header, rules block, package records, every verb's byte layout (lengths cross-checked against all 82
-`CommandPackage::process_*` return values) · 🟡 embedded-save case (the save body is located, not decoded) · ❓ Conquer
+`CommandPackage::process_*` return values), **validated on 95 real recordings** (`re/oracle/`, see [oracle-corpus.md](oracle-corpus.md)) · 🟡 embedded-save case (the save body
+is located by scan, then confirmed byte-for-byte against the user's own `.SVX` files, but not decoded here) · ❓ Conquer
 the World header.
 
-Tool: `node re/tools/rcxdump.mjs <file.rcx|decompressed.bin> [--summary] [--hex] [--json out.json]`, or `--survey <dir>`.
+Tool: `node re/tools/rcxdump.mjs <file.rcx|decompressed.bin> [--summary] [--hex] [--json out.json] [--checksums out.csv]`, or
+`--survey <dir> [--checksums out.csv] [--tsv out.tsv]`.
 
-**Replays available:** the only replay on this Mac is `re/analysis/sample_replay.bin` (already decompressed; a 1-player-vs-7-AI
+**Replays available:** besides the corpus below, the original sample is `re/analysis/sample_replay.bin` (already decompressed; a 1-player-vs-7-AI
 random map, 6 sim frames long). It decodes exactly: header → random-game-info → rules (1,024,221 bytes, 806 types) →
-6 packages (LEADER_OPTIONS, CAMERA ×5, PLAYER_SPEED), ending exactly at EOF. No other `.rcx` or save exists on this disk,
-and the install ships none (scanned for UTF-16 `"(Version:"` / `"RoNSave"` in every non-media file, gzip included).
-The user's own replays were on the Windows machine (`Documents\My Games\Rise of Nations`). Everything about multiplayer
-packages (XOR, padding, CHECK_SUMS, TURN_DATA) is therefore from code only, plus a synthetic round trip.
+6 packages (LEADER_OPTIONS, CAMERA ×5, PLAYER_SPEED), ending exactly at EOF. The install ships no replay or save.
+**Real corpus (added 2026-10):** `re/oracle/Recorded Games/` (36 single-player) and `.../Multi/` (59 multiplayer) `.rcx`, and
+`re/oracle/Saves/*.SVX`, copied from the user's Windows profile (gitignored, personal data). All 95 replays decode
+(`--survey`); the multiplayer packages (XOR, padding, CHECK_SUMS, TURN_DATA) are now confirmed on real data: every
+CHECK_SUMS row has `all` equal to the 32-bit sum of the other 15 values (172,156 rows), and the two players of a turn agree.
 
 ---
 
@@ -89,13 +92,31 @@ When `save_name ≠ ""`, the save file's bytes are copied verbatim (`write_save_
 `"RoNMultiSave"` or `"RoNCTWSave"` and a `u32 sGameSaveVersion`, then `WalkDataGame::walk_data` (the full DataWalk of the game,
 263 classes). There is no length prefix: the original finds the end by parsing the whole save. `rcxdump` stops at the
 magic and version, then **locates the command stream by scanning**: it takes the earliest offset whose records chain exactly to
-EOF and decode cleanly, whose first frame is at least the header frame (the header is written after the save loads), and which is preceded by a random-info block whose team bytes match the header's players.
-A full save decoder is a separate task (it is the save-game format).
+EOF and decode cleanly, whose first frame is at least the **embedded save's own frame**, and which is preceded by a random-info block
+(§5). A full save decoder is a separate task (it is the save-game format).
+
+**Corrections found on the real corpus (2026-10):**
+- *Lower bound of the first record's frame.* The header's `Game.frame` is **not always** the embedded save's frame. Example:
+  a replay whose `save_name` points at one of the user's saves had header frame 353231 but its first record is at frame
+  284306 and the embedded save (read with `embeddedSaveFrame`: GameInfo, 182 raw bytes, `Game` tag, GameInfo, frame) is at 284305; the file had been
+  overwritten with a later game between recording and the header snapshot. The scan therefore bounds the first record by the frame read from the
+  save itself, not by the header.
+- *Save bytes are the SVX bytes.* In all 7 replays that embed a save whose `.SVX` is in the corpus (6 saves), the located save size
+  equals the decompressed `.SVX` size exactly, and the frame matches (e.g. 4835387 bytes / frame 180904). This confirms
+  `write_save_game` copies the decompressed file verbatim and that the scan finds the true end.
+- *A save-based multiplayer game is chained.* The `Multi/2026.08.30 *` files are 45 consecutive segments of one game that was saved and
+  reloaded again and again: segment *k+1* embeds a save whose frame equals segment *k*'s last record frame (7, 18344, 21117, 21514, ...).
+  The first segment (frame 0..7) has no save; the next embeds an MP save made at frame 7.
+- *Zero runs.* A 18-byte all-zero stretch inside a save parses as a valid record (`frame 0, play 0, size 0`), which made the scan quadratic. No real
+  record has `size 0` (minimum observed: 2 in SP, 67 in MP), so the scan and the strict chain reject `size < 1`.
 
 ## 5. Random game info (`write_random_game_info` @9534e0)
 
-For each of the 8 player slots with `flags & 1` and `who < 8`, in slot order: `i8 team` (Player+0x34) and
-`i32 leaders[who]+0x0c`. Then `i32 World+0x30`. In the sample, the leader values are the tribes the random choice resolved
+For each player of the **running game**, in slot order: `i8 team` (Player+0x34) and
+`i32 leaders[who]+0x0c`. Then `i32 World+0x30`. **The entry count is not always the number of header players with `flags & 1`:** the header is
+written from `GameInfo` before players are added in some setups. Evidence: the two `.scx` scenario replays (the only two with a scenario path in the corpus) have 2 header players (flags & 1) but 8 and 5 entries; the 8-entry block of
+the `italy_mp` scenario is `00 06000000 01 06000000 ... 07 06000000` (team = slot index, leader value 6 for all), then `0e000000` (World+0x30 = 14), then the `0x92` rules tag. The decoder now finds the count by probing 0..8 entries until the byte after `5n + 4` is the `0x92`
+rules tag (or, after an embedded save, by team/leader plausibility during the scan). In the sample, the leader values are the tribes the random choice resolved
 to (17, 8, 19, …), and World+0x30 = 19 = `map_style`. Playback reads and discards the block (`read_random_game_info`), so it is
 informational only.
 
@@ -132,7 +153,9 @@ i16  size       payload bytes, ≤ 512
 u8   data[size]
 ```
 
-No alignment and no per-record checksum. Records are in processing order: frames never decrease, and within a multiplayer
+No alignment and no per-record checksum. **A game that crashed leaves a plain file whose last record is cut short** (8 of the 95 corpus files, all
+uncompressed): the final record has its 18-byte header, or part of the payload, missing (examples: 14 of 18 header bytes, 75 of 159). `rcxdump` reports
+it as `truncated {at, have, need}` and decodes everything before it. Records are in processing order: frames never decrease, and within a multiplayer
 turn the order is player slot 0..7.
 
 **Writers:**
@@ -421,10 +444,11 @@ Decompiled sources: `re/decomp/replay/`, `replay2/`, `replay3/`, `replay_rules/`
 
 ## Open questions
 
-1. **Real replays.** Validate against single-player and multiplayer `.rcx` from the Windows machine: XOR and padding, CHECK_SUMS
-   placement, TURN_DATA, every verb. `node re/tools/rcxdump.mjs --survey <dir>` reports any that fail.
+1. **Real replays.** ✅ Done for decoding: 95/95 of the user's recordings decode (`--survey`), including XOR, padding, CHECK_SUMS, TURN_DATA;
+   see [oracle-corpus.md](oracle-corpus.md). Open: the *values* (compute the sums from our own state and compare).
 2. **Embedded save body** (`WalkDataGame::walk_data`): now described in [state-spec.md](state-spec.md) and decoded by
-   `re/tools/savdump.mjs --replay`; untested on real data (no replay with a save on this Mac). `rcxdump` still locates the stream past it heuristically.
+   `re/tools/savdump.mjs --replay`; 59 corpus replays embed a save (14 single-player, 45 multiplayer); `rcxdump` still locates the stream past it by scan (cross-checked against the `.SVX` sizes).
+   `savdump` itself needs the missing `re/iface/datawalk/*.json` fragments (oracle-corpus.md §7).
 3. **Conquer the World replays**: `ConquestGame::walk_data` header not decoded. They play back through `run_solo(…, 4)`.
 4. Tag bytes: solved. `walk_test` writes the low byte of `String::generate_hash`'s case-insensitive result; reimplemented in
    `re/tools/walklabel.mjs` (state-spec.md §2).

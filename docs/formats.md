@@ -91,11 +91,13 @@ The plain stream is written while the game runs and gzip-compressed once, when t
 
 1. **Header**: `Game::walk_data` (GameInfo with seed, setup and players; the `Game[frame..balance)` block; the semaphore) + `String save_name`
 2. **Embedded save** (only if `save_name` is set): the save file copied verbatim (`"RoNSave"` magic, `WalkDataGame` body)
-3. **Random game info**: 5 bytes per active player + 4 (informational; playback discards it)
+3. **Random game info**: 5 bytes per player of the running game + 4 (informational; playback discards it). The count can exceed the header's players (scenario games), so it is probed
 4. **Rules** (only for a fresh game): `Game::walk_rules_data`, i.e. all 806 types + constants + 493×493 balance table + 24 tribes. Playback loads these over the XML rules (field-level layout and the XML loader that reproduces it: [rules-spec.md](rules-spec.md))
 5. **Command stream** until EOF: `i32 frame, i32 play, i32 valid, u32 stamp, i16 size, u8 data[size]`. `data` = commands
    (`u8 opcode` + packed args, 82 verbs). In multiplayer, data is XORed with `(seed>>8)&0xffff` per u16, and each
    command is followed by 0–1 random padding bytes (LCG seeded with `seed` per package)
+
+A game that crashed leaves a plain file whose last record is cut short; the decoder reports it. All 95 real recordings in `re/oracle/` decode ([oracle-corpus.md](oracle-corpus.md)).
 
 Sample: `re/analysis/sample_replay.bin` (decompressed). It starts with tag bytes `16 42`, then UTF-16 `"(Version: 00.2024.06.2000)"`, and decodes exactly to EOF.
 
