@@ -1,22 +1,22 @@
 # Project status and how to resume
 
-Last updated 2026-10-24 (native save / load, the recorded-games oracle, specs for transports / random maps / heroes /
-aircraft / Conquer the World; see docs/roadmap.md for the phases). Read this first when picking the work back up; then
+Last updated 2026-10-24 (every roadmap phase has a first implementation: the recorded-games oracle, transports, heroes,
+aircraft, spells, random maps and skirmish, HUD part 1, Conquer the World, multiplayer; see the phase table). Read this first when picking the work back up; then
 `CLAUDE.md`, `docs/systems-map.md`, and the spec for whatever you touch.
 
 ## Roadmap phases (docs/roadmap.md), 2026-10-24
 
 | Phase | State |
 |---|---|
-| 0 replay oracle | **working**: `re/oracle/` (gitignored, personal) holds 95 `.rcx` (59 multiplayer with per-turn CHECK_SUMS) and 10 `.SVX`; `docs/oracle-corpus.md`. The original save format is decoded and verified bit for bit (`docs/state-spec.md` §8, `ron-sav`: all 69 saves, every verify entry); the engine loads the original saves and re-emits the identical checksum image (`docs/original-save.md`: 69/69 round trips exact); `ron-sav --replay` steps a save-based MP replay and compares the 15 parts per turn — the simulation diverges from the original at the first frame (`units`, `builds`, `guys`, `leaders`, `world`): that list is the fidelity work queue. Random-map replays need the generator to be bit-exact |
+| 0 replay oracle | **working**: `re/oracle/` (gitignored, personal: 95 `.rcx`, 10 `.SVX`; `docs/oracle-corpus.md`). The original save format is decoded and verified bit for bit (`ron-sav`, `docs/state-spec.md` §8), the engine loads the original saves and re-emits the identical checksum image (`docs/original-save.md`: 69/69), `ron-sav --replay` / `ron-net replay` compare the 15 CHECK_SUMS parts per turn. First fidelity pass done (animals / herds, gatherers, LEADER_NEW_UNITS): on replay 21'23'34 `goods` holds to frame 2,318, `leaders` 566, `builds` 50; `units` still diverges at the first boundary — the open fidelity queue is `docs/original-save.md` §7 and sim-implementation.md "Fidelity log" |
 | 1 leader bonuses, 2 garrisons | done (`stats.cpp`, `garrison.cpp`; 156/156) |
 | 3 save / load | done, native format (`docs/save-format.md`, `engine/sim/save.*`, `ron-sim --save-at/--load/--roundtrip`, `ronmap` F5 / F9): round trip bit-exact on 156/156 scenarios. Original `.sav` compatibility is phase 0 work |
-| 4 random maps + skirmish | spec complete (`randommap-spec.md` + `-terrain-groups` + `-resources` + `-rivers`); generator ported (`engine/sim/mapgen_*`, `ron-mapgen`: 17 styles, deterministic; terrain-group placement approximate, no shelf / coast cells yet); **playable random skirmish** (`engine/sim/newgame.*`, `ronmap` Skirmish > Random Map... setup screen, `--random`, save / load: sim-implementation.md "Random games") |
+| 4 random maps + skirmish | generator ported (`mapgen_*`, `ron-mapgen`, 17 styles, deterministic) and calibrated on the frame-189 save: style pick, seeds, starts, lakes, terrain groups 0-3 exact; group 4 onwards (world-pattern mountains, goods, rivers) and the Terrain::init effects (half-land, shelf, water tcoords, heights) still differ (`ron-mapgen --compare`). **Playable random skirmish** (`newgame.*`, `ronmap` Skirmish > Random Map..., `--random`, save / load) |
 | transports (pulled from 5) | done (`transport-spec.md`, `spells.cpp`, `transport.cpp`; 156/156, crossings in persia / carib / italy) |
-| 5 heroes / aircraft / spells / spies … | heroes done (`heroes-spec.md`, `heroes.cpp`), aircraft done (`aircraft-spec.md`, `aircraft.cpp`); spies / packers / the other crafts specified (`spells-spec.md`), port pending |
-| 6 UI / polish | part 1 done (tooltips, game messages, market / infrastructure / mini library, minimap territory and pings, streamlined mode, key map: `ui-port.md`); library panel, formation drag, localisation pending |
-| 7 Conquer the World | spec `ctw-spec.md`; port pending |
-| 8 multiplayer | spec `multiplayer-spec.md` (lockstep design, drops, OOS recovery); port pending |
+| 5 heroes / aircraft / spells / spies … | done: heroes (`heroes.cpp`), aircraft (`aircraft.*`), spells / spies / packers / disband (`spells*.cpp`, `packers.cpp`). Left: GUARD / FOLLOW / ground PATROL orders, paradrop, the carrier BUILDAIR queue, dead crafts |
+| 6 UI / polish | part 1 done (tooltips, game messages, market / infrastructure / mini library, minimap territory and pings, streamlined mode, key map: `ui-port.md` §3-§7, §11). Left: library panel, formation drag, garrison panels, the Market building panel, speed control, localisation, the sim event hooks listed in ui-port.md §11 |
+| 7 Conquer the World | done (`ctw*.cpp`, `ronmap` Conquer the World: five campaigns, strategic map, cards, diplomacy, battle hand-off and return, campaign saves; sim-implementation.md "Conquer the World"). Approximate: the AI strategy scoring, several tactical card effects, reinforcements in battle, Cold War nukes / espionage, conquest map styles 24-26 |
+| 8 multiplayer | done (`engine/net/*`, `engine/sim/replay.*`, `ron-net`): lockstep sessions, loopback and TCP LAN games, drops with AI takeover, desync detection; 45/45 recorded MP games replayed in lockstep with all instances agreeing. Left: OOS recovery from a snapshot, recording `.rcx` of a live session, a lobby screen in `ronmap` |
 
 ## Where things stand
 
