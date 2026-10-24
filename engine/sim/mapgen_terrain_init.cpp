@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 
 #include "sim/mapgen_internal.hpp"
 
@@ -421,7 +422,8 @@ struct TerrainInit {
 				if ((nf[1] & 0x20) && (nf[7] & 0x20) && (nf[0] & 4)) b = true;
 				if ((nf[1] & 0x20) && (nf[3] & 0x20) && (nf[2] & 4)) b = true;
 				if ((nf[5] & 0x20) && (nf[7] & 0x20) && (nf[6] & 4)) b = true;
-				if (!(((nf[5] & 0x20) && (nf[3] & 0x20) && (nf[4] & 4)) || b)) {
+				const bool valid = !(((nf[5] & 0x20) && (nf[3] & 0x20) && (nf[4] & 4)) || b);
+				if (valid) {
 					ci[size_t(y) * size_t(xs) + size_t(x)].is_valid = 1;
 					generators.push_back({x, y});
 				}
@@ -691,8 +693,203 @@ struct TerrainInit {
 		d.region2 = int16_t(region2);
 	}
 
+
+	// ---- Terrain::move_goody @84a3d0 / Terrain::move_ocean_goody @84aec0 (randommap-resources section 9): whatever stands on a wcoord
+	// that stops being plain land (a cell turning half water, a river trough) is moved to the first acceptable cell of the ring
+	// move_x[9..24]: the goody box (land cells), the resource (water cells for the ocean variant), the oil derrick.
+	int find_goody_at(int x, int y) {
+		const WData& d = W(x, y);
+		if (d.down == -3 && d.down_who >= 0 && size_t(d.down_who) < g.c.items.size() && g.c.items[size_t(d.down_who)].alive()) return d.down_who;
+		return -1;
+	}
+	int find_good_at(int x, int y) {  // ObjectsData::find_good_at(w, x, y, -1, 1, 0): the cell's good terminal, live and not oil
+		const WData& d = W(x, y);
+		if (d.down == -2 && d.down_who >= 0 && size_t(d.down_who) < g.c.goods.size()) {
+			const GoodObj& go = g.c.goods[size_t(d.down_who)];
+			if (go.alive() && go.type != kOilGood) return d.down_who;
+		}
+		return -1;
+	}
+	static void clear_down(WData& d) {
+		if (d.down < 0) {
+			d.down = -1;
+			d.down_who = -1;
+		}
+	}
+	// TerrainOut::is_clear_land @874b60 for the oil search (mask 0x80, | 8 for a derrick standing in water)
+	bool is_clear_land_oil(int x, int y, unsigned mask) {
+		const WData& d = W(x, y);
+		const uint16_t f = d.flags;
+		if ((f & 0x10) && !(mask & 0x40)) return false;
+		if ((f & 0x20) && !(mask & 1)) return false;
+		if ((f & 8) && !(mask & 4)) return false;
+		if ((f & 0x800) && !(mask & 0x100)) return false;
+		if (!(f & 0x100) && (d.land == 1 || d.land == 2) && !(mask & 8)) return false;
+		if ((f & 0x1000) && !(mask & 0x10)) return false;
+		if ((f & 0x40) && !(mask & 0x20)) return false;
+		if (!(mask & 0x80)) {
+			if (f & 0x8000) return false;
+			if (find_good_at(x, y) >= 0) return false;
+		}
+		if (!(mask & 0x165) && d.blocked != 0) return false;
+		return !(F(x, y) & 4);  // the per-wcoord record's coastal bit (mask & 2 is never set here)
+	}
+	int new_good_slot() {
+		for (size_t i = 0; i < g.c.goods.size(); i++) {
+			if (!g.c.goods[i].alive()) return int(i);
+		}
+		g.c.goods.push_back(GoodObj());
+		return int(g.c.goods.size()) - 1;
+	}
+	void move_goody(int x, int y, bool ocean) {
+		WData& d0 = W(x, y);
+		int goody = -1;
+		if (!(!(d0.flags & 0x100) && (d0.land == 1 || d0.land == 2))) goody = find_goody_at(x, y);
+		const bool oil = (d0.flags & 0x800) != 0;
+		const int good = find_good_at(x, y);
+		if (goody == -1 && !oil && good < 0) return;
+		int land[48];
+		for (int k = 0; k < 48; k++) {
+			const int nx = x + move_x[k + 1], ny = y + move_y[k + 1];
+			land[k] = inb(nx, ny) ? W(nx, ny).land : -1;
+		}
+		auto interior = [&](int cx, int cy) { return cx != 0 && cy != 0 && cx != xs - 1 && cy != xs - 1; };
+		if (goody != -1) {
+			GoodObj& it = g.c.items[size_t(goody)];
+			// Item::close: the goody flag of its cell, the down list
+			{
+				WData& od = W(wcoord_of(it.x), wcoord_of(it.y));
+				od.flags &= 0x7fff;
+				clear_down(od);
+			}
+			it.flags = uint8_t(it.flags & ~objflag::kValid);
+			for (int j = 0; j < 16; j++) {
+				const int k = 9 + j;
+				const int cx = x + move_x[k], cy = y + move_y[k];
+				if (land[k - 1] == -1 || !interior(cx, cy) || land[k - 1] != 0) continue;
+				const WData& c = W(cx, cy);
+				const uint16_t f = c.flags;
+				if (f & 0x100) continue;
+				if ((f & 0x10) || (f & 0x28) || (f & 0x800)) continue;
+				if ((f & 0x1000) || (f & 0x40) || (f & 0x8000)) continue;
+				if (find_good_at(cx, cy) >= 0 || c.blocked != 0 || (F(cx, cy) & 4) || g.has_south_forest(cx, cy)) continue;
+				it.x = cx * 768 + 0x180;
+				it.y = cy * 768 + 0x180;
+				it.flags = uint8_t(it.flags | objflag::kValid);
+				item_init(w, it.x, it.y);
+				WData& nd = W(cx, cy);
+				nd.down = -3;
+				nd.down_who = int16_t(goody);
+				for (auto& pi : g.placed_items) {
+					if (pi[0] == x && pi[1] == y) {
+						pi[0] = cx;
+						pi[1] = cy;
+					}
+				}
+				break;
+			}
+		}
+		if (good >= 0) {
+			GoodObj& go = g.c.goods[size_t(good)];
+			const int type = go.type;
+			const Type& gt = g.rules.types[size_t(type)];
+			// Good::close: the resource tcoords, the blocking, the wcoord resource flag, the down list, the herd
+			{
+				const int x0 = tcoord_of(go.x) - gt.x_size / 2, y0 = tcoord_of(go.y) - gt.y_size / 2;
+				for (int tx = x0; tx < x0 + gt.x_size; tx++) {
+					for (int ty = y0; ty < y0 + gt.y_size; ty++) {
+						if (!w.in_t(tx, ty)) continue;
+						w.t(tx, ty) &= uint16_t(~tmask::kResource);
+						if (gt.block) w.set_blocked_at(tx, ty, false);
+					}
+				}
+				WData& od = W(wcoord_of(go.x), wcoord_of(go.y));
+				od.flags &= 0xfffe;
+				clear_down(od);
+			}
+			go.flags = uint8_t(go.flags & ~objflag::kValid);
+			int herd_at = -1, herd_type = 0;
+			for (size_t hi = 0; hi < g.herds.size(); hi++) {
+				if (g.herds[hi].unit_type >= 0 && g.herds[hi].good_slot == good) herd_at = int(hi);
+			}
+			if (herd_at >= 0) {
+				herd_type = g.herds[size_t(herd_at)].unit_type;
+				g.herds[size_t(herd_at)].unit_type = -1;  // Herd::close: the slot is free until Herds::init_herd takes it
+			}
+			for (int j = 0; j < 16; j++) {
+				const int k = 9 + j;
+				const int cx = x + move_x[k], cy = y + move_y[k];
+				const int l = land[k - 1];
+				if (l == -1 || !interior(cx, cy)) continue;
+				const WData& c = W(cx, cy);
+				const uint16_t f = c.flags;
+				if (ocean) {
+					if (!(l == 2 || l == 1) || (f & 0x100)) continue;
+					if ((f & 0x10) || (f & 0x68) || (f & 0x1800) || (f & 0x8000)) continue;
+				} else {
+					if (l != 0 || (f & 0x100)) continue;
+					if ((f & 0x10) || (f & 0x28) || (f & 0x800) || (f & 0x1000) || (f & 0x40) || (f & 0x8000)) continue;
+				}
+				if (find_good_at(cx, cy) >= 0 || c.blocked != 0 || (!ocean && (F(cx, cy) & 4)) || g.has_south_forest(cx, cy)) continue;
+				// GoodTypeData::snap_center, Objects::init_good (first free slot)
+				const int slot = new_good_slot();
+				GoodObj& ng = g.c.goods[size_t(slot)];
+				ng = GoodObj();
+				ng.type = type;
+				ng.x = cx * 768 + ((gt.x_size & 1) ? 0x120 : 0x180);
+				ng.y = cy * 768 + ((gt.y_size & 1) ? 0x120 : 0x180);
+				ng.flags = objflag::kValid;
+				good_init(w, type, gt, ng.x, ng.y);
+				WData& nd = W(cx, cy);
+				nd.down = -2;
+				nd.down_who = int16_t(slot);
+				for (auto& pg : g.placed_goods) {
+					if (pg[0] == x && pg[1] == y && pg[2] == type) {
+						pg[0] = cx;
+						pg[1] = cy;
+					}
+				}
+				if (herd_at >= 0) {
+					HerdRec& hr = g.herds[size_t(herd_at)];  // Herds::init_herd takes the first free slot: the one just closed
+					hr.wx = cx;
+					hr.wy = cy;
+					hr.unit_type = herd_type;
+					hr.good_slot = slot;
+				}
+				break;
+			}
+		}
+		if (oil) {
+			g.set_oil_at(x, y, false);
+			W(x, y).flags &= 0xfff7;
+			int want_a, want_b;
+			unsigned mask = 0;
+			const int here = W(x, y).land;
+			if (here == 1 || here == 2) {
+				want_a = 2;
+				want_b = 1;
+				mask = 8;
+			} else {
+				want_a = want_b = here;
+			}
+			for (int k = 9; k <= 48; k++) {
+				const int cx = x + move_x[k], cy = y + move_y[k];
+				const int l = land[k - 1];
+				if (l == -1 || !interior(cx, cy)) continue;
+				if (!(l == want_a || l == want_b) || (W(cx, cy).flags & 0x100)) continue;
+				if (!is_clear_land_oil(cx, cy, mask | 0x80)) continue;
+				if (g.has_south_forest(cx, cy)) continue;
+				g.set_oil_at(cx, cy, true);
+				// the ocean variant always sets the rock flag; the land variant only on land
+				if (ocean || mask != 8) W(cx, cy).flags |= 8;
+				break;
+			}
+		}
+	}
+
 	// ---- Terrain::mark_halfwater @84ece0
 	void mark_halfwater(int x, int y, int tx, int ty, int reg_a, int reg_b) {
+		if (!(W(x, y).flags & 0x100)) move_goody(x, y, true);  // Terrain::move_ocean_goody before the cell turns half water
 		WData& d = W(x, y);
 		bool fresh = false;
 		if (!(d.flags & 0x100)) fresh = true;
@@ -813,6 +1010,7 @@ struct TerrainInit {
 			const WData& n = W(nx, ny);
 			if (!(n.flags & 0x100) && n.region != cr) {
 				W(x, y).region = n.region;
+				move_goody(x, y, true);  // @84e4a5: the cell joined another region: Terrain::move_ocean_goody
 				break;
 			}
 		}
@@ -912,6 +1110,389 @@ struct TerrainInit {
 		}
 	}
 
+	// =====================================================================================================================
+	// RiversOut::calculate_all @888820 (param_1 = 0, a new game): for every River the control spline (ensure_ocean_end,
+	// Spline::calc_spline), the sections (RiverOut::create_sections @884e00 -> RiverSection::init @88c360 ->
+	// create_trough_and_water @889f20 -> create_trough_edge @889660) and, per section, the trough: RiverSectionOut::
+	// terraform_from_river_vert @88b360 averages the four corner heights of the tile under each of the 3 x 9 samples with the trough
+	// depth and `World::set_river_at` marks (tdata 0x800, WData 0x1000) every tile of the 36-offset neighbourhood that has a corner
+	// below zero. After the sections: TerrainOut::ensure_45_deg_slope @869890 and two smooth_tcoord passes over the touched
+	// vertices, then Terrain::spot_update_land_batch(riverbase) on the wcoords the terraform visited.
+	// The geometry (B-spline, arc-length walker, widths from the River fractal) follows engine/render/rivers.cpp, which was
+	// checked against the original's meshes; docs/randommap-rivers.md section 9.
+	using V3 = std::array<float, 3>;
+	static constexpr float kMaxWidth = 0.75f;        // RiversOut +0x5c (rivers._92)
+	static constexpr float kMaxDepth = -60.0f;       // rivers._252
+	static constexpr float kSectionsPerWcoord = 1.7f;  // rivers._256
+
+	std::vector<uint8_t> rv_bits;                    // RiverOut +0x298: tcoords already queued for smoothing
+	std::vector<int> rv_list;                        // RiverOut +0xac: tcoord indices (x + 4 xs y) queued for smoothing
+	std::vector<std::array<int, 2>> rv_wcoords;      // RiverOut +0x280: wcoords the terraform visited
+
+	bool t_inb(int tx, int ty) const { return tx >= 0 && ty >= 0 && tx < txs && ty < ys * 4; }
+
+	void rv_set_river_at(int tx, int ty) {  // World::set_river_at @6b1f80 with param_3 = 1
+		w.t(tx, ty) = uint16_t(w.t(tx, ty) | 0x800);
+		W(tx >> 2, ty >> 2).flags |= 0x1000;
+	}
+
+	// RiverSectionOut::terraform_from_river_vert @88b360
+	void terraform_from_river_vert(float x, float y, float z) {
+		const int tx = tcoord_of(int(x)), ty = tcoord_of(int(y));
+		const int wx = tx >> 2, wy = ty >> 2;
+		const uint16_t tm = w.t(tx, ty);
+		bool skip_cell = ((tm & 0x30) == 0x20) || W(wx, wy).land == 1;
+		for (int i = 1; i <= 8; i++) {
+			const int nx = wx + move_x[i], ny = wy + move_y[i];
+			if (!inb(nx, ny)) continue;
+			const WData& n = W(nx, ny);
+			if (n.land == 2 || n.land == 1 || (n.flags & 0x100)) return;
+		}
+		if (skip_cell || (tm & 3) == 2) return;
+		rv_wcoords.push_back({wx, wy});
+		h(tx, ty) = (h(tx, ty) + z) * 0.5f;
+		h(tx + 1, ty) = (z + h(tx + 1, ty)) * 0.5f;
+		h(tx, ty + 1) = (z + h(tx, ty + 1)) * 0.5f;
+		h(tx + 1, ty + 1) = (z + h(tx + 1, ty + 1)) * 0.5f;
+		for (int i = 0; i < 121; i++) {
+			const int ntx = tx + move_x[i], nty = ty + move_y[i];
+			if (!t_inb(ntx, nty)) continue;
+			const size_t idx = size_t(ntx) + size_t(txs) * size_t(nty);
+			if (!(rv_bits[idx >> 3] & (1u << (idx & 7)))) {
+				rv_list.push_back(int(idx));
+				rv_bits[idx >> 3] = uint8_t(rv_bits[idx >> 3] | (1u << (idx & 7)));
+			}
+		}
+	}
+
+	// the 36-offset marking of create_trough_edge (param_6 = param_7 = 0)
+	void mark_trough_tiles(int tx, int ty) {
+		for (int i = 0; i < 36; i++) {
+			const int nx = tx + move_x[i], ny = ty + move_y[i];
+			if (!t_inb(nx, ny)) continue;
+			if (!(h(nx, ny) < 0.0f || h(nx + 1, ny) < 0.0f || h(nx, ny + 1) < 0.0f || h(nx + 1, ny + 1) < 0.0f)) continue;
+			const int cx = nx >> 2, cy = ny >> 2;
+			const WData& c = W(cx, cy);
+			const uint16_t f = c.flags;
+			if ((f & 0x10) || (f & 0x28) || (f & 0x800)) continue;
+			if (!(f & 0x100) && (c.land == 1 || c.land == 2)) continue;
+			if ((f & 0x40) || c.blocked != 0 || (F(cx, cy) & 4)) continue;
+			rv_set_river_at(nx, ny);
+		}
+	}
+
+	// RiverSection::create_trough_edge @889660: nine samples across the river
+	void trough_edge(const V3& P, const V3& N, float width) {
+		static const float prof[9] = {1.0f, 0.75f, 0.26f, 0.0f, 0.0f, 0.0f, 0.26f, 0.75f, 1.0f};
+		const float sx = width * N[0] * 2.0f * 768.0f * 0.125f;
+		const float sy = N[1] * width * 2.0f * 768.0f * 0.125f;
+		float x = P[0] - sx * 4.0f, y = P[1] - sy * 4.0f;
+		for (int k = 0; k < 9; k++) {
+			float z = (kMaxDepth - prof[k] * kMaxDepth) + kMaxDepth * 0.25f * -1.0f;
+			const int tx = tcoord_of(int(x)), ty = tcoord_of(int(y));
+			if (t_inb(tx, ty)) {
+				if ((w.t(tx, ty) & 0x30) == 0x20 && z < 0.0f && std::abs(k - 4) < 2) z = ((z - 30.0f) + z) * 0.5f;
+				terraform_from_river_vert(x, y, z);
+				mark_trough_tiles(tx, ty);
+				const int cx = wcoord_of(int(x)), cy = wcoord_of(int(y));
+				if (inb(cx, cy)) move_goody(cx, cy, false);
+			}
+			x += sx;
+			y += sy;
+		}
+	}
+
+	// Spline type 3: clamped uniform B-spline (Cox-de Boor with the exe's guards), single precision.
+	static std::vector<V3> b_spline(const std::vector<V3>& Pc, int degree, int segs) {
+		const int n = int(Pc.size());
+		if (n <= degree) degree = n - 1;
+		if (segs < degree) segs = degree;
+		std::vector<float> knots;
+		float k = 0;
+		for (int i = 0; i <= n + degree; i++) {
+			if (i > degree && i <= n) k += 1;
+			knots.push_back(k);
+		}
+		const int m = int(knots.size());
+		const float last = knots[size_t(m - 1)];
+		std::function<float(float, int, int)> basis = [&](float t, int i, int d) -> float {
+			if (i + d >= m) return 1;
+			if (d == 0) return knots[size_t(i)] <= t && t < knots[size_t(i + 1)] ? 1.0f : 0.0f;
+			float a = 0;
+			const float d1 = t - knots[size_t(i)], w1 = knots[size_t(i + d)] - knots[size_t(i)];
+			if (d1 > 0 && w1 > 0) a = basis(t, i, d - 1) * (d1 / w1);
+			const float d2 = knots[size_t(i + d + 1)] - t, w2 = knots[size_t(i + d + 1)] - knots[size_t(i + 1)];
+			if (d2 > 0 && w2 > 0) a = a + basis(t, i + 1, d - 1) * (d2 / w2);
+			return a;
+		};
+		const float step = (last - knots[0]) / float(segs);
+		std::vector<V3> out{Pc[0]};
+		float t = knots[0] + step;
+		int span = 0;
+		while (last > t) {
+			int i = span;
+			while (i + 1 < m) {
+				if (!(t > knots[size_t(i + 1)]) && knots[size_t(i)] < knots[size_t(i + 1)]) break;
+				i++;
+			}
+			span = i;
+			if (span > m - 1) break;
+			V3 p{0, 0, 0};
+			for (int j = std::max(0, span - degree); j <= span && j < n; j++) {
+				const float Nb = basis(t, j, degree);
+				for (int c = 0; c < 3; c++) p[size_t(c)] = p[size_t(c)] + Pc[size_t(j)][size_t(c)] * Nb;
+			}
+			out.push_back(p);
+			t = t + step;
+		}
+		if (last - (t - step) > 0.001f) out.push_back(Pc[size_t(n - 1)]);
+		return out;
+	}
+	static V3 norm3(V3 v) {
+		const float l2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+		if (l2 == 0 || l2 == 1) return v;
+		const float s = 1.0f / std::sqrt(l2);
+		return {v[0] * s, v[1] * s, v[2] * s};
+	}
+	static float dist3(const V3& a, const V3& b) {
+		return std::sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) + (a[2] - b[2]) * (a[2] - b[2]));
+	}
+
+	// Spline::next_at_dist: walks the evaluated polyline by arc length.
+	struct Walker {
+		const std::vector<V3>& pts_;
+		const std::vector<V3>& normals_;
+		float length_, acc_ = 0, target_ = 0;
+		int idx_ = 0;
+		Walker(const std::vector<V3>& pts, const std::vector<V3>& normals, float length) : pts_(pts), normals_(normals), length_(length) {
+			if (pts.empty() || length == 0) acc_ = -1, idx_ = -1;
+		}
+		bool next(float step, V3& p, V3& n) {
+			if (acc_ < 0 || idx_ < 0) return false;
+			idx_ += 1;
+			target_ += step;
+			const float thr = step * 0.33f;
+			float s = -1;
+			while (idx_ < int(pts_.size()) && target_ > acc_) {
+				s = dist3(pts_[size_t(idx_)], pts_[size_t(idx_ - 1)]);
+				acc_ += s;
+				idx_++;
+			}
+			idx_ -= 1;
+			if (acc_ > target_ && idx_ < int(pts_.size()) && !(length_ - target_ < thr)) {
+				if (s < 0) s = dist3(pts_[size_t(idx_)], pts_[size_t(idx_ - 1)]);
+				const float f = s == 0 ? 0 : (acc_ - target_) / s;
+				for (size_t c = 0; c < 3; c++) {
+					p[c] = pts_[size_t(idx_)][c] + (pts_[size_t(idx_ - 1)][c] - pts_[size_t(idx_)][c]) * f;
+					n[c] = normals_[size_t(idx_)][c] + (normals_[size_t(idx_ - 1)][c] - normals_[size_t(idx_)][c]) * f;
+				}
+				n = norm3(n);
+				return true;
+			}
+			p = pts_[size_t(idx_)];
+			n = normals_[size_t(idx_)];
+			if (idx_ + 1 < int(pts_.size()) && acc_ < length_) return true;
+			acc_ = length_;
+			idx_ = -1;
+			return false;
+		}
+	};
+
+	// RiverOut::ensure_ocean_end @885400: one or two more control points towards the water
+	void ensure_ocean_end(std::vector<V3>& Pc, float& length) {
+		const int n = int(Pc.size());
+		if (n <= 2) return;
+		auto add = [&](int wx, int wy) {
+			const V3 q{float(wx * 768 + 384), float(wy * 768 + 384), 0.0f};
+			const V3& prev = Pc.back();
+			const float dx = prev[0] - q[0], dy = prev[1] - q[1];
+			Pc.push_back(q);
+			length = std::sqrt(dy * dy + dx * dx) / 768.0f + length;
+		};
+		const V3 last = Pc[size_t(n - 1)], before = Pc[size_t(n - 2)];
+		V3 d{last[0] - before[0], last[1] - before[1], last[2] - before[2]};
+		const float l2 = d[1] * d[1] + d[0] * d[0] + d[2] * d[2];
+		V3 u = d;
+		if (!(l2 == 0.0f || l2 == 1.0f)) {
+			const float inv = 1.0f / std::sqrt(l2);
+			u = {d[0] * inv, d[1] * inv, d[2] * inv};
+		}
+		if (u[0] == 0.0f && u[1] == 0.0f) {
+			const V3 third = Pc[size_t(n - 3)];
+			u = {last[0] - third[0], last[1] - third[1], last[2] - third[2]};
+			d = u;
+		}
+		if (u[0] == 0.0f && u[1] == 0.0f) return;
+		float best = 1e6f, vx = d[0], vy = d[1];
+		bool found = false;
+		int bx = 0, by = 0;
+		const int lx = floor_div3(int(last[0]) >> 8), ly = floor_div3(int(last[1]) >> 8);
+		for (int i = 0; i < 49; i++) {
+			const int cx = lx + move_x[i], cy = ly + move_y[i];
+			if (cx < 0 || cy < 0 || cx >= xs || cy >= ys || W(cx, cy).land == 2) {
+				vx = float(cx * 768 + 384) - last[0];
+				vy = float(cy * 768 + 384) - last[1];
+				if (0.0f <= vy * u[1] + vx * u[0] + u[2] * 0.0f) {
+					const float dd = float(std::sqrt(double(vy * vy + vx * vx + 0.0f)));
+					if (dd < best) {
+						found = true;
+						bx = cx;
+						by = cy;
+						best = dd;
+					}
+				}
+			}
+		}
+		if (!found) return;
+		add(bx, by);
+		float ax = vx - u[0], ay = vy - u[1];
+		const float l = ay * ay + ax * ax + (0.0f - u[2]) * (0.0f - u[2]);
+		if (l != 0.0f && l != 1.0f) {
+			const float s = 1.0f / std::sqrt(l);
+			ax = ax * s;
+			ay = ay * s;
+		}
+		const int ex = floor_div3(int(float(bx * 768 + 384) + ax * 768.0f) >> 8);
+		const int ey = floor_div3(int(float(by * 768 + 384) + ay * 768.0f) >> 8);
+		if (ex >= 0 && ey >= 0 && ex < xs && ey < ys && W(ex, ey).land == 2) add(ex, ey);
+	}
+
+	// TerrainOut::ensure_45_deg_slope @869890: one pass over the queued vertices; the changed ones are queued again
+	void ensure_45_deg_slope() {
+		std::vector<uint8_t> added(size_t(txs) * size_t(ys * 4) / 8 + 1, 0);
+		const std::vector<int> cur = rv_list;
+		rv_list.clear();
+		for (int idx : cur) {
+			const int ty = idx / txs, tx = idx % txs;
+			for (int vy = ty; vy < ty + 2; vy++) {
+				for (int vx = tx; vx < tx + 2; vx++) {
+					if (!t_inb(vx, vy)) continue;
+					const float h0 = h(vx, vy);
+					for (int ny = vy - 1; ny < vy + 2; ny++) {
+						for (int nx = vx - 1; nx < vx + 2; nx++) {
+							if (!t_inb(nx, ny)) continue;
+							const uint8_t b = uint8_t(w.t(nx, ny));
+							if ((b & 3) == 3 || (b & 0x30) == 0x20 || (b & 3) == 2) continue;
+							if (79.68f < h(nx, ny) - h0) {
+								const float nv = (h0 + 79.68f) - 4.0f;
+								if (0.0f < nv) {
+									h(nx, ny) = nv;
+									const size_t id = size_t(nx) + size_t(txs) * size_t(ny);
+									if (!(added[id >> 3] & (1u << (id & 7)))) {
+										rv_list.push_back(int(id));
+										added[id >> 3] = uint8_t(added[id >> 3] | (1u << (id & 7)));
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	void river_geometry_run(const std::vector<RiverPath>& rivers) {
+		const TFractal frac(50, 50, 2, 2, 0);  // River::one_time_init
+		for (const RiverPath& rp : rivers) {
+			if (rp.pts.empty()) continue;
+			// the control points RiverOut::add_spline_point collects (Map::make_riverlist emission)
+			std::vector<V3> Pc;
+			float length = 0;
+			auto add = [&](int wx, int wy) {
+				const V3 q{float(wx * 768 + 384), float(wy * 768 + 384), 0.0f};
+				if (!Pc.empty()) {
+					const float dx = Pc.back()[0] - q[0], dy = Pc.back()[1] - q[1];
+					length = std::sqrt(dy * dy + dx * dx) / 768.0f + length;
+				}
+				Pc.push_back(q);
+			};
+			for (const auto& pt : rp.pts) add(pt[0], pt[1]);
+			const int ex = rp.pts.back()[0], ey = rp.pts.back()[1];
+			if (rp.edge) {
+				add(ex, ey);
+				if (ex == 0) add(-1, ey);
+				else if (ey == 0) add(ex, -1);
+				else if (ex == xs - 1) add(xs, ey);
+				else if (ey == ys - 1) add(ex, ys);
+			}
+			ensure_ocean_end(Pc, length);
+			if (Pc.size() < 2) continue;
+			const int segs = int(length * kSectionsPerWcoord) & 0xFFFF;
+			const std::vector<V3> pts = b_spline(Pc, 3, segs);
+			if (pts.size() < 2) continue;
+			std::vector<V3> normals;
+			V3 prev{0, 0, 0};
+			float plen = 0;
+			for (size_t j = 1; j < pts.size(); j++) {
+				const V3 dv{pts[j][0] - pts[j - 1][0], pts[j][1] - pts[j - 1][1], pts[j][2] - pts[j - 1][2]};
+				plen += std::sqrt(dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2]);
+				const V3 nn = norm3({dv[1], -dv[0], 0});
+				normals.push_back(norm3({prev[0] + nn[0], prev[1] + nn[1], prev[2] + nn[2]}));
+				prev = nn;
+			}
+			normals.push_back(prev);
+			Walker walk(pts, normals, plen);
+			const float step = 768.0f / kSectionsPerWcoord;
+			rv_bits.assign(size_t(txs) * size_t(ys * 4) / 8 + 1, 0);
+			rv_list.clear();
+			rv_wcoords.clear();
+			V3 A, nA, B, nB;
+			walk.next(0, A, nA);
+			int a0 = 0, a4 = 0, cc = -1, index = 0;
+			float prev_w = kMaxWidth;
+			bool ocean = false;
+			for (;;) {
+				if (++a0 > 49) {
+					a4++, a0 = 0;
+					if (a4 > 49) a4 = 0;
+				}
+				const float w0 = prev_w;
+				float wd = ocean ? std::min(kMaxWidth + kMaxWidth, w0 * 1.5f) : (float(frac(a0, a4)) * 0.005f + 0.5f) * kMaxWidth;
+				prev_w = wd;
+				const bool more = walk.next(step, B, nB);
+				if (!ocean) {
+					const int mx = tcoord_of(int((A[0] + B[0]) * 0.5f)), my = tcoord_of(int((A[1] + B[1]) * 0.5f));
+					if (t_inb(mx, my) && (w.t(mx, my) & 0x30) == 0x20) {
+						ocean = true;
+						cc = index;
+						wd *= 1.5f;
+						prev_w = wd;
+					}
+				}
+				const V3 mid{(A[0] + B[0]) * 0.5f, (A[1] + B[1]) * 0.5f, (A[2] + B[2]) * 0.5f};
+				const V3 n_mid{(nA[0] + nB[0]) * 0.5f, (nA[1] + nB[1]) * 0.5f, (nA[2] + nB[2]) * 0.5f};
+				trough_edge(A, nA, w0);
+				trough_edge(mid, n_mid, (w0 + wd) * 0.5f);
+				trough_edge(B, nB, wd);
+				A = B, nA = nB;
+				index++;
+				if (!more) break;
+			}
+			// create_sections' tail: the slope limiter drains the queue, then two smoothing passes over the original queue
+			(void)cc;
+			// (the original copies the queue before ensure_45_deg_slope drains it)
+			std::vector<int> original = rv_list;
+			rv_list = original;
+			while (!rv_list.empty()) ensure_45_deg_slope();
+			for (int pass = 0; pass < 2; pass++) {
+				for (int idx : original) smooth_tcoord(idx % txs, idx / txs);
+			}
+			// Terrain::spot_update_land_batch(rivers' wcoords, land 0, riverbase)
+			const int rb = g.tgd.river_base;
+			for (const auto& c : rv_wcoords) {
+				WData& d = W(c[0], c[1]);
+				if (d.land != 0 || d.land_sub != rb) {
+					d.land_sub = uint8_t(rb);
+					d.land = 0;
+				}
+			}
+			for (const auto& c : rv_wcoords) {
+				int l = 0, s = rb;
+				verify_land(c[0], c[1], &l, &s);
+			}
+		}
+	}
+
 	void run() {
 		coast_base = g.tgd.coast_base;
 		fa = TFractal(txs + 1, g.ys * 4 + 1, 5, 2, g.world_seed);
@@ -933,6 +1514,7 @@ struct TerrainInit {
 void Gen::terrain_init() {
 	TerrainInit ti(*this);
 	ti.run();
+	coord_flags = ti.cf;
 	res.heights = ti.H;
 	res.height_vxs = ti.vxs;
 	res.height_vys = ti.vys;
@@ -941,6 +1523,16 @@ void Gen::terrain_init() {
 	rg.clear_all(w);
 	rg.find_all(w);
 	sync_regions();
+}
+
+void Gen::river_geometry() {
+	if (res.rivers.empty() || res.heights.empty()) return;
+	TerrainInit ti(*this);
+	ti.cf = coord_flags;
+	ti.H = res.heights;
+	ti.coast_base = tgd.coast_base;
+	ti.river_geometry_run(res.rivers);
+	res.heights = ti.H;
 }
 
 }  // namespace ron::sim::mapgen

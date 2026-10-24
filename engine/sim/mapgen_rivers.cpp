@@ -59,21 +59,27 @@ int Gen::astar_river(int sx, int sy, int twist, int minlen, std::vector<std::arr
 		if (!inb(nx, ny) || (W(nx, ny).flags & 0x1000) || water_at(nx, ny) || is_edge(nx, ny)) return 0;
 	}
 	nodes.push_back({sx, sy, -1, 0, 0});
-	open.insert({0, seq++, 0});
+	// Tree<PathNode*,int>::ordered_insert @4796f0 sends an equal key to the LEFT (cmp edi,[ecx+0x10]; jle), and first_open_node
+	// @687970 takes the leftmost node: among equal values the NEWEST insertion pops first (so the sequence is negated).
+	open.insert({0, -(seq++), 0});
 	state[cell(sx, sy)] = 1;
+	// The ancestor test of the original walks node, parent, ... and stops when it reaches the root WITHOUT comparing it (the root
+	// is in the closed set anyway for the dedup, but not for the neighbour test below).
 	auto on_chain = [&](int node, int x, int y) {
-		for (int n = node; n >= 0; n = nodes[size_t(n)].parent) {
+		for (int n = node; nodes[size_t(n)].parent >= 0; n = nodes[size_t(n)].parent) {
 			if (nodes[size_t(n)].x == x && nodes[size_t(n)].y == y) return true;
 		}
 		return false;
 	};
+	auto border_at = [&](int x, int y) { return is_edge(x, y); };
 	int iterations = 0;
 	while (!open.empty() && ++iterations < 400000) {
 		const auto top = *open.begin();
 		open.erase(open.begin());
 		const int ni = std::get<2>(top);
 		const Node nd = nodes[size_t(ni)];
-		state[cell(nd.x, nd.y)] = 2;
+		// first_open_node soft-deletes the open entry; only an EXPANDED node goes to the closed set (BRTree @72 insert at 877d0 path)
+		state[cell(nd.x, nd.y)] = 0;
 		const WData& cd = W(nd.x, nd.y);
 		const bool expandable = (cd.flags & 0x100) || !water_at(nd.x, nd.y);
 		const bool finish = !expandable || (cd.flags & 0x1000) || is_edge(nd.x, nd.y);
@@ -92,6 +98,28 @@ int Gen::astar_river(int sx, int sy, int twist, int minlen, std::vector<std::arr
 			const int nx = nd.x + orthog_x[dir], ny = nd.y + orthog_y[dir];
 			if (!inb(nx, ny) || state[cell(nx, ny)] != 0 || on_chain(ni, nx, ny)) continue;
 			if (W(nx, ny).flags & 0x0002) continue;
+			// the neighbour test @686d58: the four neighbours of the child except the node itself; gating uses the CHILD's own cell
+			// (not water, not border, not a river cell), a neighbour that is water / border / river counts; one on the node's
+			// ancestor chain (root excluded) kills the child
+			const bool child_half = (W(nx, ny).flags & 0x100) != 0;
+			const bool child_water = !child_half && water_at(nx, ny);
+			const bool counting = !child_water && !border_at(nx, ny) && !(W(nx, ny).flags & 0x1000);
+			int pinch = 0;
+			bool chain_hit = false;
+			for (int o = 1; o <= 4; o++) {
+				const int qx = nx + orthog_x[o], qy = ny + orthog_y[o];
+				if ((qx == nd.x && qy == nd.y) || !inb(qx, qy)) continue;
+				if (counting) {
+					const WData& qd = W(qx, qy);
+					if (qd.flags & 0x1000) pinch++;
+					else if ((!(qd.flags & 0x100) && water_at(qx, qy)) || border_at(qx, qy)) pinch++;
+				}
+				if (on_chain(ni, qx, qy)) {
+					chain_hit = true;
+					break;
+				}
+			}
+			if (chain_hit || pinch > 1) continue;
 			const bool terminal = water_at(nx, ny) || is_edge(nx, ny) || (W(nx, ny).flags & 0x1000);
 			if (terminal) {
 				const int D = vd(nx - sx, ny - sy);
@@ -105,18 +133,6 @@ int Gen::astar_river(int sx, int sy, int twist, int minlen, std::vector<std::arr
 				if (D >= minlen && !parent_river) kept.push_back({nx, ny, ni, nd.length + 1, 0});
 				break;
 			}
-			int pinch = 0;
-			for (int o = 1; o <= 4; o++) {
-				const int qx = nx + orthog_x[o], qy = ny + orthog_y[o];
-				if (!inb(qx, qy)) continue;
-				if (nodes[size_t(ni)].parent >= 0 && qx == nd.x && qy == nd.y) continue;
-				if (qx == nd.x && qy == nd.y) continue;
-				if (on_chain(ni, qx, qy)) continue;
-				if (water_at(qx, qy) || is_edge(qx, qy) || (W(qx, qy).flags & 0x1000)) pinch++;
-			}
-			// ❓ randommap-rivers §6: the pinch test (>= 2 water / border / river neighbours) only applies to non-terminal
-			// children: a border or water child always has such neighbours and could never end a river otherwise
-			if (pinch >= 2) continue;
 			if (near_start_city(nx, ny) || W(nx, ny).blocked != 0 || (W(nx, ny).flags & 8)) continue;
 			int rr = r.rnd_draw(20) + 10;  // PathFinder::calc_river_cost: DRAW B
 			const int len = nd.length + 1;
@@ -151,9 +167,10 @@ int Gen::astar_river(int sx, int sy, int twist, int minlen, std::vector<std::arr
 		for (const Node& k : kept) {
 			if (state[cell(k.x, k.y)] != 0) continue;
 			nodes.push_back(k);
-			open.insert({k.value, seq++, int(nodes.size()) - 1});
+			open.insert({k.value, -(seq++), int(nodes.size()) - 1});
 			state[cell(k.x, k.y)] = 1;
 		}
+		state[cell(nd.x, nd.y)] = 2;
 	}
 	return 0;
 }
@@ -243,6 +260,7 @@ void Gen::make_riverlist(int start, int range, int length, int minlen, int valle
 			}
 		}
 		if (edge) W(ex, ey).flags |= 0x1000;
+		rp.edge = edge;
 		res.rivers.push_back(std::move(rp));
 		if (!again) return;
 	}
@@ -270,6 +288,8 @@ void Gen::make_rivers() {
 	}
 	for (WData& d : w.wdata) d.flags &= uint16_t(~(0x2000 | 0x0002));
 	// Regions::find_all at the end of make_rivers: 0x1000 is not a barrier for the regions, so nothing changes here.
+	// RiversOut::calculate_all (Terrain::init, right after Map::make_rivers): the sections, the trough and the heights
+	river_geometry();
 }
 
 }  // namespace ron::sim::mapgen

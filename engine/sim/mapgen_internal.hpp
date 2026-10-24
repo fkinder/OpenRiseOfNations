@@ -74,6 +74,7 @@ struct TileGroupData {  // tilesets.xml <TERRAINGROUP>
 	int clump_factor = 3, forest_base = -1, forest_growth_prob = 0, mountain_base = -1, mountain_growth_prob = 0,
 	    mnt_fringe_tree_prob = 0, coast_base = -1, coast_growth_prob = 0, bush_clump_prob = 0, bush_spacing = 0,
 	    bush_min = 0, bush_max = 0, mnt_rock_clump_prob = 0, mnt_rock_spacing = 0, mnt_rock_min = 0, mnt_rock_max = 0;
+	int river_base = 0;  // <TILESET riverbase=...>: the land_sub of the cells a river runs through (Terrain::spot_update_land_batch)
 };
 
 // A region while a recipe builds it (Regions.list entry: cells in the order they were added).
@@ -279,6 +280,8 @@ public:
 
 	// ---- mapgen_terrain_init.cpp
 	void terrain_init();
+	void river_geometry();  // RiversOut::calculate_all: the river sections, their trough tiles and heights (randommap-rivers section 9)
+	std::vector<uint16_t> coord_flags;  // TerrainOut's per-wcoord CoordInfo.flags after Terrain::init's coast pass (bit 4 = coastal)
 
 	// ---- mapgen_resources.cpp
 	void place_resources();

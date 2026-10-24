@@ -5,7 +5,10 @@
 // Deviations / marks:
 //  - conquest map styles 24-26 (MapConquest, the sea variant, MapScenario) are not in the generator: land links use the
 //    "Random Land" picker (map style 1), sea links "Random Sea" (2), custom maps are loaded from their .scx.
-//    TODO(ctw 24-26): MapConquest::make (the node-shaped terrain), check_starting_loc / check_sea_map.
+//    TODO(ctw 24-26): MapConquest::make (the node-shaped terrain), check_starting_loc / check_sea_map. Status of the generator side: the
+//    style files (CONQUESTMAP / CONQUESTMAPSEA) and the rest of Map::make are the generic path; what is missing is make_continents, which turns the two
+//    countries' silhouette images (conquest/RenderMaps/MapPieces/<map>/xpack_temp_country<N><map>.png) into land and water (import_image: box average
+//    against a percent, docs/randommap-terrain-groups.md B3.13) and places the starts; it needs the silhouettes and rectangles from this layer.
 //  - the battle seed: conquest_game.seed for every battle, as build_game does; ConquestGame::vary_battle_seed derives one per link
 //    and round instead (an option, off by default).
 //  - reinforcement armies: ctw_reinf.cpp; the tactical cards: ctw_tactical.cpp.

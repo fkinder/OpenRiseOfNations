@@ -80,6 +80,7 @@ struct EmpireEntry {
 struct RiverPath {
 	std::vector<std::array<int32_t, 2>> pts;  // wcoords, source to mouth
 	int32_t segment = 0;                      // 0 whole river (shipped flags)
+	bool edge = false;                        // the mouth is on the map border (make_riverlist adds the duplicate and the outside point)
 };
 
 struct Result {

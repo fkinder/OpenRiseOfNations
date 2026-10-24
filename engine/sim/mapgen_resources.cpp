@@ -177,8 +177,15 @@ void Gen::put_good(int good, int x, int y) {
 	go.x = cx;
 	go.y = cy;
 	go.flags = objflag::kValid;
-	const int slot = int(c.goods.size());
-	c.goods.push_back(go);
+	int slot = int(c.goods.size());  // Objects::init_good: the first free slot, else a new one
+	for (size_t i = 0; i < c.goods.size(); i++) {
+		if (!c.goods[i].alive()) {
+			slot = int(i);
+			break;
+		}
+	}
+	if (size_t(slot) == c.goods.size()) c.goods.push_back(go);
+	else c.goods[size_t(slot)] = go;
 	good_init(w, good, gt, cx, cy);
 	if (good != kOilGood) {
 		W(x, y).down = -2;
@@ -206,8 +213,15 @@ void Gen::put_goody(int x, int y) {
 	it.x = cx;
 	it.y = cy;
 	it.flags = objflag::kValid;
-	const int slot = int(c.items.size());
-	c.items.push_back(it);
+	int slot = int(c.items.size());  // Objects::init_item: the first free slot, else a new one
+	for (size_t i = 0; i < c.items.size(); i++) {
+		if (!c.items[i].alive()) {
+			slot = int(i);
+			break;
+		}
+	}
+	if (size_t(slot) == c.items.size()) c.items.push_back(it);
+	else c.items[size_t(slot)] = it;
 	item_init(w, cx, cy);
 	W(x, y).down = -3;
 	W(x, y).down_who = int16_t(slot);
@@ -495,6 +509,7 @@ void Gen::place_resources() {
 // Herd::create_units @7417f0 for every herd in slot order (Setup::build_game step 10).
 void Gen::create_herd_units() {
 	for (const HerdRec& h : herds) {
+		if (h.unit_type < 0) continue;  // a herd closed by Terrain::move_goody
 		const int units = h.unit_type == 412 ? 1 : h.unit_type == 411 ? 3 : 4;
 		for (int u = 0; u < units; u++) {
 			HerdAnimal a;

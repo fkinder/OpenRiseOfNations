@@ -35,7 +35,10 @@
 #include "sim/mapgen.hpp"
 #include "sim/placement.hpp"
 #include "sim/trig.hpp"
+#include "sim/commands.hpp"
+#include "sim/newgame.hpp"
 #include "sim/original_save.hpp"
+#include "sim/replay.hpp"
 
 using namespace ron;
 using namespace ron::sim;
@@ -526,6 +529,132 @@ void compare_goods(const char* name, const Rules& rules, const std::vector<GoodO
 	}
 }
 
+
+// ---------------------------------------------------------------- --play189
+// ron-mapgen <game dir> --play189 <file.rcx> [--save file.SVX] [--frames N] [--trace]
+// Builds the replay's random game with new_random_game, feeds the replay's commands (the records of frame <= f run before f's
+// do_frame, as apps/sav --replay does) and reports game_random after N frames; with --save, the distance in draws to the save's
+// random_seed and the objects that differ (docs/randommap-spec.md "Oracle").
+int run_play189(const GameFiles& files, const Rules& rules, const char* rcx_path, int argc, char** argv) {
+	Replay rp;
+	std::string err;
+	if (!read_replay(rcx_path, rp, err)) {
+		std::fprintf(stderr, "cannot read %s: %s\n", rcx_path, err.c_str());
+		return 1;
+	}
+	const ReplayHeader& h = rp.header;
+	RandomGameSetup S = default_random_setup(std::max(2, h.present_players()));
+	S.map_style = h.setup_field(kSetMapStyle);
+	S.map_size = h.setup_field(kSetMapSize);
+	S.seed = h.seed;
+	S.num_nations = h.present_players();
+	S.game_rules = h.setup_field(kSetGameRules);
+	S.game_speed = h.setup_field(kSetGameSpeed);
+	S.pop_limit = h.setup_field(kSetPopLimit);
+	S.tech_cost = h.setup_field(kSetTechCost);
+	S.rush_rules = h.setup_field(kSetRushRules);
+	S.reveal_map = h.setup_field(kSetRevealMap);
+	S.victory = h.setup_field(kSetVictory);
+	S.elimination = h.setup_field(kSetElimination);
+	S.wonderwin = h.setup_field(kSetWonderWin);
+	S.score_goal = h.setup_field(kSetScoreGoal);
+	S.popwin = h.setup_field(kSetPopWin);
+	S.time_limit = h.setup_field(kSetTimeLimit);
+	S.econwin = h.setup_field(kSetEconWin);
+	S.starting_town = h.setup_field(kSetStartingTown);
+	S.starting_resources = h.setup_field(kSetStartingResources);
+	S.starting_technology = h.setup_field(kSetStartingTechnology);
+	S.ending_technology = h.setup_field(kSetEndingTechnology);
+	std::array<int, 8> seat_who{};
+	int k = 0;
+	for (const ReplayPlayer& pl : h.players) {
+		if (!pl.present()) continue;
+		NationSetup& n = S.nation[size_t(k)];
+		n.tribe = pl.tribe;
+		n.team = pl.team >= 0 && pl.team < 8 ? pl.team : -1;
+		n.human = k == 0;
+		n.difficulty = pl.diff;
+		seat_who[size_t(pl.slot & 7)] = pl.who;
+		k++;
+	}
+	std::printf("replay %s: seed %u style %d size %d players %d town %d res %d tech %d..%d frames to %d\n", rcx_path, h.seed, S.map_style, S.map_size,
+	            S.num_nations, S.starting_town, S.starting_resources, S.starting_technology, S.ending_technology, rp.last_frame());
+	RandomExtras ex;
+	std::unique_ptr<Game> g = new_random_game(files, rules, nullptr, S, &ex);
+	if (!g) {
+		std::fprintf(stderr, "new_random_game failed: %s\n", ex.error.c_str());
+		return 1;
+	}
+	const char* fa = arg_value(argc, argv, "--frames");
+	const int frames = fa ? std::atoi(fa) : rp.last_frame();
+	const uint32_t seed0 = g->rng.seed();
+	std::printf("after new_random_game: frame %d game_random 0x%08x (%llu generator draws)\n", g->frame, seed0, (unsigned long long)ex.result.draws);
+	sim::CommandPackage package;
+	size_t ri = 0;
+	std::map<int, int> skipped;
+	for (int f = g->frame; f < frames; f++) {
+		while (ri < rp.packages.size() && rp.packages[ri].frame <= f) {
+			const ReplayPackage& pk = rp.packages[ri++];
+			package.group = -1;
+			for (const ReplayCommand& c : pk.cmds) {
+				if (c.op == op::kTurnData || c.op == op::kCamera || c.op == op::kCheckSums || c.op == op::kPlayerSpeed) continue;
+				Command cmd;
+				if (!replay_to_engine(pk.data(c), c.len, cmd)) {
+					skipped[c.op]++;
+					continue;
+				}
+				package.process(*g, cmd, pk.play, seat_who[size_t(pk.play & 7)]);
+			}
+		}
+		const uint32_t before = g->rng.seed();
+		g->do_frame();
+		if (has_flag(argc, argv, "--trace")) {
+			long long n = 0;
+			for (uint32_t q = before; q != g->rng.seed() && n < 1000000; q = q * 0x19660Du + 0x3C6EF35Fu) n++;
+			if (n) std::printf("  frame %d: %lld draws\n", f, n);
+		}
+	}
+	for (const auto& kv : skipped) std::printf("  commands not executed: %s x%d\n", replay_verb_name(kv.first), kv.second);
+	const uint32_t seed1 = g->rng.seed();
+	auto distance = [](uint32_t from, uint32_t to) -> long long {
+		uint32_t f = from;
+		for (long long n = 0; n <= 4000000; n++) {
+			if (f == to) return n;
+			f = f * 0x19660Du + 0x3C6EF35Fu;
+		}
+		return -1;
+	};
+	std::printf("after %d frames: game_random 0x%08x (%lld draws after new_random_game)\n", g->frame, seed1, distance(seed0, seed1));
+	if (const char* sv = arg_value(argc, argv, "--save")) {
+		std::vector<uint8_t> raw, save;
+		if (!read_whole(sv, raw) || !gunzip_maybe(raw, save)) {
+			std::fprintf(stderr, "cannot read %s\n", sv);
+			return 1;
+		}
+		auto peek = std::make_unique<dw::Tree>(dw::Description::get());
+		dw::SaveDecode sd = dw::decode_save(*peek, save.data(), save.size(), 0);
+		GameSetup setup;
+		setup.starting_technology = int32_t(peek_int(*peek, "game.info.starting_technology"));
+		setup.starting_technology2 = int32_t(peek_int(*peek, "game.info.starting_technology2"));
+		setup.ending_technology = int32_t(peek_int(*peek, "game.info.ending_technology"));
+		setup.game_rules = int32_t(peek_int(*peek, "game.info.game_rules"));
+		setup.flag8 = (peek_int(*peek, "game.info.flags") & 8) != 0;
+		Rules srules = rules;
+		start_game(srules, setup);
+		OriginalLoadReport rep;
+		std::unique_ptr<Game> eg = load_original_save(files, srules, nullptr, save, &rep);
+		if (!eg) {
+			std::fprintf(stderr, "load failed: %s\n", rep.error.c_str());
+			return 1;
+		}
+		const uint32_t want = eg->rng.seed();
+		std::printf("save frame %d game_random 0x%08x: engine is %lld draws before it (generation + frames); engine-ahead %lld\n", eg->frame, want,
+		            distance(seed1, want), distance(want, seed1));
+		std::printf("save: draws from the generation end to the save would be %lld if the engine's generation draws were exact\n", distance(seed0, want));
+	}
+	return 0;
+}
+
 int run_compare(const GameFiles& files, const Rules& rules, const char* save_path, int argc, char** argv) {
 	std::vector<uint8_t> raw, save;
 	if (!read_whole(save_path, raw) || !gunzip_maybe(raw, save)) {
@@ -968,6 +1097,7 @@ int main(int argc, char** argv) {
 		const uint32_t base_seed = sa ? uint32_t(std::strtoul(sa, nullptr, 0)) : 12345u;
 
 		if (const char* cmp = arg_value(argc, argv, "--compare")) return run_compare(files, rules, cmp, argc, argv);
+		if (const char* rc = arg_value(argc, argv, "--play189")) return run_play189(files, rules, rc, argc, argv);
 
 		if (has_flag(argc, argv, "--all")) {
 			int s_lo = 6, s_hi = 23, z_lo = 0, z_hi = 6, n_lo = 2, n_hi = 8;

@@ -310,6 +310,34 @@ there). `find_avail_regions`' list is in descending id order (§5). `find_region
 Open ❓: (1) the `pattern` fallback for an unknown name; (2) `get_age_slow` for goods (Sulphur early/late); (3) draws inside
 `Objects::init_unit` / `Unit::set_new_location` during `Herd::create_units` (none seen in `find_nearby_spot`).
 
+## 13. `Terrain::move_goody` @84a3d0 and `Terrain::move_ocean_goody` @84aec0 (third pass, ported)
+
+Placement (sections 4 / 6) happens inside `Map::make`; `Terrain::init` runs afterwards and changes cells under the placed objects. Whatever stands on
+a wcoord that stops being plain land is moved by one of two near-twin functions (`engine/sim/mapgen_terrain_init.cpp`, `TerrainInit::move_goody`):
+
+- **`move_ocean_goody`** from `Terrain::mark_halfwater` @84ece0 (before the cell becomes half water; `flags & 0x100 == 0`) and from the end of
+  `Terrain::check_and_set_halfland_wcoord` @84dec0 (@84e4a5: a cell that was re-evaluated and joined a neighbour's region);
+- **`move_goody`** from `RiverSection::create_trough_edge` (every sample's wcoord, randommap-rivers section 9) and `Cliffs::assess_wcoord` @8a6a40
+  (steep cells; not ported yet, it needs `has_plus_slope` on the mountain heights).
+
+Both read the object on the cell first: the goody box (`down == -3`, valid item; skipped when the cell is water and not half-land), the resource
+(`down == -2`, valid, not oil), the derrick (`WData.flags & 0x800`); nothing there ends the call. The 48 `land` values of `move[1..48]`
+are read (-1 outside the map). Then, each in this order:
+
+1. **Goody** (item slot kept): `Item::close` (clears `0x8000` and the down list of the old cell), then the first of `move[9..24]` (ring 2, 16 cells) that is
+   inside the map, not on the border (`x` or `y` equal 0 or `xs - 1`, the original compares both with `xs - 1`), `land == 0`, not half-land, no
+   `0x10 / 0x28 / 0x800 / 0x1000 / 0x40 / 0x8000`, no good, `blocked == 0`, CoordInfo coastal bit (`& 4`) clear and not `has_south_forest`
+   takes it (`Item::init` at the cell centre, `set_down(-3)`). No acceptable cell: the goody stays closed (lost).
+2. **Resource**: `Good::close` (resource tcoords, blocking, `flags & 1`, down list, its herd), then the same ring; land variant: the goody's tests with
+   `land == 0`; ocean variant: `land` 1 or 2, not half-land, none of `0x10 / 0x68 / 0x1800 / 0x8000`, no good, `blocked == 0`, no south forest
+   (no coastal-bit test); `Objects::init_good` (first free slot, centre from `snap_center`) and `Herds::init_herd` (first free herd slot).
+3. **Derrick**: `World::set_oil_at(x, y, 0)` and rock flag `0x8` off; the first of `move[9..48]` whose `land` equals the source's (a water derrick looks for
+   `land` 2 or 1 with mask 8), not half-land, `is_clear_land(mask | 0x80)` @874b60 (no mountain / forest / rock / oil / river / cliff flag unless the mask
+   allows it, `blocked == 0`, CoordInfo coastal bit clear) and not south forest gets `set_oil_at(..., 1)`; the rock flag `0x8` is set there (the ocean variant
+   always, the land variant only for a derrick that was on land).
+
+`Objects::init_good` / `init_item` / `World::set_oil_at` reuse the first free slot of their array (also `put_good`, `put_goody`, `Gen::set_oil_at` now).
+
 ## Oracle: current 2.SVX (2026-10-24)
 
 Second pass (2026-10-24, after the group fixes of `randommap-terrain-groups.md` and the `Terrain::init` port): goods 78 of 80 exact (type and
@@ -317,8 +345,7 @@ position; the 2 others are oil sites on one rock clump), goodies 33 of 50 exact,
 helping fairness (the lagging player gets extra oil) all follow once the groups are exact: the earlier count differences were consequences of
 group placement, not of this file.
 
-- The 17 goodies that differ all sit one to two cells from the save position (same ring, same player). The ring walk and `accept` were
-  re-read against the decompile of `place_player_resource` @691f70 and match (goody: only the `items` spacing, no neighbour-coast test).
-  The suspect is the lake-shore state at resource time: the save's lake corners (`(85,28)`, `(50,11)`) are rejected where ours accepts a
-  coast cell. Draws are aligned (the ring offset `rnd(w + 1)` is the right form; `w`, `w - 1`, scaled forms are all worse).
+- (third pass) The 17 goodies that sat one or two cells off were not an acceptance rule at placement time: the original moves them afterwards,
+  section 13 (`move_ocean_goody` for the cells that become half water, `move_goody` for the river trough). With both ported goodies are 50 of 50
+  exact and goods 80 of 80 (the two oil sites on the rock clump too: the river moved the derrick), on every world with a comparable goody list.
 - On the other worlds the match is complete for goods and goodies where the group state is (East Indies 100: 107/107 goods, 1/1 goody).

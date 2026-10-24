@@ -354,13 +354,53 @@ Only `current 2.SVX` is a fresh game (frame 189). The other saves were taken far
 flag and city flags carry game-time changes the generator cannot reproduce. Everything the generator decides before the game starts
 (land, half-land, mountains, forests, doobers/rocks, goods) agrees on all of them.
 
+### Third pass (2026-10-24): rivers, moved goodies, the draw check
+
+- **Rivers are done** (`randommap-rivers.md` sections 6 and 9): the A* tie order and dedup were the cause of the shorter paths, and what the saves hold
+  beyond the path (the ±1 band, `tdata 0x800`) is the river trough, `RiversOut::calculate_all`. Results: river flag cells exact on three of four worlds
+  (953 / 845 / 688), river tiles (`tdata 0x800`) exact (8462 / 7510 / 6049), `current 2.SVX` 201 of 202 cells (+11 extra next to lake shores) and
+  1714 of 1730 river tiles. The saved river control splines (`River::walk_data`, `SplineData`) match ours point for point, including the points
+  `ensure_ocean_end` appends, and `total_spline_length` / `depth` match to the printed digits (29729.1 / 78, 24397.44 / 66, 23747.65 / 62).
+- **Goodies / goods / oil are exact** (`randommap-resources.md` section 13): `Terrain::move_ocean_goody` / `move_goody` move what stands on a cell that
+  becomes half water or lies in a river trough. `current 2.SVX`: goodies 50 of 50 (33 before), goods 80 of 80, oil flags exact, rock flags 1 off
+  ((16,36): a lake-shore cell the save has as plain shallow water with its derrick, see the open item below). Goods are exact on all seven worlds.
+- `Doober::has_doobers` always returns 0 (`randommap-terrain-groups.md`); the rock clump "diagonal growth" was the river moving a derrick.
+- The saves carry `CoordInfo.flags` for every wcoord (`TerrainList::walk_data`, `state-walk.md`): ours equal the save's in the bits that drive the
+  coast generators (0x8, 0x20, 0x1000, 0x8000) on all 9999 cells; bit 4 differs on 19 cells (the half-land differences).
+- `game_random` after 189 frames: `ron-mapgen --play189 <rcx> [--save svx] [--frames N]` builds the replay's game with `new_random_game` and feeds the
+  commands. `Playback 2026.07.11 00'24'00` (seed 18119929): the generator makes 53769 draws and `new_random_game` 9 more; the engine then draws 19480
+  numbers in 189 frames (19404 after the goody / slot changes; frames 5 to 9 alone 7000: the first AI turn), the save's `random_seed` is 11350 draws after the end of generation. So the
+  engine is 8054 draws ahead of the original after the 189 frames, and the generator cannot be separated from the frame code with this oracle: the draw
+  schedule of the first frames of a NEW game (not a loaded one) is the open item. No generator step the river geometry added draws.
+
+Result of the third pass on the seven worlds (`ron-mapgen --compare`, differing cells / vertices before -> after this pass; goods and goodies are exact / save):
+
+| | current 2 | current RN | east indies 2 | East indies final surround | DO NOT DELETE | DO NOT DELETE 2 | curent dec 14 |
+|---|---|---|---|---|---|---|---|
+| land_sub | 158 -> 76 | 720 -> 720 | 1230 -> 1230 | 636 -> 636 | 3509 -> 2012 | 3643 -> 1938 | 2655 -> 1461 |
+| WData.flags (all bits) | 368 -> 169 | 1703 -> 1700 | 2412 -> 2410 | 1323 -> 1321 | 2220 -> 1357 | 2333 -> 1337 | 1732 -> 1079 |
+| half-land 0x100 | 30 -> 30 | 63 -> 63 | 85 -> 85 | 40 -> 40 | - | - | - |
+| rock 0x8 | 2 -> 1 | 0 -> 2 | 0 -> 0 | 0 -> 1 | 2 -> 0 | 0 -> 0 | 0 -> 0 |
+| river cells 0x1000 | 175 -> 12 | - | - | - | 1074 -> 0 | 1202 -> 0 | 768 -> 0 |
+| river tiles tdata 0x800 | 1730 -> 99 | - | - | - | 7510 -> 0 | 8462 -> 0 | 6049 -> 0 |
+| goods | 78 -> 80 / 80 | 134 -> 136 / 136 | 107 -> 107 / 107 | 111 -> 112 / 112 | 22 -> 26 / 26 | 24 -> 26 / 26 | 23 -> 25 / 25 |
+| goodies | 33 -> 50 / 50 | 3 / 3 | 1 / 1 | 0 / 0 | 9 / 9 | 10 / 10 | 14 -> 15 / 15 |
+| shelf vertices bit-exact | 2615 -> 3145 | 6168 | 6380 | 5531 | 2648 / 2661 | - | - |
+| land vertices >= 60 bit-exact | 68991 -> 70999 | 15621 | 9418 | 6003 | 71904 / 92897 | - | - |
+
+(The old saves are late games: their goodies were picked up and their `land_sub` carries farms and roads, so only the shown cells are comparable. The "rock
+0 -> 2 / 1" cells of the East Indies worlds are moved derricks whose rock flag the save lacks; same cause as the open item below.)
+
 ### Still different on `current 2.SVX`
 
-- `land` 10 and half-land 30: the shelf heights at a few lake corners differ from the save (`TerrainOut::mark_coast_vert_influence` jitter /
-  influence ownership; relax passes other than 5, swapped line ends, other jitter rounding and an xy swap were tried and are worse). The
-  residue is 2615 of 15386 shelf vertices bit-exact (5997 within 0.01) and the rest of the shore band; sea floor 30397 of 30701 exact.
-- `val` (756 cells, `compute_all_vals` inputs: the half-land differences), `blocked` / `bad` / `solid` (51 / 87 / 51: cells next to those).
-- Rivers: 129 cells against 202 (78 common), three rivers each but shorter and partly other beds. The A* tie rule and dedup test are still
-  the open items listed in `randommap-rivers.md`.
-- Goodies 33 of 50 placed exactly (the others sit within two cells), oil 27 of 29, rocks 49 of 50: one group-7/8 rock clump grows a diagonal
-  neighbour differently ((10,79) against (12,80)).
+- `land` 10 and half-land 30, `land_sub` 76, `val` 756, `blocked` / `bad` / `solid` 51 / 87 / 51, one rock flag: all follow from the lake-shore heights.
+  Shelf: 7592 of 15381 vertices bit-exact (49 percent), mean error 2.4; sea floor 30397 of 30701. What was verified and is NOT the cause:
+  `mark_valid_coastal_influencers`, `mark_coast_vert_influence`, `adjust_aquatic_height`, `relax_aquatic_verts` (5 passes: 3, 4, 6, 8 are all
+  worse), `LineState`, `Fractal::init` / `get_height` (read against the asm), the 25-cell window, the generator set (CoordInfo flags equal the save's),
+  the line owners, the whole sequence of `Terrain::init` between `refresh_data` and `build_coastal_data`. About one generator in five (24 of 179
+  where a change is visible; they all have a diagonal first link) puts its line source at another jitter than ours: in the saved heights the
+  nearest influence point sits at the generator cell plus the jitter of its LAST neighbour (`jn`) for the two cases examined closely ((42,36), (37,34))
+  while the majority (155) is right with the generator's own jitter, and forcing `jn` for all, the first neighbour, the target cell's own jitter or
+  a shared jitter are each much worse. The rule that selects them is not found.
+- `Cliffs::init` and `TerrainOut::adjust_for_mountains` are not ported (mountain height faces, `has_plus_slope`): the remaining land-height
+  differences (11105 of 82104 vertices) and the 51 `blocked` cells.

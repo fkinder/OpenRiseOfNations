@@ -195,9 +195,13 @@ expand(node): for dir in orthog 1..4 (this order):
     child = node moved one wcoord; child.metric = node.metric + xs·dy + dx (= cell index)
     drop if outside the map, if its metric is already in the open or the closed set, or if it is on the node's ancestor chain
     drop if flags(child cell) & 0x0002                      // valley of an earlier river
-    n = number of the child's 4 neighbours (≠ the parent, not on the ancestor chain) that are water, border or 0x1000
-        ❓ exact neighbour test (the decompile mixes child and neighbour lookups)
-    drop if n >= 2
+    neighbour test @686d58 (settled in the third pass, asm): for each of the child's 4 orthogonal neighbours q, skipping the node itself
+    and positions outside the map:
+        count (only when the CHILD cell is not water (not half-land, land 1/2), not on the border and not 0x1000): +1 when q is a 0x1000
+        cell, or q is water (not half-land and land 1/2), or q is on the border (x or y = 0 / size-1; the border test also holds for a
+        half-land q);
+        if q lies on the node's ancestor chain (walked from the node up, the ROOT is not compared) the CHILD is dropped at once
+    drop if count > 1
     if the child cell is water (not half-land) or a border cell or has 0x1000:           // terminal child
         D = dist(child, start)  (max + min²/2max metric)
         if D < minlen, or any orthogonal neighbour of the PARENT other than the child has 0x1000:
@@ -205,7 +209,7 @@ expand(node): for dir in orthog 1..4 (this order):
         else: child.value = 0, child.length = L + 1, child.parent = node; discard the siblings generated so far and
               stop expanding: the child is the only new open node (popped next, ends through finish())
     else:
-        drop if start_city_rad_wcoord(child) or WData byte +0x11 != 0 or flags & 8          ❓ byte +0x11 not named in part 1
+        drop if start_city_rad_wcoord(child) or WData byte +0x11 (`blocked`) != 0 or flags & 8
         r = rnd(20) + 10     // DRAW B: `PathFinder::calc_river_cost`: Random::get(0, 0xffff) % 20 + 10, once per surviving child
         child.length = L + 1
         if child.length > 1:                                                             // grandparent = node.parent
@@ -221,10 +225,20 @@ expand(node): for dir in orthog 1..4 (this order):
 ```
 Consequences for a port: with twist 60 a straight step costs ×61 and a turn ×41 (rivers meander); with a long `minlen`
 the search prefers deep nodes (the penalties fall as `length` grows) and only ends when it touches water, the border
-or an existing river at least `minlen` away from the source with `length > minlen`. ❓ Not bit-exact without the
-tie behaviour of `Tree<PathNode*,int>::ordered_insert` (equal `value`s: left or right) and the exact dedup test (open
-and closed membership use a red-black tree keyed by cell index, with a sentinel flag at node +0x15); the number and
-order of DRAW B depends on both. The structure above is faithful to the disassembly in everything else.
+or an existing river at least `minlen` away from the source with `length > minlen`.
+
+Settled in the third pass (the two things that made the first port's paths shorter and its third source different):
+- **Ties.** `Tree<PathNode*,int>::ordered_insert` @4796f0 is an unbalanced binary tree that sends an equal key to the LEFT
+  (`cmp edi,[ecx+0x10]; jle`), and `first_open_node` @687970 takes the leftmost node: among equal `value`s the node inserted LAST is
+  popped first (not the oldest).
+- **Open / closed.** The open set is a red-black tree keyed by the cell index (`BRTree<TreeNode*,ulong>`, node +0x15 = "removed"):
+  `first_open_node` only soft-deletes the entry. The closed set is a second tree that receives a node only when it was EXPANDED (also
+  a node that ended as a dead end through the "discard the siblings" rule); a node that finishes (water / border / river) and is
+  rejected by the `minlen` test is in neither set, so its cell can be reached again by another route. A child is dropped when its
+  cell index is in the open set (not removed) or in the closed set; the ancestor test never compares the root, which is in the
+  closed set anyway.
+- **Pinch.** See the neighbour test above (the count only applies when the child is an ordinary land cell, a terminal child never
+  has a count; the "ancestor neighbour kills the child" rule applies to every child).
 
 ## 7. Draw order of the whole step
 
@@ -232,6 +246,52 @@ order of DRAW B depends on both. The structure above is faithful to the disassem
 (`rnd(range+1)` if `range > 0`, else none), then for each visited bed (LFSR order, §4) that passes the fairness filter:
 DRAW B once for every child the A* keeps, in the order the A* expands (§6). Nothing else touches `game_random`.
 Rejected candidates (acceptance fails, or `P >= 400`) still consumed their draws.
+
+## 8. What the river path changes in the world, and what does not draw
+
+`Map::make_rivers` leaves only WData `0x1000` on the path cells; everything below (section 9) runs in `RiversOut::calculate_all` right after it.
+Neither the geometry nor `RiverSectionOut::create_doobers` touches `game_random`: the River fractal is seeded with 0 and the river doobers use
+the separate `internal_random`. The total draw count of a map is therefore the one of sections 4 and 7.
+
+## 9. `RiversOut::calculate_all` @888820: sections, trough, tiles (ported in the third pass)
+
+Called by `Terrain::init` @850f70 with `(param_2, param_3) = (0, 0)` for a new game (`ensure_ocean_end` and the terrain edits run only then), once
+per `River` object in creation order (`make_riverlist` makes one River per path for the shipped data: `wide 0, med 100` gives `a = 0, b = c = P`).
+
+1. **Control points** (`RiverOut::add_spline_point` @885a40): `(wx * 768 + 384, wy * 768 + 384, 0)` for every path point; a path that ends on the
+   map border (`edge`) gets `(ex, ey)` again and one point outside the map (`(-1, ey)` if `ex == 0`, else `(ex, -1)` if `ey == 0`, else
+   `(xs, ey)`, else `(ex, ys)`); `length += dist / 768` in float after every point.
+2. **`RiverOut::ensure_ocean_end` @885400** (more than two points): direction `d` = last - previous (normalised; the one before when it is zero);
+   over the 49 cells `move[0..48]` around the last point's wcoord (cells outside the map count as water) every water cell (`land == 2`) whose vector
+   from the last point has a non-negative dot product with `d` is a candidate and the nearest wins (float `sqrt`, `1e6` start); its centre is
+   appended; then (quirk kept: the vector of the LAST water cell looked at, not of the winner) `(v - d)` normalised times 768 is added to the winner's
+   centre and, when that wcoord is `land == 2`, appended too. A mouth that already sits in a lake finds itself (distance 0) and adds one point.
+3. **Spline** (`Spline::calc_spline` type 3): clamped uniform cubic B-spline with `segs = (short)(length * 1.7)` (`rivers._256`) segments,
+   normals = side vector `(dy, -dx, 0)` averaged with the previous segment's, walked by arc length (`Spline::next_at_dist`) in steps of
+   `768 / 1.7`. Single precision throughout (`engine/render/rivers.cpp` is the same code, checked against the original's meshes).
+4. **Sections** (`RiverOut::create_sections` @884e00): the width of section k is `(fractal(a0, a4) * 0.005 + 0.5) * 0.75` (`rivers._92` = 0.75
+   wcoord; `Fractal(50, 50, 2, flags 2, seed 0)`, counters `a0` 0..49 then `a4`, both start at 0 for each river); the first previous width is 0.75;
+   when the middle of a section lies on a water tile (`tdata & 0x30 == 0x20`) the river is in its delta: that section's width x1.5 and the
+   following ones `min(1.5, 1.5 * previous)`. Each section calls `create_trough_edge` three times: start (width = previous width), middle
+   (point and normal averaged, width averaged), end (width).
+5. **`RiverSection::create_trough_edge` @889660**, nine samples across the river (`k = 0..8`, step = `normal * width * 192`, first sample 4 steps
+   before the point): depth `z = (-60 - prof[k] * -60) + 15` with `prof = {1, .75, .26, 0, 0, 0, .26, .75, 1}`; on a water tile and `z < 0`
+   and `|k - 4| < 2` it becomes `((z - 30) + z) / 2`. For a sample inside the map:
+   - `RiverSectionOut::terraform_from_river_vert` @88b360: skipped when any of the 8 neighbours of the tile's wcoord is water (`land` 1 or 2) or
+     half-land, or the tile is a water tile / the wcoord is `land == 1` / the tile is a mountain tile (`tdata & 3 == 2`); otherwise the wcoord is queued
+     for the land update, the four corner heights of the tile become `(h + z) / 2` and the 121 tcoords `move[0..120]` around it are queued once
+     for smoothing;
+   - **marking**: for the 36 tcoords `move[0..35]` around the sample's tile: if any of its four corner heights is `< 0` and its wcoord has no mountain,
+     forest, rock or oil flag (`0x10 / 0x28 / 0x800`), is not water (unless half-land), has no cliff flag `0x40`, `blocked == 0` and the wcoord's
+     CoordInfo flags have no coastal bit (`& 4`), then `World::set_river_at` @6b1f80 sets `tdata |= 0x800` and `WData.flags |= 0x1000`;
+   - `Terrain::move_goody` (land variant, resources section 9) on the sample's wcoord.
+6. **Tail of `create_sections`**: `TerrainOut::ensure_45_deg_slope` @869890 on the queue until it is empty (a vertex whose neighbour tile (not mountain,
+   not water) is higher than `h + 79.68` is lowered to `h + 79.68 - 4` when that is positive and queued again), then two `smooth_tcoord` passes
+   over the ORIGINAL queue (`TerrainOut::smooth_tcoord` @86c3a0), and in `calculate_all` `Terrain::spot_update_land_batch` @84d540 sets
+   `land_sub = riverbase` (`<TILESET riverbase=...>`, 2 for `early_autumn`) and `land = 0` on every queued wcoord and then runs `verify_land` on each.
+
+The heights live in the same `master_land_heights` grid that `Terrain::init`'s coast pass left (`Result::heights`); `adjust_for_mountains` and `Cliffs::init`
+(next in `Terrain::init`) are not ported yet.
 
 ## What the port needs
 
@@ -266,15 +326,15 @@ Rejected candidates (acceptance fails, or `P >= 400`) still consumed their draws
 | `Map` vtable | b45d68 | slots: `init_rivers` +0xc, `make_riverbeds` +0x44, `make_riverlist` +0x48, `make_rivers` +0x4c |
 | Style XML | `mapstyles/*.xml` | `RIVERLIST`, `RIVER_THRESHOLD`; rules.xml has no river constants |
 
-## Oracle: current 2.SVX (2026-10-24)
+## Oracle: current 2.SVX and the three river worlds (third pass)
 
-River cells (0x1000): save 202, generated 129, 78 common (after the second pass; 157 / 10 before). Terrain, forests (the bed
-candidates), mountains and the draws before `Terrain::init` now agree with the save, so the remaining difference is inside this file.
+After the third pass the A* paths are exact: every generated river cell is in each save, and `DO NOT DELETE`, `DO NOT DELETE 2` and
+`curent dec 14` match on all 0x1000 cells (1074 / 1202 / 768 differing before, 0 now) and on all tdata 0x800 trough tiles
+(7510 / 8462 / 6049 before, 0 now). On `current 2.SVX` the cells go 202 save / 129 ours (78 common) -> 212 ours (201 common) and the trough
+tiles 1730 -> 99 differing. The remaining river difference there sits on the lake shore, where the half-land and corner heights still differ
+(see `randommap-spec.md`, "Still different").
 
-- The save holds three rivers (68, 61 and 73 cells); ours three too, but shorter (40, 43 and 46) and with another third source. The first river
-  starts at the same bed in the west ((3,68) to (22,82)) and follows the same valley for about half of its length.
-- The river lengths point at the scaling reference: with `R = map_sizes[3]` (70) the entry scales to `length 34`, `min 17`, `valley 11`;
-  a reference of 40 would give 60 / 30 / 20 and rivers of the saved length, but changes the bed order and the draws (351 cells), 50 gives
-  223, 60 gives 169, none of them better than 70 on common cells. The ❓ "which map-size entry" of §1 is therefore still open; the saved
-  lengths (61 to 73) are longer than the `length` requirement even for R = 40, so the A* tie / dedup behaviour (§6 ❓) is the more likely cause.
-- Not touched in this pass: `PathFinder::astar_river` needs the disassembly of the open/closed tree insert for equal `value`s.
+What closed it: the `astar_river` tie order (`ordered_insert` @4796f0 sends equal keys left, so the newest equal node pops first), the
+open/closed dedup (closed receives only expanded nodes and dead ends), the ancestor-chain test, and the orthogonal neighbour pinch test
+(@686d58); then the geometry of sections 8 and 9 (`create_trough_edge`, `set_river_at`, `ensure_45_deg_slope`). The saved control splines
+and `ensure_ocean_end` points equal ours point for point; the spline lengths match (29729.10, 24397.44, 23747.65).

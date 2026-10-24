@@ -155,6 +155,7 @@ void Gen::read_tileset_group_data() {
 			static const char16_t* names[3] = {u"BASELAND", u"COASTAL", u"OCEAN"};
 			if (const XNode* land = xml::child(t, names[li])) tile_counts[size_t(li)] = int(xml::children(land, u"BASE").size());
 		}
+		tgd.river_base = xml::get_attrib_num(t, u"riverbase", 0);
 		const XNode* g = xml::child(t, u"TERRAINGROUP");
 		if (!g) return;
 		auto num = [&](const char16_t* tag, int def) { return xml::get_attrib_num(xml::child(g, tag), u"value", def); };

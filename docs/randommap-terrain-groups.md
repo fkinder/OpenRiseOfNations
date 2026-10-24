@@ -579,6 +579,24 @@ The islands' players get candidate starts from their own island but are handed t
   other start (or just `skip_player`) and every entry of `list` at `vd ≥ r`; no mountain / forest / water / `flags & 0x48` cells within radius `r` when the 4th argument is non-zero.
 - `check_sea_map` @68d1a0: if the map has sea regions (`Regions::get_num_sea ≠ 0`): `sea_map = 3` when the start locations are not all in the same region, else 2 (no sea: unchanged).
 
+Third pass (2026-10-24), the pipeline read against the decompile (`re/decomp/mapgen_fid3/cq/`), NOT ported (no oracle and the inputs live in the CtW layer):
+- `ConquestCountries::draw_scenario_area(nodeA, nodeB, &image, &ids, &xs, &ys)` @761310: `get_scenario_map_rect` gives the rectangle of the strategic map around the two
+  countries; the image is a square of side `max(w, h)` filled with `0xffffffff` (water); for every country whose rectangle (its `left / right / top / bottom` divided by
+  the map texture scale, shifted by `-map_tex_width` when the map wraps) overlaps the rectangle, every pixel of the country's own silhouette image
+  (`conquest/RenderMaps/MapPieces/<map>/xpack_temp_country<N><map>.png`, alpha != 0) is drawn as `0xff000000` (land); the countries whose centre
+  (`starting_coords_ws`) lies inside the rectangle are returned with their centre relative to the rectangle. The image is written to
+  `<profile>/conquest/<file>` and read back unchanged.
+- `ScenarioEditor::import_image(image, percent, ids, xs, ys, &out_x, &out_y)` @9a3f30: for every wcoord `(x, y)` the pixels of the box
+  `[x / xs * side, (x + 1) / xs * side] x [y / ys * side, (y + 1) / ys * side]` (both ends inclusive, truncated) are averaged as
+  `sum(rgb24 / 16777215) / count` (white = 1, land = 0); `flags &= 0xffc3`; `land = 2` (water) when the average is at least `percent / 100`, else 0.
+  The returned start positions are the countries' centres scaled to the world (`int(pos / side * xs)`). Then `Regions::clear_all / find_all`,
+  `Map::force_continent_spacing` and `Map::make_coastlines`.
+- `make_continents` then adds the two starts (`add_starting_location`, the conquest lists as in B3.13 above), `add_additional_players` @68d260 (the
+  barbarian / supporting seats: one `rnd(region size)` as the walk start, `check_starting_loc` @68d7e0 per candidate) and `check_sea_map`. The percent and the
+  hidden register arguments of `check_starting_loc` / `add_additional_players` need an asm pass.
+What `ctw_battle.cpp` would have to supply: the two countries' silhouette images and rectangles (the PNG pieces ship in `conquest/RenderMaps/MapPieces/`; the engine has no PNG
+reader), the map-wrap shift and the scale, and `get_scenario_map_rect`'s rectangle rule (not decompiled).
+
 ### B3.14 `MapScenario::make(a, b, c)` @68c8f0 — style 26 and the campaign's custom maps
 Frees the conquest start lists, then `ScenarioRead::import(game_style.custom_map)` (error "Unable to load custom scenario."); only when `semaphore.ptr[2] & 2` (a conquest game) it continues:
 `game_style.player_start_x/y` (tcoords, `>> 2` = wcoords) and `ai_start_x/y` become start locations 0 and 1 (with the conquest lists `start_capital = 1`, `start_node` = the link's nodes picked by which one is
@@ -636,14 +654,15 @@ All verified on `current 2.SVX` (a fresh game, frame 189) and on the other saves
 | `TerrainGroups::nubify_forest` | 6a93b0 | A run is tested for **continuation first** (`dir != 0` and forest at `x + dir`): a cell with forest on both sides still continues a run. The run is reset to 0 after **every** draw, whether the nub was placed or not. Both changes alter the number of draws (the original draws more). |
 | `TerrainGroups::change_forest_base / mountain_base / coast_base` | 6a9a60 / 6a9c10 / 6a9dc0 | `Map::make` calls each only when the tileset base is `>= 0`. The growth neighbour must also have `land != 2` (mountain and coast variants lacked it, adding draws); source cells and grown neighbours get `land = 0`. |
 | `Fractal::init` | 6aa2d0 | Rewritten from the decompile: grid `(xs+1) x (ys+1)` bytes, level `L = S..0`, cells `i << L, j << L` with `i < xs >> L`, `j < ys >> L` visited **x outer / y inner**, so horizontal, vertical and centre cells interleave their draws; neighbours past `ys` stay 0; column `xs` is a copy of column 0 at the start of every level and at the end. This is also the field of `fill_fertile`; the per-tileset check is the share of agreeing `land_sub` cells on plain land (81 percent before the other fixes, the remaining differences are `Terrain::init` and late-game changes in the old saves). |
-| `TerrainGroups::add_doobers` | 6a1540 | Draw order was right. Doober positions are `(px, py)` in world units (768 per wcoord); `Doober::add_doober` draws nothing. `Doober::has_doobers` @8466d0 does **not** exclude cells in the rock pass in practice (any exclusion changes the draws and breaks the forest fit), so the rock pass has no skip. The doober count is kept for `res.doobers`. |
+| `TerrainGroups::add_doobers` | 6a1540 | Draw order was right. Doober positions are `(px, py)` in world units (768 per wcoord); `Doober::add_doober` draws nothing. `Doober::has_doobers` @8466d0 (disassembled, third pass) can never return 1: for a match on the x wcoord it builds `(float)(loc.y == (float)param_2)` (0.0 or 1.0), takes `div_3_table[(int)that >> 8]` = `div_3_table[0]` = 0 and tests that against 0, so the function returns 0 for every call; the rock pass therefore has no skip. The doober count is kept for `res.doobers`. |
 
 The draw alignment after these fixes was verified with a statistical fit: for every `change_forest_base` growth draw a hit must put
 `land_sub == 3` in the save. The best alignment moved from "+9 draws" (before the `nubify_forest` fix) to "+0" (after).
 
-### What still differs on `current 2.SVX`
+### What still differs on `current 2.SVX` (third pass)
 
-- `land_sub`: 158 of 10000 cells (was 3756). They sit at class boundaries and next to the 30 wrong half-land wcoords (`Terrain::init`).
-- One rock wcoord ((10,79) against (12,80), a diagonal growth step of one group-7/8 clump) and two oil sites that sit on it; one mountain
-  wcoord (84,95) that the save has as plain forest.
-- `place_oil_deposits` / rocks are otherwise exact (49/50), mountains 455/455 except that one, forest 520/520.
+- `land_sub`: 76 of 10000 cells (158 before this pass). They sit at class boundaries and next to the 30 half-land wcoords that
+  `Terrain::init` still gets wrong at lake corners (shelf heights, see `randommap-spec.md`).
+- One rock flag (16,36) and the derricks at (1,4) / (29,80) in the newer worlds: the moved derrick follows the lake-shore half-land cells.
+  `Doober::has_doobers` is settled (always 0), so the earlier diagonal growth difference of the rock clump is not a doober skip.
+- Goods 80/80 and goodies 50/50 now match (they were moved by `move_goody` / `move_ocean_goody`, `randommap-resources.md` section 13).

@@ -245,6 +245,13 @@ void Gen::set_oil_at(int x, int y, bool on) {
 	go.x = x * 768 + 0x180;
 	go.y = y * 768 + 0x180;
 	go.flags = objflag::kValid;
+	// Objects::init_good takes the first free slot of the goods array
+	for (GoodObj& slot : c.goods) {
+		if (!slot.alive()) {
+			slot = go;
+			return;
+		}
+	}
 	c.goods.push_back(go);
 }
 
