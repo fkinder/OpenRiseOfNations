@@ -49,7 +49,7 @@
 //           box (units before buildings, 128 max); right-click: move / attack / rally point; minimap: click or drag to
 //           look, right-click to order; Ctrl+0..9 stores a control group (no selection: a camera bookmark), 0..9 recalls,
 //           twice centres; G names the selected soldiers as an army group (a panel button per group: click recalls, again
-//           centres, right-click deletes; G with the group selected renames), Shift+G / the panel's button regroups it; edge scrolling (2 px), mouse wheel / pinch zoom toward the cursor, trackpad scroll pans;
+//           centres, Shift+click renames, right-click deletes; G with the group selected renames), Shift+G / the panel's button regroups it; edge scrolling (2 px), mouse wheel / pinch zoom toward the cursor, trackpad scroll pans;
 //           arrows scroll   + - zoom level   P pause   F fog   B bloom   H HUD   Esc cancel / clear / game menu   F10 game menu
 //           (Resume, Save Game, Load Game, Return to Main Menu, Quit)   F5 quick save   F9 quick load; the game-over
 //           screen offers Return to Main Menu.
@@ -5307,7 +5307,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	}
 	if (_gnameSlot >= 0) return;  // the group name dialog: keys only
 	if (_sviewOn && [self modalMouse:p up:NO]) return;
-	if ([self hudVisible] && [self groupPanelClick:p right:right]) return;
+	if ([self hudVisible] && [self groupPanelClick:p right:right rename:(m & NSEventModifierFlagShift) != 0]) return;
 	if ([self hudVisible] && _hud.captures(int(p.x), int(p.y))) {
 		_hudPress = YES;
 		[self handleHudAction:_hud.mouse_down(int(p.x), int(p.y), right, _hudState) modifiers:m];
@@ -5700,7 +5700,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	while (!name.empty() && name.back() == ' ') name.pop_back();
 	while (!name.empty() && name.front() == ' ') name.erase(name.begin());
 	if (name.empty()) name = "Grupo " + std::to_string(slot + 1);
-	if (!_groupNames[size_t(slot)].empty() && [self selectedNamedGroup] == slot) {
+	if (!_groupNames[size_t(slot)].empty()) {  // an existing group: rename only (G with it selected, Shift+click on its button)
 		_groupNames[size_t(slot)] = name;
 		std::printf("named group %d renamed \"%s\"\n", slot, name.c_str());
 		return;
@@ -5781,12 +5781,18 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	return ok;
 }
 
-// A press on the panel: left recalls / regroups, right deletes. NO when the point is not on the panel.
-- (BOOL)groupPanelClick:(CGPoint)p right:(BOOL)right {
+// A press on the panel: left recalls / regroups, Shift+left renames, right deletes. NO when the point is not on the panel.
+- (BOOL)groupPanelClick:(CGPoint)p right:(BOOL)right rename:(BOOL)rename {
 	for (const auto& [slot, r] : _groupRects) {
 		if (!r.contains(int(p.x), int(p.y))) continue;
-		if (right) [self deleteNamedGroup:slot];
-		else [self recallNamedGroup:slot];
+		if (right) {
+			[self deleteNamedGroup:slot];
+		} else if (rename) {
+			_gnameSlot = slot, _gnameText = _groupNames[size_t(slot)];
+			_pressing = _boxing = _hudPress = _rightPress = NO;
+		} else {
+			[self recallNamedGroup:slot];
+		}
 		return YES;
 	}
 	if (_regroupSlot >= 0 && _regroupRect.contains(int(p.x), int(p.y))) {
