@@ -1,0 +1,12 @@
+re/decomp/mapgen_fid3/cq
+ConquestCountries::draw_scenario_area
+ScenarioEditor::import_image
+ScenarioEditor::import_image_screen
+MapConquest::make_continents
+MapConquest::check_sea_map
+MapConquest::add_additional_players
+MapConquest::check_starting_loc
+MapConquestSea::.*
+MapConquest::.*
+Map::make
+Map::new_map

@@ -1,0 +1,9 @@
+re/decomp/ui_sel
+Options::do_all_current.*
+Options::do_select_damaged.*
+Options::do_filter.*
+Options::do_cycle_research.*
+Options::do_cycle_unittype.*
+GroupData::count.*
+Options::do_toggle.*
+Options::do_back_to_work.*

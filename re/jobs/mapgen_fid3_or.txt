@@ -1,0 +1,2 @@
+re/decomp/mapgen_fid3/imm1000.txt
+0x1000\b

@@ -909,7 +909,7 @@ void install_mutation_funcs(ScriptHost& h) {
 		const int32_t w = g.local_play;
 		if (uint32_t(w) >= 8) return make_int(-1);
 		Leader& l = g.leaders[size_t(w)];
-		if (lv != l.worker_stance) {
+		if (lv != l.opt_peasants) {
 			for (int32_t o = 0; o < g.objects[size_t(w)].unit_mark; o++) {
 				Unit* u = unit_at(g, w, o);
 				if (!u || !(u->flags & objflag::kValid) || (u->type != 50 && u->type != 51)) continue;
@@ -927,7 +927,8 @@ void install_mutation_funcs(ScriptHost& h) {
 				if (b && (b->flags & objflag::kValid) && build_stance_type(g, b->type) == 1) b->stance = int8_t(lv);
 			}
 		}
-		l.worker_stance = int8_t(lv);  // leader_options[who] +4
+		l.opt_peasants = lv;  // leader_options[who] +4
+		l.worker_stance = int8_t(lv);
 		return make_int(1);
 	});
 

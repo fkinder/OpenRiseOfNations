@@ -137,6 +137,9 @@ class Provider {
 public:
 	virtual ~Provider() = default;
 	virtual void begin_walk() {}
+	// While held, begin_walk() keeps the containers the provider owns (an object list is asked once and then each element is walked
+	// as its own top-level walk).
+	virtual void hold_containers(bool) {}
 	virtual Obj global(int gid) = 0;
 	virtual const uint8_t* image(Obj o, int64_t off, uint32_t n) = 0;
 	virtual Obj child(Obj o, const Site& site, int64_t index) = 0;

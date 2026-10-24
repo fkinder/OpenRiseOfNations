@@ -1,0 +1,6 @@
+re/decomp/fidelity5
+Stack<PathData>::init
+Stack<PathData>::push
+Stack<PathData>::increase_size
+Stack<PathData>::pop
+Stack<PathData>::operator=

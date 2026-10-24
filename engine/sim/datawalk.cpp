@@ -1143,6 +1143,9 @@ struct Layout {
 		ContainerHeader h;
 		if (!p.container(objects, site, h)) fail("objects list %d missing", who);
 		if (hi > h.length) hi = h.length;
+		// Every f(...) below walks one object as a top-level walk, whose begin_walk() would drop the list the engine owns (the objects it
+		// created after the load are in no recorded presence byte).
+		struct Hold { Provider& p; explicit Hold(Provider& q) : p(q) { p.hold_containers(true); } ~Hold() { p.hold_containers(false); } } hold(p);
 		for (int64_t o = lo; o < hi; ++o) {
 			if (!p.present(objects, site, o)) continue;
 			Obj e = p.element(objects, site, o);

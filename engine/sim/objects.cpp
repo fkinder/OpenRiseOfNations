@@ -238,6 +238,10 @@ void undo_follower_counts(Game& g, Unit& u) {
 void unit_init(Game& g, Unit& u, int32_t who, int32_t type, int32_t o, int32_t x, int32_t y) {
 	// close(0, -1, 0): the dead slot's path, orders and search are dropped.
 	u.path.clear();
+	if (u.path_size < 10) {  // Unit::init: Stack<PathData>::init(10, increment 10) only when the slot's stack is smaller
+		u.path_size = 10;
+		u.path_inc = 10;
+	}
 	u.orders.clear();
 	u.openlist.reset();
 	x = ucoord_of(x) * 48 + 24;
@@ -258,6 +262,7 @@ void unit_init(Game& g, Unit& u, int32_t who, int32_t type, int32_t o, int32_t x
 	u.z = g.world.in_t(tcoord_of(x), tcoord_of(y)) ? find_tcoord_z(g, tcoord_of(x), tcoord_of(y), 1) : 0;
 	u.healing = 0;
 	u.inside_down = -1;
+	u.inside_down_who = int8_t(who);  // Object::init @647750: field_0x3e = who (also for units; unit_remove_from_inside copies it up the chain)
 	u.up = u.down = -1;
 	u.near_o = u.near_who = -1;
 	u.damage = 0;
@@ -308,9 +313,21 @@ void unit_init(Game& g, Unit& u, int32_t who, int32_t type, int32_t o, int32_t x
 	u.rare = 0;      // +0x54
 	u.doober = -1;   // +0x86 (workers; caravans get their Caravan slot below)
 	u.cara = -1;
-	// Stance from the leader options by stance type (TODO: get_stance_type per type; combat default here, the
-	// scenario loader overwrites it with the file's stance).
-	u.stance = g.leaders[size_t(who)].combat_stance;
+	// Unit::init @612100, the stance switch on UnitData::get_stance_type: COMBAT -> leader_options +0xc (`opt_buildings`);
+	// WORKER -> a computer leader at starting_resources 8 gets (8)+1 = 2, else 1 for the computer, the options' +4
+	// (`opt_peasants`) for a human; CASTER -> ~(flags >> 4) & 1; PACKER -> ~(flags >> 3) & 1.
+	{
+		const Leader& L = g.leaders[size_t(who)];
+		switch (unit_stance_type(*u.ptype)) {
+		case kStanceCombat: u.stance = int8_t(L.opt_buildings); break;
+		case kStanceWorker:
+			u.stance = !(L.flags & leaderflag::kHuman) ? int8_t((g.info.starting_resources == 8) + 1) : int8_t(L.opt_peasants);
+			break;
+		case kStanceCaster: u.stance = int8_t(~(L.options_flags >> 4) & 1); break;
+		case kStancePacker: u.stance = int8_t(~(L.options_flags >> 3) & 1); break;
+		default: u.stance = 0; break;
+		}
+	}
 	// TODO(frame-spec 8.1): UNIT_CAN_TRANSPORT from the leader's transport level, tribe bonuses 0x12 / 0x77,
 	// Supplies / Heroes / Caravans / Specials registration.
 	if (u.ptype->unit_flags2 & 4) u.unit_masks |= umask::kPacked;  // packer types start packed

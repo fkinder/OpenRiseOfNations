@@ -1,0 +1,7 @@
+re/decomp/fidelity5
+Guy::set_new_location
+Guy::update_z
+Guy::set_new_z
+Guy::move
+Guy::set_bank
+Guy::set_pitch

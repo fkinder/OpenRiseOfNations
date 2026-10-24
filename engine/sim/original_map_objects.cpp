@@ -22,7 +22,7 @@ template <class T> void object_fields(Builder<T>& b) {
 	b.f("near_o", &Object::near_o).f("near_who", &Object::near_who).f("healing", &Object::healing);
 	b.f("infiltrated", &Object::infiltrated).f("damage_frac", &Object::damage_frac).f("mylos", &Object::mylos);
 	b.f("targeted", &Object::targeted).f("inside_down_who", &Object::inside_down_who).f("up_who", &Object::up_who);
-	b.f("visible", &Object::visible);
+	b.f("visible", &Object::visible).f("launch_frames", &Object::launch_timer);  // +0x41 (airbases, carriers, silos)
 }
 
 // The must_walk byte the writer stores at each level (Local steps SubObject / Object / Unit::must_walk) and the type local.
@@ -126,6 +126,7 @@ const ClassMap& map_guy() {
 		b.f("off_x", &Guy::off_x).f("off_y", &Guy::off_y).f("node_flags", &Guy::node_flags).f("des_node_flags", &Guy::des_node_flags);
 		b.f("guy_flags", &Guy::guy_flags).f("cur_anim", &Guy::cur_anim).f("stopped", &Guy::stopped).f("hold_attack", &Guy::hold_attack);
 		b.f("whom", &Guy::whom).f("queued_attack", &Guy::queued_attack).f("who", &Guy::who).f("guy_num", &Guy::guy_num);
+		b.f("bank", &Guy::bank).f("last_bank", &Guy::last_bank).f("pitch", &Guy::pitch).f("last_pitch", &Guy::last_pitch);  // aircraft banking (GuyData +0x44..+0x50)
 		m.finish();
 		return m;
 	}();
@@ -387,13 +388,19 @@ const ClassMap& map_unit() {
 		b.f("inside_up_who", &Unit::inside_up_who).f("guy_mark", &Unit::guy_mark).f("play", &Unit::play);
 		// path: Stack<PathData> at +0xb8: raw [+4, +0xd) = i32 size (allocation), i32 length, u8 increment; the elements are Deref children.
 		b.raw(0xb8 + 4, 9, "path",
-		      [](Unit&, const uint8_t*) {},  // the elements are loaded one by one from the children
+		      [](Unit& u, const uint8_t* p) {  // the elements are loaded one by one from the children
+			      u.path_size = int32_t(get_le(p, 4));
+			      u.path_inc = p[8];
+		      },
 		      [](const Unit& u, uint8_t* p) {
-			      int32_t size = int32_t(get_le(p, 4)), len = int32_t(u.path.size());
-			      const int inc = p[8] ? p[8] : 1;
-			      if (size < len) size = len + (inc - len % inc) % inc;  // Stack grows by `increment`
+			      // Stack<PathData>: size (allocation), length, increment. Push grows by `increment` when size <= length, so the allocation
+			      // follows the longest the stack ever was, not its length; a stack that was never initialised (size 0) stays 0 until it grows.
+			      int32_t size = u.path_size, len = int32_t(u.path.size());
+			      const int inc = u.path_inc ? u.path_inc : 10;
+			      while (size < len) size += inc;
 			      scalar_emit(size, p, 4);
 			      scalar_emit(len, p + 4, 4);
+			      p[8] = u.path_inc;
 		      });
 		const dw::Description& d = dw::Description::get();
 		static const int step_guys = d.find_step(d.find_function("PtrArray<Guy>::walk_data"), dw::StepKind::Container);

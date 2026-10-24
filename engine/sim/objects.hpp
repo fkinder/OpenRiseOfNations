@@ -210,7 +210,7 @@ struct Object {
 	int16_t inside_down = -1;
 	// Per-wcoord object list (WData.down/down_who is the head): `down` = next (older) object, `up` = previous.
 	int16_t up = -1, down = -1, down_who = 0;
-	int8_t up_who = 0;
+	int8_t up_who = -1;  // a never-used slot holds 0xff here (Object::add_to_world writes it only when it links behind a head)
 	bool linked = false;  // currently in a wcoord list (gaia is never linked)
 	uint16_t uid = 0, hold_frames = 0;
 	int16_t near_o = -1, near_who = -1, healing = 0;
@@ -264,6 +264,10 @@ struct Unit : Object {
 	int8_t animal_aid = 0;
 
 	std::vector<PathData> path;  // Stack<PathData>; back() = top
+	// Stack<PathData>'s allocation (`size`) and `increment`: Unit::init gives a fresh stack 10 / 10, a push grows it by the increment when
+	// size <= length, nothing shrinks it. Not saved natively (a native load starts from the length).
+	int32_t path_size = 0;
+	uint8_t path_inc = 10;
 	std::deque<Order> orders;    // execution order: front() = current order (head_node->prev in the original)
 	std::vector<Guy> guys;       // PtrArray<Guy>: squad_size + crew_size
 

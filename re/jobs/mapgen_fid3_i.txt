@@ -1,0 +1,2 @@
+re/decomp/mapgen_fid3/cl
+Cliffs::.*

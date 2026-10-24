@@ -1,0 +1,4 @@
+re/decomp/fidelity5
+UnitData::get_worker_stance
+ObjectData::get_worker_stance
+UnitData::has_stance_type

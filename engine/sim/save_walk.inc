@@ -371,7 +371,7 @@ static_assert(sizeof(PathData) == 16, "PathData changed: update its walk() in sa
 static_assert(sizeof(Order) == 264, "Order changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Guy) == 152, "Guy changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Object) == 96, "Object changed: update its walk() in save_walk.inc");
-static_assert(sizeof(Unit) == 384, "Unit changed: update its walk() in save_walk.inc");
+static_assert(sizeof(Unit) == 392, "Unit changed: update its walk() in save_walk.inc");  // (path_size / path_inc are not saved)
 static_assert(sizeof(Build) == 256, "Build changed: update its walk() in save_walk.inc");
 static_assert(sizeof(BuildQueue) == 32, "BuildQueue changed: update its walk() in save_walk.inc");
 static_assert(sizeof(QueueItem) == 20, "QueueItem changed: update its walk() in save_walk.inc");

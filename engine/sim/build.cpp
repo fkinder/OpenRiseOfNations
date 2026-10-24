@@ -412,9 +412,9 @@ int32_t init_build_site(Game& g, int32_t who, int32_t type, int32_t x, int32_t y
 	b.city_down = -1;
 	b.attack_ox = -1;
 	switch (build_stance_type(g, type)) {
-	case kStanceCombat: b.stance = l.combat_stance; break;
+	case kStanceCombat: b.stance = int8_t(l.opt_buildings); break;  // leader_options +0xc
 	case kStanceWorker:
-		b.stance = (!(l.flags & leaderflag::kHuman) && g.info.starting_resources == 8) ? 2 : l.worker_stance;
+		b.stance = (!(l.flags & leaderflag::kHuman) && g.info.starting_resources == 8) ? 2 : int8_t(l.opt_peasants);  // leader_options +4
 		break;
 	case kStanceCaster: b.stance = 1; break;
 	case kStancePacker: b.stance = int8_t(!((l.options_flags >> 3) & 1)); break;

@@ -1,0 +1,11 @@
+re/decomp/fidelity5
+Object::init
+SubObject::init
+Unit::init
+Unit::clear
+Wall::init
+Build::init
+Object::clear
+Build::clear
+Unit::reset.*
+Wall::clear

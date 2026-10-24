@@ -1,0 +1,13 @@
+re/decomp/ui_air3
+UnitOut::make_options.*
+Options::do_attack_ground.*
+Options::do_transfer.*
+Options::do_airstrike.*
+Options::do_air_patrol.*
+Options::do_patrol.*
+Options::do_stance.*
+Options::do_form.*
+Options::do_disband.*
+Options::do_infinite.*
+Options::do_auto_explore.*
+Options::do_halt.*

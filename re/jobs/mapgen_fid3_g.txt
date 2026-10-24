@@ -1,0 +1,13 @@
+re/decomp/mapgen_fid3/gy2
+Item::close
+Item::init
+Good::close
+Good::init
+Objects::init_good
+Objects::init_item
+GoodTypeData::snap_center
+TerrainOut::is_clear_land
+World::set_down
+World::set_oil_at
+ObjectsData::find_good_at
+ObjectsData::find_goody_at

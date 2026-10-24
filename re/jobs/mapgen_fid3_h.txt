@@ -1,0 +1,6 @@
+re/decomp/mapgen_fid3/gy3
+World::clear_down
+Herd::close
+Herds::init_herd
+Objects::close_good
+TerrainOil::add_rocky_patch

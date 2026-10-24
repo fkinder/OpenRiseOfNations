@@ -1,0 +1,5 @@
+re/decomp/mapgen_fid3/sb
+Terrain::spot_update_land_batch
+Terrain::spot_update_land
+TerrainOut::has_plus_slope
+TerrainOut::adjust_for_mountains

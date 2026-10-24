@@ -1,0 +1,3 @@
+re/decomp/fidelity5/types2.txt
+CityData
+City

@@ -151,6 +151,10 @@ int32_t emit_path(Game& g, Unit& u, std::vector<PathData>& stack, PathNode* e, i
 			stack.push_back(PathData{x, y, tol, flags});
 		}
 	}
+	// Stack<PathData>::push grows the allocation by `increment` whenever size <= length: the emission may overshoot what the
+	// straightening leaves, and the allocation stays.
+	if (&stack == &u.path)
+		while (u.path_size < int32_t(stack.size()) && u.path_inc > 0) u.path_size += u.path_inc;
 	return 1;
 }
 

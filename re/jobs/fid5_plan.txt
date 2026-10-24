@@ -1,0 +1,3 @@
+re/decomp/fidelity5
+Leader::plan_strategy
+WorldData::check_building_wcoord

@@ -1,0 +1,5 @@
+re/decomp/fidelity5/types3.txt
+WCoordData
+WData
+WCoord.*
+Region

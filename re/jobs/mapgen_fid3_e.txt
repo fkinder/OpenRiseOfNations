@@ -1,0 +1,7 @@
+re/decomp/mapgen_fid3/rs
+RiverSection::.*
+RiverOut::create_sections
+Spline::.*
+RiverOut::.*
+RiversOut::.*
+River::.*

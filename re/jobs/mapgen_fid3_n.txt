@@ -1,0 +1,4 @@
+re/decomp/mapgen_fid3/ab
+ArrayBaseSimpleCopy<int>::increase_size
+InitCoastInfo::.*
+ArrayBaseSimpleCopy<int>::.*

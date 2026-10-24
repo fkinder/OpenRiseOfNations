@@ -1,0 +1,7 @@
+re/decomp/fidelity5/types4.txt
+BuildData
+GuyData
+AnimalData
+WallData
+City
+CityData

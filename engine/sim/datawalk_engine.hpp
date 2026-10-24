@@ -23,6 +23,7 @@ public:
 	// new one (or call begin_walk) after the game has advanced. Not thread safe.
 	explicit EngineProvider(Game& g);
 	void begin_walk() override;
+	void hold_containers(bool on) override { hold_ = on; }
 	datawalk::Obj global(int gid) override { return base_.global(gid); }
 	const uint8_t* image(datawalk::Obj o, int64_t off, uint32_t n) override;
 	datawalk::Obj child(datawalk::Obj o, const datawalk::Site& site, int64_t index) override;
@@ -47,6 +48,7 @@ private:
 		int32_t shadow_length = 0, length = 0;
 	};
 	std::unordered_map<uint64_t, Active> active_;
+	bool hold_ = false;
 	static uint64_t key_of(const void* rec, int step, int64_t base) {
 		return (uint64_t(reinterpret_cast<uintptr_t>(rec)) * 0x9E3779B97F4A7C15ull) ^ (uint64_t(uint32_t(step)) << 32) ^ uint64_t(base);
 	}

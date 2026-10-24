@@ -1,0 +1,3 @@
+re/decomp/mapgen_fid3/gy
+Terrain::move_goody
+Terrain::move_ocean_goody

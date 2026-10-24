@@ -286,6 +286,65 @@ trigger (a wonder / city activation) is a few frames earlier or later in the eng
 region falls through to `think_civilian_transport(0)` / `think_scout(1)` (random cell of the own region); the engine returns 0 there (TODO in ai_unit.cpp), a few draws per 16 frames per scout.
 (4) `units` at boundary 8 of `21'23'34` still differs (no RNG involved any more: guys, world, builds match to 194): a plain member, see section 7.
 
+### 6.5 Fifth pass (2026-10-24): the `units` hash at boundary 8, objects the walker dropped, the Object defaults
+
+First differing boundary, `21'23'34` / `21'45'58` / `21'57'16` (start of the pass -> now; "ok" = equal through the end):
+
+| part | `21'23'34` | `21'45'58` | `21'57'16` |
+|---|---|---|---|
+| units | 8 -> **308** | 18,345 -> **18,351** | 25,553 -> 25,553 |
+| builds | 200 -> **338** | 18,387 -> 18,387 | 25,571 -> **25,601** |
+| guys | 200 -> **308** | 18,351 -> 18,351 | 25,553 |
+| world | 308 -> 308 | 18,351 | 25,553 |
+| cities | 206 -> 206 (a count, see below) | 18,381 | 25,577 |
+| groups / leaders | 422 / 566 | 19,047 / 18,405 | 25,595 / 25,553 |
+| goods / items / ammo / deaths | 2,318 / 6,752 / 6,896 / 7,094 | ok / ok / ok / 20,415 | ok / ok / 25,559 / 25,559 |
+
+(`21'45'58`: units, guys, world were wrong at its very first boundary - the Crossbowmen `des_x` +1024 quirk of the earlier passes is gone - and now
+match through 18,345 with items / goods / ammo equal through the end.) What the pass found, in the order it was found:
+
+1. **`Stack<PathData>` keeps its allocation** (`Unit.path_size` / `path_inc`, `emit_path`, `unit_init`, the path map). `Stack<PathData>::init(10, increment 10)` @46d720
+   (called by `Unit::init` @612100 only `if (size < 10)`), `push` @46d820 grows by `increment` whenever `size <= length`, `increase_size` @46e8c0; nothing shrinks it.
+   The A* emission of unit 1/2's repath in frame 7 (146 expansions) pushes more than 10 entries before `find_upath`'s straightening cuts the stack to 7, so the
+   original's stack is 20 big; the engine emitted `max(recorded size, length)`. This was the whole `units` delta at boundary 8 (a = 20 in the Adler difference).
+   Recycled slots keep the grown size, a stack that was never initialised (size 0 in a save) stays 0.
+2. **The checksum walker dropped every object the engine created after the load but the first of each list.** `each_object` (`datawalk.cpp`) asks the provider for the
+   list once and then walks every element as its own top-level walk; `EngineProvider::begin_walk()` cleared its engine-owned containers at each of them, so
+   from the second element on `present()` fell back to the loaded save's presence bytes. Fix: `Provider::hold_containers(bool)` held for the loop. The first citizen
+   the engine trains (frame 197, unit 0/11) had been missing from `units`, `guys` and `builds` since: that was `guys` / `builds` at 200 (a = 16,849 = the sum of its bytes).
+   It also moved `21'57'16`'s builds from 25,571 to 25,601 and `21'45'58`'s units from 18,345 to 18,351 (in the engine the objects created in the step were invisible).
+3. **Object defaults.** `Object::init` @647750 writes `+0x3e` (`inside_down_who`) = `who` for units too (the engine left -1 / the old slot's value; `unit_remove_from_inside`
+   copies it into the container, which is the byte that differed at building 2000 at boundary 200); `add_to_world` @64d8c0 never writes `+0x3f` (`up_who`): a never-used slot holds 0xff.
+4. **`Unit::init` / `Build::init` stance from the leader options** (`@612100` / `@629740`, the switch on `get_stance_type`): COMBAT -> `leader_options +0xc`, WORKER -> options `+4`
+   (a computer leader: `(starting_resources == 8) + 1`), CASTER -> `~(flags >> 4) & 1`, PACKER -> `~(flags >> 3) & 1`. The engine read `Leader::combat_stance` /
+   `worker_stance`, which nothing loads (the replay's `LEADER_OPTIONS` fill `opt_peasants` / `opt_buildings`); the script `set_auto_peasant_level` now writes `opt_peasants`.
+5. **Two members that were never mapped** (`original_map_objects.cpp`): `Object +0x41 launch_frames` (airbase / carrier / silo: the engine counted it, the hash read the
+   recorded byte: 22'23'40 and 22'52'08 had exactly this single byte at their first boundary) and `Guy +0x44..+0x50 bank / last_bank / pitch / last_pitch` (the aircraft floats).
+
+*Looked at, equal*: the whole of `Unit::init` @612100 member by member (angle, dest_angle, form / form_mod / full, mana_burn, spell_time, attrition, healing, idle, damage_*, waiting,
+tolerance, queue_time, orders_x/y, los_x/y, recharging, num_queued, safe, supply, hero, inside_up(_who), group, gather_down, good_obj, rare, doober/cara, collide_*, announce_frame,
+o_up/o_down, cavarch_*, play, avoid_*, start_dist), `Object::init` and `Wall::init`; the CEO bit (`is(0x165)`) and the Steam statistics are not simulated. `Unit::clear` @611890 only resets flags,
+x/y/z and o_up/o_down.
+
+*Diagnostics added* (`apps/sav`): `RON_DUMP_UNIT_AT=who,o` / `RON_DUMP_BUILD_AT=who,o` (+ `RON_SEARCH_AT`: every member of the engine's unit or building at that boundary),
+`RON_OBJ_LIST=1` (with `--solve-at`: which objects the part's stream walked), `RON_CITIZENS=1` (with `--compare-next`: citizens per stance / first order / idle, original then engine),
+`RON_CITIZENS_AT=B` (+ `RON_CITIZENS_LIST`), `RON_LIST_BUILD_DIFF=member`, `RON_DIFF_ALL=1` / `RON_DIFF_FILTER=text` (the whole compare-next member list).
+
+**What is left on `21'23'34`.**
+- *`units` / `guys` / `world` at 308 are one missing game_random draw.* `RON_INSERT="F:1"` (one extra draw before frame F) makes `guys` match through 326 for every F in 293 - 302 (292 and
+  earlier fail): the original draws once more than the engine somewhere in frames 293 - 295 (frame 294 holds the only unattributed site, a market redraw of three numbers; the farms draw 8
+  per frame, the birds 9 at 296; none of them is hashed, so the exact site cannot be told from the hashes: only the 71-fish burst of frame 302 shows it). Even with the extra draw the next
+  difference is at 332 (a unit, no small delta). Not found in: the BUILD / GATHER / MOVE commands (none in 280 - 330), `Build::process` roads (no MAKE_ROAD pending at 2011), `Unit::think_peasant`.
+- *`cities` at 206*: `City.land` and `City.filled` of city (0,0) are both one lower in the original after the frame-200 strategy pass; the same pass is exact for player 1's city at 175 and for
+  every other field. Every condition of `Leader::plan_strategy` @6b9620's tile loop was compared with `leader_plan_strategy` (owner `WData +0xf`, flags & 0x100, land, `k + 1 < circle_radius[n]`, region `+4`,
+  `flags & 0x70`, `check_building_wcoord < 4`) and they agree; skipping any one filled tile of the loop reproduces the hash, so the cause is a tile the original excludes that the engine counts (the
+  `WData`s of the loop are equal in the `world` hash at 200). Persists at 406. Not found.
+- *`builds` at 338*: `Object.up` of building 2007 is 7 in the original (a unit that entered the wcoord list first): a consequence of the unit drift above.
+- *Early economy.* No late construction or activation was found in the first 560 frames (`leaders` and `builds` match there). Player 0's citizens are at stance 2 (auto-build, no auto-gather) until his
+  `LEADER_OPTIONS` of frame 6,806 sets 1; the engine then has 14 idle citizens that `find_gather_spot` cannot place (a citizen of city 1 is not sent to city 0's woodcutter: `uu <= free + 2 + gatherers`
+  of city 0), the original has none (`RON_CITIZENS`, at 18,338: engine 34 idle of 50 citizens, original 0 of 55). The `cities` / `leaders` censuses that feed this (`City.free`, `gatherers`) are the engine's,
+  so the divergence is upstream of it: the unit drift from 308 on (positions, who stands in which city) is the first suspect, then the idle-citizen counters.
+
 ## 7. What blocks exact checksums
 
 State of the fidelity work (2026-10-24; the log of each fix is in docs/sim-implementation.md "Fidelity log"). **Fixed** since the first table:
@@ -294,7 +353,7 @@ pen animals), the `LEADER_NEW_UNITS` flag, the walking gatherers' `Build.recharg
 `Unit::update_speed`, the herd branch of `AnimalData::is_seen`, the loaded game's leader slot 9, the game script of the replay header.
 
 What still **separates the engine from the original**, in the order the replays meet it:
-- **Movement in the first frames.** `21'23'34` matches `guys` and `world` at boundary 8 (the first step from the save: ten citizens walk, the first
+- **Movement in the first frames.** (Fixed in the fifth pass, section 6.5: the `units` delta at boundary 8 was the path stack's allocation size.) `21'23'34` matches `guys` and `world` at boundary 8 (the first step from the save: ten citizens walk, the first
   collision is resolved identically) and differs at 14; `units` differs at 8. The second pass (2026-10-24) narrowed it and ruled out a lot, none of it found the cause:
   - *Where.* The `units` hash is per unit `Object` 0x20..0x42, `SubObject` 9..24, `Unit` 0x48..0xb6, path stack, order list, guys; its delta at 8 is (a = 25, b = 46,052),
     `guys` at 14 (a = -1,055, b = 5,723), `world` at 14 (a = -48, b = 15,458). `guys` / `world` match at 8, so positions, angles, animations and collision bits are right; the

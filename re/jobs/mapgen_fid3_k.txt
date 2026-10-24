@@ -1,0 +1,3 @@
+re/decomp/mapgen_fid3/db
+Doober::has_doobers
+Doober::add_doober

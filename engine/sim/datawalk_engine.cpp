@@ -15,7 +15,7 @@ EngineProvider::EngineProvider(Game& g) : g_(g), sh_(*g.original), base_(g.origi
 void EngineProvider::begin_walk() {
 	base_.begin_walk();
 	nth_.clear();
-	active_.clear();
+	if (!hold_) active_.clear();
 }
 
 int EngineProvider::next_nth(const void* rec, int step, int64_t base) {

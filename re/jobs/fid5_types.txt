@@ -1,0 +1,10 @@
+re/decomp/fidelity5/types.txt
+UnitData
+ObjectData
+SubObjectData
+GuyData
+Unit
+Object
+SubObject
+Guy
+WallData

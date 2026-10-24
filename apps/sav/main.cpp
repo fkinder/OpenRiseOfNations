@@ -1863,6 +1863,46 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 						std::printf("  guy try: %d hits\n", hits);
 					}
 				}
+				if (std::getenv("RON_CITIZENS_AT") && f == std::atoll(std::getenv("RON_CITIZENS_AT"))) {  // the engine's citizens at that boundary: (stance, first order type, idle>=12): count
+					for (int who = 0; who < 2; ++who) {
+						std::map<std::tuple<int, int, int>, int> hist;
+						int n = 0;
+						for (int o = 0; o < game->objects[size_t(who)].unit_mark; ++o) {
+							sim::Unit* u = game->unit(who, o);
+							if (!u || !u->alive() || (u->type != 50 && u->type != 51)) continue;
+							++n;
+							hist[{u->stance, u->orders.empty() ? -1 : int(u->orders.front().type), u->idle >= 12 ? 1 : 0}]++;
+							if (u->orders.empty() && std::getenv("RON_CITIZENS_LIST")) std::printf("      idle unit %d/%d at %d,%d idle %d masks %08x\n", who, o, u->x, u->y, u->idle, u->unit_masks);
+						}
+						std::printf("  frame %lld engine player %d: %d citizens (stance, first order type, idle>=12): count\n", (long long)f, who, n);
+						for (const auto& kv : hist) std::printf("      (%d, %d, %d): %d\n", std::get<0>(kv.first), std::get<1>(kv.first), std::get<2>(kv.first), kv.second);
+					}
+				}
+				if (const char* db = std::getenv("RON_DUMP_BUILD_AT")) {  // RON_DUMP_BUILD_AT=who,o (+ RON_SEARCH_AT): the engine's building at that boundary
+					if (f == (std::getenv("RON_SEARCH_AT") ? std::atoll(std::getenv("RON_SEARCH_AT")) : start + 1)) {
+						int dw = 0, dob = 0;
+						std::sscanf(db, "%d,%d", &dw, &dob);
+						if (sim::Build* b = game->build(dw, dob))
+							std::printf("build %d/%d type %d (%s) frame %d: flags %02x masks %04x inside_down %d/%d launch_timer %d launch_list %zu recharging %d queued %d damage %d myhits %d city %d\n", dw, dob, b->type, b->ptype ? sim::to_utf8(b->ptype->type_name).c_str() : "?", game->frame, b->flags, unsigned(b->build_masks), b->inside_down, b->inside_down_who, b->launch_timer, b->launch_list.size(), b->recharging, b->queued, b->damage, b->myhits, b->city);
+					}
+				}
+				if (const char* du = std::getenv("RON_DUMP_UNIT_AT")) {  // RON_DUMP_UNIT_AT=who,o (+ RON_SEARCH_AT): the engine's unit with every Unit member and its guys, at that boundary
+					if (f == (std::getenv("RON_SEARCH_AT") ? std::atoll(std::getenv("RON_SEARCH_AT")) : start + 1)) {
+						int dw = 0, dob = 0;
+						std::sscanf(du, "%d,%d", &dw, &dob);
+						for (int dbi : {36, 40, 137}) if (sim::Unit* du2 = game->unit(0, dbi)) std::printf("slot 0/%d type %d ptype %d flags %x hold %d o_up %d\n", dbi, du2->type, int(du2->ptype != nullptr), du2->flags, du2->hold_frames, du2->o_up);
+						std::printf("unit_mark %d/%d/%d build_mark %d\n", game->objects[0].unit_mark, game->objects[1].unit_mark, game->objects[8].unit_mark, game->objects[0].build_mark);
+						if (sim::Unit* u = game->unit(dw, dob)) {
+							std::printf("unit %d/%d type %d frame %d: x %d y %d z %d angle %08x dest_angle %08x flags %02x up %d down %d down_who %d inside_down %d/%d inside_up %d/%d uid %d idle %d tol %d queue_time %d masks %08x/%08x\n", dw, dob, u->type, game->frame, u->x, u->y, u->z, u->angle, u->dest_angle, u->flags, u->up, u->down, u->down_who, u->inside_down, u->inside_down_who, u->inside_up, u->inside_up_who, u->uid, u->idle, u->tolerance, u->queue_time, u->unit_masks, u->unit_masks2);
+							std::printf("   orders_xy %d,%d los %d,%d group %d supply %d hero %d collide %d/%d/%d o_up %d o_down %d gather_down %d good_obj %d cavarch %d/%d/%d damage_o %d damage_who %d form %d/%d full %d waiting %d recharging %d stance %d safe %d collide_who %d guy_mark %d play %d rare %d doober %d cara %d path %zu (size %d) orders %zu\n", u->orders_x, u->orders_y, u->los_x, u->los_y, u->group, u->supply, u->hero, u->collide, u->collide_o, u->collide_guy, u->o_up, u->o_down, u->gather_down, u->good_obj, u->cavarch_o, u->cavarch_who, u->cavarch_uid, u->damage_o, u->damage_who, u->form, u->form_mod, u->full, u->waiting, u->recharging, u->stance, u->safe, u->collide_who, u->guy_mark, u->play, u->rare, u->doober, u->cara, u->path.size(), u->path_size, u->orders.size());
+							std::printf("   myhits %d damage %d mylos %d myspeed %d myarmor %d healing %d near %d/%d visible %d targeted %d infiltrated %d dmgfrac %d mana_burn %d spell_time %d attrition %d num_queued %d collide_frame %d damage_frame %d announce %d air_alt %d\n", u->myhits, u->damage, u->mylos, u->myspeed, u->myarmor, u->healing, u->near_o, u->near_who, u->visible, u->targeted, u->infiltrated, u->damage_frac, u->mana_burn, u->spell_time, u->attrition, u->num_queued, u->collide_frame, u->damage_frame, u->announce_frame, u->air_alt);
+							for (const sim::PathData& pd : u->path) std::printf("   path (%d,%d t%d f%x)\n", pd.x, pd.y, pd.tol, pd.flags);
+							for (const sim::Order& od : u->orders) std::printf("   order type %d\n", int(od.type));
+							for (const sim::Guy& gy : u->guys)
+								std::printf("   guy %d: anim %d stopped %d cur_time %u end_time %u last_time %d x %d y %d z %d spd %d/%d flags %04x gpiece %d des %d,%d des_angle %08x angle %08x last %d,%d,%d off %d,%d variation %d node %d/%d hold %d whom %d queued %d ox %d\n", gy.guy_num, gy.cur_anim, gy.stopped, gy.cur_time, gy.end_time, gy.last_time, gy.x, gy.y, gy.z, gy.last_speed, gy.avg_speed, gy.guy_flags, gy.gpiece, gy.des_x, gy.des_y, gy.des_angle, gy.angle, gy.last_x, gy.last_y, gy.last_z, gy.off_x, gy.off_y, gy.variation, gy.node_flags, gy.des_node_flags, gy.hold_attack, gy.whom, gy.queued_attack, gy.ox);
+						}
+					}
+				}
 				if (const char* ps = std::getenv("RON_PAIR_SEARCH")) {
 					// experiment: every small-integer member (<= 4 bytes) of the listed units (Unit.*, their order bodies, path entries) off by a delta in [-W, W] (RON_PAIR_W, default 70);
 					// one or two of them together must give the target delta of part RON_PAIR_PART (default units) at boundary RON_SEARCH_AT
@@ -2405,6 +2445,10 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 						if (got.v[k] == it->second[size_t(k)]) continue;
 						PartTrace tr;
 						if (trace_part(ep, k, tr)) solve_single_byte(tr, it->second[size_t(k)], dw::kCheckPartNames[k]);
+						if (std::getenv("RON_OBJ_LIST")) {  // (who, o) of every object the part's stream walked, with its first byte offset
+							std::set<std::pair<int, int>> seen_o;
+							for (const auto& r : tr.ranges) if (seen_o.insert({r.who, r.o}).second && (r.who == 0 || r.who == 1)) std::printf("      obj %d/%d at %zu\n", r.who, r.o, r.begin);
+						}
 						if (const char* ol = std::getenv("RON_OBJ_LAYOUT")) {  // the hashed ranges of one object: step kind, constants (offset / size), bytes
 							int lw = 0, lo = 0;
 							std::sscanf(ol, "%d,%d", &lw, &lo);
@@ -2591,7 +2635,24 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 		int shown = 0;
 		for (const sim::AuditLine& l : d) {
 			if (!l.mismatches) continue;
-			if (shown++ < 60) std::printf("    differs: %-34s %6lld of %-7lld %s\n", l.member.c_str(), (long long)l.mismatches, (long long)l.objects, l.example.c_str());
+			if (shown++ < (std::getenv("RON_DIFF_ALL") ? 100000 : 60) || (std::getenv("RON_DIFF_FILTER") && l.member.find(std::getenv("RON_DIFF_FILTER")) != std::string::npos)) std::printf("    differs: %-34s %6lld of %-7lld %s\n", l.member.c_str(), (long long)l.mismatches, (long long)l.objects, l.example.c_str());
+		}
+		if (std::getenv("RON_CITIZENS")) {  // citizens per player: (stance, first order type, idle>=12) histogram, original first then the engine
+			for (int which = 0; which < 2; ++which) {
+				sim::Game& gg = which == 0 ? *truth : *game;
+				for (int who = 0; who < 2; ++who) {
+					std::map<std::tuple<int, int, int>, int> hist;
+					int n = 0;
+					for (int o = 0; o < gg.objects[size_t(who)].unit_mark; ++o) {
+						sim::Unit* u = gg.unit(who, o);
+						if (!u || !u->alive() || (u->type != 50 && u->type != 51)) continue;
+						++n;
+						hist[{u->stance, u->orders.empty() ? -1 : int(u->orders.front().type), u->idle >= 12 ? 1 : 0}]++;
+					}
+					std::printf("  %s player %d: %d citizens (stance, first order type, idle>=12): count\n", which == 0 ? "original" : "engine  ", who, n);
+					for (const auto& kv : hist) std::printf("      (%d, %d, %d): %d\n", std::get<0>(kv.first), std::get<1>(kv.first), std::get<2>(kv.first), kv.second);
+				}
+			}
 		}
 		if (std::getenv("RON_CARAVANS")) {
 			for (int which = 0; which < 2; ++which) {
@@ -2658,6 +2719,32 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 						a->orders.empty() ? -1 : int(a->orders.front().type), a->los_x, a->los_y, b->los_x, b->los_y);
 				}
 			std::printf("  %d units differ in %s\n", n, lm);
+		}
+		if (const char* lb = std::getenv("RON_LIST_BUILD_DIFF")) {  // every building whose member `lb` (mylos myhits max_age stance build_masks type queued recharging city) differs: engine -> original
+			const std::string mname = lb;
+			auto val = [&](const sim::Build& b) -> int64_t {
+				if (mname == "mylos") return b.mylos;
+				if (mname == "myhits") return b.myhits;
+				if (mname == "max_age") return b.max_age;
+				if (mname == "stance") return b.stance;
+				if (mname == "build_masks") return b.build_masks;
+				if (mname == "type") return b.type;
+				if (mname == "queued") return b.queued;
+				if (mname == "recharging") return b.recharging;
+				if (mname == "city") return b.city;
+				if (mname == "damage") return b.damage;
+				if (mname == "flags") return b.flags;
+				return 0;
+			};
+			int n = 0;
+			for (int who = 0; who < sim::kNumLeaders; ++who)
+				for (int o = sim::kBuildBase; o < game->objects[size_t(who)].build_mark && o < truth->objects[size_t(who)].build_mark; ++o) {
+					sim::Build* a = game->build(who, o);
+					sim::Build* b = truth->build(who, o);
+					if (!a || !b || !a->alive() || !b->alive() || val(*a) == val(*b)) continue;
+					if (n++ < 60) std::printf("    build %d/%d type %d %s %s: engine %lld original %lld (age %d/%d)\n", who, o, a->type, a->ptype ? sim::to_utf8(a->ptype->type_name).c_str() : "?", lb, (long long)val(*a), (long long)val(*b), int(a->max_age), int(b->max_age));
+				}
+			std::printf("  %d buildings differ in %s\n", n, lb);
 		}
 		std::printf("  %d mapped members differ between the engine and the next save\n", shown);
 	}

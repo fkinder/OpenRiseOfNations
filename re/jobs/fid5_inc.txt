@@ -1,0 +1,5 @@
+re/decomp/fidelity5
+Objects::inc_time
+Good::inc_time
+Wall::inc_time
+Item::inc_time

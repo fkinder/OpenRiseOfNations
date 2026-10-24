@@ -1,0 +1,4 @@
+re/decomp/mapgen_fid3/callers_goody.txt
+3
+Terrain::move_goody
+Terrain::move_ocean_goody

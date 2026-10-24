@@ -1,0 +1,7 @@
+re/decomp/mapgen_fid3/rs2
+RiverSectionOut::.*
+TerrainOut::ensure_45_deg_slope
+TerrainOut::smooth_tcoord
+TerrainOut::find_coord_normal
+TerrainOut::find_coord_tangent
+RiverSection::.*
