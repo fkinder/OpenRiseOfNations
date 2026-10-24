@@ -1,7 +1,7 @@
 // Player commands for local play (docs/replay-spec.md sections 7-9, docs/orders-spec.md sections 1-2): the issuer
 // side (CommandManager::issue_*, add_group) and the executor (CommandPackage::process_*), for the verbs the movement,
 // combat and production cores support: GROUP, ATTACK, STANCE, FORM, MOVE_TO, HALT, SWARM_AROUND, DISBAND,
-// GATHER_POINT, QUEUE_UP, BUILD, BUILDMASK, UNQUEUE, GARRISON, EJECTALL.
+// GATHER_POINT, QUEUE_UP, BUILD, BUILDMASK, UNQUEUE, GARRISON, EJECTALL, TRANSPORT, SET_TRANSPORT, BOARD_SHIP.
 //
 // Usage per simulation step (frame-spec.md section 2): issue commands any time while frame F is current, then
 // CommandManager::process_turn(game) executes them in issue order, then game.do_frame() turns F into F + 1.
@@ -18,7 +18,8 @@ class Game;
 
 // Opcodes (replay-spec.md section 9).
 enum class Verb : uint8_t {
-	Group = 0, Stance = 2, Form = 3, Attack = 4, SwarmAround = 6, MoveTo = 7, Halt = 12, Disband = 21, GatherPoint = 22,
+	Group = 0, Stance = 2, Form = 3, Attack = 4, SwarmAround = 6, MoveTo = 7, Halt = 12, Transport = 13, SetTransport = 14,
+	BoardShip = 15, Disband = 21, GatherPoint = 22,
 	QueueUp = 24, Build = 25, BuildMask = 33, Unqueue = 48,
 	// economy (docs/economy-spec.md section 11)
 	Trade = 17, CityGather = 18, Gather = 19, Garrison = 20, EjectAll = 26, ClearTributes = 39, Accept = 41, Reject = 42, Tribute = 43,
@@ -58,6 +59,7 @@ struct Command {
 	// GARRISON (13): i32 ox, i32 whom, queued (ox / whom / queued above). EJECTALL (17): i32 back_to_work, i32 who,
 	// i32 eject_o, i32 eject_who (`who` above; who < 0 = the group's own contents).
 	int32_t back_to_work = 0, eject_o = -1, eject_who = -1;
+	// TRANSPORT (1): no payload. SET_TRANSPORT (5): i32 flag (`flags` above). BOARD_SHIP (9): i32 ox (the ship), queued.
 };
 
 // CommandPackage: the executor. `group` (the current group set by GROUP) persists across packages.
@@ -131,6 +133,12 @@ public:
 	// BUY / SELL lots of 100 of `good` (flags 1: x5, 4: x10 (buy), 2: all) for the local leader.
 	bool issue_buy(int32_t good, int32_t flags = 0);
 	bool issue_sell(int32_t good, int32_t flags = 0);
+	// TRANSPORT: the group's land units get a Transport Barge now and go inside it (Group::action_transport; no stock
+	// UI issues it). SET_TRANSPORT: the group's units may (flag) / may not be carried across water (UNIT_CAN_TRANSPORT).
+	// BOARD_SHIP: the group's units walk to the ship objects[who][ship] and go inside (Group::action_board_ship).
+	bool issue_transport(const Game& g, const std::vector<int32_t>& objs);
+	bool issue_set_transport(const Game& g, const std::vector<int32_t>& objs, bool flag);
+	bool issue_board_ship(const Game& g, const std::vector<int32_t>& objs, int32_t ship, QueuePos q = kQueueNew);
 	// TRIBUTE (amount > 0 given) / DEMAND_TRIBUTE (asked), CLEAR_TRIBUTES, ACCEPT / REJECT with leader whom.
 	bool issue_tribute(int32_t whom, int32_t good, int32_t amount, bool demand = false);
 	bool issue_clear_tributes(int32_t whom);

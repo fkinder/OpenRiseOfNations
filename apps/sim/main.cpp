@@ -32,7 +32,8 @@
 // diplomacy.
 // Garrisons (docs/garrison-spec.md): --garrison issues GROUP + GARRISON (the units go into building BO of leader BWHO);
 // --eject-all GROUP + EJECTALL (the listed buildings let their garrison out; /1 = back_to_work: citizens only, orders
-// kept). --list prints `inside N` on a building (and on a unit) with a garrison.
+// kept). --list prints `inside N` on a building (and on a unit) with a garrison. Transports (docs/transport-spec.md):
+// --transport / --set-transport / --board (see parse_transport); RON_TRANSPORT_TRACE=1 logs casts, barges and landings.
 // --attack issues GROUP + ATTACK (target object TO of leader TWHO). --combat-every prints a combat summary (alive
 // units and hit points per leader, live ammo, corpses, kills) every K frames.
 // --move issues GROUP + MOVE_TO for the listed units of leader WHO at FRAME (default 0); /form sets the formation
@@ -91,7 +92,7 @@ using namespace ron::sim;
 
 struct Script {
 	enum Kind { Move, Halt, Form, Attack, Build, Queue, Rally, Swarm, Disband, Unqueue, Gather, CityGather, Buy, Sell,
-		        Tribute, Respond, Peasants, Select, Option, Garrison, EjectAll } kind = Move;
+		        Tribute, Respond, Peasants, Select, Option, Garrison, EjectAll, Transport, SetTransport, Board } kind = Move;
 	int32_t who = 0;
 	std::vector<int32_t> objs;
 	int32_t x = 0, y = 0, frame = 0, form = -1, queue = 2, rotate = 0;
@@ -234,6 +235,44 @@ Script parse_eject_all(const std::string& a) {
 	s.who = int32_t(std::strtol(t.substr(0, colon).c_str(), nullptr, 0));
 	s.objs = parse_list(t.substr(colon + 1, at == std::string::npos ? std::string::npos : at - colon - 1));
 	if (at != std::string::npos) s.frame = int32_t(std::strtol(t.c_str() + at + 1, nullptr, 0));
+	return s;
+}
+
+// Transports (docs/transport-spec.md 9): --transport WHO:o1,o2[@FRAME] (TRANSPORT: the units get a barge now),
+// --set-transport WHO:o1,o2[@FRAME][/0|1] (SET_TRANSPORT flag, default 1), --board WHO:o1,o2@SHIP_O[@FRAME][%queue]
+// (BOARD_SHIP: walk to the ship objects[WHO][SHIP_O] and go inside; queue default 2 = NEW).
+Script parse_transport(const std::string& a, Script::Kind kind) {
+	Script s;
+	s.kind = kind;
+	s.num = 1;  // SET_TRANSPORT flag
+	std::string t = a;
+	if (kind == Script::SetTransport) {
+		const size_t slash = t.find('/');
+		if (slash != std::string::npos) {
+			s.num = int32_t(std::strtol(t.c_str() + slash + 1, nullptr, 0));
+			t = t.substr(0, slash);
+		}
+	}
+	if (kind == Script::Board) {
+		const size_t pct = t.find('%');
+		if (pct != std::string::npos) {
+			s.queue = int32_t(std::strtol(t.c_str() + pct + 1, nullptr, 0));
+			t = t.substr(0, pct);
+		}
+	}
+	const size_t colon = t.find(':'), at = t.find('@');
+	if (colon == std::string::npos) throw std::runtime_error("bad transport option " + a);
+	s.who = int32_t(std::strtol(t.substr(0, colon).c_str(), nullptr, 0));
+	s.objs = parse_list(t.substr(colon + 1, at == std::string::npos ? std::string::npos : at - colon - 1));
+	std::string rest = at == std::string::npos ? std::string() : t.substr(at + 1);
+	if (kind == Script::Board) {
+		if (rest.empty()) throw std::runtime_error("bad --board (needs @SHIP_O) " + a);
+		const size_t at2 = rest.find('@');
+		s.to = int32_t(std::strtol(rest.substr(0, at2).c_str(), nullptr, 0));
+		s.twho = s.who;
+		rest = at2 == std::string::npos ? std::string() : rest.substr(at2 + 1);
+	}
+	if (!rest.empty()) s.frame = int32_t(std::strtol(rest.c_str(), nullptr, 0));
 	return s;
 }
 
@@ -1336,8 +1375,8 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 				if (e[0] == w && e[1] == o) return;
 			rr.watched.push_back({w, o});
 		};
-		if (s.kind == Script::Garrison) watch(s.twho, s.to);
-		if (s.kind == Script::EjectAll)
+		if (s.kind == Script::Garrison || s.kind == Script::Board) watch(s.twho, s.to);
+		if (s.kind == Script::EjectAll || s.kind == Script::Transport || s.kind == Script::SetTransport || s.kind == Script::Board)
 			for (int32_t o : s.objs) watch(s.who, o);
 		if (s.kind == Script::Attack) {  // the attack target too
 			bool known = false;
@@ -1376,6 +1415,17 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 				cm.issue_eject_all(*g, s.objs, s.num != 0);
 				if (print) std::printf("  f%-5d EJECTALL %d:%d%s%s\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0],
 				                       s.objs.size() > 1 ? "+" : "", s.num ? " (back to work)" : "");
+			} else if (s.kind == Script::Transport) {
+				cm.issue_transport(*g, s.objs);
+				if (print) std::printf("  f%-5d TRANSPORT %d:%d%s\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0], s.objs.size() > 1 ? "+" : "");
+			} else if (s.kind == Script::SetTransport) {
+				cm.issue_set_transport(*g, s.objs, s.num != 0);
+				if (print) std::printf("  f%-5d SET_TRANSPORT %d:%d%s = %d\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0],
+				                       s.objs.size() > 1 ? "+" : "", s.num != 0);
+			} else if (s.kind == Script::Board) {
+				cm.issue_board_ship(*g, s.objs, s.to, QueuePos(s.queue));
+				if (print) std::printf("  f%-5d BOARD_SHIP %d:%d%s -> ship %d:%d\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0],
+				                       s.objs.size() > 1 ? "+" : "", s.twho, s.to);
 			} else if (s.kind == Script::Build || s.kind == Script::Queue) {
 				const int32_t t = find_type(*g, s.type);
 				if (t < 0) throw std::runtime_error("unknown type " + s.type);
@@ -1629,6 +1679,9 @@ int main(int argc, char** argv) {
 			else if (std::strcmp(argv[i], "--attack") == 0) scripts.push_back(parse_attack(argv[i + 1]));
 			else if (std::strcmp(argv[i], "--garrison") == 0) scripts.push_back(parse_garrison(argv[i + 1]));
 			else if (std::strcmp(argv[i], "--eject-all") == 0) scripts.push_back(parse_eject_all(argv[i + 1]));
+			else if (std::strcmp(argv[i], "--transport") == 0) scripts.push_back(parse_transport(argv[i + 1], Script::Transport));
+			else if (std::strcmp(argv[i], "--set-transport") == 0) scripts.push_back(parse_transport(argv[i + 1], Script::SetTransport));
+			else if (std::strcmp(argv[i], "--board") == 0) scripts.push_back(parse_transport(argv[i + 1], Script::Board));
 			else if (std::strcmp(argv[i], "--build") == 0) scripts.push_back(parse_prod(Script::Build, argv[i + 1]));
 			else if (std::strcmp(argv[i], "--queue") == 0 || std::strcmp(argv[i], "--research") == 0)
 				scripts.push_back(parse_prod(Script::Queue, argv[i + 1]));

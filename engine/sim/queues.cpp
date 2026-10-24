@@ -84,21 +84,28 @@ void unit_go_inside(Game& g, Unit& u, int32_t o, int32_t who) {
 	unit_insert_inside(g, *c, o, who);
 	// (UI: the console selection drops it.)
 	const Object* cont = g.object(who, o);
-	if (cont && cont->is_unit && c->ptype->uber_size > 1) {
-		c->unit_masks &= ~umask::kMultimove;
-		c->path.clear();
-		close_orders(g, *c, false);
-		clear_partial_path(*c);
-		update_action(g, *c);
-	}
+	// Into a unit (a transport): every member of an uber chain forgets its orders (the original's recursive
+	// go_inside(follower, o, who, 1) runs this block for each of them).
+	auto drop_orders = [&](Unit& m) {
+		if (cont && cont->is_unit && m.ptype->uber_size > 1) {
+			m.unit_masks &= ~umask::kMultimove;
+			m.path.clear();
+			close_orders(g, m, false);
+			clear_partial_path(m);
+			update_action(g, m);
+		}
+	};
+	drop_orders(*c);
 	if (c->o_down >= 0) {
 		Unit* d = g.unit(c->who, c->o_down);
 		if (d && d->alive()) {
 			unit_insert_inside(g, *d, o, who);  // go_inside(follower, o, who, 1)
+			drop_orders(*d);
 			for (Unit* q = d; q->o_down >= 0;) {
 				Unit* n = g.unit(q->who, q->o_down);
 				if (!n || !n->alive()) break;
 				unit_insert_inside(g, *n, o, who);
+				drop_orders(*n);
 				q = n;
 			}
 		}

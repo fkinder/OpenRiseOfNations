@@ -30,6 +30,7 @@ exists), so "ported" means "from the spec and the decompiles", not "verified". S
 | `economy.hpp`, `econ_income.cpp`, `econ_gather.cpp`, `econ_market.cpp`, `econ_trade.cpp` | economy ([economy-spec.md](economy-spec.md)): starting stockpiles, income pipeline, gather rates, gatherer lists, GATHER order and handlers, auto-gather, farms, oil wells, markets, tribute, fishermen / merchants, caravans | ported (see "Economy") |
 | `capture.{hpp,cpp}` | capture, elimination, victory ([capture-spec.md](capture-spec.md)): `Build::check_capture`, `Cities::capture_city`, `City::capture`, `Build` / `Wall` / `Unit::swap_team`, `Leader::lost_a_city` / `lost_capital` / `recapture_capital` / `defeat` / `defeat_by` / `victory`, `Game::check_victory` / `defeat_all` / `retake_capital`, `process_elimination`, the victory clocks, `GameDaemon::process_victory`, the city's 64-frame capture poll | ported (see "Capture and victory") |
 | `script_host.{hpp,cpp}`, `script_funcs*.cpp`, `script_ui.hpp`, `scenario_data.hpp` | scripts ([script-spec.md](script-spec.md) §6, §7): the game's `bhs::Runtime` (engine/script), scenario / general powers / AI production script loading and call points, `ScriptTimers`, find counters, the builtins on the simulation, `ScenarioData`, the presentation queue / seat-local input view | ported (see "Scripts") |
+| `spells.{hpp,cpp}`, `transport.{hpp,cpp}` | spells and transports ([transport-spec.md](transport-spec.md)): `add_cast_order`, `do_cast` (untargeted branch), `spell_is_castable` / `pay_cast_costs` / `spell_job_time`, `spell_cast`; the who-may-be-carried predicates, `cast_transport`, `same_damage`, BOARD_SHIP / AWAIT_BOARD (`do_board`, `do_await_board`, `check_meet_ship`), the TRANSPORT / SET_TRANSPORT / BOARD_SHIP group actions | ported (see "Transports") |
 | `apps/sim/main.cpp` | `build/ron-sim` harness | done |
 
 Renderer integration: `#include "sim/game.hpp"`, `"sim/commands.hpp"`, `"sim/view.hpp"`, `"sim/anim_assets.hpp"`.
@@ -346,9 +347,66 @@ capture.scx Light Horse into a Stable and out with cleared orders; a full Fortre
 12th; citizens of a Major City keep their gather orders and resume after `/1`; a destroyed Fortress ejects one chain
 per frame; a unit heals inside; all 156 stock scenarios 600 frames with the AI and the self-check OK.
 
-Stubbed (TODO in code): transports (carry_orders, same_damage, caravan hand-over, `is_entering_or_exiting`),
-aircraft (helicopters on carriers, airbase scramble), the militia disarm spell on leaving, the scenario ignore-orders
+Stubbed (TODO in code): `is_entering_or_exiting`, aircraft (helicopters on carriers, airbase scramble), the militia disarm spell on leaving, the scenario ignore-orders
 prelude, the Lakota / American gather bonuses from the "inside" counters, fire rafts / aircraft ejecting a garrison.
+
+## Transports
+
+`engine/sim/spells.{hpp,cpp}` and `engine/sim/transport.{hpp,cpp}` (docs/transport-spec.md, 2026-10-24): a land unit
+whose owner may transport it (`UNIT_CAN_TRANSPORT`, from `Leader::check_transport`) walks a path with flag 4 across
+water; there is no ship to build.
+- `Unit::set_new_location` (guys.cpp): on entering a water tile the unit does **not** move: `add_cast_order(0x28a,
+  QUEUE_FIRST)` and a return of 0 (`do_move` treats 0 as "did not move"). A sea unit with `unit_flags & 0x10` (the barge)
+  placed on a non-water tile ejects its contents (`eject_contents(0, -1, carry_orders 1, no_orders 1)`), dies when
+  empty and does not move either.
+- `do_cast` (untargeted branch): pays the cost (`pay_cast_costs`, free for 0x28a), first frame `set_anim` and the
+  "is there a water spot for a barge within `unit_board_distance`" test, `spell_job_time` (0), followers wait while their
+  captain is casting, then `spell_cast` -> `cast_transport`: a Transport Barge (the current upgrade; Merchant Fleet for
+  caravans; marines mark it `kMarineTransport`) is created on the unit, takes its damage ratio (`same_damage`), is teleported
+  to the water spot, receives the unit's whole order list and path (the next point loses flag 4 when it is in the barge's
+  region) and `UNIT_CAN_TRANSPORT`, and the unit (with its `o_down` chain) goes inside (`unit_go_inside`; into a unit
+  every member of an uber chain also drops its orders).
+- The barge walks the path (passability already lets a sea unit with the flag onto land on a flag-4 step; its speed gets
+  `military_transport_bonus` x the leader's military epoch). Colliders wait for a barge that is casting (collision.cpp).
+- Landing: `eject_contents`, unit-source branch (garrison.cpp): `same_damage` (the cargo takes the carrier's ratio when
+  higher), caravan slot hand-over, `carry_orders` (the order list and the path go to the unit, the next path point loses
+  flag 4), the transport flag is re-granted from the leader's level. The caravan (`cara`) record follows the unit.
+- Commands (commands.hpp): TRANSPORT (13, `Group::action_transport`: barge now, unit inside), SET_TRANSPORT (14,
+  `Group::action_set_transport`: sets / clears the flag when the leader has a transport level), BOARD_SHIP (15,
+  `Group::action_board_ship` -> BOARD_SHIP / AWAIT_BOARD orders, `check_meet_ship`). `CommandManager::issue_transport /
+  issue_set_transport / issue_board_ship`. `RON_TRANSPORT_TRACE=1` prints every cast order, barge, landing on stderr.
+
+Crossing test: unit 1:54 (a citizen of the Persian AI, owner with TRANSPORT_BONUS and docks) walks to a land tile across the
+strait of persia.scx:
+`RON_TRANSPORT_TRACE=1 build/ron-sim <game dir> conquest/Alexander/persia.scx --frames 700 --no-scripts --no-selfcheck
+--digest-every 0 --move 1:54@5200,3500@1 --dump-every 20`. The trace shows `f352 L1 unit 54 enters water at 10544,3438 ->
+cast order`, `f353 cast_transport ... barge 7 (type 320)`, `barge 7 takes 1 orders (front 1), path 29`, `f601 barge 7 leaves
+the water at 5375,3480`, `f601 landing L1 unit 54 ... 1 orders (front 1), path 2`; the dump shows 1:54 `INSIDE(on_map=0)` from
+f360 to f600, then at (5200,3525) (its target) on the far shore at f620 (the AI then gives it new orders). A driver that
+damages the unit first (damage 30/50, moves queued: MOVE_TO(5200,3500) then MOVE_TO(5200,4300)) shows the ratio and the
+order list surviving: unit 23/50 at the cast, barge 22/50, unit 23/50 and both MOVE_TO orders after the landing.
+`--roundtrip 400` on the first line prints `save round-trip: OK` with the unit inside the barge.
+
+What is simulated: everything above for single units and uber chains (a chain crosses as one cargo, the captain casts), the
+three commands, the damage hand-over both ways, caravans (Merchant Fleet) as far as the record hand-over goes. All 156
+stock scenarios run 600 frames with `--ai-every 8` and the self-check OK; five digests moved against the build before the
+port, all of them an AI unit now crossing water in a barge instead of walking on it (persia, persia2, carib, carib2,
+italy_mp).
+
+Differences from docs/transport-spec.md (the exe wins): `set_new_location` returns 0 right after `add_cast_order` (the
+disassembly at 5f8f77 xors EAX and returns; the barge-leaving branch also returns 0 when contents remain);
+`can_ever_transport` is true for a non-land unit with `carry != 0` that is **not** a carrier (5f2f5 returns 1 on `is(0x15f)`
+== 0); `is_castable` returns 0 (not 1) for decoys; `do_cast` kills the order when `pay_cast_costs` fails; the military
+speed bonus multiplies `LeaderDataEncrypt.epoch[0]` (military library level), not the transport level;
+`collision.cpp:382` is the pack-spell soft collider, not the 0x28a wait (that is `:535`).
+
+Stubbed (TODO in code): the targeted branch of `do_cast` and every spell but TRANSPORT (`TODO(spells)`), the group machinery
+for chains landing from a barge (`TODO(groups)`: `reset_move_orders` + the temporary group; the orders and path go to the
+captain instead), `is_entering_or_exiting` / `unpay_cast_costs` in `kill_current_order`, aircraft cargo in `can_carry`,
+the AI's ferrying (`think_civilian_transport`, `do_transporting`), sounds, the console selection and `replace_hotunit`, the
+`ron-sim` options and the right-click verbs. ❓ `check_meet_ship` follows the disassembly but is exercised only by
+BOARD_SHIP (no stock scenario issues it); `action_board_ship`'s QUEUE_FIRST re-insert runs `finish_insert` on the group (the
+decompile uses a temporary group holding the ship).
 
 ## Healing and attrition
 
@@ -806,7 +864,7 @@ caravan repath of City::close.
 8. ~~Economy~~ done (see "Economy"). Next: caravan roads (PathFinder::find_road), packers (merchants), the AI parts
    (strategy_all), then compare with replays that contain gathering, trading and market commands.
 9. ~~AI~~ (ai-spec 15 steps 1-11) done (see "Computer opponent"). ~~City capture~~ done (see "Capture and
-   victory"). Next: transports, spells, heroes (the despot plunder, THECITIZEN), garrisons (ejection, the strength
+   victory"). Next: ~~transports~~ (see "Transports"), the other spells, heroes (the despot plunder, THECITIZEN), garrisons (ejection, the strength
    scan's num_inside, the AI alarm); ~~the most-called scenario builtins~~ done (see "Scripts": 472 names, the
    tutorials call no unported builtin); then save / load of the script state, the renderer side of
    `sim/script_ui.hpp` (apps/map-mac), the CTW strategic layer.

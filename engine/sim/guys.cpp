@@ -15,12 +15,16 @@
 
 #include <algorithm>
 #include <climits>
+#include <cstdio>
 
 #include "sim/compass.hpp"
 #include "sim/combat.hpp"
 #include "sim/game.hpp"
+#include "sim/garrison.hpp"
 #include "sim/groups.hpp"
 #include "sim/movement.hpp"
+#include "sim/spells.hpp"
+#include "sim/transport.hpp"
 #include "sim/trig.hpp"
 
 // The terrain z and walk-ratio math must be single-precision IEEE with no fused multiply-add.
@@ -316,14 +320,35 @@ int32_t unit_set_new_location(Game& g, Unit& u, int32_t x, int32_t y, bool p3, b
 	if (!wc && tc) {
 		// Tile-only change: the old wcoord's HALF_LAND bit decides whether the amphibious test runs.
 		const bool half = w.in_w(owx, owy) && (w.w(owx, owy).flags & wflag::kHalfLand) != 0;
-		// TODO(@5f8e60): tribe bonus 0x12 ground units: unit_masks 0x800 = "standing on a tree tile"
-		// (LeaderData::has_tribe_bonus is not available yet).
+		// @5f8e60: tribe bonus 0x12 (Iroquois) ground units: unit_masks 0x800 (UNDER_COVER) = "standing on a tree tile".
+		// It is written on every tile-only move, whatever HALF_LAND says.
+		if (has_tribe_bonus(g, u.who, 0x12) && u.ptype->domain == 0) {
+			if (w.in_t(ntx, nty) && (w.t(ntx, nty) & tmask::kMedium) == tmask::kTree) u.unit_masks |= umask::kUnderCover;
+			else u.unit_masks &= ~umask::kUnderCover;
+		}
 		check_transform = half;
 	}
-	if (check_transform) {
-		// TODO(@5f8f30): amphibious units ((unit_masks & UNIT_CAN_TRANSPORT and not unit_masks2 0x2000) or unit_flags
-		// 0x10): a ground unit entering a water tile gets add_cast_order(spell 0x28a, QUEUE_FIRST) and the function
-		// returns 0 without moving; a domain-1 unit leaving water ejects its contents and dies when empty (returns 0).
+	if (check_transform && unit_can_transport(u)) {
+		// @5f8f30: amphibious units (docs/transport-spec.md 3). A ground unit entering a water tile queues the TRANSPORT
+		// cast at the front and does NOT move (the exe returns 0 right after add_cast_order; the cast creates the barge
+		// next to it); a sea unit (the barge) leaving the water ejects its contents, dies when empty and does not move.
+		const int32_t d = u.ptype->domain;
+		const uint16_t medium = w.in_t(ntx, nty) ? uint16_t(w.t(ntx, nty) & tmask::kMedium) : uint16_t(0);
+		if (d == 0 && medium == tmask::kWater) {
+			if (transport_trace())
+				std::fprintf(stderr, "[transport] f%d L%d unit %d type %d enters water at %d,%d -> cast order\n", g.frame, u.who, u.o,
+				             u.type, x, y);
+			add_cast_order(g, u, -1, -1, -1, -1, spell::kTransport, kQueueFirst, false);
+			return 0;
+		}
+		if (d == 1 && medium != tmask::kWater) {
+			if (transport_trace())
+				std::fprintf(stderr, "[transport] f%d L%d barge %d type %d leaves the water at %d,%d (inside %d)\n", g.frame, u.who, u.o,
+				             u.type, x, y, num_inside(g, u, 1));
+			eject_contents(g, u, 0, -1, 1, 1);
+			if (num_inside(g, u, 1) == 0) object_die(g, u, 0, -1, 0.0f);
+			return 0;
+		}
 	}
 	if (wc) remove_from_world(g, u);
 

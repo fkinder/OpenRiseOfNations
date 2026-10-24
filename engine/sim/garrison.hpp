@@ -2,8 +2,8 @@
 // counting what is inside an object (num_inside, count_inside), who may garrison where (UnitTypeData::can_garrison),
 // the GARRISON order and its handler, the GARRISON / EJECTALL group actions and Object::eject_contents / kill_contents.
 //
-// Transports (units carried by units), aircraft on airbases / carriers and missiles in silos share the container links
-// but are outside this module: their branches are TODO(transports) / TODO(air).
+// Transports (units carried by units: sim/transport.hpp) share the container links and the unit-source branch of
+// eject_contents; aircraft on airbases / carriers and missiles in silos are TODO(air).
 #pragma once
 
 #include <cstdint>

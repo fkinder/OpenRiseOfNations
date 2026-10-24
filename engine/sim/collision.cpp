@@ -12,6 +12,7 @@
 #include "sim/movement.hpp"
 #include "sim/orders.hpp"
 #include "sim/pathfinder.hpp"
+#include "sim/spells.hpp"
 #include "sim/trig.hpp"
 
 namespace ron::sim {
@@ -380,8 +381,12 @@ int32_t detect_unit_collision(Game& g, Unit& u, int32_t x, int32_t y, bool test_
 				}
 				const OrderType bt = b->orders.front().type;
 				if (bt == kCastSpell) {
-					// TODO(spells): soft when the cast order's spell type is 0x28b/0x28d/0x28f/0x291 (or a SpellType
-					// subclass whose vtable +0x50 says so).
+					// Soft when the cast order's spell type is a pack spell (0x28b/0x28d/0x28f/0x291: TypeData::is_pack).
+					// (TRANSPORT, 0x28a, is not: the mover waits for it below instead.)
+					if (spell_is_pack(b->orders.front().spell)) {
+						soft = true;
+						continue;
+					}
 				} else if (bt == kOrderNone || bt == kGuard || (is_move_type(bt) && b_act != kAttack)) {
 					soft = true;
 					continue;
@@ -532,7 +537,7 @@ void resolve_unit_collision(Game& g, Unit& u, int32_t x, int32_t y) {
 		    bt == kGroupAttackTo)
 			wait_case = true;
 		else if (bt == kCastSpell) {
-			// TODO(spells): wait_case when B's cast order is spell 0x28a (the boat transform).
+			wait_case = b && b->orders.front().spell == spell::kTransport;  // B is turning into a barge (transport-spec 6)
 		}
 	}
 	if (wait_case && b) {

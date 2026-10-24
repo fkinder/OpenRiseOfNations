@@ -10,6 +10,7 @@
 #include "sim/placement.hpp"
 #include "sim/production.hpp"
 #include "sim/rules_internal.hpp"
+#include "sim/transport.hpp"
 
 namespace ron::sim {
 
@@ -706,10 +707,10 @@ void check_transport(Game& g, int32_t who) {
 			for (int32_t o = 0; o < OL.unit_mark; o++) {
 				Unit* u = g.unit(who, o);
 				if (!u || !u->alive()) continue;
-				// UnitData::can_ever_transport / transport_type: TODO(transport) — every land unit qualifies here.
-				if (u->ptype->domain != 0) continue;
+				// UnitData::can_ever_transport (land units, and the barges), then the scout option, then transport_type <= want.
+				if (!unit_can_ever_transport(g, *u)) continue;
 				if (!(l.options_flags & 2) && unit_is(g, *u, 0x45)) continue;
-				u->unit_masks |= umask::kCanTransport;
+				if (unit_transport_type(g, *u) <= want) u->unit_masks |= umask::kCanTransport;
 			}
 			return;
 		}

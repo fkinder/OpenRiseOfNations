@@ -10,6 +10,8 @@
 #include "sim/garrison.hpp"
 #include "sim/guys.hpp"
 #include "sim/movement.hpp"
+#include "sim/spells.hpp"
+#include "sim/transport.hpp"
 #include "sim/trig.hpp"
 
 namespace ron::sim {
@@ -179,7 +181,8 @@ void kill_current_order(Game& g, Unit& u, bool no_side_effects) {
 	} else if (cur.type == kTradeRoute) {
 		end_trade_route(g, u);
 	}
-	// CAST_SPELL / SPECIAL_ANIM side effects: TODO (not created yet).
+	// CAST_SPELL side effects: TODO(spells): a paid order gives its cost back (unpay_cast_costs; a no-op for TRANSPORT:
+	// empty cost, mana 0) and a packing merchant refreshes its gpiece. SPECIAL_ANIM: TODO (not created yet).
 	const bool pathed = order_is_pathed(cur);
 	u.orders.pop_front();
 	if (pathed) kill_current_path(g, u);
@@ -420,6 +423,12 @@ int32_t do_job(Game& g, Unit& u, OrderType t, Order* o) {
 		return do_repair(g, u, *o);  // Unit::do_repair @5ee420 (4.8)
 	case kGarrison:
 		return do_garrison(g, u, *o);  // Unit::do_garrison @5e6b80 (garrison-spec 4)
+	case kBoardShip:
+		return do_board(g, u, *o);  // Unit::do_board @5ed1f0 (transport-spec 8)
+	case kAwaitBoard:
+		return do_await_board(g, u, *o);  // Unit::do_await_board @5ed040
+	case kCastSpell:
+		return do_cast(g, u, *o);  // Unit::do_cast @5ebfe0 (transport-spec 4)
 	case kSpecialAnim:
 		// Unit::do_spec_anim: the walk-out order of Unit::come_out is killed in the call that adds it; any other
 		// (none created yet) ends at once too. TODO(anims): timed special animations.
@@ -430,7 +439,7 @@ int32_t do_job(Game& g, Unit& u, OrderType t, Order* o) {
 		kill_current_order(g, u, false);
 		return 0;
 	default:
-		// TODO(orders-spec 6): board / await-board, follow, guard, cast, strafe, patrol, ... are not simulated yet; such
+		// TODO(orders-spec 6): follow, guard, strafe, patrol, ... are not simulated yet; such
 		// orders are never created by the implemented commands.
 		return 0;
 	}

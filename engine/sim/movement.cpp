@@ -89,12 +89,11 @@ void update_speed(Game& g, Unit& u0) {
 	const Type& t = *u.ptype;
 	const Constants& c = g.rules->constants;
 	int32_t base = t.moves;
-	if (t.domain == 1 && (t.unit_flags & 0x10)) {
-		// TODO(techs): += (leader +0x6eb8 -> +0xe8 ^ 0x63187, the transport level) * military_transport_bonus (0x3c)
-	}
-	if (u.unit_masks2 & umask2::kMarineTransport) {
-		// TODO(techs): += the same level * americans_marine_speed_bonus (0x86c)
-	}
+	// (leader +0x6eb8 -> +0xe8) ^ 0x63187 is LeaderDataEncrypt.epoch[0], the military library level ("speed bonus for
+	// transports per military tech"); the spec's guess (the transport level 0..3) is wrong.
+	const int32_t mil = u.who >= 0 && u.who < kNumLeaders ? g.leaders[size_t(u.who)].epoch[0] : 0;
+	if (t.domain == 1 && (t.unit_flags & 0x10)) base += mil * c.at(0x3c);  // military_transport_bonus
+	if (u.unit_masks2 & umask2::kMarineTransport) base += mil * c.at(0x86c);  // americans_marine_speed_bonus
 	int32_t s = c.at(0x4) * base;  // unit_move_speed
 	// TODO(leader): objmask 0x2000 with the leader's whales bit: s = (whales_ships_move + 100) * s / 100
 	if (unit_is(g, u, 0x68)) s = s * 36 / 32;

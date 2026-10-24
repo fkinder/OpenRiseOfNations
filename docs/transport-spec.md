@@ -78,7 +78,7 @@ return 2;                                               // everything else is mi
 if (type.domain == 0) return 1;
 if (!is_unit()) return 0;
 if (type.carry == 0) return 0;
-return is(0x15f CARRIER, 0) ? 1 : 0;
+return is(0x15f CARRIER, 0) ? 0 : 1;      // disassembly @46f2e3: a carrying sea unit (barge) yes, the carrier no
 ```
 
 ### 2.4 `UnitData::can_transport()` @46f960 (already `unit_can_transport`)
@@ -150,14 +150,11 @@ if (check && (((unit_masks & 0x800000) && !(unit_masks2 & 0x2000)) || (type.unit
 }
 ```
 
-Important: unlike the port's TODO text, the original does **not** return early. After the cast order is queued the
-function continues: `remove_from_world`, `x/y/z` are written (the unit now stands on the water tile), `add_to_world`,
-goody test, `update_seen`, guys placed. The barge is then created at that position (§5). The same for the barge
-leaving water: it ejects first (the unit comes out next to the barge's **old** position, found by `find_nearby_spot`
-with the unit's own type, so on land) and then steps onto the land tile itself if it survived (it does not: a barge
-carrying one chain is empty and dies before the move; `die` closes the orders, and the caller must treat the unit as
-gone — `unit_set_new_location` should return 0 after a `die` so `do_move` stops, which is what the movement port
-already expects of a 0).
+Correction (disassembly @5f8f72: `CALL add_cast_order; XOR EAX,EAX; RET`): the original **returns 0 right after
+queuing the cast order** — the unit does not move onto the water tile; it stays on the shore and the barge is created
+on the unit's own tile (§5) and teleported to the water spot. The barge-leaving branch also returns 0 (whether or not
+contents remain: the next frame retries); the unit comes out next to the barge's position, found by `find_nearby_spot`
+with the unit's own type, so on land. `do_move` already stops on a 0 from `unit_set_new_location`.
 
 `num_inside(1)` is garrison-spec `num_inside(p = 1)` (captains only).
 
@@ -185,7 +182,7 @@ Returns 3 = castable. The "does the leader own the spell" chain at the top (`is(
 `tribe_can_type`, graft) is skipped for 0x28a and 0x29a. Then:
 
 ```
-if (obj.is_unit() && (unit_masks & 1 kDecoy) && !is_pack && !is_unpack) return 1;   // decoys cast nothing
+if (obj.is_unit() && (unit_masks & 1 kDecoy) && !is_pack && !is_unpack) return 0;   // decoys cast nothing
 case 0x288, 0x289, 0x28a: return obj.is_cargo() ? 3 : 0;
 ```
 
@@ -215,7 +212,7 @@ tribe bonus 9 halves, `is(0x177,1)` → 10). None applies to 0x28a: **job time 0
 ```
 spell = order.spell; S = spelltypes[spell]; eff = is_spell_type(spell) ? spell : 0x296
 if (order.paid == 0) {
-    if (pay_cast_costs(S, o, who) != 0) { (console feedback) }     // the order goes on regardless
+    if (pay_cast_costs(S, o, who) != 0) { (console feedback); goto kill }   // cannot pay: the order dies
     order.paid = 1
 }
 if (spell_time == 0) {                                           // first frame of the cast
@@ -302,14 +299,15 @@ Notes for the port:
 
 - Passability: `invalid_loc` (passability.cpp) already lets a domain-1 unit onto a non-water tile when the path step
   carries flag 4 and `can_transport(u)` is true, and a domain-0 unit onto water the same way. No change.
-- Collision: `collision.cpp:534` TODO — in `detect_unit_collision`, when the blocking unit B's front order is
-  CAST_SPELL with `spell == 0x28a`, `wait_case = true` (the mover waits for the transforming unit like it waits for
-  a mover). Also `collision.cpp:382` (same test, same meaning).
+- Collision: `collision.cpp:534` — in `detect_unit_collision`, when the blocking unit B's front order is CAST_SPELL
+  with `spell == 0x28a`, `wait_case = true` (the mover waits for the transforming unit like it waits for a mover).
+  `collision.cpp:382` is a different rule: a blocker casting a **pack** spell (0x28b / 0x28d / 0x28f / 0x291) is a
+  soft collider.
 - `check_target_path` (combat_orders.cpp:307) for CAST_SPELL: `SpellTypeData::is_valid_target` — untouched (0x28a has
   no target: `ox < 0` returns 0 before it).
-- Speed (`movement.cpp:93`): `+= transport level (LeaderData::can_transport()) * K(military_transport_bonus)` and
-  the marine transport bonus — fill the TODO: `speed += can_transport(leader) * K("military_transport_bonus")`.
-  ❓ the exact expression (`leader +0x6eb8 → +0xe8 ^ 0x63187` in the TODO text is the level); use the level 0..3.
+- Speed (`movement.cpp:93`): `+= LeaderDataEncrypt.epoch[0] (the military library level; leader +0x6eb8 → +0xe8 ^
+  0x63187) * K(military_transport_bonus)` for barges (domain 1 with unit_flags 0x10), and `+= epoch[0] *
+  K(americans_marine_speed_bonus)` for marine transports. (Both constants are 0 in the stock rules.)
 - The AI `is_entering_or_exiting` (garrison.cpp:479): a unit whose front order is BOARD_SHIP / AWAIT_BOARD, or a
   CAST_SPELL 0x28a. Fill when convenient.
 

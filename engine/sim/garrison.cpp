@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <vector>
 
 #include "sim/ai.hpp"
@@ -16,6 +17,7 @@
 #include "sim/orders.hpp"
 #include "sim/production.hpp"
 #include "sim/search.hpp"
+#include "sim/transport.hpp"
 #include "sim/trig.hpp"
 
 namespace ron::sim {
@@ -556,7 +558,6 @@ void die_chain(Game& g, Unit& u) {
 }  // namespace
 
 void eject_contents(Game& g, Object& ob, int32_t kill_if_stuck, int32_t type, int32_t carry_orders, int32_t no_orders) {
-	(void)carry_orders;  // TODO(transports): the carrier's order list and inverted path go to a single unit / a chain
 	if (!on_map(ob)) return;
 	if (!ob.is_unit && type < 0 && !g.editor && !can_carry_domain(g, ob, kDomainAir)) {
 		static_cast<Build&>(ob).build_masks |= bmask::kEjecting;
@@ -618,7 +619,49 @@ void eject_contents(Game& g, Object& ob, int32_t kill_if_stuck, int32_t type, in
 				// TODO(air): add_strafe_order(-1, -1, -1, -1, 1, QUEUE_NEW, 0)
 			}
 		}
-		// TODO(transports): from a unit: sound, same_damage, caravan slot hand-over, carry_orders, selection.
+		if (ob.is_unit) {
+			// From a unit (a transport barge; docs/transport-spec.md 7.1). (sound S_TRANSPORTUNLOAD when the carrier is on
+			// screen and seen by the console)
+			Unit& carrier = static_cast<Unit&>(ob);
+			same_damage(g, *u, carrier.o, carrier.who);  // the cargo takes the carrier's damage ratio
+			if (unit_is_caravan(carrier)) {
+				u->cara = carrier.cara;
+				if (carrier.cara >= 0 && size_t(carrier.cara) < g.caravans[size_t(carrier.who)].size())
+					g.caravans[size_t(carrier.who)][size_t(carrier.cara)].o = int16_t(u->o);
+				carrier.cara = -1;
+				if (carrier.unit_masks & 0x200) u->unit_masks |= 0x200;  // kTradeLoaded
+				else u->unit_masks &= ~0x200u;
+			}
+			if (carry_orders != 0) {
+				if (u->ptype->uber_size != 1) {
+					// TODO(groups): Unit::reset_move_orders(carrier); for a temporary group (not an army member) the original
+					// re-issues the carrier's orders to the chain through Group::set_up_insert / kill / add / push_group /
+					// finish_insert. ❓ approximated as the single-unit hand-over below (orders and path to the captain).
+				}
+				// The carrier's whole order list goes to the unit, front first, and so does its path (same stack order).
+				while (!carrier.orders.empty()) {
+					u->orders.push_back(carrier.orders.front());
+					carrier.orders.pop_front();
+				}
+				for (const PathData& p : carrier.path) u->path.push_back(p);
+				carrier.path.clear();
+				if (!u->path.empty()) {  // the next point: no transport flag
+					PathData p = u->path.back();
+					u->path.pop_back();
+					p.flags &= ~pathflag::kTransport;
+					u->path.push_back(p);
+				}
+			}
+			if (transport_trace())
+				std::fprintf(stderr, "[transport] f%d landing L%d unit %d (type %d) from %d at %d,%d: damage %d, %zu orders (front %d), path %zu\n",
+				             g.frame, u->who, u->o, u->type, carrier.o, u->x, u->y, u->damage, u->orders.size(),
+				             u->orders.empty() ? 0 : int(u->orders.front().type), u->path.size());
+			// The leader's transport level (re)grants the flag; scouts only with the leader option.
+			const int32_t level = leader_can_transport(g, carrier.who);
+			if (unit_transport_type(g, *u) <= level && (!unit_is(g, *u, 0x45) || (g.leaders[size_t(carrier.who)].options_flags & 2)))
+				u->unit_masks |= umask::kCanTransport;
+			// (console selection: the carrier out, the unit in; Object::replace_hotunit: presentation)
+		}
 	}
 }
 

@@ -4,6 +4,7 @@
 #include "sim/economy.hpp"
 #include "sim/game.hpp"
 #include "sim/garrison.hpp"
+#include "sim/transport.hpp"
 #include "sim/production.hpp"
 
 namespace ron::sim {
@@ -117,6 +118,20 @@ void CommandPackage::process(Game& g, const Command& c, int32_t play, int32_t pl
 		if (group >= 0)
 			group_action_eject_all(g, g.groups.g[size_t(group)], c.back_to_work, c.who, c.eject_o, c.eject_who);  // @710b40
 		return;
+	case Verb::Transport:
+		if (group >= 0) group_action_transport(g, g.groups.g[size_t(group)], 0);  // process_transport @949050
+		return;
+	case Verb::SetTransport:
+		if (group >= 0) group_action_set_transport(g, g.groups.g[size_t(group)], c.flags);  // process_set_transport @948f60
+		return;
+	case Verb::BoardShip: {
+		// process_board_ship @948e00: ox < 0 or objects[group owner][ox] valid -> Group::action_board_ship(ox, queued).
+		if (group < 0) return;
+		Group& gr = g.groups.g[size_t(group)];
+		const Object* t = c.ox >= 0 ? g.object(gr.who, c.ox) : nullptr;
+		if (c.ox < 0 || (t && t->alive())) group_action_board_ship(g, gr, c.ox, QueuePos(c.queued));
+		return;
+	}
 	case Verb::CityGather:
 		if (group >= 0) group_action_city_gather(g, g.groups.g[size_t(group)], c.type, QueuePos(c.queued));  // @948a10
 		return;
@@ -383,6 +398,33 @@ bool CommandManager::issue_eject_all(const Game& g, const std::vector<int32_t>& 
 	c.who = who;
 	c.eject_o = eject_o;
 	c.eject_who = eject_who;
+	local_.push_back(c);
+	return true;
+}
+
+bool CommandManager::issue_transport(const Game& g, const std::vector<int32_t>& objs) {
+	if (!issue_group(g, objs)) return false;
+	Command c;
+	c.verb = Verb::Transport;
+	local_.push_back(c);
+	return true;
+}
+
+bool CommandManager::issue_set_transport(const Game& g, const std::vector<int32_t>& objs, bool flag) {
+	if (!issue_group(g, objs)) return false;
+	Command c;
+	c.verb = Verb::SetTransport;
+	c.flags = flag ? 1 : 0;
+	local_.push_back(c);
+	return true;
+}
+
+bool CommandManager::issue_board_ship(const Game& g, const std::vector<int32_t>& objs, int32_t ship, QueuePos q) {
+	if (!issue_group(g, objs)) return false;
+	Command c;
+	c.verb = Verb::BoardShip;
+	c.ox = ship;
+	c.queued = int8_t(q);
 	local_.push_back(c);
 	return true;
 }
