@@ -32,3 +32,6 @@
 # Locally installed Claude Code skills (third-party content)
 /.claude/skills/
 /skills-lock.json
+
+# Recorded games and saves from the original game (personal data, the fidelity oracle; never committed)
+/re/oracle/
