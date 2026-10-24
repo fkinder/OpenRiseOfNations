@@ -912,7 +912,9 @@ The player's complaint: armies scatter. `ronmap` now has named groups of soldier
   group's key does); a second click within 500 ms, or a click while the group is already the selection, also centres the camera on
   the members' centroid. Shift+click opens the rename dialog. Right click deletes the group (HOTKEY clear, the name dropped). A group whose members all died disappears.
   G with a named group selected (the selection equals its living members) opens the dialog as a rename.
-- **Regroup** (`regroupNamed`, the panel button or **Shift+G** with the group selected): one `issue_move_to` for the whole group to the
+- **Command card**: with soldiers selected the card's slot (2, 0) is a text button, **Agrupar** (opens the name dialog) or
+  **Reagrupar** when the selection is a named group (`hud::kOptGroup`, a port option index outside the original's enum).
+- **Regroup** (`regroupNamed`, the panel button, the card's Reagrupar or **Shift+G** with the group selected): one `issue_move_to` for the whole group to the
   centroid of its living members. `Group::action_move_near` lays the members out in their formation around that point
   (`docs/movement-spec.md` section 11) and they walk there as one group move. A right-click move of a named group is the same group
   order (`commandMoveAt` -> one MOVE_TO per owner), so the formation and the group speed apply: `Unit::do_group_move` already holds

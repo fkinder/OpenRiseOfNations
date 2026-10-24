@@ -3273,6 +3273,10 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		}
 		opt(hud::kOptMoveTo, 0, 0, own);
 		opt(hud::kOptAttackTo, 1, 0, false);  // TODO(sim): the ATTACK_TO verb (attack-move) is not ported
+		if (own && ![self militarySelection].empty()) {  // named army groups: "Agrupar" (the G dialog) or "Reagrupar" with a named group selected
+			hud::Option* o = opt(hud::kOptGroup, 2, 0, true);
+			o->label = [self selectedNamedGroup] >= 0 ? "Reagrupar" : "Agrupar";
+		}
 		if (citizens) {
 			opt(hud::kOptBuild, 0, 1, own);
 			opt(hud::kOptBuildMilitary, 1, 1, own);
@@ -4675,6 +4679,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	const int me = [self localPlayer];
 	switch (option) {
 		case hud::kOptMoveTo: case hud::kOptGarrison: _targeting = option; break;
+		case hud::kOptGroup: [self groupKey:[self selectedNamedGroup] >= 0]; break;  // Agrupar: the name dialog; Reagrupar: the group move
 		case hud::kOptHalt: {
 			const std::vector<int32_t> objs = [self ownSelectedUnits];
 			[self issueAs:me block:^bool { return _cm.issue_halt(*_game, objs); }];
