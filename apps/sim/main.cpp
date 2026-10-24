@@ -1504,8 +1504,9 @@ int main(int argc, char** argv) {
 				for (int32_t o = 0; o < g.objects[size_t(who)].unit_mark; o++) {
 					const Unit* u = g.unit(who, o);
 					if (!u || !u->alive()) continue;
-					std::printf("  unit %d:%-4d %-24s (%6d,%6d) angle %08x speed %d los %d%s%s\n", who, o,
+					std::printf("  unit %d:%-4d %-24s (%6d,%6d) angle %08x speed %d los %d hits %d attack %d armor %d range %d%s%s\n", who, o,
 					            type_name(g, u->type).c_str(), u->x, u->y, u->angle, int(u->myspeed), object_los(g, *u),
+					            obj_hits(g, *u), obj_attack(g, *u), obj_armor(g, *u), obj_max_range(g, *u),
 					            u->on_map() ? "" : " inside", u->o_up >= 0 ? " follower" : "");
 				}
 			}

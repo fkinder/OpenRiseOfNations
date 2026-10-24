@@ -58,55 +58,7 @@ int32_t raw_max_range(const Game& g, const Type& t) {
 	return t.max_range;
 }
 
-int32_t obj_attack(const Game& g, const Object& ob) {
-	(void)g;
-	// ObjectData::attack @6469f0 = type attack (x10). TODO(combat-spec 5.1): caravan attack tech, Dutch merchants,
-	// Terra Cotta, THECITIZEN, Obsidian archers, Space Program, hero bonuses (units); general in a tower, Obsidian,
-	// Antipater (buildings).
-	return ob.ptype ? ob.ptype->attack : 0;
-}
-
-int32_t obj_armor(const Game& g, const Object& ob) {
-	(void)g;
-	if (ob.is_unit) {
-		// UnitData::armor @610160: the cached myarmor (Unit::update_armor @6054c0). TODO: general rally armor and
-		// hero bonuses.
-		return static_cast<const Unit&>(ob).myarmor;
-	}
-	return ob.ptype ? ob.ptype->armor : 0;  // ObjectData::armor @647db0 (Wall/Build bonuses: TODO)
-}
-
-int32_t obj_hits(const Game& g, const Object& ob) {
-	(void)g;
-	// UnitData::hits @610890 = myhits (Unit::update_hits). BuildData::hits(0) @62e740 = construct_hits (Wall::update_hits:
-	// growing with construction progress, = myhits once active; production-spec 4.5). TODO(spec 4.5): the
-	// DEPOPULATE / RAZE queue scaling.
-	if (!ob.is_unit) return static_cast<const Build&>(ob).construct_hits;
-	return ob.myhits;
-}
-
-int32_t obj_max_range(const Game& g, const Object& ob) {
-	if (!ob.ptype) return 0;
-	if (ob.is_unit) {
-		// UnitData::max_range @60fe90: 0 whenever the raw type value is 0. TODO: siege/naval/archer range bonuses.
-		return raw_max_range(g, *ob.ptype);
-	}
-	// BuildData::max_range @62e470 -> BuildTypeData::get_building_range @639990 with no techs, wonders or nation
-	// powers: towers add tower_fort_range[0], forts fort_upgrade_range[0]. TODO: techs (TOWER/FORT range upgrades),
-	// Colosseum, British/Roman powers, general inside, temple range for city buildings.
-	int32_t r = ob.ptype->max_range;
-	if (type_is(*ob.ptype, 0x1bb)) {
-		r += RON_K(g, "fort_upgrade_range");
-	} else if (type_is(*ob.ptype, 0x1b7)) {
-		r += RON_K(g, "tower_fort_range");
-	}
-	return r;
-}
-
-int32_t obj_min_range(const Game& g, const Object& ob) {
-	(void)g;
-	return ob.ptype ? ob.ptype->min_range : 0;  // ObjectData::min_range @646c20 (UnitData @6100b0: TODO bonuses)
-}
+// obj_attack / obj_armor / obj_hits / obj_max_range / obj_min_range: stats.cpp (combat-spec 5.1).
 
 int32_t obj_hits_left(const Game& g, const Object& ob) {
 	// ObjectData::hits_left @6535c0: hits - damage, not below 0.

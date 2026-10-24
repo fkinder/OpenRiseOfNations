@@ -92,7 +92,7 @@ void update_speed(Game& g, Unit& u0) {
 	if (t.domain == 1 && (t.unit_flags & 0x10)) {
 		// TODO(techs): += (leader +0x6eb8 -> +0xe8 ^ 0x63187, the transport level) * military_transport_bonus (0x3c)
 	}
-	if (u.unit_masks2 & 0x200) {
+	if (u.unit_masks2 & umask2::kMarineTransport) {
 		// TODO(techs): += the same level * americans_marine_speed_bonus (0x86c)
 	}
 	int32_t s = c.at(0x4) * base;  // unit_move_speed

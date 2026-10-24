@@ -66,6 +66,17 @@ int32_t obj_hits(const Game& g, const Object& ob);       // vslot 0x11c: myhits 
 int32_t obj_max_range(const Game& g, const Object& ob);  // vslot 0x130: UnitData @60fe90 / BuildData @62e470 (tiles)
 int32_t obj_min_range(const Game& g, const Object& ob);  // vslot 0x12c (tiles)
 int32_t obj_hits_left(const Game& g, const Object& ob);  // ObjectData::hits_left @6535c0
+// stats.cpp (combat-spec 5.1): the leader-dependent terms. object_attack = ObjectData::attack @6469f0; update_hits /
+// update_armor = Unit::update_hits @60e930 / Unit::update_armor @6054c0 (captain computes, copied down the o_down chain);
+// get_general_upgrade @6e0830 / get_spy_upgrade @6e1090 count the upgrade techs; get_temple_range (temple_upgrade_range[k]);
+// building_range = BuildTypeData::get_building_range @639990.
+int32_t object_attack(const Game& g, const Object& ob);
+void unit_update_hits(Game& g, Unit& u);
+void unit_update_armor(Game& g, Unit& u);
+int32_t get_general_upgrade(const Game& g, int32_t who);
+int32_t get_spy_upgrade(const Game& g, int32_t who);
+int32_t get_temple_range(const Game& g, int32_t who);
+int32_t building_range(const Game& g, const Type& t, int32_t who);
 // UnitData::recharge @60fdf0 (sup = the supply that keeps the unit supplied, -1).
 int32_t unit_recharge(const Game& g, const Unit& u, int32_t* sup);
 // get_combat_stance: UnitData @610a30 / BuildData @62e0f0 (STAND_GROUND for types without a COMBAT stance type).

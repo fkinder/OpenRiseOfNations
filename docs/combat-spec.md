@@ -2271,16 +2271,100 @@ All arithmetic below is int32 with C truncating division unless stated; `trunc25
 
 ### 5.1 The stat getters (virtual, per object) ✅
 
-| Getter (vslot) | Unit | Building | Notes |
-|---|---|---|---|
-| `attack()` (+0x120) | `UnitData::attack` @6103c0 | `BuildData::attack` @62e610 | base `ObjectData::attack` @6469f0 = `type.attack` (already ×10); caravans of a leader with tech CARAVAN_ATTACK_BONUS (698) use `C.caravan_attack_bonus` instead; Dutch (tribe bonus 22) merchants/caravans/supply/fur traders (61, 62, 400, is_caravan, is_supply) that are not gov heroes get `+ ages × dutch_attack_bonus × 10` (ages = `LeaderDataEncrypt.ages ^ 0x62766`). If the base is 0 the unit result is 0. Unit adds, in this order: Terra Cotta wonder (529) `+terra_cotta_attack×10`; THECITIZEN general (356) nearby `+thecitizen_attack_bonus×10`; HORSE_ARCHER (0x4000) and separately FOOT_ARCHER (0x400) when the leader has Obsidian (rare good 32: bit `g − 6` = 26 of `LeaderData.rare` +0x6d98 or `rare_conquest` +0x6dc0) `+obsidian_archers_attack×10` each; air units with Space Program (542) `×(space_air_attack+100)/100`; then hero bonuses gated on the leader owning the hero type (`num_units[t−50] ≠ 0`) and `ObjectData::has_general(0, t)` (a hero of type t in range, via `HeroesData::find_hero`): ALEXANDER 358 (+alexander_attack×10, +alexander_heavy_inf_attack×10 for is(132 HOPLITES)), NAPOLEON 359 (siege: +napoleon_siege_attack×10), PARMENIO 360 (is(227 CATAPHRACT): +parmenio_heavy_cav_attack×10), PTOLEMY 362 (is(265 CATAPULT): +ptolemy_siege_attack×10), SPITAMENES 365 (is(187 HORSEARCHERS): +spitamenes_horse_archer_attack×10), BLUCHER 373 (where = STABLE 428: +blucher_cav_attack×10), DJEZZAR 370 (+djezzar_attack×10), MEMNON 364 (is(394 GREEKMERCS): +memnon_merc_attack×10), THEMONARCH 354 (where = STABLE: +themonarch_cav_attack×10) |
-| `armor()` (+0x124) | `UnitData::armor` @610160 | `ObjectData::armor` @647db0 (Wall/Build versions not specced here) | unit: starts from the cached `myarmor` (+0x9c), which `Unit::update_armor` @6054c0 sets on the captain and copies down the uber chain: `ObjectData::armor` (type armor + Dutch `ages × dutch_attack_bonus` for the same unit set as above, gov heroes excluded from patch version 9) + `cattle_citizen_armor` for citizens 50/51 with Cattle (good 37). Then if a general is in range (`find_hero` around the unit, radius `(x_size+y_size)×96` for buildings) or the unit itself is a hero: `+general_rally_armor × (general_upgrade + 1)`, Ptolemy/Darius/Wellington/Blucher(stable units)/Memnon(mercs)/THECITIZEN/THEMONARCH(stable units) bonuses (constants `ptolemy_armor`, `darius_armor`, `wellington_defense`, `blucher_cav_armor`, `memnon_merc_armor`, `thecitizen_armor_bonus`, `themonarch_cav_armor`) |
-| `hits()` (+0x11c) | `UnitData::hits` @610890 = `myhits` (+0x20) | `BuildData::hits` @62e740 | `myhits` is cached by `update_hits` (+0x15c): `Object::update_hits` @647010 = `types[t].hits`, except citizens 50/51 take the hits of PARTISAN 68, else MINUTEMAN 67, else MILITIA 66 when that type's bit is set in `LeaderData.tech` (the militia line they can arm into). `Unit::update_hits` @60e930 (captain only, copies to the chain): + `americans_marine_hp_bonus` (unit_masks2 & MARINE_TRANS); ×(copper_factory_hp+100)/100 for ships and factory units (where 430/431) with Copper (good 24); ×(bananas_hp_bonus+100)/100 (Bananas, good 45); Iroquois (tribe 18) barracks units ×(iroquois_extra_hits+100)/100; Dutch merchants/caravans/supply `+ages × dutch_hp_bonus`; spies (58): `spy_upgrade_hp[clamp(spy_upgrade,0,3)]` (replaces); heroes: `h + g²·h/2` with g = general_upgrade; Nubian (tribe 4) merchants/caravans ×(nubian_hit_points+100)/100; supply wagons `+supply_hp_upgrade[supply_upgrade]` |
-| `max_range()` (+0x130) | `UnitData::max_range` @60fe90 | `BuildData::max_range` @62e470 | `type.max_range` (tcoords; 0 = melee) plus siege/naval/archer bonuses (turk_siege_range, liberty/eiffel wonders, ptolemy, napoleon, rum_naval_range, obsidian_archers_range, theceo_unit_range) |
-| `recharge()` (+0x134) | `UnitData::recharge` @60fdf0 | — | `type.recharge`; siege units (`is_siege`) not in supply (or under attack, `UNIT2_UNDER_ATTACK`, when `artillery_under_attack_fires_slowly`) get ×3/2, or ×2 for the BOMBARD (267) line |
+Re-read from the decompiles and the disassembly on 2026-10-23 (the decompiler had dropped the return paths of
+`ObjectData::attack` / `armor`, `BuildData::attack` / `hits` and `UnitData::max_range`); ported in
+`engine/sim/stats.cpp`. Conventions: `ages` = `LeaderDataEncrypt.ages ^ 0x62766` (the leader's age count);
+"owns(t)" = `LeaderData.num_units[t − 50] ≠ 0`; "general(t)" = owns(t) and `ObjectData::has_general(0, t) ≥ 0`
+(a hero of type t in range: not simulated yet, −1); "rare(g)" = bit `g − 6` of `rare` (+0x6d98) or
+`rare_conquest` (+0x6dc0); "dutch set" = types 0x3d, 0x3e, 400, `is_caravan` or `is_supply`, and not a government
+hero (`is_gov_hero`, vslot 0xc8: `unit_flags & 0x4000000`; the hero exclusion only from patch version 9, which
+every Extended Edition game is); `pct(k, v) = (k + 100)·v / 100`. Hero constants are read behind the stubs.
 
-A port can start with the base values (type fields) and add the leader-dependent terms when leaders, heroes,
-rares and wonders exist; every term is additive or a percentage applied in the order above.
+**`ObjectData::attack` @6469f0** (units and buildings; `type.attack` is already ×10):
+```
+a = type.attack
+if is_caravan and has_preq(CARAVAN_ATTACK_BONUS 0x2ba): a = C.caravan_attack_bonus       // replaces
+if tribe bonus 22 (Dutch) and C.dutch_attack_bonus ≠ 0 and is_active and the unit is in the dutch set:
+    a += ages × C.dutch_attack_bonus × 10
+return a
+```
+
+**`UnitData::attack` @6103c0** = `ObjectData::attack`, then **if that is 0 return 0**, else in order:
+Terra Cotta (wonder 0x211) `+ C.terra_cotta_attack×10`; general(0x164 THECITIZEN) `+ thecitizen_attack_bonus×10`;
+HORSE_ARCHER (obj_masks 0x4000) with rare(32 Obsidian) `+ obsidian_archers_attack×10`, and again for FOOT_ARCHER
+(0x400); aircraft (domain 2) with Space Program (wonder 0x21e) `a = pct(space_air_attack, a)`; then the hero
+terms, each `+ constant×10`: general(0x166 ALEXANDER) `alexander_attack` (+ `alexander_heavy_inf_attack` for
+`is(0x84)`); general(0x167 NAPOLEON) for siege (type vslot 0x10c) `napoleon_siege_attack`; `is(0xe3)` and
+general(0x168 PARMENIO) `parmenio_heavy_cav_attack`; `is(0x109)` and general(0x16a PTOLEMY) `ptolemy_siege_attack`;
+`is(0xbb)` and general(0x16d SPITAMENES) `spitamenes_horse_archer_attack`; `type.where == 0x1ac` (stable) and
+general(0x175 BLUCHER) `blucher_cav_attack`; general(0x172 DJEZZAR) `djezzar_attack`; general(0x16c MEMNON) and
+`is(0x18a)` `memnon_merc_attack`; `where == 0x1ac` and general(0x162 THEMONARCH) `themonarch_cav_attack`.
+
+**`BuildData::attack` @62e610** = `ObjectData::attack`; then only for `is(0x1b7 tower)`, forts (type vslot 0xfc)
+or city buildings (`flags & 0x20` with `city ≥ 0`): a general garrisoned (`count_inside(COUNT_TYPE, the leader's
+general type)`: `tribe_can_type(types[0x36]) ? 0x36 : its tribe substitute`) `+ general_building_attack×10`;
+rare(32 Obsidian) `+ obsidian_archers_attack×10`; owns(0x169 ANTIPATER) and `count_inside(COUNT_STRICT_TYPE,
+0x169)` `+ antipater_garrison_attack_bonus×10`. (Garrisons are not simulated: `count_inside` is 0.)
+
+**`ObjectData::armor` @647db0**: `type.armor` (+0x214), plus `ages × C.dutch_attack_bonus` (no ×10) for the Dutch
+set under the same conditions as `attack`. **`Unit::update_armor` @6054c0** (from the captain, copied down the
+`o_down` chain): `myarmor = ObjectData::armor`, `+ C.cattle_citizen_armor` for types 0x32 / 0x33 with rare(37
+Cattle). **`UnitData::armor` @610160** (the live value): `a = myarmor`; then `h = o` (the unit itself) when
+`is_active and is_hero`, else `h = HeroesData::find_hero(x, y, leader, 0, −1, r)` with `r = (x_size + y_size)·96`
+for `is_building` else 0; if `h ≥ 0`: `+ general_rally_armor × (get_general_upgrade + 1)`, owns(0x16a) and
+general(0x16a) `+ ptolemy_armor`, owns(0x16b) and general(0x16b) `+ darius_armor`, owns(0x170) and general(0x170)
+`+ wellington_defense`, owns(0x175) and `where == 0x1ac` and general(0x175) `+ blucher_cav_armor`, owns(0x16c) and
+`is(0x18a)` and general(0x16c) `+ memnon_merc_armor`, general(0x164) `+ thecitizen_armor_bonus`, `where == 0x1ac`
+and general(0x162) `+ themonarch_cav_armor`. **`WallData::armor` @63fa60** (buildings): `ObjectData::armor`, `+
+thesenator_build_armor` when the building is an active hero that `is(0x161)`, or owns(0x161) and
+`find_hero(..., 0x161, r)` finds one; then **halved while not active** (under construction).
+
+**`Object::update_hits` @647010**: `myhits = types[t].hits` with t = PARTISAN 68 / MINUTEMAN 67 / MILITIA 66 for
+citizens 0x32 / 0x33 when the leader's `tech` bit of that type is set (highest first). **`Unit::update_hits(p)`
+@60e930** (a follower defers to its captain; the captain's value is copied down the chain):
+```
+h = Object::update_hits
+if unit_masks2 & 0x200 (marine transport): h += C.americans_marine_hp_bonus
+if rare(24 Copper) and (domain 1 or where in {0x1ae, 0x1af}): h = pct(copper_factory_hp, h)
+if rare(45 Bananas): h = pct(bananas_hp_bonus, h)
+if tribe bonus 18 (Iroquois) and C.iroquois_extra_hits ≠ 0 and where == 0x1ab (barracks) and
+   (type +0x1e8 (obj attack) ≠ 0 or is(0x45)): h = pct(iroquois_extra_hits, h)
+if tribe bonus 22 (Dutch) and C.dutch_hp_bonus ≠ 0 and the unit is in the dutch set: h += ages × dutch_hp_bonus
+if is(0x3a spy): h = C.spy_upgrade_hp[clamp(get_spy_upgrade, 0, 3)]                 // replaces
+if is_hero: g = get_general_upgrade; h += g·g·h / 2
+if the unit is a merchant (0x3d, 0x3e, 400) or is_caravan, and tribe bonus 4 (Nubian) and C.nubian_hit_points ≠ 0:
+   h = pct(nubian_hit_points, h)
+if is_supply: h += C.supply_hp_upgrade[get_supply_upgrade]
+myhits = h
+```
+`UnitData::hits` @610890 = `myhits`. **`BuildData::hits(p)`** @62e740: `p ? myhits : construct_hits`, scaled while
+an active building's queue head is DISBAND (0x29a) or DEPOPULATE (0x286): `max(1, (int)(((float)(T − j) ×
+(float)h) / (float)T))` with `T = train_time(head type)` and `j` the head's job counter (SSE single).
+`WallData::hits(p)` @642bb0 = `p ? myhits : construct_hits`.
+
+**`UnitData::max_range` @60fe90**: `r = type.max_range`; **if 0 return 0**. Siege (vslot 0x10c): tribe bonus 8
+(Turks) `+ turk_siege_range`, Statue of Liberty (0x219) `+ liberty_siege_range`, Eiffel (0x21c) `+
+eiffel_siege_range`; not siege: owns(0x165 THECEO) and `r ≠ 0` and general(0x165) `+ theceo_unit_range`. Then
+owns(0x16a) and general(0x16a) `+ ptolemy_range_bonus`; owns(0x167) and siege and general(0x167) `+
+napoleon_siege_range`; domain 1 with rare(43 Rum) `+ rum_naval_range`; FOOT_ARCHER (0x400) or HORSE_ARCHER
+(0x4000) with rare(32 Obsidian) `+ obsidian_archers_range`. `UnitData::min_range` @6100b0 = `type.min_range`.
+
+**`BuildTypeData::get_building_range(who)` @639990**: `r = type.max_range`; for towers (`is(0x1b7)`) and forts
+(vslot 0xfc, `is(0x1bb)`): Colosseum (0x212) `+ colosseum_fort_range`, tribe bonus 11 (British) `+
+british_tower_range`. Forts: tribe bonus 6 (Romans) `+ roman_fort_range`, then `+ fort_upgrade_range[k]` with k =
+3 / 2 / 1 / 0 for FORTRANGE4 / 3 / 2 (0x2d6 / 0x2d5 / 0x2d4, `has_preq`) / none. Towers: Romans `+
+roman_fort_range`, then `+ tower_fort_range[k]` with k from the militia line **tech bits** (PARTISAN 68 → 3,
+MINUTEMAN 67 → 2, MILITIA 66 → 1, else 0). **`BuildData::max_range` @62e470** = that, `+ general_building_range`
+with a garrisoned general (as in `attack`) for towers, forts and city buildings; city buildings whose city has a
+temple (`city_flags & 0x80`): `+ get_temple_range` (`temple_upgrade_range[k]`, k = 3 / 2 / 1 / 0 for TEMPLERANGE4
+/ 3 / 2 = 0x2d0 / 0x2cf / 0x2ce), `((tikal_temple_hp + 100)·v + 99)/100` with Tikal (0x214).
+
+**`LeaderData::get_general_upgrade` @6e0830** counts GENERALS_UPGRADE_1..3 (0x305..0x307) and
+**`get_spy_upgrade`** @6e1090 SPIES_UPGRADE_1..3 (0x308..0x30a), with `has_preq` (the BUY_SELL / Nubian rule does
+not apply to those ranges). **`Leader::calc_unit_stats` @6cf970**: `calc_attrition`, `calc_anti_attrition`, then
+for every valid unit slot: `update_los`; captains also `update_hits(0)`, `update_speed`, `update_armor`.
+`Unit::init` and `Unit::set_type` call the same four. **`Leader::calc_wall_stats` @6cf7c0**: every valid building
+and wall: `update_construct_time` when not active, `update_hits(0)`, `update_los`.
 
 ### 5.2 `ObjectData::get_damage(ox, whom, angle, splash, overkill, &death_type)` @644130 ✅
 

@@ -212,9 +212,9 @@ void unit_set_type(Game& g, Unit& u, int32_t t, int32_t mode) {
 		if (unit_is(g, u, 0x165, true)) u.unit_masks2 |= umask2::kTheCeo;
 		else u.unit_masks2 &= ~umask2::kTheCeo;
 		if (unit_is(g, u, 0x77)) u.unit_masks2 |= umask2::kMarines;
-		u.myhits = T.hits;  // update_hits(0) (leader bonuses TODO)
+		unit_update_hits(g, u);  // Unit::update_hits @60e930 (combat-spec 5.1)
 		unit_update_los(g, u);
-		u.myarmor = int16_t(T.armor);
+		unit_update_armor(g, u);  // Unit::update_armor @6054c0
 		update_speed(g, u);
 	}
 	if (mode == 0) unit_update_gpiece(g, u);

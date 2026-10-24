@@ -20,6 +20,13 @@
 
 namespace ron::sim {
 
+// ObjectData::has_general @646b00: a hero (general) in range giving `mask`. TODO(heroes): no heroes yet (-1), so the
+// generals' bonuses (stats.cpp, attrition.cpp, groups) never fire. Declared in groups.hpp.
+int32_t has_general(const Game& g, const Unit& u, int32_t mask, int32_t p) {
+	(void)g, (void)u, (void)mask, (void)p;
+	return -1;
+}
+
 namespace {
 
 
@@ -174,11 +181,6 @@ int32_t get_form_mod_option(Game& g, const Group& gr) {
 
 // ---- systems the group code calls that are not simulated yet
 
-// ObjectData::has_general @646b00: a hero (general) in range giving `mask`. TODO(heroes): no heroes yet.
-int32_t has_general(Game& g, const Unit& u, int32_t mask, int32_t p) {
-	(void)g, (void)u, (void)mask, (void)p;
-	return -1;
-}
 // Objects::add_flock @65c0e0 (a flock of animals near a forest wcoord). TODO(gaia, movement-spec 15.8): it is rate
 // limited per leader (frame >= leader+0x7b8 + 225), then draws game_random (2 + per animal) and creates gaia units;
 // not ported, so a group move that ends on a forest edge consumes only do_group_move's own draw.

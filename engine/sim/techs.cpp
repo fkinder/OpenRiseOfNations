@@ -1222,9 +1222,9 @@ void calc_unit_stats(Game& g, int32_t who) {
 		if (!u || !u->alive()) continue;
 		unit_update_los(g, *u);
 		if (u->o_up < 0) {
-			u->myhits = u->ptype->hits;  // Unit::update_hits(0): leader bonuses TODO(combat-spec 5.1)
+			unit_update_hits(g, *u);  // Unit::update_hits(0) @60e930
 			update_speed(g, *u);
-			u->myarmor = int16_t(u->ptype->armor);  // Unit::update_armor
+			unit_update_armor(g, *u);  // Unit::update_armor @6054c0
 		}
 	}
 }

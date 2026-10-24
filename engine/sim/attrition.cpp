@@ -45,12 +45,8 @@ bool has_rare(const Leader& l, int32_t bit) {
 	return ((l.rare[size_t(bit >> 3)] | l.rare_conquest[size_t(bit >> 3)]) >> (bit & 7)) & 1;
 }
 
-// ObjectData::has_general @646b00: a general of type `p` in range. TODO(heroes): generals are not simulated (-1),
-// so the Antipater / Napoleon / Monarch / CEO healing and the general supply branches never fire.
-int32_t has_general(const Game& g, const Unit& u, int32_t mask, int32_t p) {
-	(void)g, (void)u, (void)mask, (void)p;
-	return -1;
-}
+// ObjectData::has_general (groups.cpp): generals are not simulated (-1), so the Antipater / Napoleon / Monarch / CEO
+// healing and the general supply branches never fire.
 // The leader's alive units of type t (LeaderData +0x56fe num_units[t - 50]).
 int32_t num_units(const Game& g, int32_t who, int32_t t) {
 	return g.leaders[size_t(who)].num_units[size_t(t - kUnits)];

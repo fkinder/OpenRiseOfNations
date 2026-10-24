@@ -13,6 +13,9 @@ namespace ron::sim {
 
 class Game;
 
+// ObjectData::has_general @646b00 (groups.cpp): a hero of type p (mask 0: any) in range; TODO(heroes): always -1.
+int32_t has_general(const Game& g, const Unit& u, int32_t mask, int32_t p);
+
 constexpr int32_t kGroupMax = 128, kGroupsPerLeader = 64, kNumGroups = 512, kGroupOpenSlots = 46;
 
 // Group (0x9d4 bytes). Walked: raw [+4, +0x4c) then the first `num` entries of each array (state-spec.md).

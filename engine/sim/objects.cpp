@@ -364,10 +364,10 @@ void unit_init(Game& g, Unit& u, int32_t who, int32_t type, int32_t o, int32_t x
 	// Caravans::init_caravan for non-hero land caravans (economy-spec 6.1); TODO(heroes / specials).
 	if (who < 8 && !(u.ptype->unit_flags2 & 0x20) && (u.ptype->unit_flags2 & 8) && u.ptype->domain == 0)
 		u.cara = int16_t(caravans_init(g, who, o));
-	u.myhits = u.ptype->hits;
-	u.myarmor = int16_t(u.ptype->armor);  // Unit::update_armor @6054c0 (leader bonuses: TODO, combat-spec 5.1)
 	u.damage_frac = 0;
+	unit_update_hits(g, u);   // Unit::update_hits @60e930 (combat-spec 5.1)
 	unit_update_los(g, u);
+	unit_update_armor(g, u);  // Unit::update_armor @6054c0
 	update_speed(g, u);
 	object_update_seen(g, u, false);
 	if ((g.leaders[size_t(who)].flags & 0xc) != leaderflag::kHuman) u.unit_masks |= umask::kAiControl;

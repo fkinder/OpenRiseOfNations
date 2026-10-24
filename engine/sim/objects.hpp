@@ -48,7 +48,7 @@ constexpr uint32_t kDecoy = 0x1, kFacing = 0x2, kInCombat = 0x4, kPathClear = 0x
 // UnitMask2 (Unit.unit_masks2)
 namespace umask2 {
 constexpr uint32_t kUnderAttack = 0x1, kAttackCivies = 0x4, kNewJam = 0x8, kHoldAnim = 0x10, kKeepTarget = 0x100,
-                   kMarines = 0x800, kAntipaterEntr = 0x1000, kDisableTransport = 0x2000, kMoveInForest = 0x4000,
+                   kMarineTransport = 0x200, kMarines = 0x800, kAntipaterEntr = 0x1000, kDisableTransport = 0x2000, kMoveInForest = 0x4000,
                    kPassiveCloak = 0x8000, kTheCeo = 0x10000, kMarineEntrench = 0x20000, kAttritionSafe = 0x40000;
 }
 

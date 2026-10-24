@@ -304,8 +304,10 @@ self-check and `--fog-check` OK (6 show combat activity from idle units engaging
 
 Stubbed / approximated (TODO in code, with spec references):
 - Leader-dependent stat terms (nation powers, heroes / generals, rares, wonders, techs; combat-spec 5.1, step 8) are
-  0, except the tower / fort base range bonuses. Healing, member regeneration, supply and attrition (step 7) are
-  ported: see "Healing and attrition".
+  ported in `engine/sim/stats.cpp` (combat-spec 5.1, 2026-10-23): attack, armor, hits and range from techs, wonders,
+  rares and nation powers; the hero and garrison terms are written behind the `has_general` / `find_hero` /
+  `count_inside` stubs. `ron-sim --list` prints hits / attack / armor / range per unit. Healing, member
+  regeneration, supply and attrition (step 7): see "Healing and attrition".
 - Territory (`WData.who`) is not computed, so: citizens / militia deal half damage to every building, buildings never
   count as being in unfriendly territory, and `check_target` rejects every building without BUILDTYPE_OUTSIDE (no
   man's land) — idle units never auto-acquire buildings (explicit attacks work). Unsupplied siege fires 1.5× slower.
@@ -774,8 +776,8 @@ caravan repath of City::close.
 5. ~~Fog of war~~ done (see "Fog of war"); the renderer draws the shroud from `make_fog_view` and the view's
    `seen_by` / `now_seen_by` masks. Next fog work comes with combat (`valid_target_const`, `set_attacking`), territory
    and scripts.
-6. ~~Combat~~ steps 1–7 done (see "Combat", "Healing and attrition"). Next: leader bonuses (step 8), packers and
-   ATTACK_GROUND, then compare with a real replay that contains fighting.
+6. ~~Combat~~ steps 1–8 done (see "Combat", "Healing and attrition", stats.cpp). Next: packers and ATTACK_GROUND,
+   then compare with a real replay that contains fighting.
 7. ~~Production~~ done (see "Production"), territory included.
 8. ~~Economy~~ done (see "Economy"). Next: caravan roads (PathFinder::find_road), packers (merchants), the AI parts
    (strategy_all), then compare with replays that contain gathering, trading and market commands.
