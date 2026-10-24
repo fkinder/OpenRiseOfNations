@@ -85,6 +85,12 @@ Check: the per-player camera lands next to that player's own objects (median dis
   dy = 0, dx > 0) and verified on the data: over 1,197 stock units with an enemy unit within 3,000 units, this
   hypothesis gives mean cos 0.46 towards the nearest enemy (67 % within 45°); the five other axis conventions score
   ≤ 0.21. The draw path uses `chad.angle = deg(angle) + 180` (`GuyOut::draw`), then the `Rz` of attachments-spec §M_unit.
+  The unit matrix `T(L) · Rz(angle) · S(s, −s, s)` is a mirror (det < 0) in the same basis as the terrain, so the
+  port binds each render state's own cull faces unflipped for units and projectiles (as for the terrain and the
+  scenario flags); flipping them culled the faces towards the camera and drew closed bodies (trucks, wagons, siege
+  engines) hollow. BH3 normals are unit length after `parse_bh3` (the shipped files carry unnormalised and, in tail
+  vertices, garbage ones: denormals, zeros, NaNs) and the combiner shader guards `normalize` so that a NaN pixel cannot
+  black the frame through the exposure average.
 - Axis check: with x/y swapped, 27 % of land units would stand in water and only 50 % of building centres would sit on
   `land_sub > 0`; with the correct axes it is 0 % and 91 % (towns are painted with the arid/dirt land sub-type; the
   map-wide share is 35 %).

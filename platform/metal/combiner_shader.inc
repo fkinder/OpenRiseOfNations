@@ -192,7 +192,10 @@ fragment float4 rs_fragment(VOut in [[stage_in]],
 	const float hdr = fc_no_hdr ? 1.0 : 5.0;
 
 	if (fc_lighting) {
-		const float3 n = normalize(in.view_normal);
+		// Interpolation can shrink a normal to zero (opposite normals on one triangle); normalize(0) is NaN and a NaN
+		// pixel blacks the whole frame through the exposure average, so fall back to facing the camera.
+		const float nl2 = dot(in.view_normal, in.view_normal);
+		const float3 n = nl2 > 1e-20 ? in.view_normal * rsqrt(nl2) : float3(0.0, 0.0, 1.0);
 		const float3 l = (s.view * float4(-normalize(s.light_dir.xyz), 0.0)).xyz;
 		const float ndl = dot(n, l);
 		const float3 ambient = max(0.0, hdr * d.mat_ambient.rgb * s.ambient_light.rgb);

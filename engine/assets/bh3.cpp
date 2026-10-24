@@ -1,5 +1,7 @@
 #include "assets/bh3.hpp"
 
+#include <cmath>
+
 namespace ron {
 
 namespace {
@@ -68,6 +70,16 @@ BH3Model parse_bh3(const Bytes& b) {
 			}
 			const size_t n = mesh.vertex_count();
 			if (mesh.normals.size() != n * 3) mesh.normals.assign(n * 3, 0.0f);
+			// Shipped meshes carry unnormalised normals and, in the tail vertices of many (lightcav.bh3, napoleon.bh3,
+			// banner_0n.BH3...), uninitialised ones: denormals, zeros and NaNs. Normalising those gives NaN lighting,
+			// and one NaN pixel blacks the whole frame through the exposure average (renderer.mm luminance chain).
+			// Unit length here; a degenerate normal points up.
+			for (size_t i = 0; i < n; i++) {
+				float* nv = &mesh.normals[i * 3];
+				const float len = std::sqrt(nv[0] * nv[0] + nv[1] * nv[1] + nv[2] * nv[2]);
+				if (std::isfinite(len) && len > 1e-6f) nv[0] /= len, nv[1] /= len, nv[2] /= len;
+				else nv[0] = 0, nv[1] = 0, nv[2] = 1;
+			}
 			if (mesh.uvs.size() != n * 2) mesh.uvs.assign(n * 2, 0.0f);
 			for (uint16_t i : mesh.indices) {
 				if (i >= n) throw FormatError("triangle index out of range");
