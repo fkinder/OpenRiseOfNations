@@ -102,7 +102,12 @@
 #include "assets/iface_layout.hpp"
 #include "sim/production.hpp"
 #include "hud.hpp"
+#include "keymap.hpp"
+#include "notices.hpp"
 #include "script_view.hpp"
+#include "tips.hpp"
+#include "assets/strings.hpp"
+#include "sim/capture.hpp"
 #include "audio.hpp"
 #include "sim/script_ui.hpp"
 #include "renderer.hpp"
@@ -441,6 +446,11 @@ static bool debug_skip(const char* pass) {
 - (void)setMouseInside:(BOOL)inside;
 - (void)setCursorWorldX:(float)x y:(float)y;
 - (void)testPopup:(const char*)text;
+// Harness: the mouse at UI pixel (x, y) with the mouse-over help shown at once; the resource panel flags; the streamlined
+// interface; the help detail; a key by its KeyMap string ("Ctrl+Shift+F").
+- (void)setHoverX:(float)x y:(float)y;
+- (void)setPanels:(int)flags streamlined:(BOOL)streamlined help:(int)level;
+- (void)runKeyString:(const std::string&)keys;
 // Leaving the game from the game menu or the game-over screen: quit = NO returns to the Main Menu. Nil: Quit only.
 @property(nonatomic, copy) void (^onExit)(BOOL quit);
 // Opens the game menu (Esc / F10): 1 the pause menu, 2 the game-over choices.
@@ -470,6 +480,10 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		if (v.cap[k] > 0) cap = std::min(cap, v.cap[k] / 16);
 	}
 	r.commerce_cap = cap;
+	for (size_t k = 0; k < 6; k++) {
+		r.buy[k] = v.buy[k], r.sell[k] = v.sell[k], r.over_cap[k] = v.over_cap[k];
+	}
+	r.can_trade = v.can_trade;
 	r.pop = v.control;
 	r.pop_cap = v.pop_cap;
 	r.cities = v.cities;
@@ -668,6 +682,18 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	double _overMs;  // when the local game-over was first seen (-1 not yet)
 	BOOL _overOffered;
 	BOOL _uiReady;
+	// Mouse-over help, hotkeys, notices from the simulation, minimap layers (docs/ui-port.md section 11).
+	std::unique_ptr<ron::StringTables> _tables;
+	tips::Help _help;
+	BOOL _helpOn;
+	notices::Notifier _notifier;
+	hud::Hover _hover;
+	int _hoverTick;       // the graphic tick the hover target last changed
+	BOOL _hoverForce;     // --hover: the tooltip shows without the delay
+	int _verbosity;       // player_profile.prefs.verbosity: help detail 1..3 (default 2)
+	id<MTLTexture> _miniTerr;
+	int _terrFrame;       // game frame of the last territory texture update
+	std::vector<ron::ColorVertex> _miniRiverTris, _miniMountainTris;  // the minimap background's feature overlays
 }
 
 - (instancetype)initWithDevice:(id<MTLDevice>)device
@@ -682,6 +708,7 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	_uiScale = 1;
 	_targeting = -1, _buildPage = -1, _placeType = -1, _lastGroupKey = -1;
 	_gmHover = _gmPress = -1, _overMs = -1;
+	_verbosity = 2, _terrFrame = -100000, _hoverTick = 0;
 	_simSeed = seed;
 	_device = device;
 	_queue = [device newCommandQueue];
@@ -758,7 +785,27 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 			                        buffer(d.indices.data(), d.indices.size() * 4), d.indices.size(), tex(d.texture), nil, nil, nil});
 			ndoobers += d.vertices.size() / 4;
 		}
+		// The minimap background's feature overlays (WorldMapBackground::render_feature): mountains in 0x857F69 at alpha 0x77
+		// (additive), rivers flat 0x576870.
+		for (const ron::MountainRangeMesh& m : dressing.mountains) {
+			for (size_t k = 0; k + 2 < m.indices.size(); k += 3) {
+				for (size_t c = 0; c < 3; c++) {
+					ron::ColorVertex v = m.vertices[m.indices[k + c]].base;
+					v.r = 0x85, v.g = 0x7F, v.b = 0x69, v.a = 0x77;
+					_miniMountainTris.push_back(v);
+				}
+			}
+		}
 		const ron::RiverMesh rivers = ron::build_rivers(sc.terrain);
+		for (int ri = 0; ri < 3; ri++) {
+			for (size_t k = 0; k + 2 < rivers.trough_indices[ri].size(); k += 3) {
+				for (size_t c = 0; c < 3; c++) {
+					ron::ColorVertex v = rivers.trough[ri][rivers.trough_indices[ri][k + c]];
+					v.r = 0x57, v.g = 0x68, v.b = 0x70, v.a = 255;
+					_miniRiverTris.push_back(v);
+				}
+			}
+		}
 		const std::string river_tex[3] = {ts.river_normal, ts.river_delta, ts.river_halfdelta};
 		for (int i = 0; i < 3; i++) {
 			if (rivers.trough_indices[i].empty() || river_tex[i].empty()) continue;
@@ -904,6 +951,11 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		if (!_hudOn) std::fprintf(stderr, "interface unavailable: %s\n", uerr.c_str());
 		_sviewOn = _hudOn && _sview.init(*_files, *_layout, uerr);
 		_uiReady = _hudOn;
+		_tables = std::make_unique<ron::StringTables>(*_files, ron::Language::English);
+		_notifier.init(_tables.get());
+		std::string herr;
+		_helpOn = _hudOn && _help.init(*_files, herr);
+		if (_hudOn && !_helpOn) std::fprintf(stderr, "help.xml unavailable: %s\n", herr.c_str());
 	} catch (const std::exception& e) {
 		std::fprintf(stderr, "interface unavailable: %s\n", e.what());
 		_hudOn = NO;
@@ -1134,8 +1186,35 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		_prevView = std::move(_curView);
 		[self indexPrevView];
 		_curView = ron::sim::make_view(*_game);
+		[self notifyFrame];
 	}
 	if (frames > 0) [self syncSimBuildings];
+}
+
+// The messages, banners and pings the simulation's frame caused (notices.hpp), for the local seat.
+- (void)notifyFrame {
+	if (!_game || !_sviewOn) return;
+	notices::Env env;
+	env.game = _game.get(), env.view = &_curView, env.me = [self localPlayer];
+	env.type_name = [self](int t) { return [self typeName:t]; };
+	env.nation = [self](int who) {
+		if (!_simRules || who < 0 || who >= int(_game->leaders.size())) return std::string();
+		const int tr = _game->leaders[size_t(who)].tribe;
+		return tr >= 0 && size_t(tr) < _simRules->tribes.size() ? ron::sim::to_utf8(_simRules->tribes[size_t(tr)].name) : std::string();
+	};
+	env.leader = [self, nation = env.nation](int who) {
+		const std::string& n = _game->leaders[size_t(who)].name;
+		return n.empty() ? nation(who) : n;
+	};
+	std::vector<notices::Note> notes;
+	_notifier.update(env, notes);
+	if (notes.empty()) return;
+	const scriptview::Env senv = [self scriptEnv];
+	const scriptview::Callbacks cb = [self scriptCallbacks];
+	for (const notices::Note& n : notes) {
+		if (_scriptLog) std::printf("  f%-5d NOTE %s \"%s\"%s\n", _game->frame, n.kind == notices::Note::Notice ? "notice" : "message", n.text.c_str(), n.located ? " (located)" : "");
+		_sview.post(n, senv, cb);
+	}
 }
 
 // GROUP + MOVE_TO from leader `who`'s seat, executed at once (several process_turn calls per frame are allowed; each
@@ -2024,6 +2103,18 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		_placeType = -1, _targeting = -1, _buildPage = -1;
 		return;
 	}
+	{
+		// The default key map (KeyMap::lookup): the key's meaning in the current mode and selection context.
+		const NSEventModifierFlags mf = event.modifierFlags;
+		const std::string ks = keymap::key_string(event.keyCode, (mf & (NSEventModifierFlagControl | NSEventModifierFlagCommand)) != 0,
+		                                          (mf & NSEventModifierFlagOption) != 0, (mf & NSEventModifierFlagShift) != 0);
+		if (const keymap::Entry* e = keymap::lookup(ks, _buildPage >= 0 ? 1 : 0, [self](int ctx) { return [self selectionContext:ctx] == YES; })) {
+			if ([self execKeyOption:e->option param:e->param modifiers:mf] >= 0) {
+				[self updateTitle];
+				return;
+			}
+		}
+	}
 	NSString* chars = event.charactersIgnoringModifiers;
 	const unichar c = chars.length ? [chars characterAtIndex:0] : 0;
 	const float step = 120;
@@ -2276,8 +2367,8 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 }
 
 // WorldMapBackground::render @008cfc40: the map drawn once, top-down (yaw 0, ortho over [0,W] x [0,H]), into a 256 x 256
-// texture: terrain and water, then the trees as flat tree_minimap_color (0x425542) squares. Rivers, mountain tints and
-// the ocean gradient quad are not drawn yet.
+// texture: terrain and water, then the feature overlays: trees as flat tree_minimap_color (0x425542) squares, rivers flat
+// 0x576870 and the mountains' 0x857F69 at alpha 0x77 (additive). The ocean gradient quad is not drawn yet.
 - (void)renderMinimapBackground {
 	if (!_hudOn || _bucketIB.empty()) return;
 	const NSUInteger S = 256;
@@ -2356,6 +2447,27 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		[enc setFragmentBytes:&tu length:sizeof tu atIndex:1];
 		[enc setFragmentTexture:_white atIndex:0];
 		[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:v.size()];
+	}
+	auto draw_tris = [&](const std::vector<ron::ColorVertex>& tris, const ron::RenderState& rs) {
+		if (tris.empty()) return;
+		rm::DrawUniforms fu = rm::draw_uniforms(rs, matrix_identity_float4x4);
+		cache.bind(enc, rs, rm::VertexKind::Colored, true);
+		[enc setCullMode:MTLCullModeNone];
+		id<MTLBuffer> vb = [_device newBufferWithBytes:tris.data() length:tris.size() * sizeof(ron::ColorVertex) options:MTLResourceStorageModeShared];
+		[enc setVertexBuffer:vb offset:0 atIndex:0];
+		[enc setVertexBytes:&fu length:sizeof fu atIndex:1];
+		[enc setFragmentBytes:&fu length:sizeof fu atIndex:1];
+		[enc setFragmentTexture:_white atIndex:0];
+		[enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:tris.size()];
+	};
+	{
+		ron::RenderState rs = *ron::find_render_state("Circle Blend");
+		rs.enables = 0;  // opaque, no depth test: the rivers are flat 0x576870
+		draw_tris(_miniRiverTris, rs);
+		rs.enables = 0x4;  // the mountains: SRCALPHA / ONE at alpha 0x77
+		rs.src_blend = ron::BlendMode::SrcAlpha;
+		rs.dst_blend = ron::BlendMode::One;
+		draw_tris(_miniMountainTris, rs);
 	}
 	[enc endEncoding];
 	[cb commit];
@@ -2549,6 +2661,154 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	return out;
 }
 
+// IFaceResources::draw_infra's counts from the own gather buildings: workers (the gatherers registered at them) and slots,
+// by good: food farms, timber woodcutters, metal mines, knowledge universities, oil wells and platforms; wealth is the
+// caravans over get_caravan_limit.
+- (void)fillInfra:(hud::Resources&)r who:(int)me {
+	if (!_game) return;
+	for (const ron::sim::BuildView& b : _curView.builds) {
+		if (!b.alive || !b.active || b.who != me) continue;
+		int good = -1;
+		switch (b.type) {
+			case 417: good = 0; break;
+			case 418: good = 1; break;
+			case 419: good = 4; break;
+			case 420: good = 3; break;
+			case 421: case 422: good = 5; break;
+			default: break;
+		}
+		if (good < 0) continue;
+		r.workers[size_t(good)] += b.gatherers;
+		r.limit[size_t(good)] += b.gatherers_max;
+	}
+	if (me >= 0 && me < 8) {
+		r.workers[2] = _game->leaders[size_t(me)].caras;
+		r.limit[2] = ron::sim::get_caravan_limit(*_game, me, 1);
+	}
+}
+
+// IFaceMainBase::draw_timers (docs/ui-spec.md 6.1): the victory and elimination clocks that run. The wonder and territory
+// clocks count down from the map-scaled rules constants (Game::wonder_timer / popwin_timer), the capital clock from
+// Game::retake_capital, the time limit from the game's seconds.
+- (std::vector<hud::Timer>)gameTimers {
+	std::vector<hud::Timer> out;
+	if (!_game || !_game->rules) return out;
+	const ron::sim::Game& g = *_game;
+	auto constant = [&](const char* name) -> int32_t {
+		const int off = ron::sim::constant_offset(name);
+		return off < 0 ? -1 : g.rules->constants.at(uint32_t(off));
+	};
+	auto map_scaled = [&](int32_t k) -> int32_t {  // (ms / 2 + xs * k) / ms, at least 1 (ms = map_sizes[3], 70)
+		if (k < 1) return 0;
+		int32_t ms = 70;
+		if (const ron::sim::CategoryList* cl = g.rules->category_list("map_sizes"); cl && cl->items.size() > 3 && cl->items[3].data[0] > 0)
+			ms = cl->items[3].data[0];
+		return std::max(1, (ms / 2 + g.world.xs * k) / ms);
+	};
+	for (int i = 0; i < 8; i++) {
+		const ron::sim::Leader& L = g.leaders[size_t(i)];
+		if ((L.flags & 3u) != 3u) continue;
+		if (L.wonderwin_timer) out.push_back({0, map_scaled(constant("wonder_timer")) - (g.frame - L.wonderwin_stamp), L.color, -1});
+		if (L.popwin_timer) out.push_back({3, map_scaled(constant("popwin_timer")) - (g.frame - L.popwin_stamp), L.color, -1});
+		if (L.lost_capital_timer && g.info.elimination == 1)
+			out.push_back({1, ron::sim::game_retake_capital(g, i) - (g.frame - L.lost_capital_stamp), L.color, -1});
+	}
+	if (g.info.victory == 4) {
+		int32_t lim = 300;
+		if (g.info.time_limit < 8) {
+			if (const ron::sim::CategoryList* cl = g.rules->category_list("time_limits"); cl && g.info.time_limit < cl->items.size())
+				lim = cl->items[g.info.time_limit].data[0];
+		} else if (g.scen.custom_time_limit != 0) {
+			lim = g.scen.custom_time_limit;
+		}
+		out.push_back({5, (lim * 60 - g.tick) * 15, -1, -1});  // Game::tick counts game seconds; 15 frames each
+	}
+	for (hud::Timer& t : out) t.frames = std::max(0, t.frames);
+	return out;
+}
+
+// IFaceMiniLibrary: the next tech of each library line (epoch tech 551 + 7 * line base + epoch held) and the next age, with
+// the progress of one in production at an own Library (435).
+- (hud::MiniLib)miniLibState:(int)me {
+	hud::MiniLib ml;
+	if (!_game || me < 0 || me >= 8) return ml;
+	const ron::sim::Leader& L = _game->leaders[size_t(me)];
+	bool library = false;
+	std::vector<std::pair<int, int>> inprod;  // (type, percent)
+	for (const ron::sim::BuildView& b : _curView.builds) {
+		if (!b.alive || b.who != me || b.type != 435) continue;
+		if (b.active) library = true;
+		for (const auto& q : b.queue) inprod.push_back({q.type, q.time > 0 ? int(int64_t(q.job_counter) * 100 / q.time) : 0});
+	}
+	auto fill = [&](hud::MiniLibButton& b, int type) {
+		if (type < 0 || !_game->type(type).loaded) return;
+		const ron::sim::Type& T = _game->type(type);
+		b.valid = true, b.enabled = library && ron::sim::can_pay_cost(*_game, type, me, -1, -1, 1) > 0;
+		b.tex_id = ron::sim::to_utf8(T.tex.id), b.tex_col = T.tex.col, b.tex_row = T.tex.row;
+		b.tex_x = T.tex.x > 0 ? T.tex.x : -1, b.tex_y = T.tex.y > 0 ? T.tex.y : -1;
+		for (const auto& [qt, pct] : inprod) {
+			if (qt == type) b.percent = pct;
+		}
+	};
+	static const int base[4] = {572, 565, 558, 551};  // military, civic, commerce, science
+	for (int c = 0; c < 4; c++) {
+		ml.epoch[c] = L.epoch[size_t(c)];
+		if (L.epoch[size_t(c)] < 7) fill(ml.cat[c], base[c] + L.epoch[size_t(c)]);
+	}
+	if (L.age < 7) fill(ml.age, 544 + L.age);
+	return ml;
+}
+
+// WorldMap::render_borders / WorldMapFog::fill_colors_who: a fog-resolution texture of the owners' border colours, alpha 0x50
+// inside and 0xC8 on edges (a neighbour unowned or not allied; water ignored), for what the viewer has explored. Rebuilt every
+// 45 frames: territory changes slowly.
+- (void)updateTerritory {
+	if (!_game || !_uiReady || _fog.fxs <= 0 || _fogLevels.empty()) return;
+	if (_miniTerr && _game->frame - _terrFrame < 45 && _game->frame >= _terrFrame) return;
+	_terrFrame = _game->frame;
+	const int fx = _fog.fxs, fy = _fog.fys;
+	if (!_miniTerr) {
+		MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:NSUInteger(fx) height:NSUInteger(fy) mipmapped:NO];
+		d.usage = MTLTextureUsageShaderRead;
+		_miniTerr = [_device newTextureWithDescriptor:d];
+		_ui.set_texture("MINIMAP_TERR", _miniTerr, fx, fy);
+	}
+	static const uint8_t border[9][3] = {{255, 0, 0}, {0, 0, 255}, {188, 0, 250}, {0, 255, 0}, {255, 255, 0},
+	                                     {0, 255, 255}, {255, 255, 255}, {255, 128, 0}, {255, 255, 255}};
+	const ron::sim::World& w = _game->world;
+	auto owner = [&](int x, int y) -> int {  // -1 unowned, -2 water / off the map (ignored)
+		if (x < 0 || y < 0 || x >= fx || y >= fy) return -2;
+		const ron::sim::WData& d = w.w(x / 2, y / 2);
+		if (ron::sim::World::is_ocean(d)) return -2;
+		return d.who >= 0 && d.who < 8 ? d.who : -1;
+	};
+	std::vector<uint8_t> rgba(size_t(fx) * size_t(fy) * 4, 0);
+	const bool fog = _fogOn;
+	for (int y = 0; y < fy; y++) {
+		for (int x = 0; x < fx; x++) {
+			const int who = owner(x, y);
+			if (who < 0) continue;
+			if (fog && _fogLevels[size_t(y) * size_t(fx) + size_t(x)] == 0) continue;
+			bool edge = false;
+			for (int dy = -1; dy <= 1 && !edge; dy++) {
+				for (int dx = -1; dx <= 1; dx++) {
+					if (!dx && !dy) continue;
+					const int n = owner(x + dx, y + dy);
+					if (n == -2) continue;
+					if (n == -1 || (n != who && !ron::sim::is_ally(*_game, who, n))) {
+						edge = true;
+						break;
+					}
+				}
+			}
+			const uint8_t* c = border[std::clamp(_game->leaders[size_t(who)].color, 0, 8)];
+			uint8_t* px = &rgba[(size_t(y) * size_t(fx) + size_t(x)) * 4];
+			px[0] = c[0], px[1] = c[1], px[2] = c[2], px[3] = edge ? 0xC8 : 0x50;
+		}
+	}
+	[_miniTerr replaceRegion:MTLRegionMake2D(0, 0, NSUInteger(fx), NSUInteger(fy)) mipmapLevel:0 withBytes:rgba.data() bytesPerRow:NSUInteger(fx) * 4];
+}
+
 - (hud::State)makeHudState {
 	hud::State s;
 	s.world_w = std::max(1.0f, _mesh.width);
@@ -2629,6 +2889,20 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	}
 	s.options = [self hudOptions];
 	s.res = hud_resources(_game.get(), me);
+	[self fillInfra:s.res who:me];
+	s.timers = [self gameTimers];
+	if (const char* tt = getenv("RON_TIMER_TEST")) {  // "kind:seconds[:colour[:count]],..." for snapshots
+		for (const char* q = tt; q && *q;) {
+			int kind = 0, secs = 0, who = -1, count = -1;
+			std::sscanf(q, "%d:%d:%d:%d", &kind, &secs, &who, &count);
+			s.timers.push_back({kind, secs * 15, who, count});
+			q = std::strchr(q, ',');
+			if (q) q++;
+		}
+	}
+	s.minilib = [self miniLibState:me];
+	[self updateTerritory];
+	s.has_territory = _miniTerr != nil;
 	if (_game && me >= 0 && me < int(_game->leaders.size())) {
 		const ron::sim::Leader& L = _game->leaders[size_t(me)];
 		std::string nation;
@@ -2664,9 +2938,281 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	}
 	if (_sviewOn) {
 		s.pings = _sview.pings();
-		if (!s.pings.empty()) _ui.file_texture("art/AttackAlertCircle1.tga", &s.ping_tex);  // EFFECTS/MINIMAP/PING "default"
+		if (!s.pings.empty()) {
+			s.ping_styles = _sview.ping_styles();  // EFFECTS/MINIMAP/PING
+			for (hud::PingStyle& st : s.ping_styles) {
+				for (hud::PingPhase& ph : st.phases) _ui.file_texture(ph.file, &ph.tex_id);
+			}
+		}
 	}
 	return s;
+}
+
+// ---------------------------------------------------------------- mouse-over help (docs/ui-spec.md 6.5)
+
+// The hotkey of an option for the current selection: the key bound to it in the build menu or the standard mode, gated by
+// the selection's context (units, buildings, a building's type).
+- (BOOL)selectionContext:(int)ctx {
+	if (ctx == -1) return YES;
+	const bool units = !_selected.empty(), builds = !_selectedBuilds.empty();
+	if (ctx == -2 || ctx == -4) return builds;
+	if (ctx == -3 || ctx == -6) return units;
+	if (ctx == -5) return NO;
+	if (!_game) return NO;
+	for (const auto& [who, o] : _selectedBuilds) {
+		if (const ron::sim::BuildView* b = [self buildView:who o:o]) {
+			if (b->type == ctx) return YES;
+		}
+	}
+	for (const auto& [who, o] : _selected) {
+		if (const ron::sim::UnitView* u = [self unitView:who o:o]) {
+			if (u->type == ctx) return YES;
+		}
+	}
+	return NO;
+}
+
+- (std::string)hotkeyFor:(const char*)option param:(int)param {
+	return keymap::hotkey(option, param, [self](int ctx) { return [self selectionContext:ctx] == YES; });
+}
+
+static std::string up_str(std::string s) {
+	for (char& c : s) c = char(std::toupper(static_cast<unsigned char>(c)));
+	return s;
+}
+
+// The OptionIndex -> KeyMap option name of the card's plain buttons.
+static const char* keymap_option_name(int option) {
+	switch (option) {
+		case hud::kOptBuild: return "OPTION_BUILD";
+		case hud::kOptBuildMilitary: return "OPTION_BUILD_MILITARY";
+		case hud::kOptBuildWonder: return "OPTION_BUILD_WONDER";
+		case hud::kOptRepair: return "OPTION_REPAIR";
+		case hud::kOptPatrol: return "OPTION_PATROL";
+		case hud::kOptMoveTo: return "OPTION_MOVE_TO";
+		case hud::kOptAttackTo: return "OPTION_ATTACK_TO";
+		case hud::kOptDisband: return "OPTION_DISBAND";
+		case hud::kOptStance: return "OPTION_STANCE";
+		case hud::kOptForm: return "OPTION_FORM";
+		case hud::kOptHalt: return "OPTION_HALT";
+		case hud::kOptGarrison: return "OPTION_GARRISON";
+		case hud::kOptAlarmPeasant: return "OPTION_ALARM_PEASANT";
+		case hud::kOptBackToWork: return "OPTION_BACK_TO_WORK";
+		case hud::kOptEjectAll: return "OPTION_EJECT_ALL";
+		case hud::kOptAutoExplore: return "OPTION_AUTO_EXPLORE";
+		case hud::kOptCancel: return "OPTION_CANCEL";
+		case 65: return "OPTION_NEXT";
+		case 66: return "OPTION_BACK";
+		default: return nullptr;
+	}
+}
+
+// The help.xml group and key of a plain card button (Options::set_help_type's choice for the options the card offers).
+static std::pair<const char*, const char*> option_help_key(int option) {
+	switch (option) {
+		case hud::kOptMoveTo: return {"ORDERS", "MOVETO"};
+		case hud::kOptAttackTo: return {"ORDERS", "ATTACKTO"};
+		case hud::kOptPatrol: return {"ORDERS", "PATROL"};
+		case hud::kOptHalt: return {"EJECTS", "HALT"};
+		case hud::kOptGarrison: return {"EJECTS", "GARRISON"};
+		case hud::kOptAlarmPeasant: return {"EJECTS", "ALARMPEASANT"};
+		case hud::kOptEjectAll: return {"EJECTS", "EJECTALL"};
+		case hud::kOptAutoExplore: return {"ORDERS", "AUTOEXPLORE"};
+		default: return {nullptr, nullptr};
+	}
+}
+
+// The tooltip of the hovered element (MouseOver::describe -> Options::describe / the spot handlers): title, cost, hotkey and
+// the help.xml lines at the profile's verbosity.
+- (tips::Tip)tipFor:(const hud::Hover&)h state:(const hud::State&)s {
+	tips::Tip tip;
+	if (!_game || !_helpOn || h.kind == hud::HoverKind::None) return tip;
+	const int me = [self localPlayer];
+	const ron::sim::LeaderView lv = ron::sim::leader_view(*_game, me);
+	const int v = _verbosity;
+	auto lines = [&](const std::string& key, std::vector<std::string> sections, const std::map<std::string, std::string>& vars = {}) {
+		for (std::string& l : _help.lines(key, v, sections, vars)) tip.info.push_back(std::move(l));
+	};
+	auto good_name = [&](int g) { return [self typeName:g]; };
+	std::map<std::string, std::string> vars;
+	switch (h.kind) {
+		case hud::HoverKind::Option: {
+			if (h.b >= 0) {
+				// Train / research / build buttons: the type's name, its price, the hotkey, the help.xml text for its graphic.
+				const ron::sim::Type& T = _game->type(h.b);
+				tip.first = [self typeName:h.b];
+				const int builder = [self ownSelectedBuilds].empty() ? -1 : [self ownSelectedBuilds].front();
+				for (int g = 0; g < 6; g++) {
+					const int c = ron::sim::get_cost(*_game, h.b, g, me, builder, -1, 0, 0, -1);
+					if (c > 0) tip.cost.push_back({g, c, lv.stockpile[g] >= c});
+				}
+				if (h.a == 1000) tip.hotkey = [self hotkeyFor:"OPTION_BUILD" param:h.b].empty() ? [self hotkeyFor:"OPTION_BUILD_MILITARY" param:h.b] : [self hotkeyFor:"OPTION_BUILD" param:h.b];
+				else {
+					// The key names the first unit of a line (Slingers for the light infantry): follow the upgrade chain back.
+					const char* opt = h.a == hud::kOptTrain ? "OPTION_TRAIN" : "OPTION_RESEARCH";
+					int t = h.b;
+					for (int step = 0; step < 12 && t >= 0 && tip.hotkey.empty(); step++) {
+						tip.hotkey = [self hotkeyFor:opt param:t];
+						t = _game->type(t).from;
+					}
+				}
+				const std::string key = up_str(ron::sim::to_utf8(T.help_name.empty() ? T.name : T.help_name));
+				std::vector<std::string> secs = ron::sim::is_unit_type(h.b) ? std::vector<std::string>{"UNITS", "BUILDINGS", "SPELLS", "LIBRARY"}
+				                                                           : std::vector<std::string>{"BUILDINGS", "LIBRARY", "SPELLS", "UNITS"};
+				lines(key, secs);
+				if (tip.info.empty() && !T.desc.empty()) tip.info.push_back(ron::sim::to_utf8(T.desc));
+			} else {
+				// Plain buttons: "Name: description" (verbosity 2 and up; the name alone below), the hotkey, the help text.
+				const std::string name = _hud.option_name(h.a), desc = _hud.option_desc(h.a);
+				tip.first = v >= 2 && !desc.empty() ? (name.empty() ? desc : name + ": " + desc) : (name.empty() ? desc : name);
+				if (const char* kn = keymap_option_name(h.a)) tip.hotkey = [self hotkeyFor:kn param:-2];
+				const auto [sec, key] = option_help_key(h.a);
+				if (sec) lines(key, {sec});
+			}
+			break;
+		}
+		case hud::HoverKind::SelObject: {
+			if (size_t(h.a) >= s.selection.size()) break;
+			const hud::Object& o = s.selection[size_t(h.a)];
+			tip.first = o.name;
+			tip.info.push_back("{*0" + std::to_string(o.hp) + "/" + std::to_string(o.max_hp) + " hit points}");
+			if (const ron::sim::Type& T = _game->type(o.type); T.loaded) {
+				const std::string key = up_str(ron::sim::to_utf8(T.help_name.empty() ? T.name : T.help_name));
+				lines(key, o.building ? std::vector<std::string>{"BUILDINGS", "UNITS"} : std::vector<std::string>{"UNITS", "BUILDINGS"});
+			}
+			break;
+		}
+		case hud::HoverKind::SelQueue: {
+			if (s.selection.empty() || size_t(h.a) >= s.selection.front().queue.size()) break;
+			const hud::QueueItem& q = s.selection.front().queue[size_t(h.a)];
+			tip.first = q.name;
+			tip.info.push_back("Click to remove from the queue.");
+			break;
+		}
+		case hud::HoverKind::SelStat: {
+			static const char* keys[3] = {"STATATTACK", "STATARMOR", "STATRANGE"};
+			static const char* names[3] = {"Attack", "Armor", "Range"};
+			tip.first = names[std::clamp(h.a, 0, 2)];
+			lines(keys[std::clamp(h.a, 0, 2)], {"STATS"});
+			break;
+		}
+		case hud::HoverKind::SelHitPoints:
+			tip.first = "Hit Points";
+			lines("STATHITPOINTS", {"STATS"});
+			break;
+		case hud::HoverKind::Good: {
+			static const char* keys[6] = {"FOOD", "TIMBER", "WEALTH", "KNOWLEDGE", "METAL", "OIL"};
+			const int g = std::clamp(h.a, 0, 5);
+			const int rate = s.res.rate[size_t(g)];
+			tip.first = good_name(g);
+			vars["NUMBER0"] = std::to_string(s.res.stock[size_t(g)]);
+			vars["STRING0"] = std::to_string(rate);
+			lines(keys[g], {"GOODS"}, vars);
+			if (s.res.over_cap[size_t(g)]) lines("GOODCAPPED", {"CAPS"});
+			break;
+		}
+		case hud::HoverKind::CommerceCap:
+			tip.first = "Commerce Cap";
+			lines("RESCAP", {"CAPS"});
+			break;
+		case hud::HoverKind::PopCap:
+			tip.first = "Population Limit";
+			vars["NUMBER0"] = std::to_string(s.res.pop), vars["NUMBER1"] = std::to_string(s.res.pop_cap);
+			lines("POPCAP", {"CAPS"}, vars);
+			break;
+		case hud::HoverKind::CityCap:
+			tip.first = "City Limit";
+			vars["NUMBER0"] = std::to_string(s.res.cities), vars["NUMBER1"] = std::to_string(s.res.city_limit);
+			lines("CITYCAP", {"CAPS"}, vars);
+			break;
+		case hud::HoverKind::MarketBuy: case hud::HoverKind::MarketSell: {
+			const bool buy = h.kind == hud::HoverKind::MarketBuy;
+			const int g = std::clamp(h.a, 0, 5);
+			tip.first = std::string(buy ? "Buy " : "Sell ") + good_name(g);
+			const int price = buy ? s.res.buy[size_t(g)] : s.res.sell[size_t(g)];
+			if (buy) tip.cost.push_back({2, price, lv.stockpile[2] >= price});
+			else tip.info.push_back("{*1" + std::string("#ICON3 ") + std::to_string(price) + "} per 100");
+			tip.hotkey = [self hotkeyFor:(buy ? "OPTION_BUY" : "OPTION_SELL") param:g];
+			lines(buy ? "BUY" : "SELL", {"SPELLS"});
+			break;
+		}
+		case hud::HoverKind::ToggleMarket: tip.first = "Market Interface"; lines("MARKET", {"MAIN_IFACE_BUTTONS"}); tip.hotkey = [self hotkeyFor:"OPTION_TOGGLE_IFACE_MARKET" param:-2]; break;
+		case hud::HoverKind::ToggleResources: tip.first = "Resource Interface"; lines("RESOURCES", {"MAIN_IFACE_BUTTONS"}); tip.hotkey = [self hotkeyFor:"OPTION_TOGGLE_IFACE_RESOURCES" param:-2]; break;
+		case hud::HoverKind::ToggleInfra: tip.first = "Infrastructure Interface"; lines("INFRA", {"MAIN_IFACE_BUTTONS"}); tip.hotkey = [self hotkeyFor:"OPTION_TOGGLE_IFACE_INFRA" param:-2]; break;
+		case hud::HoverKind::Infra: {
+			static const char* keys[6] = {"FOODCAP", "WOODCAP", "WEALTHCAP", "KNOWLEDGECAP", "METALCAP", "OILCAP"};
+			static const char* heads[6] = {"FARMHEADS", "WOODCUTTERHEADS", "CARAVANCAP", "UNIVERSITYHEADS", "MINEHEADS", "OILHEADS"};
+			const int g = std::clamp(h.a, 0, 5);
+			tip.first = good_name(g) + " Infrastructure";
+			lines(g == 2 ? heads[g] : keys[g], {"CAPS", "STATS"});
+			if (g != 2) lines(heads[g], {"STATS"});
+			break;
+		}
+		case hud::HoverKind::BarButton: {
+			static const char* titles[8] = {"Pause", "Advanced Menu", "Ping", "Diplomacy", "Chat", "Data Display", "Help Text Detail", "Menu"};
+			static const char* keys[8] = {"PAUSE", "TOGGLEADVANCED", "PING", "DIPLOMACY", "CHAT", "NEXTDATA", "TOGGLEHELP", "MENU"};
+			static const char* secs[8] = {"MAIN_IFACE_BUTTONS", "MAIN_IFACE_BUTTONS", "EJECTS", "DIPLOMACY", "EJECTS", "DATADISPLAY", "MAIN_IFACE_BUTTONS", "MAIN_IFACE_BUTTONS"};
+			static const char* kmo[8] = {"OPTION_PAUSE", "OPTION_TOGGLE_ADVANCED", "OPTION_PING", "OPTION_DIPLO", "OPTION_CHAT", "OPTION_NEXT_DATA", "OPTION_TOGGLE_HELP", "OPTION_MENU"};
+			const int i = std::clamp(h.a, 0, 7);
+			tip.first = titles[i];
+			tip.hotkey = [self hotkeyFor:kmo[i] param:-2];
+			lines(keys[i], {secs[i]});
+			break;
+		}
+		case hud::HoverKind::Display:
+			tip.first = _hud.opened() ? "Streamlined Interface" : "Full Interface";
+			tip.hotkey = [self hotkeyFor:"OPTION_TOGGLE_IFACE_MAIN" param:-2];
+			lines("MAIN", {"MAIN_IFACE_BUTTONS"});
+			break;
+		case hud::HoverKind::MinimapButton: {
+			static const char* titles[4] = {"Next Military Unit", "Next General", "Objectives", "Next Idle Citizen"};
+			static const char* keys[4] = {"NEXTMILITARY", "NEXTGENERAL", "OBJECTIVES", "IDLECITIZEN"};
+			static const char* secs[4] = {"CYCLES", "CYCLES", "MAIN_IFACE_BUTTONS", "CYCLES"};
+			static const char* kmo[4] = {"OPTION_CYCLE_MILITARY", "OPTION_CYCLE_GENERAL", "OPTION_OBJECTIVES", "OPTION_CYCLE_PEASANT"};
+			const int i = std::clamp(h.a, 0, 3);
+			tip.first = titles[i];
+			tip.hotkey = [self hotkeyFor:kmo[i] param:-2];
+			lines(keys[i], {secs[i]});
+			break;
+		}
+		case hud::HoverKind::Minimap:
+			tip.first = "Minimap";
+			lines("IFACEMINIMAP_MOUSEOVER", {"EJECTS"});
+			break;
+		case hud::HoverKind::MiniLibCat: {
+			static const char* titles[5] = {"Next Age", "Military Research", "Civic Research", "Commerce Research", "Science Research"};
+			static const char* keys[5] = {"AGETECH", "MILITARY", "CIVIC", "COMMERCE", "SCIENCE"};
+			const int i = std::clamp(h.a, 0, 4);
+			tip.first = titles[i];
+			const hud::MiniLibButton& b = i == 0 ? s.minilib.age : s.minilib.cat[i - 1];
+			if (b.valid) {
+				const int base[4] = {572, 565, 558, 551};
+				const int type = i == 0 ? 544 + _game->leaders[size_t(me)].age : base[i - 1] + _game->leaders[size_t(me)].epoch[size_t(i - 1)];
+				tip.first = [self typeName:type];
+				for (int g = 0; g < 6; g++) {
+					const int c = ron::sim::get_cost(*_game, type, g, me, -1, -1, 0, 0, -1);
+					if (c > 0) tip.cost.push_back({g, c, lv.stockpile[g] >= c});
+				}
+			}
+			lines(keys[i], {"LIBRARY"});
+			break;
+		}
+		case hud::HoverKind::MiniLibToggle: tip.first = "Library"; lines("LIBRARY", {"MAIN_IFACE_BUTTONS"}); break;
+		case hud::HoverKind::Timer: {
+			static const char* titles[8] = {"Wonder Victory Timer", "Capital Recapture Timer", "Armageddon Clock", "Territory Victory Timer", "Peace Timer", "Time Limit", "Barbarian Timer", "Musical Chairs"};
+			static const char* keys[8] = {"WONDERTIMER", "CAPITALTIMER", "ARMAGEDDONCLOCK", "TERRITORYTIMER", "", "", "", ""};
+			const int i = std::clamp(h.a, 0, 7);
+			tip.first = titles[i];
+			if (keys[i][0]) lines(keys[i], {"STATS"});
+			break;
+		}
+		case hud::HoverKind::Clock:
+			tip.first = "Game Clock";
+			lines("PAUSE", {"MAIN_IFACE_BUTTONS"});
+			break;
+		default: break;
+	}
+	return tip;
 }
 
 - (void)encodeHud:(id<MTLRenderCommandEncoder>)enc width:(NSUInteger)w height:(NSUInteger)h {
@@ -2697,6 +3243,17 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		_ui.frame(float(std::floor(x0)), float(std::floor(y0)), float(std::fabs(_mouse.x - _press.x)), float(std::fabs(_mouse.y - _press.y)), 0xFFFFFFFF);
 	}
 	_hud.draw(_ui, _hudState);
+	// Mouse-over help: shown once the mouse has rested on the same element for a few ticks (MouseOver::describe: 3 ticks),
+	// not while the scene scrolls or a modal window is open.
+	if (_helpOn && _mouseInside && !_boxing && _placeType < 0 && !_pressing && !(_sviewOn && _sview.modal()) && !_gameMenu) {
+		const hud::Hover hv = _hud.hover_at(int(_mouse.x), int(_mouse.y), _hudState);
+		const int tick = int(_timeMs / 66.0);
+		if (hv != _hover) _hover = hv, _hoverTick = tick;
+		if (hv.kind != hud::HoverKind::None && (_hoverForce || tick - _hoverTick >= 3)) {
+			const tips::Tip tip = [self tipFor:hv state:_hudState];
+			tips::draw(_ui, _hud, _help, tip, _verbosity, _hud.bar_top() - 4);
+		}
+	}
 	// MessageWin, AnimNotice, ScreenArrowSpline, the modal windows (docs/ui-port.md "Script UI").
 	if (_sviewOn) _sview.draw(_ui, [self pres], [self scriptEnv]);
 	[self drawGameMenu];
@@ -2762,6 +3319,8 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		[self syncSimBuildings];
 		_fogUploaded = NO;
 		_gameEventsSeen = _game->events.size();
+		_notifier.reset(*_game);
+		_terrFrame = -100000;
 		const ron::sim::ScriptPresentation* p = [self pres];
 		_logSeq = p && p->next_seq > 0 ? p->next_seq - 1 : 0;
 		_logObjectives = p ? p->objectives.size() : 0;
@@ -3037,6 +3596,188 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	}
 }
 
+// ---------------------------------------------------------------- hotkeys (docs/ui-spec.md 4.2, keymap_table.inc)
+
+- (void)barButton:(int)i {
+	static const char* opts[8] = {"OPTION_PAUSE", "OPTION_TOGGLE_ADVANCED", "OPTION_PING", "OPTION_DIPLO", "OPTION_CHAT",
+	                              "OPTION_NEXT_DATA", "OPTION_TOGGLE_HELP", "OPTION_MENU"};
+	[self execKeyOption:opts[std::clamp(i, 0, 7)] param:-1 modifiers:0];
+}
+
+// Own objects for the cycle keys, in (type, slot) order.
+- (std::vector<std::pair<int32_t, int32_t>>)cycleList:(const std::string&)what param:(int)param {
+	std::vector<std::pair<int32_t, int32_t>> out;
+	const int me = [self localPlayer];
+	if (what == "building") {
+		for (const ron::sim::BuildView& b : _curView.builds) {
+			if (b.alive && b.who == me && b.active && b.type == param) out.push_back({b.who, b.o});
+		}
+		return out;
+	}
+	for (const ron::sim::UnitView& u : _curView.units) {
+		if (!u.alive || u.who != me || !u.on_map) continue;
+		const ron::sim::Type& T = _game->type(u.type);
+		const bool citizen = u.type == ron::sim::ptype::kPeasants || u.type == ron::sim::ptype::kPeasantsKorean;
+		const bool scholar = u.type == ron::sim::ptype::kScholars || u.type == ron::sim::ptype::kScholarsKorean;
+		bool ok = false;
+		if (what == "military") ok = !citizen && !scholar && T.attack > 0;
+		else if (what == "peasant") ok = citizen && u.order == 0;  // idle citizens
+		else if (what == "general") ok = u.type == ron::sim::ptype::kGeneral;
+		else if (what == "scout") ok = u.type == ron::sim::ptype::kScout;
+		else if (what == "spy") ok = u.type == ron::sim::ptype::kSpy;
+		if (ok) out.push_back({u.who, u.o});
+	}
+	return out;
+}
+
+// The cycle keys (C, K, ,, ., ...): select the next own object of the kind after the current selection and centre on it
+// (Ctrl: without centring, Shift: all of them).
+- (void)cycle:(const std::string&)what param:(int)param zoom:(BOOL)zoom all:(BOOL)all building:(BOOL)building {
+	const std::vector<std::pair<int32_t, int32_t>> list = [self cycleList:what param:param];
+	if (list.empty()) return;
+	size_t next = 0;
+	const auto& cur = building ? _selectedBuilds : _selected;
+	if (!cur.empty()) {
+		for (size_t i = 0; i < list.size(); i++) {
+			if (list[i] == cur.front()) next = (i + 1) % list.size();
+		}
+	}
+	_selected.clear(), _selectedBuilds.clear();
+	auto& dst = building ? _selectedBuilds : _selected;
+	if (all) dst = list;
+	else dst.push_back(list[next]);
+	if (building) [self syncSimBuildings];
+	[self selectionChanged];
+	if (zoom) {
+		const auto k = dst.front();
+		if (building) {
+			if (const ron::sim::BuildView* b = [self buildView:k.first o:k.second]) [self lookAtX:float(b->x) y:float(b->y)];
+		} else if (const ron::sim::UnitView* u = [self unitView:k.first o:k.second]) {
+			[self lookAtX:float(u->x) y:float(u->y)];
+		}
+	}
+}
+
+// Options::exec for the keys: 1 handled, 0 a bound key whose action the port does not have yet, -1 not for us (the caller
+// goes on with its own keys).
+- (int)execKeyOption:(const char*)opt param:(int)param modifiers:(NSEventModifierFlags)m {
+	if (!_game) return -1;
+	const std::string o = opt;
+	const int me = [self localPlayer];
+	const ron::sim::ScriptPresentation* sp = [self pres];
+	const BOOL shift = (m & NSEventModifierFlagShift) != 0;
+	auto own_units = [&] { return !_selected.empty() && _selected.front().first == me; };
+	auto own_builds = [&] { return !_selectedBuilds.empty() && _selectedBuilds.front().first == me; };
+	if (o == "OPTION_SLOWER" || o == "OPTION_FASTER") return -1;  // ronmap has no speed control: +/- keep zooming
+	if (o == "OPTION_MENU") {
+		if (!_inPopup) [self openGameMenu:1];
+		return 1;
+	}
+	if (o == "OPTION_PAUSE") {
+		if (!(sp && sp->pause_disabled)) _paused = !_paused;
+		return 1;
+	}
+	if (o == "OPTION_ZOOM_IN" || o == "OPTION_ZOOM_OUT") {
+		if (!(sp && (sp->zoom_lock_flags & 1))) _zoom = std::clamp(_zoom + (o == "OPTION_ZOOM_IN" ? 1 : -1), 0, 6);
+		return 1;
+	}
+	if (o == "OPTION_CANCEL") {
+		if (_placeType >= 0 || _targeting >= 0 || _buildPage >= 0) {
+			_placeType = -1, _targeting = -1, _buildPage = -1;
+			return 1;
+		}
+		return -1;  // Esc with nothing to cancel clears the selection / opens the menu (handleKey)
+	}
+	if (o == "OPTION_TOGGLE_IFACE_MAIN") return _hud.set_opened(!_hud.opened()), 1;
+	if (o == "OPTION_TOGGLE_IFACE_RESOURCES") return _hud.toggle_panel(1), 1;
+	if (o == "OPTION_TOGGLE_IFACE_MARKET") return _hud.toggle_panel(0), 1;
+	if (o == "OPTION_TOGGLE_IFACE_INFRA") return _hud.toggle_panel(2), 1;
+	if (o == "OPTION_TOGGLE_HELP") {  // Help Text Detail: LOW / MEDIUM / HIGH
+		_verbosity = param >= 1 && param <= 3 ? param : _verbosity % 3 + 1;
+		static const char* names[4] = {"", "Low", "Medium", "High"};
+		[self say:std::string("Help text detail: ") + names[_verbosity]];
+		return 1;
+	}
+	if (o == "OPTION_NEXT_MESSAGE" || o == "OPTION_PREV_MESSAGE") {
+		float x, y;
+		if (_sviewOn && _sview.next_event(x, y)) [self lookAtX:x y:y];
+		return 1;
+	}
+	if (o == "OPTION_MOVE_TO") {
+		if (own_units()) _targeting = hud::kOptMoveTo;
+		return 1;
+	}
+	if (o == "OPTION_HALT") {
+		if (own_units()) [self runOption:hud::kOptHalt object:-1 modifiers:m];
+		return 1;
+	}
+	if (o == "OPTION_DISBAND") {
+		if (own_units()) {
+			const std::vector<int32_t> objs = [self ownSelectedUnits];
+			[self issueAs:me block:^bool { return _cm.issue_disband(*_game, objs); }];
+		}
+		return 1;
+	}
+	if (o == "OPTION_BUILD" || o == "OPTION_BUILD_MILITARY" || o == "OPTION_BUILD_WONDER") {
+		const int opt_id = o == "OPTION_BUILD" ? hud::kOptBuild : o == "OPTION_BUILD_MILITARY" ? hud::kOptBuildMilitary : hud::kOptBuildWonder;
+		if (param >= 0) {  // the build menu's letter: start placing that building
+			if (_buildPage >= 0 && ron::sim::type_avail(*_game, me, param, 1) == 4) [self runOption:1000 object:param modifiers:m];
+			return 1;
+		}
+		bool citizens = false;
+		for (const auto& [who, ob] : _selected) {
+			if (const ron::sim::UnitView* u = [self unitView:who o:ob]) {
+				citizens = citizens || u->type == ron::sim::ptype::kPeasants || u->type == ron::sim::ptype::kPeasantsKorean;
+			}
+		}
+		if (citizens && own_units()) _buildPage = opt_id;
+		return 1;
+	}
+	if (o == "OPTION_NEXT") return _buildPage >= 0 ? ([self runOption:65 object:-1 modifiers:m], 1) : 0;
+	if (o == "OPTION_BACK") return _buildPage >= 0 ? ([self runOption:66 object:-1 modifiers:m], 1) : 0;
+	if (o == "OPTION_TRAIN" || o == "OPTION_RESEARCH") {
+		if (!own_builds() || param < 0) return 1;
+		// The key names the first unit of a line; the card offers its current (upgraded) form: the option on the card whose
+		// upgrade chain leads back to `param`.
+		const int want = o == "OPTION_TRAIN" ? hud::kOptTrain : hud::kOptResearch;
+		for (const hud::Option& op : [self hudOptions]) {
+			if (op.option != want || op.object < 0 || !op.enabled) continue;
+			int t = op.object;
+			for (int step = 0; step < 12 && t >= 0 && t != param; step++) t = _game->type(t).from;
+			if (t == param) {
+				[self runOption:want object:op.object modifiers:m];
+				break;
+			}
+		}
+		return 1;
+	}
+	// The cycle keys: OPTION_CYCLE_BUILDING/type (zoom), OPTION_NOZOOM_BUILDING, OPTION_ALL_BUILDING and the unit kinds.
+	struct Cyc {
+		const char* name;
+		const char* what;
+		BOOL zoom, all, building;
+	};
+	static const Cyc cycles[] = {
+	    {"OPTION_CYCLE_BUILDING", "building", YES, NO, YES}, {"OPTION_NOZOOM_BUILDING", "building", NO, NO, YES},
+	    {"OPTION_ALL_BUILDING", "building", NO, YES, YES},   {"OPTION_CYCLE_MILITARY", "military", YES, NO, NO},
+	    {"OPTION_NOZOOM_MILITARY", "military", NO, NO, NO},  {"OPTION_ALL_MILITARY", "military", NO, YES, NO},
+	    {"OPTION_CYCLE_PEASANT", "peasant", YES, NO, NO},    {"OPTION_NOZOOM_PEASANT", "peasant", NO, NO, NO},
+	    {"OPTION_ALL_PEASANT", "peasant", NO, YES, NO},      {"OPTION_CYCLE_GENERAL", "general", YES, NO, NO},
+	    {"OPTION_NOZOOM_GENERAL", "general", NO, NO, NO},    {"OPTION_ALL_GENERAL", "general", NO, YES, NO},
+	    {"OPTION_CYCLE_SCOUT", "scout", YES, NO, NO},        {"OPTION_NOZOOM_SCOUT", "scout", NO, NO, NO},
+	    {"OPTION_ALL_SCOUT", "scout", NO, YES, NO},          {"OPTION_CYCLE_SPY", "spy", YES, NO, NO},
+	    {"OPTION_NOZOOM_SPY", "spy", NO, NO, NO},            {"OPTION_ALL_SPY", "spy", NO, YES, NO},
+	};
+	for (const Cyc& c : cycles) {
+		if (o == c.name) {
+			[self cycle:c.what param:param zoom:c.zoom all:c.all building:c.building];
+			return 1;
+		}
+	}
+	(void)shift;
+	return 0;
+}
+
 - (void)handleHudAction:(const hud::Action&)a modifiers:(NSEventModifierFlags)m {
 	switch (a.kind) {
 		case hud::ActionKind::MinimapLook:
@@ -3051,6 +3792,38 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 				(o.building ? _selectedBuilds : _selected).push_back({o.who, o.o});
 				[self selectionChanged];
 			}
+			break;
+		}
+		case hud::ActionKind::Buy: case hud::ActionKind::Sell: {
+			// IFaceResources::on_button_clicked: OPTION_BUY / OPTION_SELL for the good; Shift = x5 (500), Alt = everything.
+			const int flags = (m & NSEventModifierFlagOption) ? 2 : (m & NSEventModifierFlagShift) ? 1 : 0;
+			const bool buy = a.kind == hud::ActionKind::Buy;
+			const int good = a.object;
+			const int me = [self localPlayer];
+			[self issueAs:me block:^bool { return buy ? _cm.issue_buy(good, flags) : _cm.issue_sell(good, flags); }];
+			break;
+		}
+		case hud::ActionKind::BarButton: [self barButton:a.index]; break;
+		case hud::ActionKind::MiniLib: {
+			// IFaceMiniLibrary::on_button_clicked: OPTION_RESEARCH of the line's next tech (or the next age) at the first Library.
+			const int me = [self localPlayer];
+			if (me < 0 || me >= 8) break;
+			const ron::sim::Leader& L = _game->leaders[size_t(me)];
+			static const int base[4] = {572, 565, 558, 551};
+			const int type = a.index == 0 ? 544 + L.age : base[std::clamp(a.index - 1, 0, 3)] + L.epoch[size_t(std::clamp(a.index - 1, 0, 3))];
+			if (a.index == 0 ? L.age >= 7 : L.epoch[size_t(a.index - 1)] >= 7) break;
+			for (const ron::sim::BuildView& b : _curView.builds) {
+				if (!b.alive || !b.active || b.who != me || b.type != 435) continue;
+				const std::vector<int32_t> objs = {b.o};
+				if (ron::sim::can_pay_cost(*_game, type, me, -1, b.o, 1) <= 0) _pendingWarnings |= 1;
+				[self issueAs:me block:^bool { return _cm.issue_queue(*_game, objs, type, 1); }];
+				break;
+			}
+			break;
+		}
+		case hud::ActionKind::MinimapButton: {
+			static const char* opts[4] = {"OPTION_CYCLE_MILITARY", "OPTION_CYCLE_GENERAL", "OPTION_OBJECTIVES", "OPTION_CYCLE_PEASANT"};
+			[self execKeyOption:opts[std::clamp(a.index, 0, 3)] param:-1 modifiers:m];
 			break;
 		}
 		case hud::ActionKind::QueueItem: {
@@ -3506,6 +4279,26 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 }
 
 // Headless: the mouse over a world point (ground level), as if the player pointed there.
+- (void)setHoverX:(float)x y:(float)y {
+	_mouse = CGPointMake(x, y);
+	_mouseInside = YES;
+	_hoverForce = YES;
+	_hud.mouse_move(int(x), int(y));
+}
+
+- (void)setPanels:(int)flags streamlined:(BOOL)streamlined help:(int)level {
+	if (flags >= 0) _hud.set_panel_flags(flags);
+	if (streamlined) _hud.set_opened(false);
+	if (level >= 1 && level <= 3) _verbosity = level;
+}
+
+- (void)runKeyString:(const std::string&)keys {
+	if (!_game) return;
+	if (const keymap::Entry* e = keymap::lookup(keys, _buildPage >= 0 ? 1 : 0, [self](int ctx) { return [self selectionContext:ctx] == YES; }))
+		[self execKeyOption:e->option param:e->param modifiers:keys.find("Shift+") != std::string::npos ? NSEventModifierFlagShift : 0];
+	else std::fprintf(stderr, "no binding for %s\n", keys.c_str());
+}
+
 - (void)setCursorWorldX:(float)x y:(float)y {
 	const float z = std::max(0.0f, _terrain.sample_height(x, y));
 	const simd_float2 sp = [self screenOf:simd_make_float3(x, y, z)] / (_uiScale > 0 ? _uiScale : 1);
@@ -3736,13 +4529,44 @@ static int vk_of(NSEvent* e) {
 		const int me = [self localPlayer];
 		const bool won = ev.kind == 3 && ev.who == me, lost = ev.kind == 2 && ev.who == me;
 		if (!won && !lost) continue;
-		const std::string msg = p ? (won ? p->victory_message : p->defeat_message) : std::string();
+		std::string msg = p ? (won ? p->victory_message : p->defeat_message) : std::string();
+		if (lost && msg.empty()) msg = [self defeatReason];
 		std::printf("frame %d: %s%s%s\n", _game->frame, won ? "victory" : "defeat", msg.empty() ? "" : ": ", msg.c_str());
 		if (_sviewOn) _sview.game_over(won, msg, env, cb);
 		if (_audio) {
 			if (won) _audio->music_win();
 			else _audio->music_lose();
 		}
+	}
+}
+
+// Why the local leader lost, from the install's own strings (Leader::defeat's DefeatIndex, or the winner's victory type).
+- (std::string)defeatReason {
+	if (!_game || !_tables) return {};
+	const int me = [self localPlayer];
+	if (me < 0 || me >= int(_game->leaders.size())) return {};
+	auto s = [&](size_t i, const char* expect, const char* fallback) -> std::string {
+		return i < _tables->translated().size() && _tables->translated()[i].find(expect) != std::string::npos ? _tables->translated()[i] : fallback;
+	};
+	const ron::sim::Leader& L = _game->leaders[size_t(me)];
+	switch (L.defeat_type) {
+		case 0: return s(1134, "conquered", "Your nation has been conquered!");
+		case 1: case 2: return s(1136, "capital", "You lost your capital!");
+		case 5:
+			for (const ron::sim::Leader& W : _game->leaders) {
+				if (!(W.flags & 0x20)) continue;
+				switch (W.victory_type) {
+					case 1: return s(1180, "wonder", "You lost to a wonder victory.");
+					case 2: return s(1182, "territory", "You lost to a territory victory.");
+					case 3: return s(1183, "technology", "You lost to a technology victory.");
+					case 4: return s(1184, "score", "You lost to a score victory.");
+					case 5: return s(1185, "economic", "You lost to an economic victory.");
+					default: break;
+				}
+			}
+			return {};
+		case 8: return s(1189, "ARMAGEDDON", "ARMAGEDDON!");
+		default: return {};
 	}
 }
 
@@ -4264,6 +5088,10 @@ int main(int argc, const char* argv[]) {
 			int frame = 0;
 		};
 		std::vector<TimedCursor> timed_cursors, timed_looks;
+		float hover_x = NAN, hover_y = NAN;
+		int panel_flags = -1, help_level = 0;
+		bool streamlined = false;
+		std::vector<std::string> timed_keys;
 		struct TimedZoom {
 			int level = 5, frame = 0;
 		};
@@ -4414,6 +5242,16 @@ int main(int argc, const char* argv[]) {
 				TimedZoom t;
 				std::sscanf(argv[++i], "%d@%d", &t.level, &t.frame);
 				timed_zooms.push_back(t);
+			} else if (a == "--hover" && more) {  // X,Y: the mouse at that UI pixel, mouse-over help shown
+				std::sscanf(argv[++i], "%f,%f", &hover_x, &hover_y);
+			} else if (a == "--panels" && more) {  // resource panel flags: 1 market, 2 resources, 4 infrastructure
+				panel_flags = std::atoi(argv[++i]);
+			} else if (a == "--streamlined") {
+				streamlined = true;
+			} else if (a == "--help-level" && more) {
+				help_level = std::atoi(argv[++i]);
+			} else if (a == "--key" && more) {  // "KEYS@FRAME" (e.g. "Alt+M@10"): a hotkey as the key map resolves it
+				timed_keys.push_back(argv[++i]);
 			} else if (a == "--script-log") {
 				script_log = true;
 			} else if ((a == "--select" || a == "--select-build") && more) {
@@ -4516,6 +5354,8 @@ int main(int argc, const char* argv[]) {
 		r.hudOn = r.hudOn && hud_on;
 		[r setUiWidth:w height:h scale:ui_scale];  // the UI the scripts query before any frame is drawn
 		[r setScriptLog:script_log];
+		[r setPanels:panel_flags streamlined:streamlined help:help_level];
+		if (!std::isnan(hover_x)) [r setHoverX:hover_x y:hover_y];
 		if (const char* t = getenv("RON_POPUP_TEST")) [r testPopup:t];
 		if (const char* t = getenv("RON_GAME_MENU")) [r openGameMenu:std::atoi(t)];  // 1 the game menu, 2 game over
 		if (play >= 0) [r setLocalPlayer:play];
@@ -4559,6 +5399,10 @@ int main(int argc, const char* argv[]) {
 			}
 			for (const TimedZoom& t : timed_zooms) {
 				if (t.frame == f) r.zoom = t.level;
+			}
+			for (const std::string& k : timed_keys) {
+				const size_t at = k.find('@');
+				if ((at == std::string::npos ? 0 : std::atoi(k.c_str() + at + 1)) == f) [r runKeyString:k.substr(0, at)];
 			}
 			if (f < sim_frames) [r stepSimulation:1];
 		}

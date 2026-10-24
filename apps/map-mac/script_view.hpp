@@ -15,6 +15,7 @@
 #include "assets/files.hpp"
 #include "assets/iface_layout.hpp"
 #include "hud.hpp"
+#include "notices.hpp"
 #include "sim/script_ui.hpp"
 #include "ui.hpp"
 
@@ -61,6 +62,12 @@ public:
 	// game-over line) after a save is loaded, and makes the event cursor skip the queue the loaded game carries so its
 	// old sounds and messages do not play again. The current instruction line is kept from the saved queue.
 	void reset(const ron::sim::ScriptPresentation* p);
+	// A message / banner the simulation caused (notices.hpp), with its minimap ping and sound.
+	void post(const notices::Note& n, const Env& env, const Callbacks& cb);
+	// Space (OPTION_NEXT_MESSAGE): the location of the next located message, newest first; false when there is none.
+	bool next_event(float& x, float& y);
+	// The minimap ping styles (default, attack, wonder, citylost, citywon, waypoint, resource) with their art paths.
+	std::vector<hud::PingStyle>& ping_styles() { return ping_styles_; }
 	// Game over from the simulation's event log (victory / defeat of the local leader): the AnimNotice, YOU_WIN /
 	// YOU_LOSE and the game-over line.
 	void game_over(bool won, const std::string& message, const Env& env, const Callbacks& cb);
@@ -135,7 +142,10 @@ private:
 	const ron::GameFiles* files_ = nullptr;
 	const ron::IfaceLayout* layout_ = nullptr;
 	const ron::XmlElement *rm_el_ = nullptr, *msg_el_ = nullptr, *popup_el_ = nullptr;
-	std::string arrow_tex_, ping_tex_;
+	std::string arrow_tex_;
+	std::vector<hud::PingStyle> ping_styles_;
+	std::vector<std::pair<float, float>> events_;  // located MessageWin events (add_event), oldest first
+	int next_event_ = -1;
 	int arrow_head_px_ = 18;
 	uint64_t last_seq_ = 0;
 	std::vector<Message> messages_;

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 #include "assets/xml.hpp"
 #include "sim/game.hpp"
@@ -54,9 +55,28 @@ bool View::init(const ron::GameFiles& files, const ron::IfaceLayout& layout, std
 			arrow_tex_ = ron::normalize_game_path(e.get("texture"));
 			arrow_head_px_ = e.get_int("tex_arrowhead", 18);
 		});
+		// EFFECTS/MINIMAP/PING styles, in the order notices::Note::ping indexes them.
+		static const char* order[7] = {"default", "attack", "wonder", "citylost", "citywon", "waypoint", "resource"};
+		ping_styles_.assign(7, hud::PingStyle());
 		ron::for_each_element(eg, "PING", [&](const ron::XmlElement& e) {
-			if (ron::to_lower(e.get("name")) != "default" || !ping_tex_.empty()) return;
-			if (const ron::XmlElement* ph = e.child("PHASE")) ping_tex_ = ron::normalize_game_path(ph->get("texture"));
+			const std::string name = ron::to_lower(e.get("name"));
+			for (int i = 0; i < 7; i++) {
+				if (name != order[i] || !ping_styles_[size_t(i)].phases.empty()) continue;
+				hud::PingStyle& st = ping_styles_[size_t(i)];
+				st.name = name;
+				st.rotates = e.get_int("rotates") != 0;
+				st.rotate_speed = e.get_float("rotate_speed");
+				for (const ron::XmlElement& ph : e.children) {
+					if (ph.name != "PHASE") continue;
+					hud::PingPhase p;
+					p.start = ph.get_float("start_pct", 1), p.end = ph.get_float("end_pct", 0);
+					p.color = uint32_t(std::strtoul(ph.get("color", "0xFFFFFFFF").c_str(), nullptr, 16));
+					p.usealpha = ph.get_int("usealpha") != 0, p.usescale = ph.get_int("usescale") != 0;
+					p.scaleby = ph.get_float("scaleby"), p.scalespeed = ph.get_float("scalespeed");
+					p.file = ron::normalize_game_path(ph.get("texture"));
+					st.phases.push_back(p);
+				}
+			}
 		});
 		const ron::XmlElement sg = ron::parse_xml(files.read_text("Data/soundglobals.xml"));
 		ron::for_each_element(sg, "GLOBAL", [&](const ron::XmlElement& e) {
@@ -115,6 +135,42 @@ void View::add_message(const std::string& text, uint32_t color, int ticks, const
 
 void View::say(const std::string& text, const Env& env) { add_message(text, 0xFFFFFFFF, kStdTicks, env); }
 
+// A message or banner the simulation caused (notices.hpp). MessageWin::add_message with a location also calls add_event: a
+// minimap ping of the note's style (a few 8-tick cycles), the ANNOUNCE_CIRCLE on the terrain and an entry Space jumps to.
+void View::post(const notices::Note& n, const Env& env, const Callbacks& cb) {
+	if (n.kind == notices::Note::Notice) {
+		notices_.push_back({n.image, n.text, env.ms});
+		return;
+	}
+	add_message(n.text, n.argb, n.ticks > 0 ? n.ticks : kStdTicks, env);
+	if (n.located) {
+		hud::Ping pg;
+		pg.x = n.x, pg.y = n.y;
+		pg.rgb[0] = pg.rgb[1] = pg.rgb[2] = 255;
+		pg.start_tick = env.tick;
+		pg.end_tick = env.tick + 8 * 6;
+		pg.flash = true, pg.square = false;
+		pg.style = std::clamp(n.ping, 0, int(ping_styles_.size()) - 1);
+		pings_.push_back(pg);
+		announces_.push_back({n.x, n.y, env.tick});
+		events_.push_back({n.x, n.y});
+		if (events_.size() > 200) events_.erase(events_.begin());
+	}
+	if (!n.sound.empty() && cb.play_effect) {
+		const std::string f = sound_file(n.sound.compare(0, 2, "S_") == 0 ? n.sound.substr(2) : n.sound);
+		if (!f.empty()) cb.play_effect(f);
+	}
+}
+
+// MessageWin::next_event @007e9190: the location of the next located event, newest first, wrapping.
+bool View::next_event(float& x, float& y) {
+	if (events_.empty()) return false;
+	next_event_ = (next_event_ + 1) % int(events_.size());
+	const auto& e = events_[events_.size() - 1 - size_t(next_event_)];
+	x = e.first, y = e.second;
+	return true;
+}
+
 void View::reset(const ScriptPresentation* p) {
 	messages_.clear();
 	instructions_.clear();
@@ -126,6 +182,8 @@ void View::reset(const ScriptPresentation* p) {
 	notices_.clear();
 	pings_.clear();
 	announces_.clear();
+	events_.clear();
+	next_event_ = -1;
 	marks_.clear();
 	popup_open_ = goals_open_ = false;
 	over_ = won_ = false;
@@ -200,6 +258,7 @@ void View::consume(const ScriptPresentation& p, const Env& env, const Callbacks&
 			pg.start_tick = env.tick;
 			pg.end_tick = env.tick + 180;  // ping_finish_frame = graphic_tick + 180
 			pg.flash = e.a != 0;
+			pg.style = 0;
 			pings_.push_back(pg);
 			announces_.push_back({float(e.x), float(e.y), env.tick});
 			if (cb.play_effect) {
@@ -437,7 +496,7 @@ void View::draw_messages(UiRenderer& ui, const Env& env, int x, int y) {
 // text), then the scenario message (print_msg: red plate, white text, scenario_duration ticks; -1 forever): centred,
 // width min(text, w / 2) + 1, top at 45 (100 with the mini library open; it is not drawn yet).
 void View::draw_top_centre(UiRenderer& ui, const ScriptPresentation* p, const Env& env) {
-	const int top = 45;
+	const int top = env.hud && env.hud_visible ? env.hud->feedback_top() : 45;  // 100 with the mini library expanded
 	auto box = [&](int f, const std::string& text, uint32_t plate, uint32_t shadow, int extra) {
 		const ron::FontMetrics* m = ui.font_metrics(f);
 		if (!m || text.empty()) return;

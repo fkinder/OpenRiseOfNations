@@ -48,6 +48,10 @@ struct Resources {
 	std::array<int, 6> stock{}, rate{};
 	int pop = 0, pop_cap = 0, cities = 0, city_limit = 0, commerce_cap = 0;
 	int age = 0;
+	// Market (IFaceResources::draw_market_area): prices in wealth per lot of 100 (buy / sell) by good, enabled with a market and
+	// the trade right. Infrastructure (draw_infra): workers / limit by good. over_cap: 0 under, 1 capped, 2 at the ceiling.
+	std::array<int, 6> buy{}, sell{}, workers{}, limit{}, over_cap{};
+	bool can_trade = false;
 };
 
 // A command-card entry (Options: option, object, grid slot).
@@ -68,13 +72,49 @@ struct Blip {
 	bool building = false;
 };
 
-// A minimap ping (Scene::add_ping / MessageWin::add_event, ui-spec 6.6): world point, the pinging leader's colour, the
-// graphic tick it started; the "default" EFFECTS/MINIMAP/PING phase and the owner-coloured square.
+// EFFECTS/MINIMAP/PING of effects_graphics.xml (WorldMap::init_texture_pings): a style is a list of PHASEs, each active while
+// end_pct <= p <= start_pct of the 8-tick cycle (p = (8 - t mod 8) / 8), drawing a 64 x 64 alpha mask.
+struct PingPhase {
+	float start = 1, end = 0;
+	uint32_t color = 0xFFFFFFFF;  // 0 = the event's colour
+	bool usealpha = true, usescale = false;
+	float scaleby = 0, scalespeed = 0;
+	std::string file, tex_id;  // the art path and its UiRenderer id (resolved by the caller)
+};
+struct PingStyle {
+	std::string name;
+	bool rotates = false;
+	float rotate_speed = 0;
+	std::vector<PingPhase> phases;
+};
+
+// A minimap ping (Scene::add_ping / MessageWin::add_event, ui-spec 6.6): world point, the colour, the graphic tick it
+// started; the style's phases (`flash`) and, for a player's PING, the owner-coloured square.
 struct Ping {
 	float x = 0, y = 0;
 	uint8_t rgb[3] = {255, 255, 255};
 	int start_tick = 0, end_tick = 0;
-	bool flash = true;
+	bool flash = true, square = true;
+	int style = 0;  // index into State::ping_styles
+};
+
+// A victory / elimination clock (IFaceMainBase::draw_game_timer, ui-spec 6.1): kind 0 wonder, 1 capital, 2 armageddon,
+// 3 territory, 4 peace, 5 time limit, 7 musical chairs; `frames` left (900 per minute); `who` the team colour of the owner
+// (-1 none); `count` the wonder points / armageddon count (-1 none).
+struct Timer {
+	int kind = 0, frames = 0, who = -1, count = -1;
+};
+
+// IFaceMiniLibrary: the next research of each library line, or the next age, with its progress (-1: not in production).
+struct MiniLibButton {
+	bool valid = false, enabled = false;
+	std::string tex_id;
+	int tex_col = 0, tex_row = 0, tex_x = -1, tex_y = -1;
+	int percent = -1;
+};
+struct MiniLib {
+	MiniLibButton cat[4], age;  // military, civic, commerce, science
+	int epoch[4] = {0, 0, 0, 0};
 };
 
 struct State {
@@ -99,10 +139,26 @@ struct State {
 	int hilite_option = -1, hilite_object = -1;
 	std::string highlight_tex;
 	std::vector<Ping> pings;
-	std::string ping_tex;  // the default ping's alpha mask (UiRenderer id), "" = squares only
+	std::vector<PingStyle> ping_styles;
+	bool has_territory = false;  // "MINIMAP_TERR" is registered (the border colours, fog resolution)
+	std::vector<Timer> timers;
+	MiniLib minilib;
+	int rare_columns = 0;  // columns of rare goods owned (MessageWin shifts right by 50 px per column)
 };
 
-enum class ActionKind { None, Option, MinimapLook, MinimapOrder, SelectIndex, QueueItem, Consumed };
+// What the mouse is over, for the mouse-over help (MouseOver: option, spots, buttons).
+enum class HoverKind { None, Option, SelObject, SelQueue, SelStat, SelHitPoints, Good, CommerceCap, PopCap, CityCap, MarketBuy,
+	                   MarketSell, ToggleMarket, ToggleResources, ToggleInfra, Infra, Caption, BarButton, MinimapButton, Display,
+	                   MiniLibCat, MiniLibToggle, Timer, Clock, Minimap };
+struct Hover {
+	HoverKind kind = HoverKind::None;
+	int a = -1, b = -1;       // Option: option, object. Good / Market / Infra: the good. BarButton: its index. SelStat: 0 attack 1 armor 2 range.
+	                          // SelObject / SelQueue: the index. MinimapButton / MiniLibCat: the button index. Timer: the kind.
+	bool operator==(const Hover& o) const { return kind == o.kind && a == o.a && b == o.b; }
+	bool operator!=(const Hover& o) const { return !(*this == o); }
+};
+
+enum class ActionKind { None, Option, MinimapLook, MinimapOrder, SelectIndex, QueueItem, Consumed, Buy, Sell, BarButton, MinimapButton, MiniLib };
 struct Action {
 	ActionKind kind = ActionKind::None;
 	int option = -1, object = -1, index = -1;
@@ -122,6 +178,21 @@ public:
 	Action mouse_drag(int x, int y, const State& s);
 	Action mouse_up(int x, int y, bool right, const State& s);
 	void mouse_move(int x, int y) { hover_x_ = x, hover_y_ = y; }
+	// Streamlined (collapsed) mode: the display button toggles it (OPTION_TOGGLE_IFACE_MAIN). opened: the full bar.
+	bool opened() const { return opened_; }
+	void set_opened(bool on);
+	// IFaceResources flags: bit 0 market, bit 1 resources, bit 2 infrastructure (OPTION_TOGGLE_IFACE_*).
+	int panel_flags() const { return res_flags_; }
+	void set_panel_flags(int f);
+	void toggle_panel(int bit);
+	bool minilib_open() const { return minilib_open_; }
+	void toggle_minilib() { minilib_open_ = !minilib_open_; }
+	// Where MessageWin's feedback / instructions line sits: top 45, or 100 with the mini library expanded.
+	int feedback_top() const { return minilib_open_ ? 100 : 45; }
+	// The tooltip target under (x, y) (None outside the interface) and a tick counter that restarts when it changes.
+	Hover hover_at(int x, int y, const State& s) const;
+	// The 9-slice scroll plate (IFaceRenderManager::draw_scroll) tinted `tint`.
+	void scroll_plate(ron::metal::UiRenderer& ui, ron::IfaceRect r, uint32_t tint) const;
 	int bar_top() const { return base_.t; }
 	// The resource panel's bottom edge (screen), MessageWin's anchor (resource panel height + 20).
 	int resource_bottom() const { return res_win_.b; }
@@ -131,6 +202,9 @@ public:
 	std::vector<std::pair<std::string, ron::IfaceRect>> named_rects() const;
 	// option_info: the OptionIndex whose ENGLISH_NAME matches (case-insensitive), -1 none (highlight_option).
 	int option_index(const std::string& english_name) const;
+	// options.xml: the NAME and DESC of an OptionIndex ("" when unknown).
+	std::string option_name(int option) const { return option >= 0 && size_t(option) < option_info_.size() ? option_info_[size_t(option)].name : std::string(); }
+	std::string option_desc(int option) const { return option >= 0 && size_t(option) < option_info_.size() ? option_info_[size_t(option)].desc : std::string(); }
 	// The piece of IFACEMAINBASE named `name` (AnimNotice icons from TEX_ALERTS), invalid when absent.
 	ron::IfacePiece base_piece(const std::string& name) const;
 
@@ -140,7 +214,7 @@ public:
 
 private:
 	struct OptionInfo {
-		std::string tex_id, name, english;
+		std::string tex_id, name, english, desc;
 		int col = 0, row = 0;
 	};
 	void draw_bar(ron::metal::UiRenderer& ui, const State& s);
@@ -149,6 +223,10 @@ private:
 	void draw_minimap(ron::metal::UiRenderer& ui, const State& s);
 	void draw_selected(ron::metal::UiRenderer& ui, const State& s);
 	void draw_options(ron::metal::UiRenderer& ui, const State& s);
+	void draw_market(ron::metal::UiRenderer& ui, const State& s);
+	void draw_infra(ron::metal::UiRenderer& ui, const State& s);
+	void draw_minilib(ron::metal::UiRenderer& ui, const State& s);
+	void draw_timers(ron::metal::UiRenderer& ui, const State& s);
 	void draw_icon_button(ron::metal::UiRenderer& ui, const std::string& tex_id, int col, int row, int tx, int ty, const ron::IfaceRect& r,
 	                      int factor, bool small);
 	void draw_health(ron::metal::UiRenderer& ui, const ron::IfaceRect& r, int hp, int max_hp, bool small);
@@ -170,6 +248,10 @@ private:
 	// Resource panel rects (window space).
 	int res_flags_ = 2;  // bit 0 market open, bit 1 resources open, bit 2 infra open (market and infra collapsed)
 	ron::IfaceRect market_rect_, resource_rect_, infra_rect_;
+	bool opened_ = true, minilib_open_ = true, has_sel_ = false;
+	ron::IfaceRect minilib_win_, toggle_rects_[4], minilib_buttons_[5], market_buttons_[2][4], infra_cells_[6];  // screen rects (set by draw)
+	const ron::XmlElement* ml_el_ = nullptr;
+	int pressed_market_ = -1;
 	int hover_x_ = -1, hover_y_ = -1;
 	bool minimap_drag_ = false;
 	int pressed_slot_ = -1;

@@ -63,6 +63,7 @@ bool Hud::init(const ron::GameFiles& files, const ron::IfaceLayout& layout, std:
 	mini_el_ = layout.find("IFACEMINIMAP");
 	rm_el_ = layout.find("IFACERENDERMANAGER");
 	btn_el_ = layout.find("IFACEBUTTONCLASS");
+	ml_el_ = layout.find("IFACEMINILIBRARY");
 	if (!base_el_ || !res_el_ || !sel_el_ || !opt_el_ || !mini_el_ || !rm_el_ || !btn_el_) {
 		error = "interface.xml lacks a HUD window";
 		return false;
@@ -76,10 +77,28 @@ bool Hud::init(const ron::GameFiles& files, const ron::IfaceLayout& layout, std:
 		o.row = e.get_int("tex_row");
 		if (const ron::XmlElement* n = e.child("NAME")) o.name = n->get("#text");
 		if (const ron::XmlElement* n = e.child("ENGLISH_NAME")) o.english = n->get("#text");
+		if (const ron::XmlElement* n = e.child("DESC")) o.desc = n->get("#text");
 		option_info_.push_back(o);
 	});
 	return true;
 }
+
+void Hud::set_opened(bool on) {
+	if (on == opened_) return;
+	opened_ = on;
+	ui_w_ = -1;  // relayout on the next layout() / draw()
+}
+
+void Hud::set_panel_flags(int f) {
+	f &= 7;
+	if (f == res_flags_) return;
+	res_flags_ = f;
+	ui_w_ = -1;
+}
+
+// OPTION_TOGGLE_IFACE_MARKET / _RESOURCES / _INFRA: market and infrastructure only count as open with the resources
+// ((flags & 3) == 3, (flags & 6) == 6); collapsing the resources hides both side toggles.
+void Hud::toggle_panel(int bit) { set_panel_flags(res_flags_ ^ (1 << bit)); }
 
 void Hud::layout(int w, int h) {
 	if (w == ui_w_ && h == ui_h_) return;
@@ -89,6 +108,14 @@ void Hud::layout(int w, int h) {
 	left_ = rect_in(*base_el_, "IFACERECT", "left_window", bw, bh).offset(base_.l, base_.t);
 	mid_ = rect_in(*base_el_, "IFACERECT", "mid_window", bw, bh).offset(base_.l, base_.t);
 	right_ = rect_in(*base_el_, "IFACERECT", "right_window", bw, bh).offset(base_.l, base_.t);
+	if (!opened_) {
+		// IFaceMainBase::update_visibility, streamlined: the minimap moves to the right end (against the display button), the
+		// right slot to x = 316 and 362 px wide.
+		const IfaceRect disp = rect_in(*base_el_, "BUTTON", "display", bw, bh).offset(base_.l, base_.t);
+		mid_ = mid_.offset(disp.l - mid_.r, 0);
+		const int rw = 362;
+		right_ = {left_.r, left_.r + rw, right_.t, right_.b};
+	}
 	bar_buttons_.clear();
 	for (const char* n : {"pause", "advanced_options", "ping", "diplo", "chat", "stats"}) {
 		bar_buttons_.push_back(rect_in(*base_el_, "BUTTON", n, bw, bh).offset(base_.l, base_.t));
@@ -131,7 +158,8 @@ void Hud::layout(int w, int h) {
 	market_rect_ = m[(f & 3) == 3];
 	resource_rect_ = rs[(f >> 1) & 1];
 	infra_rect_ = in[(f & 6) == 6];
-	res_win_ = unite(unite(market_rect_, resource_rect_), infra_rect_);
+	res_win_ = (f & 2) ? unite(unite(market_rect_, resource_rect_), infra_rect_) : resource_rect_;
+	if (ml_el_) minilib_win_ = ron::resolve_iface_rect(*ml_el_, w, h);
 }
 
 std::vector<std::pair<std::string, IfaceRect>> Hud::named_rects() const {
@@ -168,11 +196,14 @@ ron::IfacePiece Hud::base_piece(const std::string& name) const { return ron::ifa
 
 bool Hud::captures(int x, int y) const {
 	for (const IfaceRect* r : {&left_, &mid_, &right_, &display_btn_, &res_win_}) {
+		// Streamlined: the left and right slots exist only while the selection needs them.
+		if (!opened_ && (r == &left_ || r == &right_) && !has_sel_) continue;
 		if (r->contains(x, y)) return true;
 	}
-	for (const IfaceRect& r : bar_buttons_) {
-		if (r.contains(x, y)) return true;
+	for (size_t i = 0; i < bar_buttons_.size(); i++) {
+		if ((opened_ || i >= 6) && bar_buttons_[i].contains(x, y)) return true;
 	}
+	if (minilib_open_ ? minilib_win_.contains(x, y) : toggle_rects_[3].contains(x, y)) return true;
 	const IfaceRect cap = rect_in(*base_el_, "IFACERECT", "cap_area", base_.w(), base_.h());
 	if (cap.contains(x, y)) return true;
 	const int cx = (ui_w_ - 420) / 2;
@@ -247,6 +278,7 @@ void Hud::draw_health(UiRenderer& ui, const IfaceRect& r, int hp, int max_hp, bo
 void Hud::draw(UiRenderer& ui, const State& s) {
 	layout(ui.width(), ui.height());
 	ui.depth = 0;
+	has_sel_ = !s.selection.empty();
 	draw_bar(ui, s);
 	ui.next_window();
 	draw_minimap(ui, s);
@@ -258,39 +290,53 @@ void Hud::draw(UiRenderer& ui, const State& s) {
 	draw_top_strip(ui, s);
 	ui.next_window();
 	draw_resources(ui, s);
+	draw_minilib(ui, s);
+	draw_timers(ui, s);
 }
 
-// IFaceMainBase::on_redraw @00811600 (opened) and on_window_redraw @00811b60.
+// IFaceMainBase::on_redraw @00811600 and on_window_redraw @00811b60. Opened: the full bar. Streamlined: the bar only over the
+// left slot, no clock or bar buttons, the slots only with a selection, the minimap at the right end.
 void Hud::draw_bar(UiRenderer& ui, const State& s) {
 	const ron::XmlElement& b = *base_el_;
 	const int bw = base_.w(), bh = base_.h();
 	const bool card_visible = !s.selection.empty();
 	// Slot backgrounds: the left slot only when none of its panels shows, the right slot always (opened).
 	const IfacePiece back = ron::iface_find_piece(b, "back");
-	if (!card_visible) {
-		ui.tile(back, left_, kWhite, UiType::Normal);
-		ui.border(ron::iface_find_border(b, "back"), left_);
+	if (opened_) {
+		if (!card_visible) {
+			ui.tile(back, left_, kWhite, UiType::Normal);
+			ui.border(ron::iface_find_border(b, "back"), left_);
+		}
+		ui.tile(back, right_, kWhite, UiType::Normal);
 	}
-	ui.tile(back, right_, kWhite, UiType::Normal);
 	ui.next_layer();
-	// The bar across the top 34 px, then the clock.
-	ui.tile(ron::iface_find_piece(b, "bar"), {base_.l, base_.r, base_.t, base_.t + 34});
+	// The bar across the top 34 px (the whole width opened, the left slot when streamlined), then the clock.
+	if (opened_) ui.tile(ron::iface_find_piece(b, "bar"), {base_.l, base_.r, base_.t, base_.t + 34});
+	else if (card_visible) ui.tile(ron::iface_find_piece(b, "bar"), {base_.l, left_.r, base_.t, base_.t + 34});
 	ui.next_layer();
-	const IfaceRect timer = rect_in(b, "IFACERECT", "timer_area2", bw, bh).offset(base_.l, base_.t);
-	ui.add(ron::iface_find_piece(b, "time_back"), float(timer.l), float(timer.t), float(timer.w()), float(timer.h()), kWhite, UiType::Normal);
-	{
+	if (opened_) {
+		const IfaceRect timer = rect_in(b, "IFACERECT", "timer_area2", bw, bh).offset(base_.l, base_.t);
+		ui.add(ron::iface_find_piece(b, "time_back"), float(timer.l), float(timer.t), float(timer.w()), float(timer.h()), kWhite, UiType::Normal);
 		// draw_button_row_area: "<speed>: H:MM:SS", font clock_size, white with a 1,1 black shadow; blinks off while paused.
 		const int f = ui.font_tag("clock_size");
 		if (!(s.paused && (s.graphic_tick & 8))) ui.text_centered(f, std::string(s.paused ? "Paused" : "Normal") + ": " + clock_text(s.frame), timer, kWhite, kBlack);
 	}
-	// Frame edges (tile_random): left edge, bottom and right edges.
-	ui.tile(ron::iface_find_piece(b, "left_tile"), rect_in(b, "IFACERECT", "left_tile", bw, bh).offset(base_.l, base_.t));
-	for (int i = 0; i < 2; i++) {
-		ui.tile(ron::iface_find_piece(b, "right_tile", i), rect_in(b, "IFACERECT", "right_tile", bw, bh, i).offset(base_.l, base_.t));
+	// Frame edges (tile_random): opened: left edge, bottom and right edges. Streamlined: the left edge and a bottom edge under
+	// the left slot, and the end cap at its right edge, while the slot shows.
+	if (opened_) {
+		ui.tile(ron::iface_find_piece(b, "left_tile"), rect_in(b, "IFACERECT", "left_tile", bw, bh).offset(base_.l, base_.t));
+		for (int i = 0; i < 2; i++) {
+			ui.tile(ron::iface_find_piece(b, "right_tile", i), rect_in(b, "IFACERECT", "right_tile", bw, bh, i).offset(base_.l, base_.t));
+		}
+	} else if (card_visible) {
+		ui.tile(ron::iface_find_piece(b, "left_tile"), rect_in(b, "IFACERECT", "left_tile", bw, bh).offset(base_.l, base_.t));
+		ui.tile(ron::iface_find_piece(b, "left_tile_only"), rect_in(b, "IFACERECT", "left_tile_only", bw, bh).offset(base_.l, base_.t));
+		const IfacePiece cap = ron::iface_find_piece(b, "streamlined_end_cap");
+		ui.add(cap, float(right_.r - cap.width), float(base_.b - cap.height));
 	}
-	// Bar buttons: their tex at native size.
+	// Bar buttons: their tex at native size (opened only).
 	const char* names[6] = {"pause", "advanced_options", "ping", "diplo", "chat", "stats"};
-	for (int i = 0; i < 6; i++) {
+	for (int i = 0; i < 6 && opened_; i++) {
 		const ron::XmlElement* e = ron::iface_child(b, "BUTTON", names[i]);
 		if (!e) continue;
 		const ron::XmlElement* t = ron::iface_child(*e, "IFACETEX", "tex");
@@ -299,7 +345,7 @@ void Hud::draw_bar(UiRenderer& ui, const State& s) {
 	// The display (collapse) button: a vertical 3-slice with three arrows in the middle (on_button_redraw @00811020).
 	ui.vexpander(ron::iface_find_piece(b, "collapse_button_up0"), ron::iface_find_piece(b, "collapse_button_up1"),
 	             ron::iface_find_piece(b, "collapse_button_up2"), display_btn_);
-	const IfacePiece arrow = ron::iface_find_piece(b, "collapse_button_arrow_right");
+	const IfacePiece arrow = ron::iface_find_piece(b, opened_ ? "collapse_button_arrow_right" : "collapse_button_arrow_left");
 	const int ay = display_btn_.t + (display_btn_.h() - 3 * arrow.height - 4) / 2;
 	for (int k = 0; k < 3; k++) {
 		ui.add(arrow, float(display_btn_.l + (display_btn_.w() - arrow.width) / 2), float(ay + k * (arrow.height + 2)));
@@ -374,12 +420,17 @@ void Hud::draw_resources(UiRenderer& ui, const State& s) {
 		const int ay = rc.t + (rc.h() - 3 * a.height - 4) / 2;
 		for (int k = 0; k < 3; k++) ui.add(a, float(rc.l + (rc.w() - a.width) / 2), float(ay + k * (a.height + 2)));
 	};
-	// Market (collapsed: border and toggle; expanded: buy / sell rows are not wired yet).
-	ui.border(bd, {market_rect_.l + 1, market_rect_.r - 1, market_rect_.t + 1, market_rect_.b - 1});
-	{
-		IfaceRect b0 = rect_in(r, "IFACERECT", (res_flags_ & 3) == 3 ? "market_button_rect1" : "market_button_rect0", w, h);
+	// Market (collapsed: border and toggle; expanded: the buy / sell prices). Collapsing the resources hides both side sections.
+	toggle_rects_[0] = toggle_rects_[2] = IfaceRect{0, 0, 0, 0};
+	if (res_flags_ & 2) {
+		ui.border(bd, {market_rect_.l + 1, market_rect_.r - 1, market_rect_.t + 1, market_rect_.b - 1});
+		const bool open = (res_flags_ & 3) == 3;
+		IfaceRect b0 = rect_in(r, "IFACERECT", open ? "market_button_rect1" : "market_button_rect0", w, h);
 		b0.b = market_rect_.h() - b0.t;
-		vtoggle(b0.offset(market_rect_.l, market_rect_.t), (res_flags_ & 3) == 3);
+		toggle_rects_[0] = b0.offset(market_rect_.l, market_rect_.t);
+		vtoggle(toggle_rects_[0], open);
+		ui.next_layer();
+		if (open) draw_market(ui, s);
 	}
 	ui.next_layer();
 	// Resources (draw_resource_area @00818cc0).
@@ -390,19 +441,24 @@ void Hud::draw_resources(UiRenderer& ui, const State& s) {
 	const IfaceRect caprc = rect_in(r, "IFACERECT", "resource_cap_rect", w, h).offset(a.l, a.t);
 	ui.next_layer();
 	{
-		// draw_cap @00819370: plate, cap icon at height - 2, "+N" in green (N = min resource_cap / 16).
-		plate(caprc, kPlate);
+		// draw_cap @00819370: plate, cap icon at height - 2, "+N" in green (N = min resource_cap / 16); the box blinks red
+		// with black text while any good is over the cap.
+		bool over = false;
+		for (int v : s.res.over_cap) over = over || v != 0;
+		const bool flash = over && (s.graphic_tick & 8);
+		plate(caprc, flash ? kRed : kPlate);
 		ui.next_layer();
 		const IfacePiece icon = ron::iface_find_piece(r, "cap_tex");
 		const int ih = caprc.h() - 2, iw = icon.width * ih / std::max(1, icon.height);
 		ui.add(icon, float(caprc.l + 1), float(caprc.t + 1), float(iw), float(ih));
 		const std::string t = "+" + std::to_string(s.res.commerce_cap);
 		ui.write_digits(t, float(caprc.l + 1 + iw + (caprc.w() - 1 - iw - ui.digits_width(t, 0)) / 2),
-		                float(caprc.t + (caprc.h() - ui.digits_height(0)) / 2), kGreen, 0);
+		                float(caprc.t + (caprc.h() - ui.digits_height(0)) / 2), flash ? kBlack : kGreen, 0);
 	}
 	// The toggle button with its arrow.
 	{
 		const IfaceRect b = btn.offset(a.l, a.t);
+		toggle_rects_[1] = b;
 		ui.add(ron::iface_find_piece(r, "resource_button_tex"), float(b.l), float(b.t));
 		const IfacePiece arrow = ron::iface_find_piece(r, (res_flags_ & 2) ? "up_arrow_tex" : "down_arrow_tex");
 		ui.add(arrow, float(b.l + (b.w() - arrow.width) / 2), float(b.t + (b.h() - arrow.height) / 2));
@@ -415,31 +471,36 @@ void Hud::draw_resources(UiRenderer& ui, const State& s) {
 		const IfacePiece first = ron::iface_find_piece(r, "first_good_tex");
 		for (int i = 0; i < 6; i++) {
 			const int good = order[i];
-			// draw_resource @00818840: plate, icon (first_good_tex + 25 * good) at x + 1, stockpile at x + 29 in digit
-			// set 0, then "/" and "+rate" in grey.
+			// draw_resource @00818840: plate (YELLOW with black text, blinking, while over the cap), icon (first_good_tex + 25 *
+			// good) at x + 1, stockpile at x + 29 in digit set 0, then "/" and "+rate" in grey.
+			const bool capped = s.res.over_cap[size_t(good)] != 0 && (s.graphic_tick & 8);
 			ui.next_layer();
-			plate(row, kPlate);
+			plate(row, capped ? kYellow : kPlate);
 			ui.next_layer();
 			IfacePiece icon = first;
 			icon.left += (first.width + 4) * good;
 			ui.add(icon, float(row.l + 1), float(row.t + (row.h() - icon.height) / 2));
 			const int dy = row.t + (icon.height - ui.digits_height(0)) / 2 - 1;
 			int x = row.l + 1 + icon.width + 7;
-			x += ui.write_digits(std::to_string(s.res.stock[size_t(good)]), float(x), float(dy), kWhite, 0);
-			x += ui.write_digits("/", float(x), float(dy), kGrey, 0);
+			x += ui.write_digits(std::to_string(s.res.stock[size_t(good)]), float(x), float(dy), capped ? kBlack : kWhite, 0);
+			x += ui.write_digits("/", float(x), float(dy), capped ? kBlack : kGrey, 0);
 			const int rate = s.res.rate[size_t(good)];
-			ui.write_digits(rate > 0 ? "+" + std::to_string(rate) : std::to_string(rate), float(x), float(dy), kGrey, 0);
+			ui.write_digits(rate > 0 ? "+" + std::to_string(rate) : std::to_string(rate), float(x), float(dy), capped ? kBlack : kGrey, 0);
 			if (i < 5) hdivider(ui, row.l, row.b, row.w(), false);
 			row = row.offset(0, row.h() + 3);
 		}
 	}
 	ui.next_layer();
-	// Infrastructure (collapsed).
-	ui.border(bd, {infra_rect_.l + 1, infra_rect_.r - 1, infra_rect_.t + 1, infra_rect_.b - 1});
-	{
-		IfaceRect b0 = rect_in(r, "IFACERECT", (res_flags_ & 6) == 6 ? "infra_button_rect1" : "infra_button_rect0", w, h);
+	// Infrastructure (collapsed: border and toggle; expanded: the workers of each good).
+	if (res_flags_ & 2) {
+		ui.border(bd, {infra_rect_.l + 1, infra_rect_.r - 1, infra_rect_.t + 1, infra_rect_.b - 1});
+		const bool open = (res_flags_ & 6) == 6;
+		IfaceRect b0 = rect_in(r, "IFACERECT", open ? "infra_button_rect1" : "infra_button_rect0", w, h);
 		b0.b = infra_rect_.h() - b0.t;
-		vtoggle(b0.offset(infra_rect_.l, infra_rect_.t), (res_flags_ & 6) == 6);
+		toggle_rects_[2] = b0.offset(infra_rect_.l, infra_rect_.t);
+		vtoggle(toggle_rects_[2], open);
+		ui.next_layer();
+		if (open) draw_infra(ui, s);
 	}
 	ui.next_layer();
 }
@@ -460,6 +521,14 @@ void Hud::draw_minimap(UiRenderer& ui, const State& s) {
 		ui.add_quad("", xy, uv, rgb(40, 60, 40), UiType::Normal);
 	}
 	ui.next_layer();
+	if (s.has_territory) {
+		// WorldMap::render_borders: the border colours at fog resolution, alpha 0x50 inside and 0xC8 on the edges, under the fog.
+		if (const ron::metal::UiTexture* tt = ui.texture("MINIMAP_TERR")) {
+			const float uv[8] = {0, 0, float(tt->w), 0, float(tt->w), float(tt->h), 0, float(tt->h)};
+			ui.add_quad("MINIMAP_TERR", xy, uv, kWhite, UiType::Alpha);
+			ui.next_layer();
+		}
+	}
 	if (s.fog && s.fog_xs > 0) {
 		// The fog texture multiplies the map (fog-spec 9.4); texel centres at fog-cell centres.
 		const float fx = float(s.fog_xs), fy = float(s.fog_ys);
@@ -480,9 +549,10 @@ void Hud::draw_minimap(UiRenderer& ui, const State& s) {
 		}
 	}
 	ui.next_layer();
-	// Pings (WorldMap::render_ping @008ca6d0, ui-spec 6.6): the "default" PING phase of EFFECTS/MINIMAP (64 x 64 alpha mask,
-	// half-size 16 px x the usescale term, alpha a triangle wave over the 8-tick cycle) and the pinging player's square
-	// (half-size 16 * p in the owner's colour over a black shadow), for the ping's lifetime.
+	// Pings (WorldMap::render_ping @008ca6d0, ui-spec 6.6): each PHASE of the ping's style that is active at p = (8 - t mod 8) / 8
+	// draws its 64 x 64 alpha mask (half-size 16 px x the usescale term, alpha a triangle wave over the phase, rotated
+	// (1 - p) * 360 * rotate_speed degrees); a player's PING also gets a square of half-size 16 * p in its colour over a black
+	// shadow. Both last for the ping's lifetime.
 	for (const Ping& pg : s.pings) {
 		if (s.graphic_tick >= pg.end_tick) continue;
 		float x, y;
@@ -490,17 +560,27 @@ void Hud::draw_minimap(UiRenderer& ui, const State& s) {
 		const int t = s.graphic_tick - pg.start_tick;
 		const float p = float(8 - (t % 8)) / 8.0f;  // 1 .. 1/8
 		const uint32_t col = rgb(pg.rgb[0], pg.rgb[1], pg.rgb[2]);
-		if (!s.ping_tex.empty() && pg.flash) {
-			// scaleby 1, scalespeed 0.5: the size grows from 1x to 1.5x over the cycle; alpha 2 * (p or 1 - p).
-			const float hs = 16.0f * (1.0f + (1.0f - p) * 0.5f);
-			const float alpha = p > 0.5f ? 2 * (1 - p) : 2 * p;
-			const float xy[8] = {x - hs, y - hs, x + hs, y - hs, x + hs, y + hs, x - hs, y + hs};
-			const float uv[8] = {0, 0, 64, 0, 64, 64, 0, 64};
-			ui.add_quad(s.ping_tex, xy, uv, argb(int(std::clamp(alpha, 0.0f, 1.0f) * 255), 255, 255, 255), UiType::ColorAlphaMod);
+		if (pg.flash && size_t(pg.style) < s.ping_styles.size()) {
+			const PingStyle& st = s.ping_styles[size_t(pg.style)];
+			for (const PingPhase& ph : st.phases) {
+				if (ph.tex_id.empty() || p > ph.start + 1e-4f || p < ph.end - 1e-4f) continue;
+				const float q = ph.start > ph.end ? (p - ph.end) / (ph.start - ph.end) : 1.0f;
+				const float alpha = ph.usealpha ? (q > 0.5f ? 2 * (1 - q) : 2 * q) : 1.0f;
+				const float hs = 16.0f * (ph.usescale ? 1.0f + ph.scaleby * ph.scalespeed * (1.0f - p) : 1.0f);
+				const float ang = st.rotates ? (1.0f - p) * 2 * float(M_PI) * st.rotate_speed : 0.0f;
+				const float c = std::cos(ang) * hs, sn = std::sin(ang) * hs;
+				const float xy[8] = {x - c + sn, y - sn - c, x + c + sn, y + sn - c, x + c - sn, y + sn + c, x - c - sn, y - sn + c};
+				const float uv[8] = {0, 0, 64, 0, 64, 64, 0, 64};
+				const uint32_t base = ph.color ? ph.color : col;
+				ui.add_quad(ph.tex_id, xy, uv, argb(int(std::clamp(alpha, 0.0f, 1.0f) * 255), int((base >> 16) & 255), int((base >> 8) & 255), int(base & 255)),
+				            UiType::ColorAlphaMod);
+			}
 		}
-		const float h = std::max(1.0f, std::round(16.0f * p * 0.5f));
-		ui.fill(std::floor(x - h) + 1, std::floor(y - h) + 1, 2 * h, 2 * h, kBlack, UiType::Normal);
-		ui.fill(std::floor(x - h), std::floor(y - h), 2 * h, 2 * h, col, UiType::Normal);
+		if (pg.square) {
+			const float h = std::max(1.0f, std::round(16.0f * p * 0.5f));
+			ui.fill(std::floor(x - h) + 1, std::floor(y - h) + 1, 2 * h, 2 * h, kBlack, UiType::Normal);
+			ui.fill(std::floor(x - h), std::floor(y - h), 2 * h, 2 * h, col, UiType::Normal);
+		}
 	}
 	ui.next_layer();
 	// View rect (draw_view_rect @008c7f70): an axis-aligned white box between the main view's projected corners, kept
@@ -566,6 +646,47 @@ void Hud::draw_selected(UiRenderer& ui, const State& s) {
 	}
 	const Object& o = s.selection.front();
 	const int ox = sel_win_.l, oy = sel_win_.t;
+	if (!opened_) {
+		// Streamlined: only progress and queue (update_progress / update_queue with the *_streamlined rects); other objects get
+		// just their portrait and name.
+		const uint32_t team = rgb(o.rgb[0], o.rgb[1], o.rgb[2]);
+		if (o.building && (o.progress >= 0 || !o.queue.empty())) {
+			const int pct = o.progress >= 0 ? o.progress : o.queue.front().percent;
+			const std::string label = o.progress >= 0 ? "Construction " + std::to_string(pct) + "%"
+			                                          : o.queue.front().name + " " + std::to_string(pct) + "%";
+			const IfaceRect bar = rect_in(e, "IFACERECT", "progress_bar_streamlined", pw, ph).offset(ox, oy);
+			const IfacePiece p0 = ron::iface_find_piece(e, "progress_bar0"), p1 = ron::iface_find_piece(e, "progress_bar1");
+			const int done = bar.w() * pct / 100;
+			ui.add_sub(p0, 0, 0, float(done), float(p0.height), float(bar.l), float(bar.t), float(done), float(bar.h()));
+			ui.add_sub(p1, float(done), 0, float(bar.w() - done), float(p1.height), float(bar.l + done), float(bar.t), float(bar.w() - done), float(bar.h()));
+			const IfaceRect txt = rect_in(e, "IFACERECT", "progress_bar_text_streamlined", pw, ph).offset(ox, oy);
+			const int f = ui.font(12, ron::kFontBold);
+			if (const ron::FontMetrics* m = ui.font_metrics(f)) ui.text(f, label, float(txt.l), float(txt.b - m->font_height), 0xFFCFCFCF, kBlack);
+			for (size_t i = 0; i < o.queue.size() && i <= 10; i++) {
+				const IfaceRect qb = rect_in(e, "BUTTON", "queue_streamlined", pw, ph, int(i)).offset(ox, oy);
+				const QueueItem& q = o.queue[i];
+				draw_icon_button(ui, q.tex_id, q.tex_col, q.tex_row, q.tex_x, q.tex_y, qb, qb.contains(hover_x_, hover_y_) ? 0xa4 : 0x80, false);
+				ui.next_layer();
+				if (i == 0) ui.fill(float(qb.l), float(qb.t), float(qb.w() * q.percent / 100), float(qb.h()), argb(0x80, 0, 255, 0), UiType::ColorBlend);
+			}
+			const char* inf_name = o.repeat ? "infinite_queue_on_streamlined" : "infinite_queue_off_streamlined";
+			const ron::XmlElement* ib = ron::iface_child(e, "BUTTON", inf_name);
+			const ron::XmlElement* it = ib ? ron::iface_child(*ib, "IFACETEX", "tex") : nullptr;
+			if (it) {
+				const IfaceRect inf = rect_in(e, "BUTTON", inf_name, pw, ph).offset(ox, oy);
+				ui.add(ron::iface_piece(*it), float(inf.l), float(inf.t));
+			}
+		} else {
+			const IfaceRect obj = rect_in(e, "BUTTON", "object", pw, ph).offset(ox, oy + 14);
+			ui.fill(float(obj.l), float(obj.t - 14), float(obj.w()), 14, team, UiType::Normal);
+			ui.next_layer();
+			ui.text_centered(ui.font(12, ron::kFontBold), o.name, {obj.l, obj.r, obj.t - 14, obj.t}, kWhite, kBlack);
+			draw_icon_button(ui, o.tex_id, o.tex_col, o.tex_row, o.tex_x, o.tex_y, obj, 0x80, false);
+			ui.next_layer();
+			draw_health(ui, obj, o.hp, o.max_hp, false);
+		}
+		return;
+	}
 	// Frame: back tiled, misc_border borders, misc_tile rules, misc joints.
 	const IfaceRect main = rect_in(e, "IFACERECT", "main", pw, ph).offset(ox, oy);
 	ui.tile(ron::iface_find_piece(e, "back"), main, kWhite, UiType::Normal);
@@ -664,7 +785,7 @@ int Hud::queue_index_at(int x, int y, const State& s) const {
 	if (s.selection.size() != 1 || !s.selection.front().building) return -1;
 	const int pw = sel_win_.w(), ph = sel_win_.h();
 	for (size_t i = 0; i < s.selection.front().queue.size() && i <= 10; i++) {
-		if (rect_in(*sel_el_, "BUTTON", "queue", pw, ph, int(i)).offset(sel_win_.l, sel_win_.t).contains(x, y)) return int(i);
+		if (rect_in(*sel_el_, "BUTTON", opened_ ? "queue" : "queue_streamlined", pw, ph, int(i)).offset(sel_win_.l, sel_win_.t).contains(x, y)) return int(i);
 	}
 	return -1;
 }
@@ -764,6 +885,14 @@ Action Hud::mouse_down(int x, int y, bool right, const State& s) {
 		minimap_drag_ = !right;
 		return a;
 	}
+	pressed_market_ = -1;
+	if ((res_flags_ & 3) == 3 && !right) {
+		for (int side = 0; side < 2; side++) {
+			for (int i = 0; i < 4; i++) {
+				if (market_buttons_[side][i].contains(x, y)) pressed_market_ = side * 4 + i;
+			}
+		}
+	}
 	if (!s.selection.empty()) {
 		const int slot = card_slot_at(x, y);
 		if (slot >= 0) pressed_slot_ = slot;
@@ -792,6 +921,48 @@ Action Hud::mouse_up(int x, int y, bool right, const State& s) {
 		return a;
 	}
 	a.kind = ActionKind::Consumed;
+	if (!right) {
+		// Toggles (OPTION_TOGGLE_IFACE_*), the display button, the mini library tab, market prices, bar and minimap buttons.
+		if (res_flags_ & 2) {
+			if (toggle_rects_[0].contains(x, y)) return toggle_panel(0), a;
+			if (toggle_rects_[2].contains(x, y)) return toggle_panel(2), a;
+		}
+		if (toggle_rects_[1].contains(x, y)) return toggle_panel(1), a;
+		if (toggle_rects_[3].contains(x, y)) return toggle_minilib(), a;
+		if (display_btn_.contains(x, y)) return set_opened(!opened_), a;
+		if (minilib_open_) {
+			for (int i = 0; i < 5; i++) {
+				if (minilib_buttons_[i].contains(x, y)) {
+					a.kind = ActionKind::MiniLib, a.index = i;  // 0 the age, 1..4 military, civic, commerce, science
+					return a;
+				}
+			}
+		}
+		if (pressed_market_ >= 0) {
+			const int side = pressed_market_ / 4, i = pressed_market_ % 4;
+			pressed_market_ = -1;
+			if (market_buttons_[side][i].contains(x, y)) {
+				static const int goods[4] = {0, 1, 4, 5};
+				if (s.res.can_trade) a.kind = side == 0 ? ActionKind::Buy : ActionKind::Sell, a.object = goods[i];
+				return a;
+			}
+		}
+		for (size_t i = 0; i < bar_buttons_.size(); i++) {
+			if ((opened_ || i >= 6) && bar_buttons_[i].contains(x, y)) {
+				a.kind = ActionKind::BarButton, a.index = int(i);
+				return a;
+			}
+		}
+		int mi = 0;
+		for (const char* n : {"cycle_military", "cycle_general", "objectives", "cycle_peasant"}) {
+			const ron::XmlElement* e = ron::iface_child(*mini_el_, "BUTTON", n);
+			if (e && ron::resolve_iface_rect(*e, minimap_win_.w(), minimap_win_.h()).offset(minimap_win_.l, minimap_win_.t).contains(x, y)) {
+				a.kind = ActionKind::MinimapButton, a.index = mi;
+				return a;
+			}
+			mi++;
+		}
+	}
 	float wx, wy;
 	if (right && map_.contains(x, y) && minimap_to_world(x, y, s, wx, wy)) {
 		a.kind = ActionKind::MinimapOrder;
