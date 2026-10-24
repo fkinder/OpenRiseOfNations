@@ -5,7 +5,7 @@ top-level walk order (`WalkDataGame::walk_data`), checksum-part mapping · ✅ p
 `re/iface/datawalk.json`), **validated on real data**: the 10 `.SVX` saves of the original game and the saves embedded in 59
 `.rcx` replays all decode to the last byte with every section tag matching (§8). The description was reconstructed from this
 listing's own generated copy (`docs/state-walk.md`, via `re/tools/statewalk-to-json.mjs`) and corrected in four places by the
-real data (§8). · 🟡 reimplementation-side questions in §9.
+real data (§8). · ✅ **C++ interpreter** (`engine/sim/datawalk.*`, `ron-sav`): decodes the same 69 streams, recomputes all 134,499 - 210,209 verify-block Adler-32 values of each save and the 15 CHECK_SUMS parts (§8.1). · 🟡 reimplementation-side questions in §9.
 
 Deliverables:
 - `re/iface/datawalk.json`: every walk function as a list of steps (machine-readable; built by `node re/tools/savdump.mjs --build`
@@ -15,6 +15,9 @@ Deliverables:
   checkout the listing is the only committed copy of the description), and `--doc` of the rebuilt description gives the listing back byte for byte.
 - `re/tools/savdump.mjs`: a generic decoder that interprets the JSON (saves, the save embedded in a replay, the replay header,
   the rules block, or any single walk function at an offset).
+- `re/tools/datawalk-gen.mjs` → `engine/sim/datawalk_desc.inc` (generated, committed): the same description as a compact C++ table (expressions
+  compiled to a small bytecode, PDB field tables). `engine/sim/datawalk.{hpp,cpp}`: the C++17 interpreter (decode mode, checksum mode over a
+  `Provider`), `apps/sav/main.cpp` → `ron-sav` (§7, §8.1).
 - Helpers: `re/tools/pdbtypes.mjs` (class layouts straight from `rise.pdb`'s type stream, base classes included; Ghidra's
   import drops base classes for most game classes), `re/tools/walklabel.mjs` (section labels and tag bytes),
   `re/ghidra_scripts/DecompileWalk.java` (decompiles with a typed DataWalk vtable so the visitor calls keep their arguments).
@@ -264,6 +267,12 @@ padding bytes, which are hashed; the original allocates most objects zeroed).
 | 14 | scenario_data | `ScenarioData::walk_data` |
 | 15 | script_run_time | `RunTimeEnv::walk_data` |
 
+**Strings are hashed unless the walk guards them.** `String::walk_data` is `u32 curr_len` + `2 x len` bytes of characters, two `walk_function`
+calls like any other; under the `CheckSum` walker both are hashed (the verify entries of `tileset`, `forms`, `tribes`, `option_info`, `message_win`,
+`leaders_all`, ... do not match otherwise). The strings that CHECK_SUMS leaves out (`City` names, rules `Type` names, `TechType` alternate names,
+`GameInfo` players and paths, ...) sit inside explicit `if (checksum == 0)` branches of the walk. The earlier rule "tags skipped, strings
+skipped" is therefore only the effect of those guards on the rules block and the city list, not a property of the walker.
+
 Leader stride is 0x6eec (`leaders.list[0]` @e3a390). **Not in any part:** `game_random` (the RNG is never checksummed),
 the Game frame/tick block, Console, Camera, TurnControl, CommandManager, Armies, Forms, Heroes, Herds, Specials, Wonders,
 Forts, Docks, OilWells, Supplies, Caravans, Lands, Regions, Terrain (other than via World), Farms, GraphicEvents, Scene,
@@ -289,6 +298,16 @@ node re/tools/walklabel.mjs 0x4f24 | --hash "Game"     label offset → string a
 ```
 
 On a fresh checkout: `node re/tools/statewalk-to-json.mjs && node re/tools/savdump.mjs --build && node re/tools/savdump.mjs --check`.
+
+```
+node re/tools/datawalk-gen.mjs                         re/iface/datawalk.json (+ rise.pdb) → engine/sim/datawalk_desc.inc (deterministic, ~300 KB)
+./build/ron-sav <file.SVX|.rcx> [--summary] [--field Path] [--verify] [--checksums [--csv checksums.csv]] [--quiet]
+```
+
+`ron-sav` decodes a save or a replay's embedded save with the C++ interpreter (every section tag verified, to the last byte), prints a summary,
+single decoded fields by path (`game.frame`, `game.info.map_style`, `world.xs`, `leaders.list[3].score`: the first name is a global, then PDB
+members), recomputes every verify-block entry (`--verify`) and the 15 CHECK_SUMS parts (`--checksums`, which for a replay reads the first
+CHECK_SUMS from `re/oracle/out/checksums.csv` or `--csv`).
 
 `savdump` decodes in the loader's view and verifies every tag byte; it names raw bytes with the PDB layout of the
 context class. A tag mismatch or an implausible container length stops the decode and reports the byte offset and the
@@ -346,6 +365,58 @@ Tooling changes made along the way (all in `re/tools/savdump.mjs`): `rt()` value
 listing, `then:` chaining of `verify_save` after the walk, `pos` on `buf` items, `--summary`, and probing of the random-game-info
 entry count for scenario replays (the old header-player count failed on 2 of the 95 replays).
 
+### 8.1 The C++ interpreter on the same data (`ron-sav`)
+
+`engine/sim/datawalk.cpp` interprets `datawalk_desc.inc` (285 functions, 1,356 steps, 431 expressions, 123 globals, 457 PDB classes with 6,491 fields).
+Decode mode keeps one memory image per object (`Rec`: the raw ranges at their offsets, like the loader), the container headers, locals, heap
+buffers and strings; checksum mode walks the same steps, asking a `Provider` for the bytes and hashing them (Adler-32, tags skipped).
+`TreeProvider` replays a decoded tree, so a decoded save can be re-hashed. A recorded event is found again by (step number, call offset, index),
+so partial walks work (one leader, one list of objects, one cell).
+
+| Check | Result |
+|---|---|
+| Decode, 10 `.SVX` | all to the last byte, every tag matching (9,994 - 30,204 section tags per save), 0.1 - 0.2 s each |
+| Decode, 59 embedded saves in `.rcx` (45 MP `RoNMultiSave`, 14 SP `RoNSave`) | all decode; verify block complete; the embedded-save size equals the one `rcxdump --survey` located in 58 of 59 (the exception, `2026.03.15 22'01'45`, a truncated plain file whose header frame 353231 differs from the save frame 284305, is 10 bytes shorter: the scan end of that file is imprecise, the decode itself is exact) |
+| Verify block, 10 `.SVX` | **every entry matches**: 134,499 / 134,499 (6 saves), 134,585 (2), 210,153, 210,180, 210,209; that is all 73 subsystem entries + one per Good, Leader 0..8 and object list 0..8, and the per-cell families (WData, tdata, fog) |
+| Verify block, 59 embedded saves | every entry matches in all 59 (210,204 entries for the 45 MP saves, 210,135 / 134,499 / 134,585 / 210,153 / 210,180 for the SP ones) |
+
+Two things the first C++ run showed (both missing from the description, both now in the generator/interpreter):
+
+1. **Unguarded `String` steps are hashed** (§6 above). Skipping them made 10 verify entries wrong (tileset, forms, lands, leaders_all, tribes,
+   option_info, message_win, script_run_time, objects, check_leaders).
+2. **The metric byte of a `GatherPoint` list node is hashed as 0.** `PtrLinkListAbstract<GatherPoint,unsigned char>::walk_data` (@4708a0, decompiled in
+   this session) does `walk_function(node+0xc, node+0xd)` per node under both the SaveGame and the CheckSum walker, the stream holds 0 - 3 there, but
+   the verify hashes of every list with gather points (`builds`, `objects`, `object_list[0]`; the saves without gather points, at least two,
+   verified from the start) are reproduced only with that byte hashed as 0. Evidence: for `DO NOT DELETE.SVX` the Adler-32 of object list 0
+   differs from the stored value by exactly -1 in `a` and `(N - p)` x -1 in `b`, a single byte at the position of the only node's metric byte (stream
+   value 1); with the byte hashed as 0 all 9 lists of all 10 saves and all 59 replay saves match. The generator carries it as `HASH_AS_ZERO` (Raw step
+   `kind` 1). Why the live byte differs from the stream byte is unexplained (the walk code is identical for both walkers).
+3. `GameInfo::walk_data` hashes `flags & ~1` through a local that only exists in checksum mode (`flags_masked`, `save: u32(0x14) & 0xfffffffe`); the
+   stream has no copy, a replaying provider derives it from the image.
+
+CHECK_SUMS parts (`ron-sav <replay> --checksums`): the 15 parts computed from the **embedded save** of the 45 multiplayer save-based replays, against
+the first CHECK_SUMS row of the file (the tuple the players agree on; 2 of 2 players agree in all). The state behind the first row is the state at
+the first turn boundary after the save: the save frame S is the replay's header frame (and the first record frame), the first CHECK_SUMS is at record frame
+S + 7, computed at the start of the previous turn (S + 1, one simulation frame after the save), before that turn's packages. Parts whose input changes
+within a frame cannot match; the other parts match exactly.
+
+| Part | Matches | Reading |
+|---|---:|---|
+| rules | 45 / 45 | the save's rules block hashed with the checksum walker equals the recorded `rules` (as `rulesum.mjs` does for scratch replays) |
+| scenario_data, script_run_time | 45 / 45 | |
+| walls | 45 / 45 | no walls in any of the games (value 1) |
+| items | 45 / 45 | |
+| goods | 44 / 45 | |
+| cities | 43 / 45 | |
+| groups | 37 / 45 | |
+| ammo | 19 / 45 | equal when no ammo is in flight (value 1) or nothing moved |
+| deaths | 16 / 45 | death objects age every frame |
+| units, builds, guys, leaders, world | 0 / 45 | change every frame (animation frames, positions, income, fog); each of these walks reproduces the stored value of the same name in the verify block of the same state exactly, so the difference is the one frame between the save and the first row, not a wrong range |
+
+Parts matching per replay: 7 to 10 of 15 (most: 8 or 10). Across the 59 saves the five frame-sensitive parts are checked exactly through the
+verify block (`units`, `builds`, `guys`, `check_leaders`, `check_world` entries). Proving them against CHECK_SUMS needs the engine to simulate the
+frame (or a replay whose save frame is a turn boundary with a CHECK_SUMS on it; none in the corpus: first rows are always S + 7).
+
 ### What the saves are
 
 All ten are single-player-slot random-map games against AI (no scenario, no script, no mod). Setup block, values common to all ten:
@@ -371,7 +442,10 @@ generated map and therefore the cleanest oracle for the random-map generator; th
    accept that only the per-turn command replay, not CHECK_SUMS, is the oracle. **New:** every save carries 134,499 - 210,209
    reference Adler-32 values (§5 item 19) for the engine's state at the save frame: three families (world cell, tile, fog cell, 99.9 %
    of the entries) are plain stream bytes and match; the ~60 subsystem entries (Game, Constants, Leaders, Objects, ...) are the real test
-   of a checksum image and were *not* recomputed yet. The stream bytes of a raw range equal the hashed bytes whenever the range has no
+   of a checksum image. **Recomputed by the C++ interpreter (§8.1): all of them match in the 10 saves and the 59 embedded saves** once unguarded
+   strings are hashed and the GatherPoint metric byte is hashed as 0 (the only two places where the hashed bytes are not the stream bytes, plus the
+   `flags_masked` temporary). The checksum image an engine must provide is therefore the stream's content with exactly these exceptions; the
+   `Provider` interface of `datawalk.hpp` is the contract. The stream bytes of a raw range equal the hashed bytes whenever the range has no
    `checksum == 0` / `flags` condition around it, so a loader that keeps the loaded `[a, b)` images can be compared directly.
 4. **Abstract order bases** (`AirOrder`, `GroupOrder`, `PatrolOrder`) are described with offsets as if most-derived;
    only the derived orders are ever created, so this should not matter (all order types present in the corpus decode).
@@ -393,6 +467,14 @@ generated map and therefore the cleanest oracle for the random-map generator; th
 11. **Region-grid and tile mapping** of `World` (`reg_xs`, `tile_xs` = 4 x `xs`, `fog_xs` = 2 x `xs`) is stored as plain scalars; the
     meaning of each `tdata` u16 (a 16-bit terrain mask per tile) and of `WData.land_sub` is not spec'd here (docs/terrain-spec.md).
 
+12. **CHECK_SUMS against the state one frame later.** `units`, `builds`, `guys`, `leaders`, `world` (and partly `ammo`, `deaths`, `groups`, `goods`,
+    `cities`) of the embedded save cannot equal the first CHECK_SUMS of the replay (§8.1); the engine has to simulate the frame between to close
+    the loop. Everything else (`rules`, `scenario_data`, `script_run_time`, `walls`, `items`) already agrees.
+13. **The GatherPoint metric byte** (§8.1 item 2): hashed as 0, stored 0 - 3. A loader that rebuilds the list must restore the stored value, a
+    checksum image must expose 0 there (or ignore the byte).
+14. **Replay-header frame vs save frame.** In all 45 MP save-based replays the header frame equals the embedded save's frame (and the first record
+    frame); the one exception in the corpus, documented in docs/oracle-corpus.md (header 353231, save 284305), is an SP replay.
+
 ## Evidence
 
 | Function | Address | Used for |
@@ -410,6 +492,7 @@ generated map and therefore the cleanest oracle for the random-map generator; th
 | `ObjectsArray::get_data_type / get_new_data` | 475640 / 6450d0 | object type dispatch |
 | `Unit::walk_data`, `Unit / Object / SubObject::must_walk`, `Object::walk_data`, `SubObject::walk_data` | 60cf40, 60d040 / 647930 / 6623a0, 647830, 6621d0 | object walks; flag groups 2/4/8 |
 | `CommandManager::issue_check_sums`, `CheckSums::check_all / check_units / check_builds / check_walls / check_ammo / check_deaths / check_groups / check_guys / check_leaders / check_cities / check_items / check_goods / check_world` | 940770, 936560 / 9371d0 / 937290 / 937360 / 9374e0 / 936bb0 / 937530 / 937430 / 9375a0 / 937600 / 937790 / 937710 / 9375d0 | §6 |
+| `PtrLinkListAbstract<GatherPoint,unsigned char>::walk_data`, `BuildData::walk_data`, `CheckSums::check_builds` | 4708a0, 62f270, 937290 | the GatherPoint metric finding (§8.1); decompiled with `re/tools/ghidra-run.sh DecompileFunctions.java` |
 | every `*::walk_data` / `walk_rules_data` / `walk_*` | addresses in `re/iface/datawalk.json` | per-class walks |
 
 Decompiled sources: `re/decomp/state/` (all walk functions, typed DataWalk vtable; job `re/jobs/st_dc_all.txt`),
