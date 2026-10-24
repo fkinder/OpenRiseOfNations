@@ -4,6 +4,7 @@
 #include "sim/orders.hpp"
 #include "sim/production.hpp"
 
+#include "sim/aircraft.hpp"
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
 #include "sim/game.hpp"
@@ -351,7 +352,8 @@ void work(Game& g, Unit& u) {
 			const Object* t = g.object(act->whom, act->ox);
 			if (!t || t->uid != act->uid) {
 				if (act->type == kStrafe) {
-					act->ox = act->whom = -1;  // TODO: mark returning
+					act->ox = act->whom = -1;  // the strafe has no target: it flies home
+					act->returning = 1;
 				} else if (order_is_attack(act->type)) {
 					if (act == update_order(u)) {
 						act->ox = act->whom = -1;  // the attack handler retargets next frame
@@ -366,7 +368,8 @@ void work(Game& g, Unit& u) {
 			// TODO(orders-spec 5): TRADE_ROUTE second endpoint check.
 		}
 	}
-	// TODO(orders-spec 5): do_launch for carriers.
+	// A unit that carries aircraft (a carrier; airbases and silos launch from Build::process) lets one plane out.
+	if (u.inside_down >= 0 && can_carry_air(u)) do_launch(g, u);
 	if (u.safe) u.safe--;
 	if (type != kOrderNone) {
 		u.idle = 0;
@@ -430,9 +433,16 @@ int32_t do_job(Game& g, Unit& u, OrderType t, Order* o) {
 	case kCastSpell:
 		return do_cast(g, u, *o);  // Unit::do_cast @5ebfe0 (transport-spec 4)
 	case kSpecialAnim:
-		// Unit::do_spec_anim: the walk-out order of Unit::come_out is killed in the call that adds it; any other
-		// (none created yet) ends at once too. TODO(anims): timed special animations.
-		kill_current_order(g, u, false);
+		do_spec_anim(g, u, *o);  // Unit::do_spec_anim @5e5880 (aircraft-spec 6): landing, take-off, the walk-out
+		return 0;
+	case kStrafe:
+		do_strafe(g, u, *o);  // Unit::do_strafe @5eab00 (aircraft-spec 5)
+		return 0;
+	case kAirPatrol:
+		do_air_patrol(g, u, *o);  // Unit::do_air_patrol @5ea620
+		return 0;
+	case kAirAttackGround:
+		do_air_attack_ground(g, u, *o);  // Unit::do_air_attack_ground @5ea420
 		return 0;
 	case kChangeForm:
 		// TODO(orders-spec 6): do_form_change. Not created by the commands implemented so far.

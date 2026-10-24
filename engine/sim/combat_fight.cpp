@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "sim/aircraft.hpp"
 #include "sim/combat_internal.hpp"
 #include "sim/fog.hpp"
 #include "sim/garrison.hpp"
@@ -259,8 +260,8 @@ void ammo_init(Game& g, Ammo& a, const AmmoPackage& pkg, int32_t index, int32_t 
 		if (a.ox < 0 || a.whom < 0 || !T || !T->alive()) return;  // not activated: the slot stays free
 		if (T->is_unit && T->ptype->domain == kDomainAir && !(T->ptype->unit_flags & utflag::kHelicopter) &&
 		    !has_objmask(*T, objmask::kMissile)) {
-			// Anti-air rolls. TODO(air): is_flying_low is not simulated (always high here).
-			const bool low = false;
+			// Anti-air rolls: the target's band, the low one while it strafes / returns close to its target or base.
+			const bool low = unit_is_flying_low(g, static_cast<const Unit&>(*T));
 			if (has_objmask(*sh, objmask::kAntiAir)) {
 				if (sh->ptype->domain != kDomainAir) {
 					const int32_t r1 = g.rng.get(0, 0xffff) % 100;  // @67c079
@@ -332,7 +333,7 @@ void ammo_init(Game& g, Ammo& a, const AmmoPackage& pkg, int32_t index, int32_t 
 			if (T->is_unit && T->ptype->domain == kDomainAir) a.ez = target_z(*T);
 			a.ez = std::max(a.ez, 0);
 		}
-		// TODO(air): strafing shooters slide the impact point with the attack animation phase.
+		// ❓(air) strafing shooters slide the impact point with the attack animation phase (aircraft-spec 11: not decoded).
 	}
 	a.ex = std::clamp(a.ex, 0, g.world.xs * 768 - 1);
 	a.ey = std::clamp(a.ey, 0, g.world.ys * 768 - 1);

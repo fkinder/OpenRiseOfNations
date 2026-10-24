@@ -3,7 +3,7 @@
 // the GARRISON order and its handler, the GARRISON / EJECTALL group actions and Object::eject_contents / kill_contents.
 //
 // Transports (units carried by units: sim/transport.hpp) share the container links and the unit-source branch of
-// eject_contents; aircraft on airbases / carriers and missiles in silos are TODO(air).
+// eject_contents; aircraft on airbases / carriers and missiles in silos are sim/aircraft.hpp.
 #pragma once
 
 #include <cstdint>

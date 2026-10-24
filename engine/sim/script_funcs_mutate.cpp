@@ -6,11 +6,13 @@
 
 #include "script/bhs_stdlib.hpp"
 #include "sim/ai.hpp"
+#include "sim/aircraft.hpp"
 #include "sim/capture.hpp"
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
 #include "sim/fog.hpp"
 #include "sim/groups.hpp"
+#include "sim/guys.hpp"
 #include "sim/orders.hpp"
 #include "sim/placement.hpp"
 #include "sim/production.hpp"
@@ -482,11 +484,17 @@ void install_mutation_funcs(ScriptHost& h) {
 			group_add(g, grp, last, w, 0, 0);
 			add_named(last);
 			if (T.domain == kDomainAir && !(T.unit_flags & utflag::kHelicopter)) {
-				// TODO(air): Unit::add_strafe_order and the guy's flying height (terrain z + 1000).
-				if (Unit* u = unit_at(g, w, last)) clear_orders(g, *u);
-				h.todo_calls["create_unit: Unit::add_strafe_order"]++;
+				// A plane flies at once: a no-target STRAFE (nearest base) and the guy at terrain z + 1000.
+				if (Unit* u = unit_at(g, w, last)) {
+					clear_orders(g, *u);
+					add_strafe_order(g, *u, -1, -1, -1, -1, 1, kQueueNew, false);
+					Guy& gy = u->guys[0];
+					gy.z = gy.last_z = find_tcoord_z_at(g, u->x, u->y, 0) + 1000;
+				}
 			}
-			if (type_is(T, ptype::kCarrier)) h.todo_calls["create_unit: carrier aircraft"]++;  // TODO(air)
+			if (type_is(T, airtype::kCarrier, false)) {
+				if (Unit* u = unit_at(g, w, last)) carrier_new_wing(g, *u);  // action_unqueue(1) + limit x FIGHTERBOMBER
+			}
 		}
 		if (group_get_num(g, grp) == 0) return last;
 		if (T.domain == kDomainAir) return last;
@@ -497,6 +505,22 @@ void install_mutation_funcs(ScriptHost& h) {
 	};
 	def("create_unit", [&g, add_unit](NativeCall& c) {  // @9f4c50
 		return make_int(add_unit(c.arg_int(0), c.arg_int(1), c.arg_int(2), type_index(g, c.arg_str(3)), c.arg_int(4), false));
+	});
+	def("create_missile_and_target_build", [&g, add_unit](NativeCall& c) {  // @9f4fd0
+		const int32_t w = c.arg_int(0) - 1, tw = c.arg_int(4) - 1;
+		if (!live_leader(g, w) || !live_leader(g, tw)) return make_int(-1);
+		const int32_t t = type_index(g, c.arg_str(3));
+		if (t < 0 || !is_unit_type(t) || !(uint32_t(g.type(t).obj_masks) & 0x8000000u)) return make_int(-1);  // is_missile
+		if (!valid_build(g, tw, c.arg_int(5))) return make_int(-1);
+		if (!g.world.in_w(c.arg_int(1) >> 2, c.arg_int(2) >> 2)) return make_int(-1);
+		// add_unit(missile, 1) (indexed with the new unit's o), a mandatory STRAFE at the building (a missile turns it into
+		// an AIR_ATTACK_GROUND at the building's position) and one Unit::process (vslot 0x9c).
+		const int32_t o = add_unit(c.arg_int(0), c.arg_int(1), c.arg_int(2), t, 1, false);
+		if (Unit* u = unit_at(g, w, o)) {
+			add_strafe_order(g, *u, c.arg_int(5), tw, -1, -1, 1, kQueueNew, false);
+			unit_process(g, *u);
+		}
+		return make_int(1);
 	});
 	auto upgraded = [&g](NativeCall& c) {
 		const int32_t t = type_index(g, c.arg_str(3));

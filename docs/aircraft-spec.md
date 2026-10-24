@@ -266,6 +266,10 @@ S_UNIT_PLACEMENT_BLOCKED (own) and `vslot +0xd8` (refund), `mana_burn -= min(man
 
 ## 11. What the port needs
 
+> Ported 2026-10-24 (engine/sim/aircraft*.cpp); what the port found, where the exe differs from this spec (launch cadence 16 frames,
+> `queue_up` does not refuse, `vslot 8` = is_live_unit, the missile `is_in_range` sign, gather action 3) and what is left is in
+> docs/sim-implementation.md, section "Aircraft". The list below is the original work plan.
+
 Code with `TODO(air)` markers (all under `engine/sim/`): `combat_target.cpp:33` (`is_flying_high/low`, §7), `combat_fight.cpp:262,335` (AA bands; strafing impact slide ❓ not decoded: Guy anim phase),
 `combat_orders.cpp:223` (carrier strafes, §7) and `:905` (retarget a STRAFE in place), `queues.cpp:330` (`can_carry` silo filter), `:455/:463/:492` (gather: §8), `:708` (aircraft z at THECEO), `:930`
 (aircraft-housing buildings), `:953` (carrier wing, §2), `:966` (airbase limit, §2), `garrison.cpp:383` (helicopter on carrier, §6) and `:618` (`add_strafe_order` after eject), `build.cpp:468`

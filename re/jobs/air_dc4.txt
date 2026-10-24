@@ -1,0 +1,4 @@
+re/decomp/aircraft2
+ObjectsData::find
+ObjectsData::find_building
+Object::compare_target

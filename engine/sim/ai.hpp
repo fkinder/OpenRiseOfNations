@@ -152,6 +152,8 @@ void armies_update_city(Game& g, int32_t old_o, int32_t old_w, int32_t new_o, in
 void armies_city_closed(Game& g, int32_t who, int32_t city, int32_t city_o);  // City::close's army part
 // Search::valid_filter @67dbb0 for object (cw, co) (the cases the AI and the capture code pass; others pass).
 bool search_valid_filter(const Game& g, int32_t cw, int32_t co, int32_t f1, int32_t f2, int32_t filter);
+// Search::valid_search @67daa0: does leader `cand` pass the SearchIndexBH relation `s` to `who` (aircraft target scans).
+bool search_valid_search(const Game& g, int32_t cand, int32_t s, int32_t who);
 void calc_danger(Game& g);  // GameDaemon::calc_danger @732d10 (World.danger, every 200 frames)
 
 // ---------------------------------------------------------------- ai_unit.cpp

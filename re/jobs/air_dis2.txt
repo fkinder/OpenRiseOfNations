@@ -1,0 +1,13 @@
+re/decomp/aircraft/dis
+Unit::do_strafe
+Unit::do_air_patrol
+Unit::do_air_attack_ground
+Unit::find_new_air_target
+Unit::find_new_bomber_target
+Unit::add_strafe_order
+Unit::add_air_patrol_order
+Unit::kill_current_order
+Object::do_launch
+Unit::come_out
+Unit::do_attack
+Unit::process

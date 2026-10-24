@@ -3,6 +3,7 @@
 // remove_from_world, Objects::process_all / inc_time, Unit::process).
 #include <algorithm>
 
+#include "sim/aircraft.hpp"
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
 #include "sim/game.hpp"
@@ -464,7 +465,9 @@ void unit_process(Game& g, Unit& u) {
 	if (u.full) u.full--;
 	if (u.waiting) u.waiting--;
 	if (u.healing) u.healing--;
-	// 2. decoys, spell casters (Caster::process_spells, mana). TODO(frame-spec 9): aircraft fuel, carried production.
+	// 2. aircraft fuel and healing in a base (sim/aircraft.cpp); decoys, spell casters (Caster::process_spells, mana).
+	// TODO(frame-spec 9): the carrier's aircraft queue (Unit +0xa0).
+	unit_process_air(g, u);
 	if (!unit_process_casters(g, u)) return;
 	// 4.
 	process_healing(g, u);

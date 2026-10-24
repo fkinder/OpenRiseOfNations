@@ -537,6 +537,8 @@ bool search_valid_filter(const Game& g, int32_t cw, int32_t co, int32_t f1, int3
 	return valid_filter(g, cw, co, f1, f2, filter);
 }
 
+bool search_valid_search(const Game& g, int32_t cand, int32_t s, int32_t who) { return valid_search(g, cand, s, who); }
+
 int32_t objects_find_city(const Game& g, int32_t x, int32_t y, int32_t s, int32_t who, int32_t flags, int32_t filter,
                           int32_t f1, int32_t f2) {
 	const int16_t reg = (flags & 0x200) ? region_at(g, x, y) : int16_t(-1);

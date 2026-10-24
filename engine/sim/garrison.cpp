@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <vector>
 
+#include "sim/aircraft.hpp"
 #include "sim/ai.hpp"
 #include "sim/combat_internal.hpp"
 #include "sim/compass.hpp"
@@ -382,10 +383,17 @@ int32_t do_garrison(Game& g, Unit& u, Order& ord) {
 	const int32_t find = ord.find;
 	const uint8_t oflags = ord.flags;
 	Object* T = obj_at(g, ox, whom);
-	// 1. TODO(air): a helicopter ordered onto a carrier lands (can_carry -> STRAFE) or flies to it (MOVE_TO); aircraft
-	// are not simulated, so the order ends.
-	if ((u.ptype->unit_flags & utflag::kHelicopter) && T && T->alive() && T->ptype && type_is(*T->ptype, kTypeCarrier)) {
+	// 1. A helicopter ordered onto an airbase (the spec says carrier; the disassembly of @5e6b80 tests is(0x1bf)): it lands
+	// there (a STRAFE home with `returning` set) or, when the base cannot take it, walks up to it.
+	if ((u.ptype->unit_flags & utflag::kHelicopter) && ox >= 0 && whom >= 0 && T && T->ptype && type_is(*T->ptype, kTypeAirbase)) {
+		if (!can_carry_unit(g, *T, u.o, u.who)) {  // ("the airbase is full")
+			kill_current_order(g, u, false);
+			add_move_order(g, u, T->x, T->y, 1, false, kQueueFirst, false, -1, -1);
+			return 0;
+		}
 		kill_current_order(g, u, false);
+		add_strafe_order(g, u, -1, -1, ox, whom, 1, kQueueFirst, true);
+		if (Order* s = update_order(u)) s->returning = 1;
 		return 0;
 	}
 	// 2. a valid, active building of the unit's leader or a mutual ally, with a garrison limit and a type that fits.
@@ -615,9 +623,7 @@ void eject_contents(Game& g, Object& ob, int32_t kill_if_stuck, int32_t type, in
 					}
 				}
 			}
-			if (type_is(*bld.ptype, kTypeAirbase)) {
-				// TODO(air): add_strafe_order(-1, -1, -1, -1, 1, QUEUE_NEW, 0)
-			}
+			if (type_is(*bld.ptype, kTypeAirbase)) add_strafe_order(g, *u, -1, -1, -1, -1, 1, kQueueNew, false);  // it flies off
 		}
 		if (ob.is_unit) {
 			// From a unit (a transport barge; docs/transport-spec.md 7.1). (sound S_TRANSPORTUNLOAD when the carrier is on

@@ -3,6 +3,7 @@
 // Unit::come_out, unqueue and refunds, gather points, BUILDMASK, libraries, Unit::set_type, containment.
 #include <algorithm>
 
+#include "sim/aircraft.hpp"
 #include "sim/heroes.hpp"
 #include "sim/ai.hpp"
 #include "sim/combat.hpp"
@@ -335,7 +336,8 @@ void group_action_queue_up(Game& g, Group& gr, int32_t t, int32_t num) {
 			for (int16_t o : S) {
 				Build* b = bld(o);
 				if (!b || !b->alive() || !(b->flags & objflag::kActive)) continue;
-				// Missile silos skip unit types they cannot carry (ObjectData::can_carry, TODO(air)).
+				// Missile silos skip unit types they cannot carry (ObjectData::can_carry(TypeIndex)).
+				if (is_unit_type(t) && type_is(*b->ptype, airtype::kSilo, false) && !object_can_carry_type(g, *b, t)) continue;
 				build_queue_up(g, *b, t, 1);
 			}
 		}
@@ -458,9 +460,8 @@ bool build_gather_inside(const Build& b) {
 }
 
 void build_clear_gather(Game& g, Build& b) {
-	(void)g;
 	b.gather.clear();
-	// TODO(air): airbases send their based planes home / clear their orders.
+	if (type_is(*b.ptype, ptype::kAirbase)) airbase_gather_cleared(g, b);  // its planes go home / drop their orders
 }
 
 void build_add_gather_point(Game& g, Build& b, int32_t x, int32_t y, int32_t action, QueuePos q) {
@@ -468,7 +469,7 @@ void build_add_gather_point(Game& g, Build& b, int32_t x, int32_t y, int32_t act
 	GatherPoint p{x, y, uint8_t(action)};
 	if (q == kQueueLast) b.gather.push_back(p);  // add before the head, then head = head.next: the new tail
 	else b.gather.insert(b.gather.begin(), p);   // the new head
-	// TODO(air): airbases re-issue the patrols of their planes.
+	if (type_is(*b.ptype, ptype::kAirbase)) airbase_gather_added(g, b);  // its planes re-issue their patrols
 }
 
 void group_action_gather_point(Game& g, Group& gr, int32_t x, int32_t y, int32_t action, int32_t add_to_end) {
@@ -493,11 +494,18 @@ void group_action_gather_point(Game& g, Group& gr, int32_t x, int32_t y, int32_t
 	for (Build* b : members)
 		if (b && b->alive() && eligible(b) && build_gather_inside(*b)) q_last = false;
 	if (action == 3) {
-		for (Build* b : members) {
-			if (b && b->alive() && type_is(*b->ptype, ptype::kAirbase))
+		Group airbases;  // the airbases that took the point
+		group_clear(airbases, -1);
+		for (size_t i = 0; i < members.size(); i++) {
+			Build* b = members[i];
+			if (b && b->alive() && type_is(*b->ptype, ptype::kAirbase)) {
 				build_add_gather_point(g, *b, x, y, 3, q_last ? kQueueLast : kQueueNew);
+				group_add(g, airbases, b->o, gr.who, 0, 0);
+			}
 		}
-		// TODO(air): action_flight of the airbases' temporary group.
+		// action_flight(x, y, ATTACK, 0, 0, 0): the original passes the point's coordinates where the object (ox, whom)
+		// belongs, so it never finds a live target and does nothing. ❓ (aircraft-spec 8; the exe is what it is.)
+		if (airbases.num != 0) group_action_flight(g, airbases, x, y, kAttack, 0, 0, 0);
 	} else {
 		// (a group of cities pings a nearby woodcutter / mine: TODO(economy) find_building with FILTER_TYPE)
 	}
@@ -713,7 +721,14 @@ int32_t unit_come_out(Game& g, Unit& u0, int32_t param) {
 	}
 	// ---- E
 	unit_set_new_location(g, u, sx, sy, true, true);
-	// (THECEO position, aircraft z: TODO(air))
+	// (THECEO position: TODO.) An aircraft starts at the ground; a helicopter 500 above it.
+	if (T.domain == kDomainAir && !u.guys.empty()) {
+		guy_update_z(g, u, u.guys[0]);
+		if (T.unit_flags & utflag::kHelicopter) {
+			u.guys[0].z += 500;
+			u.guys[0].last_z = u.guys[0].z;
+		}
+	}
 	if (u.o_down >= 0) {
 		Unit* f = g.unit(who, u.o_down);
 		if (f && f->alive()) unit_come_out(g, *f, 1);
@@ -902,13 +917,17 @@ int32_t unit_come_out(Game& g, Unit& u0, int32_t param) {
 	}
 	// ---- H
 	if (from_bld && g.frame != 0) {
-		// Unit::add_spec_anim_order(1, gpiece, 0) + do_spec_anim: for a type-1 order not leaving an airbase the
-		// walk-out order is killed in the same call (do_spec_anim's frame test passes at once).
-		Order sa;
-		sa.type = kSpecialAnim;
-		sa.flags = orderflag::kExplicit;
-		add_order(g, u, sa, kQueueFirst);
-		kill_current_order(g, u, false);
+		// Unit::add_spec_anim_order(1, gpiece, 0) with the container's position and (o, who), then do_spec_anim: the walk-out
+		// order is killed in the same call, except that a plane leaving an airbase appears 0xc0 west of it (aircraft.cpp).
+		const Object* Xc = g.object(Xwho, X);
+		Order* sa = add_spec_anim_order(g, u, 1, Xwho, 0);
+		if (Xc) {
+			sa->sa_data3 = Xc->x;
+			sa->sa_data4 = Xc->y;
+			sa->ox = Xc->o;
+			sa->whom = Xc->who;
+		}
+		do_spec_anim(g, u, *sa);
 	}
 	(void)gpiece;
 	if ((u.unit_masks & umask::kAiControl) && !(T.unit_flags2 & 8) && u.type != ptype::kMerchant &&
@@ -935,11 +954,10 @@ int32_t build_train(Game& g, Build& b, int32_t t) {
 	if (unit_stance_type(*U.ptype) == build_stance_type(g, b.type)) unit_set_stance(g, U, b.stance);
 	unit_go_inside(g, U, b.o, who);
 	if (b.ptype->obj_masks & 0x200) {
-		// TODO(air): aircraft-housing buildings (airbase patrols, strafes, rebasing).
-		if (unit_is(g, U, ptype::kHelicopter) && unit_come_out(g, U, 0) != 0) {
-			object_die(g, U, 0, -1, 0.0f);
-			return -1;
-		}
+		// Aircraft-housing buildings: the airbase's gather points become patrols / strafes / rebasing (aircraft.cpp).
+		const int32_t r = build_train_air(g, b, U);
+		if (r == 1) return uo;
+		if (r == 2) return -1;
 	} else {
 		int32_t lim = get_garrison_limit(g, b.type, who);
 		if (lim == 0) lim = 10;
@@ -958,7 +976,7 @@ int32_t build_train(Game& g, Build& b, int32_t t) {
 		}
 	}
 	U.unit_masks &= ~umask::kMultimove;
-	// TODO(air): a new carrier comes with a full wing (init_unit of the fighter line, go_inside).
+	if (unit_is(g, U, ptype::kCarrier, true)) carrier_new_wing(g, U);  // a new carrier comes with a full wing
 	return uo;
 }
 
@@ -971,7 +989,10 @@ int32_t build_finished(Game& g, Build& b, int32_t t) {
 	if (trainable) {
 		if (l.pop_cap < g.type(t).control_cost + l.control) return 0;
 		if ((g.type(t).unit_flags2 & 8) && get_units(g, who, t, 0) >= get_caravan_limit(g, who, 0)) return -1;
-		// TODO(air): airbase aircraft limit.
+		// An airbase holds MAX_AIRCRAFT_PER_AIRBASE planes (helicopters are exempt): the item waits in the queue.
+		if (type_is(*b.ptype, ptype::kAirbase) && !(g.type(t).unit_flags & 0x20) &&
+		    num_aircraft_here(g, b, 0) >= num_aircraft_limit(g, b))
+			return -1;
 		build_train(g, b, t);
 		return 1;
 	}

@@ -1,0 +1,14 @@
+re/decomp/aircraft2
+Objects::find_units
+Objects::find_builds
+ObjectsData::find_units
+ObjectsData::find_builds
+ObjectsData::find_building_at
+Objects::find_building_at
+Object::fire_ammo
+Object::set_attack
+Unit::set_attack
+UnitData::set_attack
+WorldData::restrict
+Unit::do_work
+Unit::add_spec_anim_order

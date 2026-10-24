@@ -138,6 +138,20 @@ struct Order {
 	// started +0x1c, loaded +0x20, uid2 +0x24.
 	int32_t started = 0, loaded = 0;
 	uint16_t uid2 = 0xffff;
+
+	// AirOrder (STRAFE 16 at +0x24, AIR_PATROL 17 at +0x40, AIR_ATTACK_GROUND 24 at +0x14; aircraft-spec 3). The home base
+	// is `oxx` / `whose` above (a STRAFE / AIR_PATROL / AIR_ATTACK_GROUND has no GroupOrder, so the pair is free), the
+	// attack point of AIR_ATTACK_GROUND is `x` / `y`. `returning` is the "fly home" flag (check_fuel, land_plane).
+	int32_t cruising_alt = 0, sharp_turn = 0, old = 0, returning = 0;
+	// StrafeOrder +0x40 / +0x44: the last known position of the target (-1: none).
+	int32_t xx = -1, yy = -1;
+	// AirPatrolOrder (PatrolOrder): the x_pos / y_pos arrays (one pair per waypoint) and the current index (+0x3c).
+	std::vector<std::array<int32_t, 2>> wp;
+	int32_t wp_index = 0;
+	// SpecialAnimOrder (SPECIAL_ANIM, 0x2c; orders-spec 3.1): type +8 (0 landing: data3 / data4 = the base's o / who; 1 walk-out
+	// of a building: data3 / data4 = its position), started +0xc, frames +0x10, data1 +0x14 (gpiece), data2 +0x18, data3 +0x1c,
+	// data4 +0x20; ox / whom +0x24 / +0x28 are `ox` / `whom` above.
+	int32_t sa_type = 0, sa_started = 0, sa_frames = 0, sa_data1 = 0, sa_data2 = 0, sa_data3 = 0, sa_data4 = 0;
 };
 
 // UnitOrder virtual predicates (docs/orders-spec.md section 3.3).
@@ -176,6 +190,9 @@ struct Guy {
 	int16_t node_flags = 0, des_node_flags = 0;
 	uint16_t guy_flags = 0;
 	int8_t cur_anim = 0, stopped = 0, hold_attack = 0, whom = -1, queued_attack = 0, who = 0, guy_num = 0;
+	// Aircraft banking (GuyData +0x44 bank, +0x48 previous bank, +0x4c pitch, +0x50 previous pitch; aircraft-spec 4):
+	// Unit::bank_aircraft / pitch_aircraft keep them in single-precision floats and the heading and speed depend on them.
+	float bank = 0.0f, last_bank = 0.0f, pitch = 0.0f, last_pitch = 0.0f;
 };
 
 // ---------------------------------------------------------------- objects
@@ -202,6 +219,11 @@ struct Object {
 	int8_t inside_down_who = -1;  // ObjectData +0x3e: leader of inside_down (the first carried object)
 	int8_t mylos = 0;             // ObjectData +0x3c: LOS in tcoords, cached by update_los (fog-spec 4)
 	int8_t infiltrated = 0;       // ObjectData +0x3a: bit p = a spy of p infiltrated this building
+	// Aircraft containers (airbase, carrier, missile silo; aircraft-spec 8): Object +0x41 launch_timer (frames since the
+	// last launch, saturating at FRAMES_BETWEEN_LAUNCHES) and +0x44 the launch list (the `o` of the based aircraft that
+	// have an order and wait to leave, a set in insertion order).
+	int8_t launch_timer = 0;
+	std::vector<int32_t> launch_list;
 
 	bool alive() const { return (flags & objflag::kValid) != 0; }
 };

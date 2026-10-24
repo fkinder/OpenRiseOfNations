@@ -1,5 +1,6 @@
 #include "sim/commands.hpp"
 
+#include "sim/aircraft.hpp"
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
 #include "sim/game.hpp"
@@ -75,6 +76,26 @@ void CommandPackage::process(Game& g, const Command& c, int32_t play, int32_t pl
 	case Verb::Attack:
 		// process_attack -> Group::action_attack(ox, whom, mandatory 1, queued, ignore) (combat-spec 3.3.1)
 		if (group >= 0) group_action_attack(g, g.groups.g[size_t(group)], c.ox, c.whom, 1, QueuePos(c.queued), c.ignore);
+		return;
+	case Verb::AttackGround:  // process_attack_ground @9494a0 -> Group::action_attack_ground(x, y, queued)
+		if (group >= 0) group_action_attack_ground(g, g.groups.g[size_t(group)], c.x, c.y, QueuePos(c.queued));
+		return;
+	case Verb::Patrol:  // process_patrol @949380
+		if (group >= 0) group_action_patrol(g, g.groups.g[size_t(group)], c.x, c.y, QueuePos(c.queued));
+		return;
+	case Verb::LaunchPatrol:  // process_launch_patrol @949230
+		if (group >= 0)
+			group_action_launch_patrol(g, g.groups.g[size_t(group)], c.x, c.y, QueuePos(c.queued), c.shift, c.ctrl, c.alt);
+		return;
+	case Verb::Flight:  // process_flight @947db0 -> Group::action_flight(ox, whom, orders, shift, ctrl, alt)
+		if (group >= 0)
+			group_action_flight(g, g.groups.g[size_t(group)], c.ox, c.whom, c.orders, c.shift, c.ctrl, c.alt);
+		return;
+	case Verb::Recall:  // process_recall @947bd0
+		if (group >= 0) group_action_recall(g, g.groups.g[size_t(group)]);
+		return;
+	case Verb::Scramble:  // process_scramble @947ae0
+		if (group >= 0) group_action_scramble(g, g.groups.g[size_t(group)]);
 		return;
 	case Verb::SwarmAround: {
 		// process_swarm_around @949970: if whom < 0, ox < 0 or the target is alive.
@@ -188,10 +209,10 @@ void CommandPackage::process(Game& g, const Command& c, int32_t play, int32_t pl
 		return;
 	case Verb::Unqueue: {
 		// process_unqueue @9466f0: object (who, o) alive with the matching uid; buildings -> Build::action_unqueue.
-		// TODO(air): units -> Unit::action_unqueue (carrier aircraft).
 		Object* ob = g.object(c.who, c.ox);
-		if (!ob || !ob->alive() || ob->uid != c.uid || ob->is_unit) return;
-		build_action_unqueue(g, static_cast<Build&>(*ob), c.num);
+		if (!ob || !ob->alive() || ob->uid != c.uid) return;
+		if (ob->is_unit) unit_action_unqueue(g, static_cast<Unit&>(*ob));  // Unit::action_unqueue(1): a carrier's queue
+		else build_action_unqueue(g, static_cast<Build&>(*ob), c.num);
 		return;
 	}
 	}
@@ -259,6 +280,74 @@ bool CommandManager::issue_attack(const Game& g, const std::vector<int32_t>& obj
 	c.whom = whom;
 	c.ignore = ignore;
 	c.queued = int8_t(q);
+	local_.push_back(c);
+	return true;
+}
+
+bool CommandManager::issue_flight(const Game& g, const std::vector<int32_t>& objs, int32_t ox, int32_t whom, int32_t orders,
+                                  bool shift, bool ctrl, bool alt) {
+	if (!issue_group(g, objs)) return false;
+	Command c;
+	c.verb = Verb::Flight;
+	c.ox = ox;
+	c.whom = whom;
+	c.orders = int8_t(orders);
+	c.shift = shift ? 1 : 0;
+	c.ctrl = ctrl ? 1 : 0;
+	c.alt = alt ? 1 : 0;
+	local_.push_back(c);
+	return true;
+}
+
+bool CommandManager::issue_patrol(const Game& g, const std::vector<int32_t>& objs, int32_t x, int32_t y, QueuePos q) {
+	if (!issue_group(g, objs)) return false;
+	Command c;
+	c.verb = Verb::Patrol;
+	c.x = x;
+	c.y = y;
+	c.queued = int8_t(q);
+	local_.push_back(c);
+	return true;
+}
+
+bool CommandManager::issue_launch_patrol(const Game& g, const std::vector<int32_t>& objs, int32_t x, int32_t y, QueuePos q,
+                                         bool shift, bool ctrl, bool alt) {
+	if (!issue_group(g, objs)) return false;
+	Command c;
+	c.verb = Verb::LaunchPatrol;
+	c.x = x;
+	c.y = y;
+	c.queued = int8_t(q);
+	c.shift = shift ? 1 : 0;
+	c.ctrl = ctrl ? 1 : 0;
+	c.alt = alt ? 1 : 0;
+	local_.push_back(c);
+	return true;
+}
+
+bool CommandManager::issue_attack_ground(const Game& g, const std::vector<int32_t>& objs, int32_t x, int32_t y, QueuePos q) {
+	if (!issue_group(g, objs)) return false;
+	Command c;
+	c.verb = Verb::AttackGround;
+	c.x = x;
+	c.y = y;
+	c.queued = int8_t(q);
+	local_.push_back(c);
+	return true;
+}
+
+bool CommandManager::issue_recall(const Game& g, const std::vector<int32_t>& objs) {
+	if (!issue_group(g, objs)) return false;
+	Command c;
+	c.verb = Verb::Recall;
+	local_.push_back(c);
+	return true;
+}
+
+bool CommandManager::issue_scramble(const Game& g, const std::vector<int32_t>& objs) {
+	if (!issue_group(g, objs)) return false;
+	Command c;
+	c.verb = Verb::Scramble;
 	local_.push_back(c);
 	return true;
 }

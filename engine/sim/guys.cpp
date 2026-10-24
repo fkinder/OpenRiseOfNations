@@ -11,6 +11,7 @@
 // (g.anims, sim/anims.hpp). A null g.anims stands for "no art": nothing present, 3-frame animations, looping by
 // category (the original cannot run like that: "No Animation Packet").
 #include "sim/ai.hpp"
+#include "sim/aircraft.hpp"
 #include "sim/guys.hpp"
 
 #include <algorithm>
@@ -456,9 +457,11 @@ void unit_execute_events(Game& g, Unit& u) {
 	// @60edc0: alive (is_active = flags & 1), on the map and not UNIT2_HOLD_ANIM -> Guy::execute_events @5d99c0 for
 	// guys [0, guy_mark); otherwise only GraphicEvents::verify_load (render).
 	if (!u.alive() || !u.on_map() || (u.unit_masks2 & umask2::kHoldAnim)) return;
-	// Guy::execute_events @5d99c0 (combat_fight.cpp): release events fire projectiles. TODO(air): the aircraft
-	// carrier launch sequence (Unit.trench_angle +0x5c as a launch counter for is(0x15f) ships).
+	// Guy::execute_events @5d99c0 (combat_fight.cpp): release events fire projectiles. An aircraft carrier also runs its
+	// launch sequence (Unit.trench_angle +0x5c as the animation counter, the PLANERELEASE events; sim/aircraft.cpp).
+	const bool carrier = u.ptype->domain == kDomainSea && unit_is(g, u, 0x15f, true);
 	for (int32_t i = 0; i < u.guy_mark && size_t(i) < u.guys.size(); i++) {
+		if (carrier) carrier_launch_events(g, u, u.guys[size_t(i)]);
 		guy_execute_events(g, u, u.guys[size_t(i)]);
 		if (!u.alive()) return;
 	}

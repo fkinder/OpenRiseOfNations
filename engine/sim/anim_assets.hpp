@@ -32,6 +32,7 @@ public:
 	bool loops(int32_t piece, int32_t anim) const override;
 	bool track(int32_t piece, float* scale, float* offset_x, float* offset_y) const override;
 	const std::vector<ReleaseEvent>* release_events(int32_t piece) const override;
+	const std::vector<PlaneRelease>* plane_releases(int32_t piece) const override;
 	int32_t instant_hit(int32_t piece) const override;
 	bool no_release(int32_t piece) const override;
 	bool has_skeleton(int32_t piece) const override;
@@ -58,6 +59,7 @@ private:
 		float track_x = 0.0f, track_y = 0.0f;  // trackoffsetx / trackoffsety attributes
 		std::vector<int32_t> ids;  // AnimationPacket action_ids: UnitAnim -> animmgr entry (-1 none)
 		std::vector<ReleaseEvent> releases;  // <RELEASEEVENT> in file order
+		std::vector<PlaneRelease> planes;    // <PLANERELEASE> in file order
 		int32_t instant_hit = -1;            // <INSTANTHIT ammo>
 		bool no_release = false;             // <NORELEASE>
 		bool skeleton = false, scorch = false;  // the attributes name a <SKELETON> / <SCORCH>

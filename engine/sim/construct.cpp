@@ -4,6 +4,7 @@
 // Build::process, Wall::inc_time, Group::action_disband.
 #include <algorithm>
 
+#include "sim/aircraft.hpp"
 #include "sim/heroes.hpp"
 #include "sim/capture.hpp"
 #include "sim/combat.hpp"
@@ -714,7 +715,7 @@ void build_process(Game& g, Build& b) {
 	Leader& l = LD(g, who);
 	if (b.healing) b.healing--;
 	if (b.build_masks & bmask::kEjecting) build_process_ejection(g, b);  // Build::process_ejection @6201e0
-	// (HOLDS_AIR: Object::do_launch, TODO(air))
+	if (b.build_masks & bmask::kHoldsAir) do_launch(g, b);  // Object::do_launch @64f3b0 (sim/aircraft.cpp)
 	if (b.ptype->attack != 0) build_process_attack(g, b);
 	if (!b.alive()) return;
 	if (b.build_masks & bmask::kNeutralized) {

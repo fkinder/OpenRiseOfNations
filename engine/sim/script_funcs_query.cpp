@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "script/bhs_stdlib.hpp"
+#include "sim/aircraft.hpp"
 #include "sim/ai.hpp"
 #include "sim/combat.hpp"
 #include "sim/compass.hpp"
@@ -391,13 +392,15 @@ void install_query_funcs(ScriptHost& h) {
 		const int32_t w = c.arg_int(0) - 1, o = c.arg_int(1);
 		Object* ob = valid_object(g, w, o);
 		if (!ob) return make_int(-1);
-		return make_int(num_inside(g, *ob, 1));  // TODO(air): airbases count num_aircraft_here
+		if (valid_build(g, w, o) && can_carry_air(*ob)) return make_int(num_aircraft_here(g, *ob, 0));  // airbase, silo, carrier
+		return make_int(num_inside(g, *ob, 1));
 	});
 	def("building_full", [&g](NativeCall& c) {  // @9f2360: garrison limit <= num_inside(0)
 		Build* b = valid_build(g, c.arg_int(0) - 1, c.arg_int(1));
 		if (!b) return make_int(-1);
+		if (can_carry_air(*b)) return make_int(num_aircraft_limit(g, *b) <= num_aircraft_here(g, *b, 0) ? 1 : 0);
 		const int32_t lim = get_garrison_limit(g, b->type, b->who);
-		return make_int(lim <= num_inside(g, *b, 0) ? 1 : 0);  // TODO(air): can_carry(AIR) branch
+		return make_int(lim <= num_inside(g, *b, 0) ? 1 : 0);
 	});
 	def("object_visible", [&g](NativeCall& c) {  // @9f0a60: is_seen(who) of the building / the captain
 		const int32_t w = c.arg_int(0) - 1, whose = c.arg_int(1) - 1;

@@ -240,7 +240,7 @@ bool unit_process_casters(Game& g, Unit& u) {
 		return true;
 	}
 	if (!(t.unit_flags2 & 2)) {
-		// TODO(aircraft, frame-spec 9): the air unit mana / fuel bookkeeping of this step.
+		// (the air unit fuel / recharge / healing block is unit_process_air, called from unit_process)
 		return true;
 	}
 	if (valid_leader(u.who)) {

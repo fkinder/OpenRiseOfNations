@@ -5,6 +5,7 @@
 // directly, as the original does (no command queue); ScenarioData::ignore_orders, which the bodies force to 0 around
 // the action, is not modelled (groups.cpp TODO).
 #include "script/bhs_stdlib.hpp"
+#include "sim/aircraft.hpp"
 #include "sim/heroes.hpp"
 #include "sim/spells.hpp"
 #include "sim/combat.hpp"
@@ -203,7 +204,7 @@ void install_order_funcs(ScriptHost& h) {
 		set_group(g, w, o, -1);
 		return push_one(g, w, o);
 	};
-	def("unit_attack_order", [&g, &h, one](NativeCall& c) {  // @9f79e0
+	def("unit_attack_order", [&g, one](NativeCall& c) {  // @9f79e0
 		const int32_t w = c.arg_int(0) - 1, tw = c.arg_int(2) - 1, to = c.arg_int(3);
 		int32_t o = c.arg_int(1);
 		if (!active_unit_slot(g, w, o) || !valid_object(g, tw, to)) return make_int(-1);
@@ -213,7 +214,7 @@ void install_order_funcs(ScriptHost& h) {
 		Group& gr = one(w, o);
 		if (Build* tb = build_at(g, tw, to)) tb->ever_seen = uint8_t(tb->ever_seen | (1u << w));
 		if (is_plane_unit(*u) || (uint32_t(u->ptype->obj_masks) & 0x8000000u)) {
-			h.todo_calls["unit_attack_order: Group::action_flight"]++;  // TODO(air)
+			group_action_flight(g, gr, to, tw, kAttack, 0, 0, 0);
 			return make_int(1);
 		}
 		group_action_attack(g, gr, to, tw, 1, kQueueNew, 0);
@@ -252,13 +253,13 @@ void install_order_funcs(ScriptHost& h) {
 		return ground_one(c, "unit_attack_ground_order: Group::action_attack_ground");
 	});
 	def("unit_patrol_order", [ground_one](NativeCall& c) { return ground_one(c, "unit_patrol_order: Group::action_patrol"); });
-	def("unit_clear_orders", [&g, &h](NativeCall& c) {  // @9f77e0
+	def("unit_clear_orders", [&g](NativeCall& c) {  // @9f77e0
 		const int32_t w = c.arg_int(0) - 1, o = c.arg_int(1);
 		if (!active_unit_slot(g, w, o) || !valid_unit(g, w, o)) return make_int(-1);
 		set_group(g, w, o, -1);
 		Unit* u = unit_at(g, w, o);
 		clear_orders(g, *u);
-		if (is_plane_unit(*u)) h.todo_calls["unit_clear_orders: Unit::add_strafe_order"]++;  // TODO(air)
+		if (is_plane_unit(*u)) add_strafe_order(g, *u, -1, -1, -1, -1, 1, kQueueNew, false);  // back to its nearest base
 		return make_int(1);
 	});
 	def("unit_stance_order", [&g](NativeCall& c) {  // @9f9e50 (o < 0: every captain of the leader)
@@ -310,24 +311,25 @@ void install_order_funcs(ScriptHost& h) {
 		if (u->cara >= 0 && size_t(u->cara) < L.heroes.size()) caster_process_spells(g, L.heroes[size_t(u->cara)], o, w, true);
 		return make_int(1);
 	});
-	def("air_unit_transfer_order", [&g, &h](NativeCall& c) {  // @9f8720
-		const int32_t w = c.arg_int(0) - 1;
-		if (!valid_unit(g, w, c.arg_int(1)) || !valid_build(g, w, c.arg_int(2))) return make_int(-1);
-		// ObjectData::can_carry(AIR), num_aircraft_here < num_aircraft_limit, then strafe + Group::action_flight.
-		h.todo_calls["air_unit_transfer_order: aircraft"]++;  // TODO(air): airbases and flights are not ported
-		return make_int(-1);
+	def("air_unit_transfer_order", [&g](NativeCall& c) {  // @9f8720
+		const int32_t w = c.arg_int(0) - 1, o = c.arg_int(1), bo = c.arg_int(2);
+		if (!valid_unit(g, w, o) || !valid_build(g, w, bo)) return make_int(-1);
+		const Object* B = g.object(w, bo);
+		if (!can_carry_air(*B)) return make_int(-1);
+		if (num_aircraft_here(g, *B, 0) >= num_aircraft_limit(g, *B)) return make_int(0);
+		Unit* u = unit_at(g, w, o);
+		set_group(g, w, o, -1);
+		clear_orders(g, *u);
+		add_strafe_order(g, *u, -1, -1, -1, -1, 1, kQueueNew, false);
+		Group tmp;
+		group_clear(tmp, -1);
+		tmp.id = -1;
+		group_add(g, tmp, o, w, 0, 0);
+		const int32_t slot = groups_push_group(g, w, tmp, 1);
+		group_action_flight(g, g.groups.g[size_t(slot)], bo, w, kMoveTo, 0, 0, 0);  // (ignore_orders is off for the call)
+		return make_int(1);
 	});
-	def("create_missile_and_target_build", [&g, &h](NativeCall& c) {  // @9f4fd0
-		const int32_t w = c.arg_int(0) - 1, tw = c.arg_int(4) - 1;
-		if (!live_leader(g, w) || !live_leader(g, tw)) return make_int(-1);
-		const int32_t t = type_index(g, c.arg_str(3));
-		if (t < 0 || !is_unit_type(t) || !(uint32_t(g.type(t).obj_masks) & 0x8000000u)) return make_int(-1);  // is_missile
-		if (!valid_build(g, tw, c.arg_int(5))) return make_int(-1);
-		if (!g.world.in_w(c.arg_int(1) >> 2, c.arg_int(2) >> 2)) return make_int(-1);
-		// add_unit(missile, 1) + Unit::add_strafe_order(target) + launch (vfunc +0x9c).
-		h.todo_calls["create_missile_and_target_build: missiles"]++;  // TODO(air): missiles are not ported
-		return make_int(-1);
-	});
+	// create_missile_and_target_build @9f4fd0 is in script_funcs_mutate.cpp (it needs add_unit).
 	def("get_conquest_invasion_dir", [&g, &h](NativeCall&) {  // @9e5ef0: CTW only
 		if (!g.ctw) return make_int(-1);
 		h.todo_calls["get_conquest_invasion_dir: ConquestGame"]++;  // TODO(ctw): the strategic map

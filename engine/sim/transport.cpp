@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <vector>
 
+#include "sim/aircraft.hpp"
 #include "sim/combat_internal.hpp"
 #include "sim/compass.hpp"
 #include "sim/garrison.hpp"
@@ -138,8 +139,8 @@ bool can_carry_unit(const Game& g, const Object& carrier, int32_t o, int32_t who
 		if (type_is(*carrier.ptype, kTypeCarrier)) return false;
 		return cargo_inside(g, carrier) + cargo->ptype->carry_size < carrier.ptype->carry;
 	}
-	// TODO(air): aircraft cargo (airbases, carriers, missile silos: home_base, num_aircraft_here / limit).
-	return false;
+	// Aircraft cargo: airbases, carriers and missile silos (sim/aircraft.cpp).
+	return air_can_carry(g, carrier, o, who);
 }
 
 bool unit_is_caravan(const Unit& u) { return u.ptype && (u.ptype->unit_flags2 & utflag2::kCaravan) != 0; }

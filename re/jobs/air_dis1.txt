@@ -1,0 +1,7 @@
+re/decomp/aircraft/dis
+Unit::check_fuel
+Unit::bank_aircraft
+Unit::pitch_aircraft
+Unit::air_turn_speed
+Unit::land_plane
+Unit::do_air_physics

@@ -153,6 +153,18 @@ AssetAnimSource::AssetAnimSource(const GameFiles& files, const Rules& rules) : f
 					ev.resolved = it != ammo_by_name.end();
 					ev.node = c.get_int("node", 0);
 					art.releases.push_back(ev);
+				} else if (c.name == "PLANERELEASE") {
+					// event type 5 (the carrier's launch); the frame conversion is the release events'.
+					const std::string an = upper(c.get("anim"));
+					int32_t idx = 0;
+					while (idx < kNumUnitAnims && an != kUnitAnimNames[idx]) idx++;
+					if (idx == kNumUnitAnims) continue;
+					PlaneRelease pr;
+					pr.anim = idx;
+					pr.frame = std::max(1, int32_t(uint16_t(c.get_int("starttime", 0))) / 67);
+					pr.node = c.get_int("node", 0);
+					pr.angle = c.get_int("angle", 0);
+					art.planes.push_back(pr);
 				} else if (c.name == "INSTANTHIT") {
 					auto it = ammo_by_name.find(upper(c.get("ammo")));
 					art.instant_hit = it == ammo_by_name.end() ? 0 : it->second;
@@ -339,6 +351,11 @@ bool AssetAnimSource::track(int32_t piece, float* scale, float* offset_x, float*
 const std::vector<ReleaseEvent>* AssetAnimSource::release_events(int32_t piece) const {
 	const UnitArt* a = art(piece);
 	return a && a->model_ok && !a->releases.empty() ? &a->releases : nullptr;
+}
+
+const std::vector<PlaneRelease>* AssetAnimSource::plane_releases(int32_t piece) const {
+	const UnitArt* a = art(piece);
+	return a && a->model_ok && !a->planes.empty() ? &a->planes : nullptr;
 }
 
 int32_t AssetAnimSource::instant_hit(int32_t piece) const {

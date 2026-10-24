@@ -20,6 +20,8 @@ class Game;
 enum class Verb : uint8_t {
 	Group = 0, Stance = 2, Form = 3, Attack = 4, SwarmAround = 6, MoveTo = 7, Halt = 12, Transport = 13, SetTransport = 14,
 	BoardShip = 15, Disband = 21, GatherPoint = 22, Spell = 23,
+	// aircraft (docs/aircraft-spec.md section 8)
+	AttackGround = 9, Patrol = 10, LaunchPatrol = 11, Flight = 28, Recall = 35, Scramble = 36,
 	QueueUp = 24, Build = 25, BuildMask = 33, Unqueue = 48,
 	// economy (docs/economy-spec.md section 11)
 	Trade = 17, CityGather = 18, Gather = 19, Garrison = 20, EjectAll = 26, ClearTributes = 39, Accept = 41, Reject = 42, Tribute = 43,
@@ -59,6 +61,9 @@ struct Command {
 	// GARRISON (13): i32 ox, i32 whom, queued (ox / whom / queued above). EJECTALL (17): i32 back_to_work, i32 who,
 	// i32 eject_o, i32 eject_who (`who` above; who < 0 = the group's own contents).
 	int32_t back_to_work = 0, eject_o = -1, eject_who = -1;
+	// ATTACK_GROUND (10) / PATROL (10): i32 x, y, i8 queued. LAUNCH_PATROL (25): i32 x, y, queued, i32 shift, ctrl, alt.
+	// FLIGHT (25): i32 ox, whom, shift, ctrl, alt, orders (`orders` above: 1 MOVE_TO, 10 ATTACK). RECALL / SCRAMBLE (1): none.
+	int32_t shift = 0, ctrl = 0, alt = 0;
 	// SPELL (21): i32 ox, i32 whom, i32 type, i32 x, i32 y (`type` = the craft index; ox / whom / x / y above).
 	// TRANSPORT (1): no payload. SET_TRANSPORT (5): i32 flag (`flags` above). BOARD_SHIP (9): i32 ox (the ship), queued.
 };
@@ -140,6 +145,17 @@ public:
 	bool issue_transport(const Game& g, const std::vector<int32_t>& objs);
 	bool issue_set_transport(const Game& g, const std::vector<int32_t>& objs, bool flag);
 	bool issue_board_ship(const Game& g, const std::vector<int32_t>& objs, int32_t ship, QueuePos q = kQueueNew);
+	// Aircraft (docs/aircraft-spec.md section 8). FLIGHT: the group (planes, or airbases / carriers) flies to attack
+	// objects[whom][ox] (orders 10) or rebases onto it (orders 1); PATROL / LAUNCH_PATROL / ATTACK_GROUND: a map point;
+	// RECALL: planes go home; SCRAMBLE: a carrier's planes take off on patrol.
+	bool issue_flight(const Game& g, const std::vector<int32_t>& objs, int32_t ox, int32_t whom, int32_t orders = 10,
+	                  bool shift = false, bool ctrl = false, bool alt = false);
+	bool issue_patrol(const Game& g, const std::vector<int32_t>& objs, int32_t x, int32_t y, QueuePos q = kQueueNew);
+	bool issue_launch_patrol(const Game& g, const std::vector<int32_t>& objs, int32_t x, int32_t y, QueuePos q = kQueueNew,
+	                         bool shift = false, bool ctrl = false, bool alt = false);
+	bool issue_attack_ground(const Game& g, const std::vector<int32_t>& objs, int32_t x, int32_t y, QueuePos q = kQueueNew);
+	bool issue_recall(const Game& g, const std::vector<int32_t>& objs);
+	bool issue_scramble(const Game& g, const std::vector<int32_t>& objs);
 	// SPELL: the group casts craft `spell` (ox / whom -1 and x / y at the caster for the untargeted general powers;
 	// CommandManager::issue_spell @941b80, process_spell @948340 -> Group::action_spell).
 	bool issue_spell(const Game& g, const std::vector<int32_t>& objs, int32_t spell, int32_t ox, int32_t whom, int32_t x,

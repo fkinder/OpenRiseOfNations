@@ -1,0 +1,10 @@
+re/decomp/aircraft2
+ScenarioFuncSet::num_garrisoned_in
+ScenarioFuncSet::building_full
+ScenarioFuncSet::unit_clear_orders
+ScenarioFuncSet::unit_attack_order
+ScenarioFuncSet::air_unit_transfer_order
+ScenarioFuncSet::create_missile_and_target_build
+ScenarioFuncSet::create_unit
+ScenarioFuncSet::add_unit
+Group::action_gather_point

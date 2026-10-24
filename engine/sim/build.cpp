@@ -3,6 +3,7 @@
 // closing.
 #include <algorithm>
 
+#include "sim/aircraft.hpp"
 #include "sim/heroes.hpp"
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
@@ -466,8 +467,8 @@ int32_t init_build_site(Game& g, int32_t who, int32_t type, int32_t x, int32_t y
 			b.gather_max = int8_t(max_gatherers(g, type, o, who, f.x0, f.y0));
 		}
 	}
-	// ObjectData::can_carry(AIR): buildings holding aircraft. TODO(air): the carry tests of airbases.
-	if (type_is(*b.ptype, ptype::kAirbase)) b.build_masks |= bmask::kHoldsAir | bmask::kRepeatAir;
+	// ObjectData::can_carry(AIR): buildings holding aircraft (airbases and missile silos).
+	if (can_carry_air(b)) b.build_masks |= bmask::kHoldsAir | bmask::kRepeatAir;
 	return o;
 }
 

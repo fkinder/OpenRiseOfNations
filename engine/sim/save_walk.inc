@@ -160,20 +160,20 @@ template <class Ar> void walk(Ar& ar, Order& v) {
 	FIELDS(ar, v.last_x, v.last_y, v.coll_x, v.coll_y, v.orig_x, v.orig_y, v.off_x, v.off_y, v.ox, v.whom, v.uid, v.find, v.spell, v.paid);
 	FIELDS(ar, v.oxx, v.whose, v.id, v.form_id, v.group_angle, v.in_group, v.newform, v.delay, v.def_x, v.def_y, v.mandatory, v.defensive);
 	FIELDS(ar, v.in_range, v.ever_in_range, v.new_ord, v.g_tx, v.g_ty, v.build_type, v.wait, v.goto_build, v.non_flat, v.dist_mod);
-	FIELDS(ar, v.been_there, v.started, v.loaded, v.uid2);
+	FIELDS(ar, v.been_there, v.started, v.loaded, v.uid2, v.cruising_alt, v.sharp_turn, v.old, v.returning, v.xx, v.yy, v.wp, v.wp_index, v.sa_type, v.sa_started, v.sa_frames, v.sa_data1, v.sa_data2, v.sa_data3, v.sa_data4);
 }
 
 template <class Ar> void walk(Ar& ar, Guy& v) {
 	FIELDS(ar, v.type, v.x, v.y, v.z, v.angle, v.last_angle, v.turret_angles, v.des_turret_angles, v.track_dx, v.track_dy, v.des_x);
 	FIELDS(ar, v.des_y, v.des_angle, v.last_x, v.last_y, v.last_z, v.cur_time, v.end_time, v.last_time, v.last_speed, v.avg_speed);
 	FIELDS(ar, v.gpiece, v.o, v.ox, v.variation, v.off_x, v.off_y, v.node_flags, v.des_node_flags, v.guy_flags, v.cur_anim, v.stopped);
-	FIELDS(ar, v.hold_attack, v.whom, v.queued_attack, v.who, v.guy_num);
+	FIELDS(ar, v.hold_attack, v.whom, v.queued_attack, v.who, v.guy_num, v.bank, v.last_bank, v.pitch, v.last_pitch);
 }
 
 template <class Ar> void walk(Ar& ar, Object& v) {
 	FIELDS(ar, v.is_unit, v.flags, v.who, v.o, v.x, v.y, v.z, v.type, v.myhits, v.damage, v.inside_down, v.up, v.down, v.down_who, v.up_who);
 	FIELDS(ar, v.linked, v.uid, v.hold_frames, v.near_o, v.near_who, v.healing, v.targeted, v.visible, v.damage_frac, v.inside_down_who);
-	FIELDS(ar, v.mylos, v.infiltrated);
+	FIELDS(ar, v.mylos, v.infiltrated, v.launch_timer, v.launch_list);
 }
 
 template <class Ar> void walk(Ar& ar, Unit& v) {
@@ -363,11 +363,11 @@ static_assert(sizeof(DeathObj) == 60, "DeathObj changed: update its walk() in sa
 static_assert(sizeof(Group) == 2504, "Group changed: update its walk() in save_walk.inc");
 static_assert(sizeof(FormData) == 3688, "FormData changed: update its walk() in save_walk.inc");
 static_assert(sizeof(PathData) == 16, "PathData changed: update its walk() in save_walk.inc");
-static_assert(sizeof(Order) == 180, "Order changed: update its walk() in save_walk.inc");
-static_assert(sizeof(Guy) == 136, "Guy changed: update its walk() in save_walk.inc");
-static_assert(sizeof(Object) == 72, "Object changed: update its walk() in save_walk.inc");
-static_assert(sizeof(Unit) == 360, "Unit changed: update its walk() in save_walk.inc");
-static_assert(sizeof(Build) == 232, "Build changed: update its walk() in save_walk.inc");
+static_assert(sizeof(Order) == 264, "Order changed: update its walk() in save_walk.inc");
+static_assert(sizeof(Guy) == 152, "Guy changed: update its walk() in save_walk.inc");
+static_assert(sizeof(Object) == 96, "Object changed: update its walk() in save_walk.inc");
+static_assert(sizeof(Unit) == 384, "Unit changed: update its walk() in save_walk.inc");
+static_assert(sizeof(Build) == 256, "Build changed: update its walk() in save_walk.inc");
 static_assert(sizeof(BuildQueue) == 32, "BuildQueue changed: update its walk() in save_walk.inc");
 static_assert(sizeof(QueueItem) == 20, "QueueItem changed: update its walk() in save_walk.inc");
 static_assert(sizeof(GatherPoint) == 12, "GatherPoint changed: update its walk() in save_walk.inc");

@@ -3,6 +3,7 @@
 // add_death and the DeathObj pool.
 #include <algorithm>
 
+#include "sim/aircraft.hpp"
 #include "sim/combat_internal.hpp"
 #include "sim/economy.hpp"
 #include "sim/garrison.hpp"
@@ -199,7 +200,7 @@ void unit_close(Game& g, Unit& u, int32_t death, int32_t gpiece, float deg) {
 			specials_close_special(g, who, u.hero);
 			u.hero = -1;
 		}
-		// TODO(aircraft): aircraft carriers re-anchor their planes' patrol points.
+		carrier_closed(g, u);  // a carrier re-anchors the patrols based on it
 	}
 	if (death != 0) {
 		if (!blocked_merchant && is_live_unit(u) && u.on_map() && !(u.unit_masks & umask::kDecoy)) {

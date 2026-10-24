@@ -1,0 +1,4 @@
+re/decomp/aircraft2/dis
+Guy::set_new_z
+TerrainOut::find_data_z
+Guy::update_z

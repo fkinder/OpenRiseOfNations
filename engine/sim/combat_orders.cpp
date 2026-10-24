@@ -4,6 +4,7 @@
 // do_group_attack(_to), is_attacking_near / is_attacking_to).
 #include <algorithm>
 
+#include "sim/aircraft.hpp"
 #include "sim/combat_internal.hpp"
 #include "sim/garrison.hpp"
 #include "sim/groups.hpp"
@@ -220,8 +221,22 @@ int32_t do_attack(Game& g, Unit& u, Order& a) {
 	const int32_t ox = a.ox, whom = a.whom, mand = a.mandatory;
 	Object* T = obj_at(g, ox, whom);
 	if (type_is(*u.ptype, 351, true)) {
-		// Aircraft carrier: launches strafes. TODO(air).
-		if (!T || !T->alive()) kill_current_order(g, u);
+		// Aircraft carrier (@5f1b80): every 16 frames each plane inside gets a STRAFE at the target (not at a building
+		// unless the attack is mandatory); the carrier itself does not fire while the planes fly.
+		if (!T || !T->alive()) {
+			kill_current_order(g, u);
+			return 0;
+		}
+		if ((g.frame & 0xf) != 0) return 0;
+		if (!T->is_unit && !mand) return 0;
+		int32_t po = u.inside_down, pw = u.inside_down_who;
+		for (int guard = 0; po >= 0 && pw >= 0 && guard < kUnitLimit; guard++) {
+			Unit* pl = g.unit(pw, po);
+			if (!pl) break;
+			add_strafe_order(g, *pl, ox, whom, u.o, u.who, 1, kQueueNew, mand != 0);
+			po = pl->inside_down;
+			pw = pl->inside_down_who;
+		}
 		return 0;
 	}
 	if (u.ptype->attack == 0) {
@@ -902,7 +917,17 @@ void group_action_attack(Game& g, Group& gr, int32_t ox, int32_t whom, int32_t m
 			if ((ignore & 4) && type_is_siege(*M->ptype)) continue;
 			if ((ignore & 2) && (M->ptype->unit_flags2 & utflag2::kSpecial)) continue;
 			if ((ignore & 1) && type_is(*M->ptype, 58)) continue;
-			if (unit_is_plane(*M)) continue;  // TODO(air): retarget a STRAFE in place
+			if (unit_is_plane(*M)) {
+				// A plane with fuel left and a current STRAFE retargets it in place (Group::action_attack @712490).
+				if (unit_mana_left(g, *M) != 0 && M->order_type() == kStrafe) {
+					Order& S = M->orders.front();
+					S.whom = whom;
+					S.ox = ox;
+					S.uid = T.uid;
+					S.returning = 0;
+				}
+				continue;
+			}
 			if (M->ptype->domain != dom) continue;
 			const Order* aa = get_action(*M);
 			if (aa && aa->type == kAttack && aa->ox == ox && aa->whom == whom && aa->mandatory && M->orders.size() <= 2 &&

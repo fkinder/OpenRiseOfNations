@@ -15,6 +15,8 @@
 //                [--starting-resources N] [--difficulty N] [--no-scripts] [--script-log]
 //                [--select WHO:o1,..@FRAME]... [--option N[:MENU[:TYPE]]@FRAME]...
 //                [--garrison WHO:o1,..@BO:BWHO[@FRAME][%queue]]... [--eject-all WHO:o1,..[@FRAME][/back_to_work]]...
+//                [--flight WHO:o1,..@TO:TWHO[@FRAME][/flags]]... [--air-patrol|--launch-patrol|--attack-ground WHO:o1,..@X,Y[@FRAME][/flags]]...
+//                [--scramble|--recall|--kill WHO:o1,..[@FRAME]]... [--stock WHO:N[@FRAME]]... [--air-every K]
 //                [--save-at FRAME:path]... [--load path] [--roundtrip FRAME]
 //        ron-sim --dump circle|ring|stamps
 // Scripts: --script-log prints the scenario builtins' presentation queue as it fills (messages, sounds, objectives,
@@ -48,6 +50,16 @@
 // Animation data (guy clocks) comes from the install's unit_graphics.xml / anim_graphics.xml / .bha files; --no-art
 // runs without it (3-frame animations). --anims prints, after loading, the frames per animation of every graphics
 // piece the scenario's units use.
+// Aircraft (docs/aircraft-spec.md, sim/aircraft*.cpp): --flight issues GROUP + FLIGHT (the planes, or the airbases / carriers
+// named, attack object TO of leader TWHO; /move rebases onto it instead; /shift,/ctrl,/alt are the launch modifiers),
+// --air-patrol PATROL, --launch-patrol LAUNCH_PATROL (planes out of the listed airbases / carriers), --attack-ground
+// ATTACK_GROUND (/last,/first give the QueuePos); --scramble / --recall issue SCRAMBLE / RECALL for the listed units.
+// --list and --air-every K print one line per airbase / carrier / silo (planes here with and without the queue, launch timer
+// and list, the chain) and per aircraft (fuel left / mana, mana_burn, base, order, low / high band). RON_AIR_TRACE=1 logs
+// launches, landings, carrier releases, crashes and missile detonations on stderr. Test aids that are not game commands:
+// --kill (the objects die at once) and --stock (every good of the leader is set to N). The digest gains an aircraft block
+// only when some aircraft state is non-default (RON_NO_AIR_DIGEST=1 leaves it out to compare against older builds);
+// RON_DIGEST_PARTS=1 prints the running hash after each digest section on stderr.
 // Fog of war: --reveal sets GameInfo.reveal_map (default: the scenario header's, else 1 = Normal); --fog WHO prints the
 // fog map of that seat at the end; --fog-check verifies at every refresh (frame % 100 == 33) that the stale trail of
 // moving units is cleared and stationary areas survive. --dump prints the circle / ring tables or every stamp range
@@ -75,6 +87,7 @@
 #include <unistd.h>
 
 #include "assets/scenario.hpp"
+#include "sim/aircraft.hpp"
 #include "sim/anim_assets.hpp"
 #include "sim/combat.hpp"
 #include "sim/commands.hpp"
@@ -97,7 +110,8 @@ using namespace ron::sim;
 
 struct Script {
 	enum Kind { Move, Halt, Form, Attack, Build, Queue, Rally, Swarm, Disband, Unqueue, Gather, CityGather, Buy, Sell,
-		        Tribute, Respond, Peasants, Select, Option, Garrison, EjectAll, Transport, SetTransport, Board, Cast } kind = Move;
+		        Tribute, Respond, Peasants, Select, Option, Garrison, EjectAll, Transport, SetTransport, Board, Cast, Flight,
+		        AirPatrol, LaunchPatrol, AttackGround, Scramble, Recall, Kill, Stock } kind = Move;
 	int32_t who = 0;
 	std::vector<int32_t> objs;
 	int32_t x = 0, y = 0, frame = 0, form = -1, queue = 2, rotate = 0;
@@ -197,6 +211,54 @@ Script parse_attack(const std::string& a) {
 	const size_t at2 = rest.find('@');
 	s.to = int32_t(std::strtol(rest.substr(c2 + 1, at2 == std::string::npos ? std::string::npos : at2 - c2 - 1).c_str(), nullptr, 0));
 	if (at2 != std::string::npos) s.frame = int32_t(std::strtol(rest.c_str() + at2 + 1, nullptr, 0));
+	return s;
+}
+
+// The aircraft commands. WHO:o1,o2@TARGET[@FRAME][/flags] with TARGET = TO:TWHO (--flight: attack object TWHO:TO),
+// X,Y (--air-patrol, --launch-patrol, --attack-ground: a map point); --scramble / --recall: WHO:o1,o2[@FRAME].
+// flags (comma separated): move (--flight rebases onto the airbase / carrier instead of attacking), shift, ctrl, alt
+// (LAUNCH_PATROL / FLIGHT modifiers), last / first (QueuePos).
+Script parse_air(Script::Kind k, const std::string& a, const char* name) {
+	Script s;
+	s.kind = k;
+	s.order = 10;  // ATTACK
+	std::string t = a;
+	const size_t slash = t.find('/');
+	if (slash != std::string::npos) {
+		std::stringstream ss(t.substr(slash + 1));
+		std::string tok;
+		while (std::getline(ss, tok, ',')) {
+			if (tok == "move") s.order = 1;
+			else if (tok == "shift") s.num |= 1;
+			else if (tok == "ctrl") s.num |= 2;
+			else if (tok == "alt") s.num |= 4;
+			else if (tok == "last") s.queue = 1;
+			else if (tok == "first") s.queue = 0;
+			else throw std::runtime_error(std::string("bad --") + name + " flag " + tok);
+		}
+		t = t.substr(0, slash);
+	}
+	const size_t colon = t.find(':');
+	if (colon == std::string::npos) throw std::runtime_error(std::string("bad --") + name + " " + a);
+	s.who = int32_t(std::strtol(t.substr(0, colon).c_str(), nullptr, 0));
+	std::string rest = t.substr(colon + 1);
+	const size_t at1 = rest.find('@');
+	s.objs = parse_list(rest.substr(0, at1));
+	if (at1 == std::string::npos) return s;
+	rest = rest.substr(at1 + 1);
+	if (k == Script::Scramble || k == Script::Recall || k == Script::Kill) {
+		s.frame = int32_t(std::strtol(rest.c_str(), nullptr, 0));
+		return s;
+	}
+	const size_t at2 = rest.find('@');
+	const std::string tgt = rest.substr(0, at2);
+	if (at2 != std::string::npos) s.frame = int32_t(std::strtol(rest.c_str() + at2 + 1, nullptr, 0));
+	const size_t sep = tgt.find(k == Script::Flight ? ':' : ',');
+	if (sep == std::string::npos) throw std::runtime_error(std::string("bad --") + name + " target " + a);
+	const int32_t v1 = int32_t(std::strtol(tgt.substr(0, sep).c_str(), nullptr, 0));
+	const int32_t v2 = int32_t(std::strtol(tgt.substr(sep + 1).c_str(), nullptr, 0));
+	if (k == Script::Flight) s.to = v1, s.twho = v2;
+	else s.x = v1, s.y = v2;
 	return s;
 }
 
@@ -469,6 +531,8 @@ struct Fnv {
 
 uint64_t digest(const Game& g) {
 	Fnv f;
+	static const bool parts = std::getenv("RON_DIGEST_PARTS") != nullptr;
+#define PART(n) do { if (parts) std::fprintf(stderr, "f%d %s %016llx\n", g.frame, n, (unsigned long long)f.h); } while (0)
 	f.add(uint32_t(g.frame));
 	f.add(g.rng.seed());
 	for (int32_t who = 0; who < kNumLeaders; who++) {
@@ -522,6 +586,7 @@ uint64_t digest(const Game& g) {
 			}
 		}
 	}
+	PART("units");
 	for (const Group& gr : g.groups.g) {
 		if (gr.num == 0) continue;
 		f.add(gr.id), f.add(gr.num), f.add(gr.form), f.add(gr.speed), f.add(gr.order_num);
@@ -560,6 +625,7 @@ uint64_t digest(const Game& g) {
 	f.add_bytes(g.world.seen3);
 	f.add_bytes(g.world.wcoord_seen);
 	for (const WData& d : g.world.wdata) f.add(uint32_t(d.was_seen) | uint32_t(uint16_t(d.down)) << 8);
+	PART("fog");
 	// Combat: buildings, ammo, corpses, leader statistics.
 	for (int32_t who = 0; who < kNumLeaders; who++) {
 		const ObjectList& L = g.objects[size_t(who)];
@@ -585,6 +651,7 @@ uint64_t digest(const Game& g) {
 		if (!d.valid) continue;
 		f.add(d.who), f.add(d.o), f.add(d.x), f.add(d.y), f.add(d.anim), f.add(d.cur_frame);
 	}
+	PART("combat");
 	// Production: stockpiles, population, tech bits, buildings' construction / queues / rally points, cities, grid.
 	for (int32_t who = 0; who < kNumLeaders; who++) {
 		const Leader& l = g.leaders[size_t(who)];
@@ -710,6 +777,7 @@ uint64_t digest(const Game& g) {
 			}
 	}
 	f.add(uint32_t(g.hold_doobers.size()));
+	PART("prod");
 	for (uint16_t m : g.world.tdata) f.add(uint32_t(m));
 	// Unit occupancy bits.
 	for (size_t i = 0; i < g.world.wdata.size(); i++) {
@@ -718,6 +786,50 @@ uint64_t digest(const Game& g) {
 		f.add(uint32_t(i));
 		const CollBlock& cb = g.world.coll_blocks[size_t(b)];
 		for (size_t k = 0; k < 32; k++) f.add(uint32_t(cb.bytes[k]));
+	}
+	// Aircraft (docs/aircraft-spec.md): fuel burned, the air order fields, the guys' bank / pitch and the containers'
+	// launch timer / list. Added only when some aircraft state exists, so scenarios without air objects keep their digests.
+	{
+		Fnv a;
+		bool any = false;
+		auto fl = [&a](float v) {
+			uint32_t bits;
+			std::memcpy(&bits, &v, 4);
+			a.add(bits);
+		};
+		for (int32_t who = 0; who < kNumLeaders; who++) {
+			const ObjectList& L = g.objects[size_t(who)];
+			for (int32_t o = 0; o < L.unit_mark; o++) {
+				const Unit* u = g.unit(who, o);
+				if (!u || !u->alive()) continue;
+				bool air = u->mana_burn != 0 && u->ptype->domain == kDomainAir;  // (birds are domain air too: only fuel / orders count)
+				for (const Order& o2 : u->orders) air = air || order_is_air(o2.type);
+				for (const Guy& gy : u->guys) air = air || gy.bank != 0.0f || gy.pitch != 0.0f || gy.last_bank != 0.0f || gy.last_pitch != 0.0f;
+				const bool cont = u->launch_timer != 0 || !u->launch_list.empty();
+				if (!air && !cont) continue;
+				any = true;
+				a.add(who), a.add(o), a.add(int32_t(u->mana_burn)), a.add(int32_t(u->launch_timer));
+				for (int32_t l : u->launch_list) a.add(l);
+				for (const Order& o2 : u->orders) {
+					if (!order_is_air(o2.type) && o2.type != kSpecialAnim) continue;
+					a.add(int32_t(o2.type)), a.add(o2.cruising_alt), a.add(o2.sharp_turn), a.add(o2.old), a.add(o2.returning);
+					a.add(o2.oxx), a.add(o2.whose), a.add(o2.xx), a.add(o2.yy), a.add(o2.wp_index), a.add(uint32_t(o2.wp.size()));
+					for (const auto& w : o2.wp) a.add(w[0]), a.add(w[1]);
+					a.add(o2.sa_type), a.add(o2.sa_started), a.add(o2.sa_frames), a.add(o2.sa_data1), a.add(o2.sa_data2);
+					a.add(o2.sa_data3), a.add(o2.sa_data4);
+				}
+				for (const Guy& gy : u->guys) fl(gy.bank), fl(gy.last_bank), fl(gy.pitch), fl(gy.last_pitch), a.add(gy.last_z);
+			}
+			for (int32_t o = kBuildBase; o < L.build_mark; o++) {
+				const Object* b = g.object(who, o);
+				if (!b || !b->alive() || (b->launch_timer == 0 && b->launch_list.empty())) continue;
+				any = true;
+				a.add(who), a.add(o), a.add(int32_t(b->launch_timer));
+				for (int32_t l : b->launch_list) a.add(l);
+			}
+		}
+		static const bool no_air = std::getenv("RON_NO_AIR_DIGEST") != nullptr;  // compare against a build without the block
+		if (any && !no_air) f.add(uint32_t(a.h)), f.add(uint32_t(a.h >> 32));
 	}
 	return f.h;
 }
@@ -730,6 +842,7 @@ struct FogOpts {
 	int32_t reveal = -1;     // --reveal N (default: the scenario header's value, else 1)
 	int32_t econ_every = 0;  // --econ-every K (economy summary)
 	int32_t ai_every = 0;    // --ai-every K (AI summary)
+	int32_t air_every = 0;   // --air-every K (aircraft and their containers: air_describe)
 	int32_t heroes_every = 0;  // --heroes-every K (heroes summary)
 	int32_t starting_resources = -1;  // --starting-resources N (GameInfo setting before loading)
 	int32_t difficulty = -1;          // --difficulty N (GameInfo difficulty, the lobby setting; 0 easiest .. 5)
@@ -1484,6 +1597,34 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 				cm.issue_spell(*g, s.objs, s.to, -1, -1, cu ? cu->x : 0, cu ? cu->y : 0);
 				if (print) std::printf("  f%-5d CAST %d:%d%s spell 0x%x\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0],
 				                       s.objs.size() > 1 ? "+" : "", unsigned(s.to));
+			} else if (s.kind == Script::Flight) {
+				cm.issue_flight(*g, s.objs, s.to, s.twho, s.order, (s.num & 1) != 0, (s.num & 2) != 0, (s.num & 4) != 0);
+				if (print) std::printf("  f%-5d FLIGHT %d:%d%s -> %s %d:%d\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0],
+				                       s.objs.size() > 1 ? "+" : "", s.order == 1 ? "rebase onto" : "attack", s.twho, s.to);
+			} else if (s.kind == Script::AirPatrol) {
+				cm.issue_patrol(*g, s.objs, s.x, s.y, QueuePos(s.queue == 2 ? 2 : s.queue));
+				if (print) std::printf("  f%-5d PATROL %d:%d%s -> (%d,%d)\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0],
+				                       s.objs.size() > 1 ? "+" : "", s.x, s.y);
+			} else if (s.kind == Script::LaunchPatrol) {
+				cm.issue_launch_patrol(*g, s.objs, s.x, s.y, QueuePos(s.queue), (s.num & 1) != 0, (s.num & 2) != 0, (s.num & 4) != 0);
+				if (print) std::printf("  f%-5d LAUNCH_PATROL %d:%d%s -> (%d,%d)\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0],
+				                       s.objs.size() > 1 ? "+" : "", s.x, s.y);
+			} else if (s.kind == Script::AttackGround) {
+				cm.issue_attack_ground(*g, s.objs, s.x, s.y, QueuePos(s.queue));
+				if (print) std::printf("  f%-5d ATTACK_GROUND %d:%d%s -> (%d,%d)\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0],
+				                       s.objs.size() > 1 ? "+" : "", s.x, s.y);
+			} else if (s.kind == Script::Scramble) {
+				cm.issue_scramble(*g, s.objs);
+				if (print) std::printf("  f%-5d SCRAMBLE %d:%d%s\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0], s.objs.size() > 1 ? "+" : "");
+			} else if (s.kind == Script::Stock) {
+				for (int32_t& v : g->leaders[size_t(s.who)].bucket) v = s.num;  // (a test aid, not a game command)
+			} else if (s.kind == Script::Kill) {
+				// A test aid, not a game command: the objects die at once (aircraft acceptance tests: a base lost in flight).
+				for (int32_t o : s.objs)
+					if (Object* ob = g->object(s.who, o); ob && ob->alive()) object_die(*g, *ob, 0, -1, 0.0f);
+			} else if (s.kind == Script::Recall) {
+				cm.issue_recall(*g, s.objs);
+				if (print) std::printf("  f%-5d RECALL %d:%d%s\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0], s.objs.size() > 1 ? "+" : "");
 			} else if (s.kind == Script::Board) {
 				cm.issue_board_ship(*g, s.objs, s.to, QueuePos(s.queue));
 				if (print) std::printf("  f%-5d BOARD_SHIP %d:%d%s -> ship %d:%d\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0],
@@ -1584,6 +1725,9 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 		}
 		if (print && fo.econ_every > 0 && g->frame % fo.econ_every == 0) print_economy(*g);
 		if (print && fo.ai_every > 0 && g->frame % fo.ai_every == 0) print_ai(*g);
+		if (print && fo.air_every > 0 && g->frame % fo.air_every == 0)
+			for (int32_t who = 0; who < kNumLeaders; who++)
+				for (const std::string& l : air_describe(*g, who)) std::printf("  f%-5d %s\n", g->frame, l.c_str());
 		if (print && fo.heroes_every > 0 && g->frame % fo.heroes_every == 0) print_heroes(*g);
 		if (print && prod_every > 0 && g->frame % prod_every == 0) {
 			print_production(*g, false);
@@ -1741,6 +1885,25 @@ int main(int argc, char** argv) {
 			else if (std::strcmp(argv[i], "--form") == 0) scripts.push_back(parse_form(argv[i + 1]));
 			else if (std::strcmp(argv[i], "--attack") == 0) scripts.push_back(parse_attack(argv[i + 1]));
 			else if (std::strcmp(argv[i], "--garrison") == 0) scripts.push_back(parse_garrison(argv[i + 1]));
+			else if (std::strcmp(argv[i], "--flight") == 0) scripts.push_back(parse_air(Script::Flight, argv[i + 1], "flight"));
+			else if (std::strcmp(argv[i], "--air-patrol") == 0) scripts.push_back(parse_air(Script::AirPatrol, argv[i + 1], "air-patrol"));
+			else if (std::strcmp(argv[i], "--launch-patrol") == 0)
+				scripts.push_back(parse_air(Script::LaunchPatrol, argv[i + 1], "launch-patrol"));
+			else if (std::strcmp(argv[i], "--attack-ground") == 0)
+				scripts.push_back(parse_air(Script::AttackGround, argv[i + 1], "attack-ground"));
+			else if (std::strcmp(argv[i], "--scramble") == 0) scripts.push_back(parse_air(Script::Scramble, argv[i + 1], "scramble"));
+			else if (std::strcmp(argv[i], "--recall") == 0) scripts.push_back(parse_air(Script::Recall, argv[i + 1], "recall"));
+			else if (std::strcmp(argv[i], "--stock") == 0) {  // WHO:N[@FRAME]: every good of the leader is set to N (a test aid)
+				Script st;
+				st.kind = Script::Stock;
+				const std::vector<std::string> p1 = split(argv[i + 1], '@');
+				const std::vector<std::string> p2 = split(p1.at(0), ':');
+				st.who = int32_t(std::strtol(p2.at(0).c_str(), nullptr, 0));
+				st.num = int32_t(std::strtol(p2.at(1).c_str(), nullptr, 0));
+				if (p1.size() > 1) st.frame = int32_t(std::strtol(p1[1].c_str(), nullptr, 0));
+				scripts.push_back(st);
+			}
+			else if (std::strcmp(argv[i], "--kill") == 0) scripts.push_back(parse_air(Script::Kill, argv[i + 1], "kill"));  // WHO:o1,o2[@FRAME]
 			else if (std::strcmp(argv[i], "--eject-all") == 0) scripts.push_back(parse_eject_all(argv[i + 1]));
 			else if (std::strcmp(argv[i], "--transport") == 0) scripts.push_back(parse_transport(argv[i + 1], Script::Transport));
 			else if (std::strcmp(argv[i], "--set-transport") == 0) scripts.push_back(parse_transport(argv[i + 1], Script::SetTransport));
@@ -1810,6 +1973,7 @@ int main(int argc, char** argv) {
 						std::printf("\n");
 					}
 				}
+				for (const std::string& l : air_describe(g, who)) std::printf("  air %s\n", l.c_str());
 			}
 			print_production(g, true);
 			return 0;
@@ -1825,6 +1989,7 @@ int main(int argc, char** argv) {
 		fo.reveal = reveal;
 		if (const char* ee = arg_value(argc, argv, "--econ-every")) fo.econ_every = int32_t(std::strtol(ee, nullptr, 0));
 		if (const char* ae = arg_value(argc, argv, "--ai-every")) fo.ai_every = int32_t(std::strtol(ae, nullptr, 0));
+		if (const char* ai = arg_value(argc, argv, "--air-every")) fo.air_every = int32_t(std::strtol(ai, nullptr, 0));
 		if (const char* he = arg_value(argc, argv, "--heroes-every")) fo.heroes_every = int32_t(std::strtol(he, nullptr, 0));
 		if (const char* sr = arg_value(argc, argv, "--starting-resources"))
 			fo.starting_resources = int32_t(std::strtol(sr, nullptr, 0));

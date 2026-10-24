@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "sim/aircraft.hpp"
 #include "sim/heroes.hpp"
 #include "sim/ai.hpp"
 #include "sim/combat_internal.hpp"
@@ -378,7 +379,8 @@ void do_damage(Game& g, Object& att, int32_t ox, int32_t whom, uint32_t angle, i
 			tu->damage_who = att.who;
 		}
 	}
-	// TODO(combat-spec 5.3): Object::attempt_launch (carriers / airbases scramble fighters).
+	// Object::attempt_launch: a damaged carrier / airbase scrambles a fighter at the attacker (sim/aircraft.cpp).
+	if (!(uint32_t(att.ptype->obj_masks) & 0x8000000u) && att.alive()) attempt_launch(g, t, att.x, att.y);
 	int32_t v;
 	if (au) {
 		v = hp * mult;

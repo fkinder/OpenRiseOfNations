@@ -3,7 +3,9 @@
 // econ_market.cpp) and Leader::compute_score with its compute_*_score parts.
 #include <algorithm>
 
+#include "sim/aircraft.hpp"
 #include "sim/ai_internal.hpp"
+#include "sim/combat.hpp"
 #include "sim/economy.hpp"
 #include "sim/fog.hpp"
 
@@ -67,7 +69,8 @@ bool is_victory_timer(const Game& g) {
 int32_t get_team_score(const Game& g, int32_t who) { return LD(g, who).score; }
 
 // Leader::eject_my_shit_from_his_ass(whom) @6d0220: every unit of who inside a container of whom comes out; an
-// aircraft that came out (not type 310) gets a strafe order (TODO(air)); a unit that cannot come out dies.
+// aircraft that came out (not the helicopter line) gets a strafe order (it flies off and looks for a base); a unit that
+// cannot come out dies.
 void eject_units(Game& g, int32_t who, int32_t whom) {
 	const int32_t n = int32_t(g.objects[size_t(who)].units.size());
 	for (int32_t i = 0; i < n; i++) {
@@ -84,6 +87,7 @@ void eject_units(Game& g, int32_t who, int32_t whom) {
 		}
 		if (w != whom) continue;
 		if (unit_come_out(g, *u, 0) != 0) unit_die(g, *u, 0);
+		else if (u->ptype->domain == kDomainAir && !unit_is(g, *u, 0x136)) add_strafe_order(g, *u, -1, -1, -1, -1, 1, kQueueNew, false);
 	}
 }
 

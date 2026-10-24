@@ -4,6 +4,7 @@
 // group form.
 #include <algorithm>
 
+#include "sim/aircraft.hpp"
 #include "sim/ai.hpp"
 #include "sim/combat_internal.hpp"
 #include "sim/economy.hpp"
@@ -30,18 +31,9 @@ bool tree_at(const Game& g, int32_t x, int32_t y) {
 	return g.world.in_t(tx, ty) && (g.world.t(tx, ty) & tmask::kMedium) == tmask::kTree;
 }
 
-// UnitData::is_flying_high / is_flying_low (@60a310 / @60a140): air units are not simulated. TODO(air).
-bool is_flying_high(const Game& g, const Object& t) {
-	(void)g;
-	return t.is_unit && t.ptype->domain == kDomainAir && !(t.ptype->unit_flags & utflag::kHelicopter);
-}
-bool is_flying_low(const Game& g, const Object& t) {
-	(void)g, (void)t;
-	return false;
-}
-bool can_carry_air(const Object& s) {
-	return type_is(*s.ptype, 447, true) || type_is(*s.ptype, 351, true) || type_is(*s.ptype, 520, true);
-}
+// UnitData::is_flying_high / is_flying_low (@60a310 / @60a140): sim/aircraft.cpp.
+bool is_flying_high(const Game& g, const Object& t) { return t.is_unit && unit_is_flying_high(g, static_cast<const Unit&>(t)); }
+bool is_flying_low(const Game& g, const Object& t) { return t.is_unit && unit_is_flying_low(g, static_cast<const Unit&>(t)); }
 
 // The order a unit's (non-facing) scans treat as its current mandatory attack.
 const Order* front_attack(const Unit& u) {
@@ -139,7 +131,9 @@ bool is_in_range(const Game& g, const Object& s, int32_t ox, int32_t whom, int32
 
 bool is_in_range_point(const Game& g, const Object& s, int32_t tx, int32_t ty, int32_t sx, int32_t sy) {
 	// @64e4a0
-	if ((uint32_t(s.ptype->obj_masks) & objmask::kMissile) && s.is_unit && !static_cast<const Unit&>(s).on_map())
+	// A MISSILE that is not inside a container (get_inside(0) < 0, the JS at 64e4da) is in range of any point: it fires its
+	// ground ammo and dies the first frame it runs (aircraft-spec 7; the exe contradicts combat-spec's "inside" reading).
+	if ((uint32_t(s.ptype->obj_masks) & objmask::kMissile) && s.is_unit && static_cast<const Unit&>(s).on_map())
 		return true;
 	int32_t d = vector_dist(tx - sx, ty - sy);
 	if (s.is_unit) d = std::max(d - s.ptype->big_radius, 0);

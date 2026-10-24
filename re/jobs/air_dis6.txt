@@ -1,0 +1,10 @@
+re/decomp/aircraft/dis
+Group::action_launch_flight
+Group::action_flight
+Group::action_air_patrol
+Group::action_launch_patrol
+Group::action_air_attack_ground
+Group::action_patrol
+Group::action_recall
+Group::action_return
+Group::action_scramble

@@ -26,6 +26,12 @@ struct ReleaseEvent {
 	bool resolved = true;  // the ammo name was found (an unknown name reports an error and uses piece 0)
 };
 
+// One <PLANERELEASE> of a carrier piece (GraphicEvents event type 5): the animation, the game frame it fires at (same
+// conversion as the release events), the deck node and the release angle in degrees (attribute `angle`, 0 when absent).
+struct PlaneRelease {
+	int32_t anim = 0, frame = 1, node = 0, angle = 0;
+};
+
 // GraphicPieces::init_piece_ranges @8f70e0: the unit piece index space. A unit piece is
 //   (type - 50) + style * kPerStyle + age_bucket * kPerAge + gender * kPerGender + crew * kPerCrew
 // (style 0..5 = UNIT_CONTINENT, age bucket 0..2 = AGE0/AGE3/AGE5, gender 1 = -FEMALE or -PACKED, crew 0..3 = guy
@@ -58,6 +64,11 @@ struct AnimSource {
 	// ---- combat data (combat-spec 4.2, 4.17, 6.2-6.3); the defaults describe art without any of it.
 	// The piece's RELEASEEVENTs in file order (null: none).
 	virtual const std::vector<ReleaseEvent>* release_events(int32_t piece) const {
+		(void)piece;
+		return nullptr;
+	}
+	// The piece's PLANERELEASE events in file order (null: none; aircraft-spec 8, GraphicEvents::execute_game_events).
+	virtual const std::vector<PlaneRelease>* plane_releases(int32_t piece) const {
 		(void)piece;
 		return nullptr;
 	}

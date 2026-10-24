@@ -1,0 +1,5 @@
+re/decomp/aircraft2/dis
+Unit::do_spec_anim
+Unit::add_spec_anim_order
+Guy::execute_events
+Unit::go_inside

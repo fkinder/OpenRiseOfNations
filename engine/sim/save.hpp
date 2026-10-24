@@ -19,7 +19,7 @@
 
 namespace ron::sim {
 
-constexpr uint32_t kSaveVersion = 2;
+constexpr uint32_t kSaveVersion = 3;
 
 // What the header of a save says (read_save_info) and what the loader found out (load_game).
 struct SaveInfo {

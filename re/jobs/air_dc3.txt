@@ -1,0 +1,3 @@
+re/decomp/aircraft2
+LeaderData::is_peace
+LeaderData::has_tech
