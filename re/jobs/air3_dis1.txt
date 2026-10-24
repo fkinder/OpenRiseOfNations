@@ -1,0 +1,7 @@
+re/decomp/aircraft3/dis
+Ammo::init_crash
+Ammo::inc_time
+Objects::kill_guy
+Objects::add_flock
+Ammo::init
+Unit::update_z

@@ -16,9 +16,14 @@
 //                [--select WHO:o1,..@FRAME]... [--option N[:MENU[:TYPE]]@FRAME]...
 //                [--garrison WHO:o1,..@BO:BWHO[@FRAME][%queue]]... [--eject-all WHO:o1,..[@FRAME][/back_to_work]]...
 //                [--flight WHO:o1,..@TO:TWHO[@FRAME][/flags]]... [--air-patrol|--launch-patrol|--attack-ground WHO:o1,..@X,Y[@FRAME][/flags]]...
-//                [--scramble|--recall|--kill WHO:o1,..[@FRAME]]... [--stock WHO:N[@FRAME]]... [--air-every K]
+//                [--scramble|--recall|--kill|--crash|--auto-explore|--carrier-repeat WHO:o1,..[@FRAME]]... [--stock WHO:N[@FRAME]]... [--air-every K]
+//                [--unitmask WHO:o1,..@MASK[@FRAME]]... [--flock WHO:TX,TY,N[@FRAME]]...
 //                [--save-at FRAME:path]... [--load path] [--roundtrip FRAME]
 //        ron-sim --dump circle|ring|stamps
+// Dead crafts, strafing slide, flocks, unit masks (docs/aircraft-spec.md 12-14): --crash kills the aircraft the way a shot-down or out-of-fuel plane
+// dies (death type 2, so Objects::kill_guy gives each guy its Ammo::init_crash debris; --kill is the silent death 0); --flock adds a bird flock
+// (Objects::add_flock; WHO -1 = gaia, else the leader's 225-frame limit applies) at tile (TX, TY); --unitmask issues UNITMASK (Group::action_unitmask)
+// with an arbitrary mask, --auto-explore the AUTO_EXPLORE toggle (0x100) and --carrier-repeat the carrier's REPEAT toggle (0x200000).
 // Scripts: --script-log prints the scenario builtins' presentation queue as it fills (messages, sounds, objectives,
 // camera, pings; sim/script_ui.hpp) and the run-time messages; --select / --option set the seat-local input a renderer
 // would report (the local selection of leader WHO, the armed command OptionIndex) from FRAME on; --option's MENU opens
@@ -94,6 +99,7 @@
 #include "assets/scenario.hpp"
 #include "assets/strings.hpp"
 #include "sim/aircraft.hpp"
+#include "sim/flocks.hpp"
 #include "sim/anim_assets.hpp"
 #include "sim/combat.hpp"
 #include "sim/commands.hpp"
@@ -120,7 +126,7 @@ using namespace ron::sim;
 struct Script {
 	enum Kind { Move, Halt, Form, Attack, Build, Queue, Rally, Swarm, Disband, Unqueue, Gather, CityGather, Buy, Sell,
 		        Tribute, Respond, Peasants, Select, Option, Garrison, EjectAll, Transport, SetTransport, Board, Cast, Flight,
-		        AirPatrol, LaunchPatrol, AttackGround, Scramble, Recall, Kill, Stock, Teleport,
+		        AirPatrol, LaunchPatrol, AttackGround, Scramble, Recall, Kill, Crash, Flock, UnitMask, Stock, Teleport,
 		        Hotkey, ComeOut, Speed, Chat, Pause, Rename, Cheat } kind = Move;
 	int32_t who = 0;
 	std::vector<int32_t> objs;
@@ -258,7 +264,7 @@ Script parse_air(Script::Kind k, const std::string& a, const char* name) {
 	s.objs = parse_list(rest.substr(0, at1));
 	if (at1 == std::string::npos) return s;
 	rest = rest.substr(at1 + 1);
-	if (k == Script::Scramble || k == Script::Recall || k == Script::Kill) {
+	if (k == Script::Scramble || k == Script::Recall || k == Script::Kill || k == Script::Crash) {
 		s.frame = int32_t(std::strtol(rest.c_str(), nullptr, 0));
 		return s;
 	}
@@ -2096,6 +2102,20 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 				// A test aid, not a game command: the objects die at once (aircraft acceptance tests: a base lost in flight).
 				for (int32_t o : s.objs)
 					if (Object* ob = g->object(s.who, o); ob && ob->alive()) object_die(*g, *ob, 0, -1, 0.0f);
+			} else if (s.kind == Script::Crash) {
+				// A test aid: the aircraft die as a shot-down plane does (death 2 -> kill_guy -> the debris of Ammo::init_crash).
+				for (int32_t o : s.objs)
+					if (Object* ob = g->object(s.who, o); ob && ob->alive()) object_die(*g, *ob, 2, -1, 0.0f);
+				if (print) std::printf("  f%-5d CRASH %d:%d%s\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0], s.objs.size() > 1 ? "+" : "");
+			} else if (s.kind == Script::Flock) {
+				// A test aid: Objects::add_flock at tile (x, y) as the forest and fort triggers call it.
+				const int32_t before = g->objects[size_t(kGaiaWho)].unit_mark;
+				add_flock(*g, s.x, s.y, s.who, s.num);
+				if (print) std::printf("  f%-5d FLOCK %d birds at tile (%d,%d) for %d: %d new bird slots, rng %08x\n", g->frame, s.num, s.x, s.y, s.who,
+				                       g->objects[size_t(kGaiaWho)].unit_mark - before, g->rng.seed());
+			} else if (s.kind == Script::UnitMask) {
+				cm.issue_unitmask(*g, s.objs, s.num);
+				if (print) std::printf("  f%-5d UNITMASK %d:%d%s mask %x\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0], s.objs.size() > 1 ? "+" : "", s.num);
 			} else if (s.kind == Script::Teleport) {
 				// A test aid, not a game command: the units (and their followers) appear at (x, y) (spells acceptance tests).
 				for (int32_t o : s.objs) {
@@ -2197,13 +2217,19 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 				}
 				std::printf(" L%d:%d units %d hp kills %d", who, n, hp, g->leaders[size_t(who)].units_killed);
 			}
-			int32_t live = 0, stuck = 0, corpses = 0;
+			int32_t live = 0, stuck = 0, corpses = 0, debris = 0, flock = 0;
 			for (const Ammo& a : g->ammo) {
 				if (a.flags & ammobits::kFlying) live++;
 				else if (a.flags & ammobits::kStuck) stuck++;
+				if ((a.flags & ammobits::kFlying) && a.gpiece == kCrashPiece) debris++;
 			}
 			for (const DeathObj& d : g->deaths) corpses += d.valid ? 1 : 0;
-			std::printf(" | ammo %d stuck %d corpses %d\n", live, stuck, corpses);
+			for (int32_t o = 0; o < g->objects[size_t(kGaiaWho)].unit_mark; o++)
+				if (const Unit* u = g->unit(kGaiaWho, o); u && u->alive() && u->type == 403) flock++;
+			std::printf(" | ammo %d stuck %d corpses %d", live, stuck, corpses);
+			if (debris) std::printf(" debris %d", debris);
+			if (flock) std::printf(" flock birds %d", flock);
+			std::printf("\n");
 		}
 		if (print && fo.econ_every > 0 && g->frame % fo.econ_every == 0) print_economy(*g);
 		if (print && fo.ai_every > 0 && g->frame % fo.ai_every == 0) print_ai(*g);
@@ -2280,6 +2306,15 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 				for (size_t w = 0; w < cs.accum_cheated.size(); w++)
 					if (cs.accum_cheated[w]) std::printf("  cheats by L%zu: %d\n", w, cs.accum_cheated[w]);
 			}
+		}
+		for (const Script& s : scripts) {  // --unitmask / --auto-explore / --carrier-repeat: the bit on the named units at the end
+			if (s.kind != Script::UnitMask) continue;
+			std::printf("unitmask %x on %d:", s.num, s.who);
+			for (int32_t o : s.objs) {
+				const Unit* u = g->unit(s.who, o);
+				std::printf(" %d=%s", o, !u || !u->alive() ? "gone" : (u->unit_masks & uint32_t(s.num)) ? "set" : "clear");
+			}
+			std::printf("\n");
 		}
 		std::printf("final frame %d tick %d rng %08x digest %016llx\n", g->frame, g->tick, g->rng.seed(),
 		            (unsigned long long)rr.digests.back());
@@ -2413,6 +2448,36 @@ int main(int argc, char** argv) {
 			}
 			else if (std::strcmp(argv[i], "--teleport") == 0) scripts.push_back(parse_air(Script::Teleport, argv[i + 1], "teleport"));  // WHO:o1,o2@X,Y[@FRAME]
 			else if (std::strcmp(argv[i], "--kill") == 0) scripts.push_back(parse_air(Script::Kill, argv[i + 1], "kill"));  // WHO:o1,o2[@FRAME]
+			else if (std::strcmp(argv[i], "--crash") == 0) scripts.push_back(parse_air(Script::Crash, argv[i + 1], "crash"));  // WHO:o1,o2[@FRAME]
+			else if (std::strcmp(argv[i], "--auto-explore") == 0 || std::strcmp(argv[i], "--carrier-repeat") == 0) {  // WHO:o1,o2[@FRAME]
+				Script um = parse_air(Script::Crash, argv[i + 1], "unitmask");
+				um.kind = Script::UnitMask;
+				um.num = std::strcmp(argv[i], "--auto-explore") == 0 ? 0x100 : 0x200000;
+				scripts.push_back(um);
+			}
+			else if (std::strcmp(argv[i], "--unitmask") == 0) {  // WHO:o1,o2@MASK[@FRAME]
+				const std::vector<std::string> p1 = split(argv[i + 1], '@');
+				const std::vector<std::string> p2 = split(p1.at(0), ':');
+				Script um;
+				um.kind = Script::UnitMask;
+				um.who = int32_t(std::strtol(p2.at(0).c_str(), nullptr, 0));
+				um.objs = parse_list(p2.at(1));
+				um.num = int32_t(std::strtol(p1.at(1).c_str(), nullptr, 0));
+				if (p1.size() > 2) um.frame = int32_t(std::strtol(p1[2].c_str(), nullptr, 0));
+				scripts.push_back(um);
+			}
+			else if (std::strcmp(argv[i], "--flock") == 0) {  // WHO:TX,TY,N[@FRAME]  (WHO -1: gaia)
+				const std::vector<std::string> p1 = split(argv[i + 1], '@');
+				const std::vector<std::string> p2 = split(p1.at(0), ':');
+				const std::vector<int32_t> xyn = parse_list(p2.at(1));
+				if (xyn.size() < 3) throw std::runtime_error(std::string("bad --flock ") + argv[i + 1]);
+				Script fl;
+				fl.kind = Script::Flock;
+				fl.who = int32_t(std::strtol(p2.at(0).c_str(), nullptr, 0));
+				fl.x = xyn[0], fl.y = xyn[1], fl.num = xyn[2];
+				if (p1.size() > 1) fl.frame = int32_t(std::strtol(p1[1].c_str(), nullptr, 0));
+				scripts.push_back(fl);
+			}
 			else if (std::strcmp(argv[i], "--eject-all") == 0) scripts.push_back(parse_eject_all(argv[i + 1]));
 			else if (std::strcmp(argv[i], "--transport") == 0) scripts.push_back(parse_transport(argv[i + 1], Script::Transport));
 			else if (std::strcmp(argv[i], "--set-transport") == 0) scripts.push_back(parse_transport(argv[i + 1], Script::SetTransport));

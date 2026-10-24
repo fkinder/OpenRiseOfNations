@@ -24,7 +24,7 @@ enum class Verb : uint8_t {
 	BoardShip = 15, Disband = 21, GatherPoint = 22, Spell = 23,
 	// aircraft (docs/aircraft-spec.md section 8)
 	AttackGround = 9, Patrol = 10, LaunchPatrol = 11, Flight = 28, Recall = 35, Scramble = 36,
-	QueueUp = 24, Build = 25, BuildMask = 33, Unqueue = 48,
+	QueueUp = 24, Build = 25, UnitMask = 32, BuildMask = 33, Unqueue = 48,
 	// economy (docs/economy-spec.md section 11)
 	Trade = 17, CityGather = 18, Gather = 19, Garrison = 20, EjectAll = 26, ClearTributes = 39, Accept = 41, Reject = 42, Tribute = 43,
 	DemandTribute = 44, Buy = 46, Sell = 47, LeaderOptions = 73,
@@ -142,6 +142,10 @@ public:
 	bool issue_disband(const Game& g, const std::vector<int32_t>& objs, bool all = false);
 	// BUILDMASK: toggles INFINITE (0x40, repeat the queue) or REPEAT_AIR (0x80).
 	bool issue_buildmask(const Game& g, const std::vector<int32_t>& buildings, int32_t mask, bool set = true);
+	// UNITMASK (9 bytes: i32 unitmask, i32 set; Group::action_unitmask @6fcb90): toggles a Unit.unit_masks bit on the group's
+	// units: AUTO_EXPLORE (0x100, forgets the orders), a carrier's REPEAT_AIR (0x200000), AI control (0x40000: sets only).
+	// `set` is carried but never read by the original.
+	bool issue_unitmask(const Game& g, const std::vector<int32_t>& units, int32_t mask, int32_t set = 1);
 	// UNQUEUE (no group): building `o` of the local leader drops queue item `index` (-1 the last; -5 five; <= -10 all).
 	bool issue_unqueue(const Game& g, int32_t o, int32_t index = -1);
 

@@ -732,10 +732,18 @@ int32_t do_air_physics(Game& g, Unit& u, Order& A, int32_t x, int32_t y) {
 			if (animal) A.cruising_alt += u.type == 0x192 ? 200 : -200;
 		}
 	}
-	// 2. fuel; the path stack is the 1-point scratch of the goal.
+	// 2. fuel (not for animals); the path stack is the 1-point scratch of the goal. A flock bird (403) forgets its recharge and
+	// treats its last waypoint as a base: it flies to it and lands there, which kills an animal (land_plane).
 	u.path.clear();
 	int32_t goal_z = 0;
-	if (check_fuel(g, u, A, &x, &y, &goal_z)) return 0;
+	if (!is_animal_who(u.who) && check_fuel(g, u, A, &x, &y, &goal_z)) return 0;
+	if (u.type == 0x193) {
+		u.recharging = 0;
+		if (u.orders.size() == 1) {
+			A.returning = 1;
+			goal_z = find_tcoord_z(g, tcoord_of(u.x), tcoord_of(u.y), 1);
+		}
+	}
 	// 3. the goal is clamped into the world; a clamped goal cannot be landed on this frame.
 	bool clamped = false;
 	{
@@ -823,6 +831,15 @@ int32_t do_air_physics(Game& g, Unit& u, Order& A, int32_t x, int32_t y) {
 	}
 	// 9. the walk animation unless the unit is recharging a shot.
 	if (u.recharging == 0) unit_set_anim(g, u, kCharWalk, 0, 1);
+	if (u.type == 0x193) {
+		// A flock bird: never "returning" after the call, recharge 1, and it moves on to its next waypoint once within 0x30 of this one.
+		A.returning = 0;
+		u.recharging = 1;
+		if (iabs(x - u.x) + iabs(y - u.y) < 0x30 && u.orders.size() > 1) {
+			kill_current_order(g, u, false);
+			return 0;
+		}
+	}
 	return 1;
 }
 
@@ -830,6 +847,10 @@ int32_t do_air_physics(Game& g, Unit& u, Order& A, int32_t x, int32_t y) {
 
 void land_plane(Game& g, Unit& u) {
 	// @5e9950
+	if (is_animal_who(u.who)) {  // a bird that reached its last waypoint: gone
+		object_die(g, u, 0, -1, 0.0f);
+		return;
+	}
 	Order* A = u.front();
 	if (!A || !order_is_air(A->type)) return;
 	const bool heli = is_heli_type(*u.ptype);

@@ -136,6 +136,7 @@ struct Leader {
 	uint8_t ages_queued = 0, epochs_queued = 0;  // +0x67f4 / +0x67f5
 	int32_t tech_frame = 0;                        // +0x7c4
 	std::array<int32_t, 4> tech_cat_frame{};       // +0x7c8
+	int32_t flock_stamp = 0;                       // +0x7b8: the frame of this leader's last bird flock (Objects::add_flock, 225-frame limit)
 	// Population (economy-spec 7.1): pop (city statistic) +0x95c, pop_cap +0x7e4, pop_issues +0x7e8, control (pop in
 	// use) +0x940, active (unit count) +0x93c, caras (caravans) +0x980.
 	int32_t pop = 0, pop_cap = 0, pop_issues = 0, control = 0, active = 0, caras = 0;

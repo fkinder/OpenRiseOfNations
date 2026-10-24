@@ -736,6 +736,7 @@ bool replay_to_engine(const uint8_t* cmd, size_t len, Command& out) {
 		break;
 	case 30: m.verb = Verb::Follow; m.ox = a.i32(); m.whom = a.i32(); m.queued = int8_t(a.i32()); break;
 	case 31: m.verb = Verb::Guard; m.ox = a.i32(); m.whom = a.i32(); m.queued = int8_t(a.i32()); break;
+	case 32: m.verb = Verb::UnitMask; m.mask = a.i32(); m.set = a.i32(); break;
 	case 33: m.verb = Verb::BuildMask; m.mask = a.i32(); m.set = a.i32(); break;
 	case 35: m.verb = Verb::Recall; break;
 	case 36: m.verb = Verb::Scramble; break;
@@ -829,6 +830,7 @@ bool engine_to_wire(const Command& c, std::vector<uint8_t>& out) {
 	case Verb::Flight: out.push_back(28); i32(c.ox); i32(c.whom); i32(c.shift); i32(c.ctrl); i32(c.alt); i32(c.orders); return true;
 	case Verb::Follow: out.push_back(30); i32(c.ox); i32(c.whom); q32(c.queued); return true;
 	case Verb::Guard: out.push_back(31); i32(c.ox); i32(c.whom); q32(c.queued); return true;
+	case Verb::UnitMask: out.push_back(32); i32(c.mask); i32(c.set); return true;
 	case Verb::BuildMask: out.push_back(33); i32(c.mask); i32(c.set); return true;
 	case Verb::Recall: out.push_back(35); return true;
 	case Verb::Scramble: out.push_back(36); return true;

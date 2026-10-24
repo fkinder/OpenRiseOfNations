@@ -262,6 +262,8 @@ S_UNIT_PLACEMENT_BLOCKED (own) and `vslot +0xd8` (refund), `mana_burn -= min(man
 4. Carrier creation: `Objects::init_unit` x7 (`Guy::init_real`, one draw per guy) in `Build::train`.
 5. `Object::do_launch` silo AI scoring: `game_random(0,0xffff) % 10` per candidate city (see §8.3); airbase AI and the rest draw nothing.
 6. `Ammo::init` AA rolls and building-shooter scatter (combat-spec RNG table #5-#10).
+7. `Ammo::init_crash` (§13): one `game_random(0,0xffff) % 7` per guy of a dying non-missile plane, in guy order inside `Unit::close` (the debris drift uses a local `Random`).
+8. `Objects::add_flock` (§15): 2 + 2 + 1 + 1 draws for the waypoints and the heading, then per bird `init_unit`'s own, 1 for the heading step and 8 for the four waypoints; the type-403 altitude reroll (§4) is a draw per eligible `(o + frame) % 8`.
 `find_new_*_target` and `check_fuel` draw nothing; Animals (`think_bird`) have their own draws (movement-spec §2 bird spawn).
 
 ## 11. What the port needs
@@ -270,7 +272,7 @@ S_UNIT_PLACEMENT_BLOCKED (own) and `vslot +0xd8` (refund), `mana_burn -= min(man
 > `queue_up` does not refuse, `vslot 8` = is_live_unit, the missile `is_in_range` sign, gather action 3) and what is left is in
 > docs/sim-implementation.md, section "Aircraft". The list below is the original work plan.
 
-Code with `TODO(air)` markers (all under `engine/sim/`): `combat_target.cpp:33` (`is_flying_high/low`, §7), `combat_fight.cpp:262,335` (AA bands; strafing impact slide ❓ not decoded: Guy anim phase),
+Code with `TODO(air)` markers (all under `engine/sim/`): `combat_target.cpp:33` (`is_flying_high/low`, §7), `combat_fight.cpp:262,335` (AA bands; the strafing impact slide is decoded in §14),
 `combat_orders.cpp:223` (carrier strafes, §7) and `:905` (retarget a STRAFE in place), `queues.cpp:330` (`can_carry` silo filter), `:455/:463/:492` (gather: §8), `:708` (aircraft z at THECEO), `:930`
 (aircraft-housing buildings), `:953` (carrier wing, §2), `:966` (airbase limit, §2), `garrison.cpp:383` (helicopter on carrier, §6) and `:618` (`add_strafe_order` after eject), `build.cpp:468`
 (`can_carry(AIR)`), `construct.cpp:716` (HOLDS_AIR `do_launch`), `commands.cpp:167` (`Unit::action_unqueue`), `ai_diplo.cpp:70` (ejected aircraft strafe), `guys.cpp:434`,
@@ -311,5 +313,95 @@ Acceptance (all objective):
 | `Object::fire_ammo`, `Unit::set_new_location`, `UnitData::invalid_loc` | 64c8b0, 5f8d20, 607c30 | §4, §7 |
 | `Group::action_flight`, `launch_flight`, `air_patrol`, `launch_patrol`, `air_attack_ground`, `patrol`, `scramble`, `recall`, `return` | 6fb260, 6fbfb0, 7029d0, 703580, 703d80, 7030c0, 7111c0, 6fa7e0, 6fad40 | §8 |
 | `SpellType::cast_paradrop`, `SpellType::cast` (0x299) | 671f80, 676ce0 | §7, §9 |
+| `Objects::kill_guy`, `Ammo::init_crash`, `Ammo::inc_time` | 659410, 67b800, 67d380 | §13 (`re/decomp/aircraft3`, asm in `aircraft3/dis`) |
+| `Ammo::init` (strafing slide) | 67bbf0, slide at 67c9c1..67cb1f | §14 |
+| `Objects::add_flock`, `Unit::update_z`, `Guy::set_new_z` | 65c0e0, 606590, 5d86c0 | §15 (callers: `Unit::do_group_move` 5e79a0, `Object::take_damage` 652020 @6521e3) |
+| `Group::action_unitmask`, `CommandPackage::process_unitmask`, `GroupOut::issue_unitmask`, `Options::set_air_repeat`, `do_auto_explore` | 6fcb90, 947790, 708880, 71c740, 71cbf0 | §16 |
 | `FRAMES_BETWEEN_LAUNCHES` | c06248 (`re/decomp/aircraft/dis/Object_attempt_launch@00643a10.asm`) | §1 |
 | Animal vtable (+0x30 `is_animal`, +0x180 `think_bird`), Build vtable (+0x3c, +0x190 `count_queue`) | `re/decomp/aircraft/vt_animal_build.txt` | §0, §2 |
+
+## 13. Dead crafts: `Ammo::init_crash` and the debris flight (decoded 2026-10-24, ported in `aircraft_dead.cpp`)
+
+A plane that dies in the air (shot down: `Object::die` with a death type; out of fuel: `check_fuel` calls `die(2, -1, 0)`, §6) goes through
+`Unit::close` @60ee50 like any unit: when `death != 0`, the unit is a live unit on the map and not a decoy, `Objects::kill_guy` @659410 runs
+for every guy `[0, guy_mark)` then `[squad_size, guys)`. `kill_guy` tests the guy's unit type: `type.cat == 8` (Air). **Missiles**
+(`obj_masks & 0x8000000`) get nothing (no corpse, no debris). Every other air guy gets an Ammo, not a corpse: the first slot of `objects.ammo`
+whose `flags & 3 == 0` (a new slot at the end when all are busy), `Ammo::init_crash(guy, index, graph_index = objects.ammo_counter)` @67b800, then
+`ammo_counter++`. (The removal-list / sound tail of `kill_guy` is presentation.) Nothing is drawn from `game_random` by `kill_guy` itself.
+
+`Ammo::init_crash(guy, index, graph_index)` (asm in `re/decomp/aircraft3/dis/Ammo_init_crash@0067b800.asm`):
+
+1. `flags &= 0xe3`; `who` = guy.who, `o` = guy.o; `index`, `graph_index`; `num_guys = 1`; `gpiece` = the unit's own graphics piece (a *unit piece*, which turns on the
+   terrain test below; the port stores the marker `kCrashPiece = -2`). `accuracy` is not written (the slot keeps its old value).
+2. `start_roll_angle` = `-(int)guy0.bank` when the unit's current order is STRAFE (16), AIR_PATROL (17) or AIR_ATTACK_GROUND (24), else 0 (nothing reads it in the simulation).
+3. `(sx, sy, sz)` = guy x, y, z. `a` = guy angle, `v = types[guy.type].moves * unit_move_speed`.
+   `t = sqrtf((float)(-2 * sz) / GRAV_Z)` (GRAV_Z = -10.4875f: the free-fall time from the guy's z).
+   `ex = trunc((float)sinx(a, v) * t) + unit.x`, `ey = trunc((float)sinx(a - 0x40000000, v) * t) + unit.y` (the unit's position, not the guy's; `sinx` = `sin_a`, a type
+   without `moves` gives 0), each clamped into the map; `ez = find_data_z(ex, ey, 0)` (negative over water, not clamped). `angle` = guy angle.
+4. `flags |= 2` (in use), `splash_area = 2`, `cur_time = 0`, `total_time = max(1, trunc(sqrtf((float)((ex-sx)^2 + (ey-sy)^2)) / (float)v))` (unsigned minimum; `v == 0` would give 0x80000000).
+5. **Draw @67baf7: `rolling = game_random.get(0, 0xffff) % 7 - 3`** (the only `game_random` draw; the table row #17 of combat-spec §4.15).
+6. `traj = 1`, `v1z = 0`, `dx = sqrtf(dist^2) / (float)total`. A **local** `Random` seeded with `sx + sy + sz` (not the game stream) gives `bank_dx = (float)get(-30, 30)` then
+   `bank_dy = (float)get(-30, 30)`: the per-frame drift of the impact point. `whom = ox = -1`.
+
+`Ammo::inc_time` @67d380, `cur_time < total_time` branch with `traj == 1` (the `traj != 1` / spline arm is not in the port):
+- if `bank_dx != 0 or bank_dy != 0` (only debris): `ex += (int)bank_dx`, `ey += (int)bank_dy`, `WorldData::restrict`, `dx = sqrtf((float)((ex-sx)^2 + (ey-sy)^2)) / (float)total`;
+- if the gpiece is not a unit piece (every real projectile): return. Else (debris) the **terrain test**: `t = (float)cur`, `k = t / (float)total`, `px = trunc((float)(ex-sx)*k + (float)sx)`
+  (same for `py`), `h = find_data_z(px, py, 0)`, `z = (v1z*t + (float)sz) + ((GRAV_Z*0.5f)*t)*t` (asm 67d6cd..67d70d: the order matters, no fused multiply-add). If `(float)h > z` the debris
+  has hit the ground: `(ex, ey, ez) = (px, py, h)`, `total = cur + 1`, and the loop runs again (`cur += 1`, `hold_frames` of the dead shooter again) into the arrival below in the same call.
+  Otherwise return.
+- Arrival: `WorldData::restrict`, then `do_damage` (the usual `flags & 0x10` close): no target (`whom = ox = -1`) and `splash_area = 2`, so it is the **splash** branch with radius ring
+  `min(2/4 + 1, 10) = 1`; the shooter is the dead plane (its slot is held by the ammo's `hold_frames`), so the wreck hurts every object of another, non-allied leader within the splash
+  (`Object::do_damage(shooter, ..., pct)`), never the plane's own side, and never gaia.
+
+Port: `add_crash_ammo` (`aircraft_dead.cpp`) called from the aircraft branch of `kill_guy` (`combat_death.cpp`); the drift and terrain test in `ammo_inc_time` (`combat_fight.cpp`).
+`ron-sim --crash WHO:o1,o2[@FRAME]` kills airborne aircraft with death type 2; `RON_AIR_TRACE=1` prints each debris (`crashes: debris slot ...`); the summary line shows `debris N`.
+
+## 14. The strafing impact slide (`Ammo::init` @67bbf0, asm 67c9c1..67cb1f)
+
+Applies to a shooter that is a **unit** with `unit_flags & 0x400000` (UNITTYPE_STRAFING, the `w` column of §1: Fighter Bomber, Jet Fighter-Bomber...), when the ammo's target is not a plane
+(`ox, whom >= 0` and `objects[whom][ox].type.domain == 2` skips it; a ground order has no target and slides) and the shooter's guy 0 exists and `UnitAnimCat[guy0.cur_anim] == CHAR_ATTACK2`.
+It runs after the impact point `(ex, ey)` has been set (a strafer has `r = 0`: no scatter draws, §combat-spec 4.8 step 9) and before the clamp:
+
+```
+phase = (float)cur_time / (float)end_time            // guy 0, unsigned -> float
+d     = trunc(((phase - 0.3f) * 6.0f) * 192.0f)       // single precision, one operation at a time
+(ex, ey) = project(ex, ey, shooter.angle, d)
+(ex, ey) = project(ex, ey, shooter.angle + 0x40000000, 0x30)   if pkg.angle (the release node) is even
+         = project(ex, ey, shooter.angle - 0x40000000, 0x30)   if it is odd
+```
+`phase` runs from about 0.07 at the first release frame to 1 at the end of the animation, so the burst walks from 1.4 tiles behind to 4.2 tiles ahead of the target
+point and sits 0x30 to the side of the line, left or right by the node. The impact point also changes the flight time (`total_time` from the distance, combat-spec 4.8 step 12), which
+is what moves the digests of every scenario where Fighter Bombers strafe. Port: `ammo_init` in `combat_fight.cpp`. Fixture: `re/tools/air-fixtures.sh` (the two shots of a release end on different points).
+
+## 15. Bird flocks: `Objects::add_flock` @65c0e0 (decoded 2026-10-24, ported in `flocks.cpp`)
+
+`add_flock(tx, ty, who, n)` (tile coordinates, 192 units) creates `n` FLOCKBIRDs (TypeIndex 403, gaia, `who = 9`; the wild BIRD is 402 and is topped up by `Objects::process_all`, which does not
+count the flock birds). Callers: `Unit::do_group_move` @5e79a0 (a group move that ends on a forest wcoord, `v = get(0, 0xffff)`, `n = 2 + (v & 1)`, `(wx*4 + 2, wy*4 + 2, leader)`; movement-spec §15.8) and
+`Object::take_damage` @652020 (@6521e3: the first hit on an undamaged fort, temple or town by a siege weapon, 5 %, `n = 3 + (get & 1)`, the building's tile, `who = -1`).
+
+1. If `who >= 0` and the leader is valid: return when `frame < leader.flock_stamp + 225` (`LeaderData +0x7b8`, zero from `Leader::init`, so a leader's first flock is possible from frame 225);
+   else `flock_stamp = frame`. (Native save version 6 carries the stamp.)
+2. The waypoint list `W[0..3]` (WCoords, `world.xs/ys` clamps): `W0 = (tx >> 2, ty >> 2)`; `W1 = W0 + (get % 3 - 1, get % 3 - 1)` (x draw first, clamped to the map); `W2 = W1 + (get % 5 - 2,
+   get % 5 - 2)` (clamped); then `i = circle_radius[3] - 1 < 1 ? 0 : get % circle_radius[3]` and `W3` = `W2 + (circle_x[i], circle_y[i])` for the first `i < circle_radius[8]` whose cell is in
+   the map and has `WData.flags & 0x20` (forest), `W0` again when none.
+3. `angle = (get % 12) * 0x15555555`. For each of the `n` birds: `init_unit(9, FLOCKBIRD, tx*0xc0 + 0x60, ty*0xc0 + 0x60)` (its own guy draws); if it succeeded: `Unit::set_angle(angle, now)`,
+   `angle += (get % 5 + 3) * 0xb60b60` (3..7 degrees), `Unit::update_z` @606590 (unit z = `find_tcoord_z(tile, flag 1)`, guy z = terrain, 0 for ships), guy 0 `set_new_z(z + 200)`, then for each of
+   the 4 waypoints: `ru = get & 0x1ff`, `rv = get & 0x1ff`, **`add_air_attack_ground_order(W.x*0x300 + 0x80 + rv, ru + 0x80 + W.y*0x300, -1, -1, QUEUE_LAST, not explicit)`**.
+4. Flight: the bird runs the AIR_ATTACK_GROUND machinery (§4, `Animal::work` -> `do_job`): in `do_air_physics` a type-403 unit rerolls its altitude like a plane (`(get % 7 + 13) * 100`),
+   skips `check_fuel` (animals), zeroes its recharge, and with a single order left sets `returning` (landing target = its own tile z); at the end of every call `returning = 0`, recharge = 1, and
+   when within `0x30` of the waypoint (Manhattan) with more orders left `kill_current_order` (next waypoint) and the call returns 0. A returning unit within `speed * 3/2` of the last waypoint
+   `land_plane`s, which for an animal is `Object::die(0, -1, 0)` (no corpse): the flock disappears. No other draws.
+
+Port: `flocks.cpp` (`add_flock`), the 403 arms and the animal skip of `check_fuel` in `do_air_physics`, the animal arm of `land_plane` (aircraft.cpp), the callers in `groups.cpp` and
+`combat_damage.cpp`, `Leader::flock_stamp`. `ron-sim --flock WHO:TX,TY,N[@FRAME]` calls it (WHO -1 = gaia); the summary line shows `flock birds N`; `RON_AIR_TRACE=1` prints the waypoints.
+
+## 16. UNITMASK: AUTO_EXPLORE and the carrier's REPEAT (sim side ported 2026-10-24)
+
+Command 32 `UNITMASK` (9 bytes: `i32 unitmask, i32 set`; replay-spec §9) is issued by `GroupOut::issue_unitmask` @708880 for the HUD's AUTO_EXPLORE button (`Options::do_auto_explore` @71cbf0, mask
+`0x100`) and for a **carrier's** REPEAT (`Options::set_air_repeat` @71c740: a group of units, mask `0x200000` = the bit `has_repeat_air` reads on a unit; a group of buildings issues
+BUILDMASK `0x80` instead). `CommandPackage::process_unitmask` @947790 runs `Group::action_unitmask(mask, set)` @6fcb90 on the current group (nothing without one):
+not for a group of buildings; over the live units of the group, in order: `follow = (mask != 0x40000)`; for each unit (a plane skips the `0x100` case), `now = (unit_masks & mask) == 0 ? follow : false`; set or
+clear the bit, `follow = now` (the first unit decides, the rest follow it). `set` is carried and never read. For `0x100` each unit also gets `flags |= NEW_THINK`, `unit_masks &= ~MULTIMOVE`,
+its path emptied, `close_orders(0)`, `clear_partial_path`, `update_action` (it forgets its orders and starts exploring: `think_scout`, ai-spec 2881). Port: `Verb::UnitMask`, `CommandManager::
+issue_unitmask`, `group_action_unitmask` (aircraft_cmd.cpp), the `.rcx` codec (`replay.cpp`). The HUD buttons (and their `GroupData::get_auto_explore` highlight) are still to wire in `ronmap`.
+`ron-sim --unitmask WHO:o1,..@MASK[@FRAME]`, `--auto-explore`, `--carrier-repeat` (the final `unitmask` line shows the bit).

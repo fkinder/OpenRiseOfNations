@@ -24,7 +24,7 @@ template <class Ar> void walk(Ar& ar, Leader& v) {
 	FIELDS(ar, v.barracks_units, v.stable_units, v.factory_units, v.combat_units, v.dock_units, v.air_units, v.barracks_queued);
 	FIELDS(ar, v.stable_queued, v.factory_queued, v.combat_queued, v.dock_queued, v.air_queued, v.peasants, v.scholars, v.scouts);
 	FIELDS(ar, v.scholar_militia, v.peasants_inside, v.stable_inside, v.special_inside, v.barracks_inside, v.ages_queued);
-	FIELDS(ar, v.epochs_queued, v.tech_frame, v.tech_cat_frame, v.pop, v.pop_cap, v.pop_issues, v.control, v.active, v.caras);
+	FIELDS(ar, v.epochs_queued, v.tech_frame, v.tech_cat_frame, v.flock_stamp, v.pop, v.pop_cap, v.pop_issues, v.control, v.active, v.caras);
 	FIELDS(ar, v.city_mine, v.city_mark, v.city_name, v.fort_mark, v.wonder_mark, v.lost_city_stamp, v.reg_pop, v.reg_terr);
 	FIELDS(ar, v.reg_known_rares, v.territory, v.territory_high, v.num_bonus_cards, v.buildings_built, v.cities_built, v.wonders_built);
 	FIELDS(ar, v.wonders_held, v.senates_built, v.forts_built, v.defense, v.gather_slots, v.gather_slots_high, v.attrition_stamp3);
@@ -344,7 +344,7 @@ template <class Ar> void walk(Ar& ar, LandMake& v) {
 #if defined(__LP64__) && defined(_LIBCPP_VERSION)
 static_assert(sizeof(ActiveSpell) == 12, "ActiveSpell changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Caster) == 32, "Caster changed: update its walk() in save_walk.inc");
-static_assert(sizeof(Leader) == 28104, "Leader changed: update its walk() in save_walk.inc");
+static_assert(sizeof(Leader) == 28112, "Leader changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Leader::Deal) == 92, "Leader::Deal changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Personality) == 96, "Personality changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Site) == 24, "Site changed: update its walk() in save_walk.inc");

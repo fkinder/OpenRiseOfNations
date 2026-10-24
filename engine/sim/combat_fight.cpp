@@ -334,7 +334,22 @@ void ammo_init(Game& g, Ammo& a, const AmmoPackage& pkg, int32_t index, int32_t 
 			if (T->is_unit && T->ptype->domain == kDomainAir) a.ez = target_z(*T);
 			a.ez = std::max(a.ez, 0);
 		}
-		// ❓(air) strafing shooters slide the impact point with the attack animation phase (aircraft-spec 11: not decoded).
+		// Strafing shooters (a unit with UNITTYPE_STRAFING, @67c9dd) that do not shoot a plane: while guy 0 is in an ATTACK2
+		// animation the impact point slides along the heading with the animation phase, trunc((cur / end - 0.3f) * 6.0f *
+		// 192.0f) ahead of the shot (single-precision chain), and sits 0x30 to the side: the left of the heading when the
+		// release node is even, the right when odd (aircraft-spec 5.1).
+		const Object* slide_target = (a.ox >= 0 && a.whom >= 0) ? obj_at(g, a.ox, a.whom) : nullptr;
+		if (su && (sh->ptype->unit_flags & utflag::kStrafing) &&
+		    !(slide_target && slide_target->ptype->domain == kDomainAir) && !su->guys.empty() &&
+		    unit_anim_cat(su->guys[0].cur_anim) == kCharAttack2) {
+			const Guy& g0 = su->guys[0];
+			float phase = itof(g0.cur_time) / itof(g0.end_time);
+			phase = phase - 0.3f;
+			phase = phase * 6.0f;
+			phase = phase * 192.0f;
+			project(a.ex, a.ey, su->angle, ftoi(phase), &a.ex, &a.ey);
+			project(a.ex, a.ey, (pkg.angle & 1) == 0 ? su->angle + 0x40000000u : su->angle - 0x40000000u, 0x30, &a.ex, &a.ey);
+		}
 	}
 	a.ex = std::clamp(a.ex, 0, g.world.xs * 768 - 1);
 	a.ey = std::clamp(a.ey, 0, g.world.ys * 768 - 1);
@@ -400,8 +415,28 @@ void ammo_inc_time(Game& g, Ammo& a) {
 			return;
 		}
 		if (a.cur_time < a.total_time) {
-			// (splines: TODO; crash debris: aircraft are not simulated) Real projectiles just fly.
-			return;
+			// (splines: TODO.) Real projectiles just fly; crash debris (Ammo::init_crash) drifts and tests the terrain.
+			if (a.traj != 1) return;
+			if (a.bank_dx != 0.0f || a.bank_dy != 0.0f) {
+				// The drift (@67d3e0): the impact point moves by the (truncated) bank every frame, and dx follows.
+				a.ex += ftoi(a.bank_dx);
+				a.ey += ftoi(a.bank_dy);
+				restrict_xy(g, &a.ex, &a.ey);
+				const int32_t ddx = a.ex - a.sx, ddy = a.ey - a.sy;
+				a.dx = std::sqrt(float(ddx * ddx + ddy * ddy)) / itof(a.total_time);
+			}
+			if (a.gpiece != kCrashPiece) return;  // get_gpiece_type != 0: only a unit piece (the wreck) tests the terrain
+			const float t = itof(a.cur_time), k = t / itof(a.total_time);
+			const int32_t px = ftoi(float(a.ex - a.sx) * k + float(a.sx));
+			const int32_t py = ftoi(float(a.ey - a.sy) * k + float(a.sy));
+			const int32_t h = find_data_z(g, px, py, 0);
+			const float z = (a.v1z * t + float(a.sz)) + ((kGravZ * 0.5f) * t) * t;
+			if (float(h) <= z) return;
+			a.ex = px;
+			a.ey = py;
+			a.ez = h;
+			a.total_time = a.cur_time + 1;
+			continue;  // impact in this very call
 		}
 		if ((a.flags & ammobits::kVerify) && !(a.flags & ammobits::kMissed)) {
 			if (!ammo_hit_target(g, a) && !ammo_check_hit(g, a, kDomainGround)) a.flags |= ammobits::kMissed;

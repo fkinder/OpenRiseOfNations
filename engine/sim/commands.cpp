@@ -209,6 +209,9 @@ void CommandPackage::process(Game& g, const Command& c, int32_t play, int32_t pl
 	case Verb::BuildMask:
 		if (group >= 0) group_action_buildmask(g, g.groups.g[size_t(group)], c.mask, c.set);  // @947680
 		return;
+	case Verb::UnitMask:
+		if (group >= 0) group_action_unitmask(g, g.groups.g[size_t(group)], c.mask, c.set);  // process_unitmask @947790
+		return;
 	case Verb::Gather: {
 		// process_gather @9488b0: ox < 0, or objects[group owner][ox] valid -> Group::action_gather(ox, queued).
 		if (group < 0) return;
@@ -549,6 +552,16 @@ bool CommandManager::issue_buildmask(const Game& g, const std::vector<int32_t>& 
 	c.verb = Verb::BuildMask;
 	c.mask = mask;
 	c.set = set ? 1 : 0;
+	local_.push_back(c);
+	return true;
+}
+
+bool CommandManager::issue_unitmask(const Game& g, const std::vector<int32_t>& units, int32_t mask, int32_t set) {
+	if (!issue_group(g, units)) return false;
+	Command c;
+	c.verb = Verb::UnitMask;
+	c.mask = mask;
+	c.set = set;
 	local_.push_back(c);
 	return true;
 }

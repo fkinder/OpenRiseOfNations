@@ -43,7 +43,7 @@ static_assert(sizeof(Regions) == 10248, "Regions changed: update the REGN sectio
 // 1647392 + 16 (+ 32: Game::herds with its padding): Game::original (the original-save shadow, sim/original_save.hpp) is derived state the native save never writes.
 // + 9192: Game::ctl (sim/control.hpp: TurnControl speed / pause, the control groups, cheat counters, chat lines) is console state no simulation code reads;
 // the original saves its hotkey groups, the native save does not (docs/sim-implementation.md, "Orders and commands, second pass").
-static_assert(sizeof(Game) == 1657272, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
+static_assert(sizeof(Game) == 1657352, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
 // 1608 + 8: ScriptHost::ctw (the Conquer the World campaign the scripts run for, sim/ctw.hpp) is a run-time link the native battle save never writes.
 static_assert(sizeof(ScriptHost) == 1616, "ScriptHost changed: update walk_scripts()");
 #endif

@@ -695,6 +695,29 @@ static void group_action_return(Game& g, Group& gr) {
 	}
 }
 
+void group_action_unitmask(Game& g, Group& gr, int32_t mask, int32_t set) {
+	(void)set;
+	if (gr.buildings) return;
+	bool follow = mask != 0x40000;
+	for (int32_t i = 0; i < gr.num; i++) {
+		Unit* u = g.unit(gr.who, gr.list[size_t(i)]);
+		if (!u || !is_live_unit(*u)) continue;
+		if (mask == 0x100 && unit_is_plane(*u)) continue;
+		const bool now = (u->unit_masks & uint32_t(mask)) == 0 ? follow : false;
+		if (now) u->unit_masks |= uint32_t(mask);
+		else u->unit_masks &= ~uint32_t(mask);
+		follow = now;
+		if (mask == 0x100) {
+			u->flags |= objflag::kNewThink;
+			u->unit_masks &= ~umask::kMultimove;
+			u->path.clear();
+			close_orders(g, *u, false);
+			clear_partial_path(*u);
+			update_action(g, *u);
+		}
+	}
+}
+
 void group_action_recall(Game& g, Group& gr) {
 	// TODO(scenarios): the ScenarioData::ignore_orders prelude.
 	if (gr.num <= 0) return;

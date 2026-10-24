@@ -457,9 +457,27 @@ the airbase gather-point hooks and `air_describe`; `aircraft_cmd.cpp` the comman
   AI's silo completes (central, f9); 5: planes inside bases, only the new aircraft digest block; 4 real divergences from AI
   launches: korea3 / korea4 (units f21, RNG f31), suez2 (f36 / f42), Tutorial6 (f587, RNG unchanged)).
 - **Not ported / ❓**: `Group::action_guard` (an ally target of FLIGHT sends the non-planes there), vslot 0x10 of the home object in
-  the FLIGHT no-fuel check (read as "alive"), the strafing impact slide (combat_fight.cpp) and the carrier deck node position (render
-  data). The ground halves of PATROL / ATTACK_GROUND, the paradrop, the carrier's BUILDAIR queue with the counters and refund of
-  `Unit::action_unqueue` were ported in the second pass (below).
+  the FLIGHT no-fuel check (read as "alive") and the carrier deck node position (render data). The ground halves of PATROL /
+  ATTACK_GROUND, the paradrop, the carrier's BUILDAIR queue with the counters and refund of `Unit::action_unqueue` were ported in the
+  second pass (below); dead crafts, the strafing impact slide, bird flocks and the UNITMASK verb in the third (below).
+- **Third pass (2026-10-24; aircraft-spec 13-16)**: (1) **dead crafts**: `Objects::kill_guy` @659410 gives every guy of a dying non-missile
+  plane `Ammo::init_crash` @67b800 (`aircraft_dead.cpp`: one game_random draw for `rolling`, a local `Random(sx+sy+sz)` for the debris drift), and
+  `Ammo::inc_time` @67d380 drifts the debris by `(int)bank_dx/dy` per frame, ends it at the first frame its ballistic height is under the terrain
+  (`total = cur + 1`, impact in that call) and splashes radius 2 around it (`combat_fight.cpp`; the debris carries `gpiece = kCrashPiece`); (2) the
+  **strafing impact slide** of `Ammo::init` @67c9c1: a STRAFING shooter's guy 0 in ATTACK2 moves the impact point `(phase - 0.3f) * 6 * 192` along its
+  heading and 0x30 to the side of the release node's parity (`combat_fight.cpp`); (3) **bird flocks**: `Objects::add_flock` @65c0e0 (`flocks.cpp`;
+  `Leader::flock_stamp` +0x7b8, **save version 6**) with the four AIR_ATTACK_GROUND waypoints per FLOCKBIRD (403), the type-403 arms of
+  `do_air_physics` (recharge reset, `returning` on the last order, 0x30 waypoint switch), the animal skip of `check_fuel` and the animal arm of `land_plane` (a
+  bird that lands dies), the two callers (`do_group_move` onto a forest edge: it was a stub; `take_damage` of a fort / temple / town by a siege weapon: it was a TODO);
+  (4) the **UNITMASK** verb (32): `CommandManager::issue_unitmask`, `group_action_unitmask` @6fcb90 (AUTO_EXPLORE `0x100`, the carrier's REPEAT `0x200000`),
+  `.rcx` codec. Left for `ronmap`: the REPEAT / AUTO_EXPLORE buttons and their lit state (`GroupData::get_auto_explore`). Harness: `--crash`, `--flock`, `--unitmask`,
+  `--auto-explore`, `--carrier-repeat`; `re/tools/air-fixtures.sh <game>` runs 11 checks (debris appears and is gone, the slide, a flock of 4 appears and lands, the 225-frame limit, the
+  mask toggles). Validated (scratch build, zero warnings): `ron-check` 0 failures; `sim-all` 600 frames `--ai-every 8` 156 / 156 self-check OK; `ron-sim tut1 --roundtrip 300` OK (also with a flock
+  in the air at 320 and debris at 72 on korea); `ron-sav` 10 / 10; `--spell-fixtures` 59 / 59 (korea.scx); `ron-net selftest` 91 / 91 and replay `21'23'34` in lockstep agree. **Digests against the
+  tree before the pass: 149 scenarios identical, 7 changed**: `tut2`, `mexico`, `italy_mp` (first change at frames 447 / 296 / 239: the first group move onto a forest edge now draws and spawns a
+  flock of 2-3; before it drew nothing), `korea3` (flock at 228, slide earlier at 156), `korea4`, `korea5`, `suez2` (frames 155 / 215 / 409: the first strafing shot of a Fighter Bomber, whose
+  impact point and flight time moved with the slide). No scenario of the 600-frame runs crashes a plane (the debris is only exercised by `--crash`). `ron-sav --replay` on `21'23'34` (9,000 frames)
+  matches the previous tree boundary for boundary: no flock or crash occurs in that window.
 
 ## Healing and attrition
 

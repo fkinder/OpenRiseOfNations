@@ -10,6 +10,7 @@
 #include "sim/ai.hpp"
 #include "sim/combat_internal.hpp"
 #include "sim/economy.hpp"
+#include "sim/flocks.hpp"
 #include "sim/garrison.hpp"
 #include "sim/guys.hpp"
 #include "sim/orders.hpp"
@@ -630,7 +631,7 @@ int32_t take_damage(Game& g, Object& tgt, int32_t hp, int32_t frac, int32_t deat
 			const bool fortlike = type_is(*tgt.ptype, 0x1bb) || type_is(*tgt.ptype, 437) || type_is(*tgt.ptype, 415);
 			if (fortlike && att && att->ptype && type_is_siege(*att->ptype)) {
 				const int32_t n = g.rnd_draw(2) + 3;  // @652199
-				(void)n;  // TODO(gaia): Objects::add_flock(tile, -1, n) and its own draws.
+				add_flock(g, tcoord_of(tgt.x), tcoord_of(tgt.y), -1, n);  // @6521e3
 			}
 		}
 		// TODO(combat-spec 5.4): AI war declaration on missile hits.

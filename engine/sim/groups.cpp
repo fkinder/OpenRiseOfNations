@@ -14,6 +14,7 @@
 #include <cstdlib>
 
 #include "sim/aircraft.hpp"
+#include "sim/flocks.hpp"
 #include "sim/game.hpp"
 #include "sim/garrison.hpp"
 #include "sim/guys.hpp"
@@ -179,12 +180,6 @@ int32_t get_form_mod_option(Game& g, const Group& gr) {
 
 // ---- systems the group code calls that are not simulated yet
 
-// Objects::add_flock @65c0e0 (a flock of animals near a forest wcoord). TODO(gaia, movement-spec 15.8): it is rate
-// limited per leader (frame >= leader+0x7b8 + 225), then draws game_random (2 + per animal) and creates gaia units;
-// not ported, so a group move that ends on a forest edge consumes only do_group_move's own draw.
-void add_flock(Game& g, int32_t tx, int32_t ty, int32_t who, int32_t n) {
-	(void)g, (void)tx, (void)ty, (void)who, (void)n;
-}
 // LeaderData::current_upgrade @6e3140. TODO(techs): leader techs are not simulated; the type itself.
 int32_t current_upgrade_type(const Game& g, int32_t who, int32_t t) {
 	(void)g, (void)who;

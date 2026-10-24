@@ -1,0 +1,11 @@
+re/decomp/aircraft3
+Objects::kill_guy
+Ammo::inc_time
+Ammo::close
+Objects::add_ammo
+Objects::inc_time
+Unit::update_z
+Guy::update_z
+Guy::set_new_z
+Objects::init_unit
+Unit::set_angle

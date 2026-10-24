@@ -1,0 +1,8 @@
+re/decomp/aircraft3
+CommandPackage::process_unitmask
+CommandManager::issue_unitmask
+GroupOut::issue_unitmask
+CommandPackage::process_buildmask
+CommandManager::issue_buildmask
+GroupData::get_auto_explore
+UnitData::is_plane

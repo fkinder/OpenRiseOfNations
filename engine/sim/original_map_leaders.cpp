@@ -100,7 +100,7 @@ const ClassMap& map_leader() {
 		b.f("air_queued", &Leader::air_queued).f("peasants_garr", &Leader::peasants_inside).f("stable_garr", &Leader::stable_inside);
 		b.f("scout_garr", &Leader::special_inside).f("barracks_garr", &Leader::barracks_inside).f("nukes_launched", &Leader::nukes_launched);
 		b.f("nukes_in_flight", &Leader::nukes_in_flight).f("frame_attacked", &Leader::frame_attacked).f("attacked_by", &Leader::attacked_by);
-		b.f("gov_hero_frame", &Leader::gov_hero_frame);
+		b.f("gov_hero_frame", &Leader::gov_hero_frame).f("flock_stamp", &Leader::flock_stamp);
 		b.f("deaths_current_frame", &Leader::deaths_current_frame).f("kills_current_frame", &Leader::kills_current_frame);
 		b.f("hits_current_frame", &Leader::hits_current_frame);
 		b.f("strategy", &Leader::strategy).f("reg_active", &Leader::reg_active).f("reg_combat", &Leader::reg_combat);

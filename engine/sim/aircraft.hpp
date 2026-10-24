@@ -130,6 +130,11 @@ void group_action_attack_ground(Game& g, Group& gr, int32_t x, int32_t y, QueueP
 // Group::action_scramble @7111c0 (SCRAMBLE), Group::action_recall @6fa7e0 (RECALL; planes: action_return @6fad40).
 void group_action_scramble(Game& g, Group& gr);
 void group_action_recall(Game& g, Group& gr);
+// Group::action_unitmask(mask, set) @6fcb90 (UNITMASK, process_unitmask @947790): toggles `mask` in Unit.unit_masks over the group's
+// live units (not for a group of buildings). The first unit decides: it gets the bit when it lacks it (except for AI control
+// 0x40000, which is never set here), loses it otherwise; every later unit takes the state of the one before it. `set` is not read.
+// AUTO_EXPLORE (0x100) skips planes and, on the others, flags NEW_THINK and drops the orders. The carrier's REPEAT is 0x200000.
+void group_action_unitmask(Game& g, Group& gr, int32_t mask, int32_t set);
 // Unit::action_unqueue(1) @5e1f20 (UNQUEUE of a unit: one queued plane off a carrier, with the counters and the refund).
 void unit_action_unqueue(Game& g, Unit& u);
 // Group::action_spell, aircraft branch: BUILDAIR (queue the current FIGHTERBOMBER on the group's carriers); the carrier's
@@ -141,6 +146,15 @@ void carrier_closed(Game& g, Unit& carrier);
 // Build::clear_gather / add_gather_point on an airbase (aircraft-spec 8): its planes go home / re-issue their patrols.
 void airbase_gather_cleared(Game& g, Build& b);
 void airbase_gather_added(Game& g, Build& b);
+
+// ---------------------------------------------------------------- dead crafts (aircraft-spec 12)
+
+// Ammo::gpiece of the debris of a dying aircraft: the original stores the unit's graphics piece (GraphicPieces::
+// get_gpiece_type 0, "a unit piece", which turns on the terrain test of Ammo::inc_time); the port keeps the marker only.
+constexpr int32_t kCrashPiece = -2;
+// Objects::kill_guy @659410, the aircraft branch (a non-missile guy of domain Air): Ammo::init_crash @67b800 on the first free
+// Ammo slot (a new one when all are in use) with the ammo counter as graph_index.
+void add_crash_ammo(Game& g, Unit& u, int32_t guy);
 
 // ---------------------------------------------------------------- harness
 

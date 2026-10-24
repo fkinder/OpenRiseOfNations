@@ -248,7 +248,8 @@ void kill_guy(Game& g, int32_t who, int32_t o, int32_t guy, int32_t anim, int32_
 	const Type& gt = g.type(gy.type);
 	if (gt.cat == 8) {
 		// Aircraft guys crash as an Ammo (Ammo::init_crash @67b800: one game_random draw, a local Random for the
-		// drift). TODO(combat-spec 4.12): aircraft are not simulated.
+		// drift; aircraft_dead.cpp), missiles die without debris.
+		if (!has_objmask(*u, objmask::kMissile)) add_crash_ammo(g, *u, guy);
 		return;
 	}
 	if (anim >= 11 && anim <= 20) add_death(g, who, o, guy, anim, gpiece, deg);

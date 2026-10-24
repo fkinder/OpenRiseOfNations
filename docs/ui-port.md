@@ -153,8 +153,8 @@ wheel and pinch zoom one level toward the cursor (in to 6, out to 4); trackpad s
 What is still missing after the fourth pass (section 13):
 
 - The air garrison in the streamlined layout (the original fills the panel from the bottom right; the garrison grid has the same gap)
-  and a carrier's REPEAT toggle (a unit mask: the command set has BUILDMASK for buildings only; no `UNITMASK` verb). AUTO_EXPLORE
-  (also a unit mask), TRANSPORT, ADVANCE (no verb) and ATTACK_TO (no verb) are not offered; REPAIR, ALARM stay disabled.
+  and a carrier's REPEAT toggle (a unit mask, `0x200000`: the sim has the `UNITMASK` verb, `CommandManager::issue_unitmask`, since the aircraft third pass; the button is not wired). AUTO_EXPLORE
+  (also a unit mask, `0x100`, the same verb), TRANSPORT, ADVANCE (no verb) and ATTACK_TO (no verb) are not offered; REPAIR, ALARM stay disabled.
 - Silo / carrier art states that need a scenario with a carrier: no stock scenario has one, so the carrier branch of the panel
   (the `FIGHTERBOMBER` family, `CARRIER_*` keys) is covered by the shared code and the snapshots of the airbase only.
 - Localised option help for the literals the port writes itself (section 12.6 lists them; the air panel's "Ready" / "Fueling"
