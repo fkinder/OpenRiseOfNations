@@ -648,7 +648,16 @@ int Gen::corner_d(int x, int y, int corner) const {
 void Gen::check_player_land(int range, bool nearby) {
 	const Circles& C = circles();
 	const int R = std::min(64, range < 0 ? 5 : range);
-	for (const WCoord& s : starts) {
+	// World::add_starting_location @6b2de0 pushes four city-footprint cells per start into the arrays this loop walks
+	// (+0xc8 / +0xe4, count +0xbc): (x, y), (x-1, y), (x, y-1), (x-1, y-1); each is a circle centre.
+	std::vector<WCoord> centres;
+	for (const WCoord& st : starts) {
+		centres.push_back({st.x, st.y});
+		centres.push_back({st.x - 1, st.y});
+		centres.push_back({st.x, st.y - 1});
+		centres.push_back({st.x - 1, st.y - 1});
+	}
+	for (const WCoord& s : centres) {
 		if (!inb(s.x, s.y)) continue;
 		int rid = W(s.x, s.y).region;
 		if (rid == 0) {

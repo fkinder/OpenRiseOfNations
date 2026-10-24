@@ -377,27 +377,6 @@ void init_diplomacy(Game& g, int32_t who, int32_t tribe) {
 	leader_init_ally_mask(g, who);
 }
 
-// The generator leaves the water tcoords of TData unset (it works on WData.land); a scenario's tcoord chunk has them, and the
-// passability, the terrain and the AI read them. Every tcoord of an open-water wcoord becomes water (mask & 0x30 == 0x20).
-// Idempotent, so it stays correct once the generator sets them itself.
-int fix_water_tcoords(World& w) {
-	int changed = 0;
-	for (int y = 0; y < w.ys; y++) {
-		for (int x = 0; x < w.xs; x++) {
-			if (!World::is_ocean(w.w(x, y))) continue;
-			for (int j = 0; j < 4; j++) {
-				for (int i = 0; i < 4; i++) {
-					uint16_t& m = w.t(x * 4 + i, y * 4 + j);
-					if ((m & tmask::kMedium) == tmask::kWater) continue;
-					m = uint16_t((m & ~tmask::kMedium) | tmask::kWater);
-					changed++;
-				}
-			}
-		}
-	}
-	return changed;
-}
-
 int clampi(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
 
 // The setup with its random picks made (tribes, the random start age) and every value in range. The picks use their own
@@ -683,7 +662,6 @@ std::unique_ptr<Game> new_random_game(const GameFiles& files, const Rules& rules
 	}
 	g.frame = 0;
 	g.tick = 0;
-	fix_water_tcoords(g.world);
 
 	// ---- the terrain the renderer draws and the simulation's heights (Terrain::init)
 	X.scenario.name = "Random Map: " + mapgen::style_name(rules, res.picked_style) + ", " + std::to_string(res.xs) + "x" +

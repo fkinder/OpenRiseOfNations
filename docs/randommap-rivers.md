@@ -268,4 +268,13 @@ Rejected candidates (acceptance fails, or `P >= 400`) still consumed their draws
 
 ## Oracle: current 2.SVX (2026-10-24)
 
-River cells (0x1000): save 202, generated 157, 10 common. Rivers are made in `Terrain::init` after the waterline lists; they depend on the post-pass heights, which are not ported. Not settled by this oracle.
+River cells (0x1000): save 202, generated 129, 78 common (after the second pass; 157 / 10 before). Terrain, forests (the bed
+candidates), mountains and the draws before `Terrain::init` now agree with the save, so the remaining difference is inside this file.
+
+- The save holds three rivers (68, 61 and 73 cells); ours three too, but shorter (40, 43 and 46) and with another third source. The first river
+  starts at the same bed in the west ((3,68) to (22,82)) and follows the same valley for about half of its length.
+- The river lengths point at the scaling reference: with `R = map_sizes[3]` (70) the entry scales to `length 34`, `min 17`, `valley 11`;
+  a reference of 40 would give 60 / 30 / 20 and rivers of the saved length, but changes the bed order and the draws (351 cells), 50 gives
+  223, 60 gives 169, none of them better than 70 on common cells. The ❓ "which map-size entry" of §1 is therefore still open; the saved
+  lengths (61 to 73) are longer than the `length` requirement even for R = 40, so the A* tie / dedup behaviour (§6 ❓) is the more likely cause.
+- Not touched in this pass: `PathFinder::astar_river` needs the disassembly of the open/closed tree insert for equal `value`s.

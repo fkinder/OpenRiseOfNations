@@ -312,4 +312,13 @@ Open ❓: (1) the `pattern` fallback for an unknown name; (2) `get_age_slow` for
 
 ## Oracle: current 2.SVX (2026-10-24)
 
-Goods: save 80, generated 87 (12 exact type+position). Fish 33 vs 38, relics and wine exist in the save and not in the output. Helping fairness is confirmed (the lagging player gets extra oil). Positions follow group placement, so they stay off until the group 4-8 draw schedule is solved.
+Second pass (2026-10-24, after the group fixes of `randommap-terrain-groups.md` and the `Terrain::init` port): goods 78 of 80 exact (type and
+position; the 2 others are oil sites on one rock clump), goodies 33 of 50 exact, `WData.goods` near bits exact. Fish, relics, wine and the
+helping fairness (the lagging player gets extra oil) all follow once the groups are exact: the earlier count differences were consequences of
+group placement, not of this file.
+
+- The 17 goodies that differ all sit one to two cells from the save position (same ring, same player). The ring walk and `accept` were
+  re-read against the decompile of `place_player_resource` @691f70 and match (goody: only the `items` spacing, no neighbour-coast test).
+  The suspect is the lake-shore state at resource time: the save's lake corners (`(85,28)`, `(50,11)`) are rejected where ours accepts a
+  coast cell. Draws are aligned (the ring offset `rnd(w + 1)` is the right form; `w`, `w - 1`, scaled forms are all worse).
+- On the other worlds the match is complete for goods and goodies where the group state is (East Indies 100: 107/107 goods, 1/1 goody).

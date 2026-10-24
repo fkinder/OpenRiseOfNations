@@ -1,0 +1,3 @@
+re/decomp/mapgen_fid2
+LineState::init
+LineState::next_element

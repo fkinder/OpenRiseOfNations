@@ -618,4 +618,32 @@ Confirmed against the save (cells placed that are also in the save): home trees 
 - Direction and mountain-range lists are built by head insertion: forward walks read in reverse of file order (medium list 14..7). `randomize_mountains` draws medium (`%8`) then large (`%7`).
 - `Mountains::add_mountain` @0089c2e0: mode 4 `excluding_verify` (drop_tile, region groups), mode 5 `sliding_excluding_verify` (player groups); `quick_verify_template` @00898ab0. Rings: mountain 0x10|0x40, coast 0x4, forest 0x20, rock 0x8.
 - `place_region_group`: LFSR 0xB400 walk from `idx0 = rnd % n`, orthogonal growth only, returns the last seed-drop result.
-- Open: the world-pattern mediums (group 4) do not reproduce. The saved placement order is known (r12@(8,57) r11@(93,48) r10@(8,9) ...), every position passes our acceptance rules when earlier ones are placed, but no consecutive-draw LFSR schedule (about 400k offsets tested) yields these start cells. Sea oil (group 9) matches 7/9 with a +78 draw offset, so draws are consumed differently somewhere in groups 4-8.
+- (2026-10-24, second pass) The world-pattern mediums (group 4) now reproduce exactly: all 27 mountains of the save, in order. The earlier
+  "open" item was not a draw schedule: the region-1 list had 7231 cells where the original has 7236, which moved the LFSR start of
+  every clump (`idx0 = draw % n`). The cause is in `Map::check_player_land` (below). The draw per clump is exactly one
+  (`Random::get(0,0xffff) % n`), the walk is the raster-ordered list, and the 19 placements after the five home mountains were
+  found by fitting `n` (7236 reproduced 19/19; 7231 reproduced 3/19).
+
+### Corrections found against the save (second pass)
+
+All verified on `current 2.SVX` (a fresh game, frame 189) and on the other saves of the oracle set (see the table in
+`randommap-spec.md`).
+
+| Function | Address | Fix |
+|---|---|---|
+| `Map::check_player_land` | 68ef00 | The circle loop walks the four **footprint cells** that `World::add_starting_location` @6b2de0 pushes for every start (lists `+0xc8` / `+0xe4`, count `+0xbc`: `(x,y) (x-1,y) (x,y-1) (x-1,y-1)`), not the start itself. Land is made under the union of four radius-`R` discs, `R = ceil(Battleship max_range / 4)`. This adds 5 lake-shore cells to region 1 in Great Lakes and fixes `n`. |
+| `TerrainGroups::treeify_mountains` | 6a1cc0 | The fringe test was inverted. A wcoord with mountain tcoords that is not itself a mountain wcoord becomes forest when **neither** its (x, y+1) **nor** its (x+1, y) neighbour is a mountain wcoord (`flags & 0x404 == 0`, one draw); a mountain wcoord with an open +x or +y orthogonal neighbour becomes `0x30` (draw, `land = 0`). Forest cells now match 520/520. |
+| `TerrainGroups::nubify_forest` | 6a93b0 | A run is tested for **continuation first** (`dir != 0` and forest at `x + dir`): a cell with forest on both sides still continues a run. The run is reset to 0 after **every** draw, whether the nub was placed or not. Both changes alter the number of draws (the original draws more). |
+| `TerrainGroups::change_forest_base / mountain_base / coast_base` | 6a9a60 / 6a9c10 / 6a9dc0 | `Map::make` calls each only when the tileset base is `>= 0`. The growth neighbour must also have `land != 2` (mountain and coast variants lacked it, adding draws); source cells and grown neighbours get `land = 0`. |
+| `Fractal::init` | 6aa2d0 | Rewritten from the decompile: grid `(xs+1) x (ys+1)` bytes, level `L = S..0`, cells `i << L, j << L` with `i < xs >> L`, `j < ys >> L` visited **x outer / y inner**, so horizontal, vertical and centre cells interleave their draws; neighbours past `ys` stay 0; column `xs` is a copy of column 0 at the start of every level and at the end. This is also the field of `fill_fertile`; the per-tileset check is the share of agreeing `land_sub` cells on plain land (81 percent before the other fixes, the remaining differences are `Terrain::init` and late-game changes in the old saves). |
+| `TerrainGroups::add_doobers` | 6a1540 | Draw order was right. Doober positions are `(px, py)` in world units (768 per wcoord); `Doober::add_doober` draws nothing. `Doober::has_doobers` @8466d0 does **not** exclude cells in the rock pass in practice (any exclusion changes the draws and breaks the forest fit), so the rock pass has no skip. The doober count is kept for `res.doobers`. |
+
+The draw alignment after these fixes was verified with a statistical fit: for every `change_forest_base` growth draw a hit must put
+`land_sub == 3` in the save. The best alignment moved from "+9 draws" (before the `nubify_forest` fix) to "+0" (after).
+
+### What still differs on `current 2.SVX`
+
+- `land_sub`: 158 of 10000 cells (was 3756). They sit at class boundaries and next to the 30 wrong half-land wcoords (`Terrain::init`).
+- One rock wcoord ((10,79) against (12,80), a diagonal growth step of one group-7/8 clump) and two oil sites that sit on it; one mountain
+  wcoord (84,95) that the save has as plain forest.
+- `place_oil_deposits` / rocks are otherwise exact (49/50), mountains 455/455 except that one, forest 520/520.

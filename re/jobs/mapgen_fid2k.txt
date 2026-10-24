@@ -1,0 +1,5 @@
+re/decomp/mapgen_fid2
+TerrainOut::mark_coast_vert_influence
+TerrainOut::adjust_aquatic_height
+TerrainOut::mark_valid_coastal_influencers
+TerrainOut::relax_aquatic_verts

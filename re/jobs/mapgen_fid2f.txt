@@ -1,0 +1,12 @@
+re/decomp/mapgen_fid2/callers_terrain.txt
+1
+Terrain::check_and_set_halfland
+Terrain::check_and_set_coastal
+Terrain::convert_beach_to_sandy
+Terrain::mark_halfwater
+Terrain::check_and_set_halfland_wcoord
+Terrain::spot_update_land
+Terrain::spot_update_land_batch
+Terrain::verify_land
+Terrain::clear_halfland_wcoord
+Terrain::move_ocean_goody

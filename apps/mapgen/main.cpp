@@ -33,6 +33,7 @@
 #include "sim/datawalk.hpp"
 #include "sim/game.hpp"
 #include "sim/mapgen.hpp"
+#include "sim/placement.hpp"
 #include "sim/trig.hpp"
 #include "sim/original_save.hpp"
 
@@ -323,8 +324,25 @@ struct CaseResult {
 	int style = 0, size = 0, nations = 0;
 	bool ok = false, crash = false, nondeterministic = false, slow = false, fallback = false;
 	double seconds = 0;
+	int water_gaps = 0;  // open-water wcoords with a tcoord that is not water (the generator must set them all)
 	std::string error;
 };
+
+// Open-water wcoords (land 1 or 2, not half-land) whose 16 tcoords are not all water.
+int water_gaps(const World& w) {
+	int n = 0;
+	for (int y = 0; y < w.ys; y++) {
+		for (int x = 0; x < w.xs; x++) {
+			if (!World::is_ocean(w.w(x, y))) continue;
+			bool gap = false;
+			for (int j = 0; j < 4 && !gap; j++) {
+				for (int i = 0; i < 4 && !gap; i++) gap = !w.is_tocean(x * 4 + i, y * 4 + j);
+			}
+			if (gap) n++;
+		}
+	}
+	return n;
+}
 
 // ---------------------------------------------------------------- --compare
 
@@ -452,6 +470,8 @@ struct GoodKey {
 	bool operator<(const GoodKey& o) const { return type != o.type ? type < o.type : x != o.x ? x < o.x : y < o.y; }
 };
 
+bool g_goodlist = false;  // --goodlist: print the goods / items that differ
+
 void compare_goods(const char* name, const Rules& rules, const std::vector<GoodObj>& e, const std::vector<GoodObj>& g) {
 	std::multiset<GoodKey> a, b;
 	std::map<int, std::pair<int, int>> by_type;
@@ -489,6 +509,17 @@ void compare_goods(const char* name, const Rules& rules, const std::vector<GoodO
 		nb += t.second.second;
 	}
 	std::printf("  %-22s save %5ld  gen %5ld  exact (type+pos) %5ld  same position any type %5ld\n", name, na, nb, exact, cells);
+	if (g_goodlist) {
+		std::multiset<GoodKey> a2, b2;
+		for (const GoodObj& o : e) if (o.alive()) a2.insert({o.type, o.x, o.y});
+		for (const GoodObj& o : g) if (o.alive()) b2.insert({o.type, o.x, o.y});
+		for (const GoodKey& k : a2) {
+			auto it = b2.find(k);
+			if (it != b2.end()) b2.erase(it);
+			else std::printf("      only save: type %d at (%d,%d)\n", int(k.type), int(k.x), int(k.y));
+		}
+		for (const GoodKey& k : b2) std::printf("      only gen : type %d at (%d,%d)\n", int(k.type), int(k.x), int(k.y));
+	}
 	for (const auto& t : by_type) {
 		if (t.second.first == t.second.second) continue;
 		std::printf("      type %-3d %-16s save %4d gen %4d\n", t.first, to_utf8(rules.types[size_t(t.first)].name).c_str(), t.second.first, t.second.second);
@@ -557,13 +588,14 @@ int run_compare(const GameFiles& files, const Rules& rules, const char* save_pat
 	}
 	const World& E = eg->world;
 	const World& G = g.world;
-	std::printf("generated: picked style %d (save %d)%s, %dx%d, world.seed %u (save %d), sea_map %d (save %d), %llu draws\n", g.res.picked_style,
+	std::printf("generated: picked style %d (save %d)%s, %dx%d, world.seed %u (save %d), sea_map %d (save %d), tileset %s, %llu draws\n", g.res.picked_style,
 	            resolved_style, g.res.picked_style == resolved_style ? "" : " MISMATCH", G.xs, G.ys, g.res.world_seed,
-	            int(peek_int(*peek, "world.seed")), G.sea_map, E.sea_map, (unsigned long long)g.res.draws);
+	            int(peek_int(*peek, "world.seed")), G.sea_map, E.sea_map, g.res.tileset.c_str(), (unsigned long long)g.res.draws);
 	if (E.xs != G.xs || E.ys != G.ys) {
 		std::printf("map sizes differ: nothing else comparable\n");
 		return 0;
 	}
+	g_goodlist = has_flag(argc, argv, "--goodlist");
 	if (const char* cs = arg_value(argc, argv, "--cells")) {
 		// --cells x0,y0,x1,y1 [--layer land|sub|flags|region|region2|mask]: grids of the save (left) and generator (right)
 		const std::vector<int> b = parse_list(cs);
@@ -573,7 +605,7 @@ int run_compare(const GameFiles& files, const Rules& rules, const char* save_pat
 		auto val = [&](const World& w, int x, int y) -> int {
 			if (layer == "mask") return w.t(x, y);
 			const WData& d = w.w(x, y);
-			return layer == "land" ? d.land : layer == "sub" ? d.land_sub : layer == "flags" ? d.flags : layer == "region" ? d.region : d.region2;
+			return layer == "land" ? d.land : layer == "sub" ? d.land_sub : layer == "flags" ? d.flags : layer == "region" ? d.region : layer == "blocked" ? d.blocked : layer == "bad" ? d.bad : layer == "solid" ? d.solid : layer == "val" ? d.val : layer == "goods" ? d.goods : d.region2;
 		};
 		(void)tiles;
 		if (b.size() == 4 && layer == "feat") {
@@ -607,6 +639,19 @@ int run_compare(const GameFiles& files, const Rules& rules, const char* save_pat
 				std::printf("%3d | %s | %s\n", y, l.c_str(), r.c_str());
 			}
 		}
+		return 0;
+	}
+	if (has_flag(argc, argv, "--subtab")) {
+		std::map<std::string, int> tab;
+		for (int y = 0; y < E.ys; y++)
+			for (int x = 0; x < E.xs; x++) {
+				const WData& a = E.w(x, y);
+				const WData& b = G.w(x, y);
+				char k[160];
+				std::snprintf(k, sizeof k, "save[land=%d sub=%d] gen[land=%d sub=%d]", a.land, a.land_sub, b.land, b.land_sub);
+				tab[k]++;
+			}
+		for (const auto& kv : tab) std::printf("  %6d  %s\n", kv.second, kv.first.c_str());
 		return 0;
 	}
 	if (has_flag(argc, argv, "--table")) {
@@ -659,6 +704,32 @@ int run_compare(const GameFiles& files, const Rules& rules, const char* save_pat
 		std::printf("\n");
 		return 0;
 	}
+	if (has_flag(argc, argv, "--odd")) {
+		// the cells where the generator says water and the save says plain land (land 0, not half-land)
+		for (int y = 0; y < E.ys; y++)
+			for (int x = 0; x < E.xs; x++) {
+				const WData& a = E.w(x, y);
+				const WData& b = G.w(x, y);
+				if (World::is_ocean(b) && a.land == 0 && !(a.flags & 0x100))
+					std::printf("odd (%d,%d): save land %d flags %04x region %d | gen land %d flags %04x region %d\n", x, y, a.land, a.flags, a.region, b.land, b.flags, b.region);
+			}
+		return 0;
+	}
+	if (has_flag(argc, argv, "--oilorder")) {
+		// the oil goods in list order (= placement order in the save), with the region of their cell
+		for (int side = 0; side < 2; side++) {
+			const World& Wd = side == 0 ? E : G;
+			const std::vector<GoodObj>& gl = side == 0 ? eg->goods : g.goods;
+			std::printf("%s oil goods in list order:", side == 0 ? "save" : "gen ");
+			for (const GoodObj& go : gl) {
+				if (go.type != kOilGood) continue;
+				const int x = wcoord_of(go.x), y = wcoord_of(go.y);
+				std::printf(" (%d,%d r%d)", x, y, Wd.w(x, y).region);
+			}
+			std::printf("\n");
+		}
+		return 0;
+	}
 	if (has_flag(argc, argv, "--oil")) {
 		for (int side = 0; side < 2; side++) {
 			const World& Wd = side == 0 ? E : G;
@@ -698,6 +769,14 @@ int run_compare(const GameFiles& files, const Rules& rules, const char* save_pat
 				for (int x = b[0]; x <= b[2]; x++) std::printf(" %7.1f", double(eg->heights.h[size_t(y) * size_t(eg->heights.vxs) + size_t(x)]));
 				std::printf("\n");
 			}
+			if (!g.res.heights.empty() && has_flag(argc, argv, "--gen")) {
+				std::printf("generated:\n");
+				for (int y = b[1]; y <= b[3]; y++) {
+					std::printf("%3d |", y);
+					for (int x = b[0]; x <= b[2]; x++) std::printf(" %7.1f", double(g.res.heights[size_t(y) * size_t(g.res.height_vxs) + size_t(x)]));
+					std::printf("\n");
+				}
+			}
 		}
 		return 0;
 	}
@@ -730,11 +809,74 @@ int run_compare(const GameFiles& files, const Rules& rules, const char* save_pat
 			}
 		}
 		print_layer(l);
+		Layer lw;
+		lw.name = "tdata water (&0x30==0x20)";
+		lw.total = E.tile_size;
+		for (int y = 0; y < E.tile_ys; y++) {
+			for (int x = 0; x < E.tile_xs; x++) {
+				if (E.is_tocean(x, y) != G.is_tocean(x, y)) {
+					if (!lw.diff) {
+						char buf[96];
+						std::snprintf(buf, sizeof buf, "first tile (%d,%d) exp=0x%04x got=0x%04x", x, y, E.t(x, y), G.t(x, y));
+						lw.first = buf;
+					}
+					lw.diff++;
+				}
+			}
+		}
+		print_layer(lw);
 	}
 	std::printf("\nWData.flags bit by bit (cells: save, generated, both, differing -only save +only generated):\n");
 	bit_layers("flags", 16, E, G, [](const World& w, int x, int y) { return unsigned(w.w(x, y).flags); }, false);
 	std::printf("\nTData.mask bit by bit:\n");
 	bit_layers("tdata", 16, E, G, [](const World& w, int x, int y) { return unsigned(w.t(x, y)); }, true);
+
+	if (!g.res.heights.empty() && eg->heights.h.size() == g.res.heights.size()) {
+		// the height grid: the generator has the land fractals, the coast generators and the sea, not mountains or river troughs
+		std::printf("\nheights (%d x %d vertices; class = the save's height):\n", g.res.height_vxs, g.res.height_vys);
+		struct Cls {
+			const char* name;
+			float lo, hi;
+			long n = 0, exact = 0, near = 0;
+			double maxd = 0;
+			int fx = -1, fy = -1;
+		};
+		Cls cl[4] = {{"sea floor (< -250)", -1e9f, -250.0f}, {"shelf (-250 .. -30)", -250.0f, -30.0f}, {"shore (-30 .. 60)", -30.0f, 60.0f}, {"land (>= 60)", 60.0f, 1e9f}};
+		for (int vy = 0; vy < g.res.height_vys; vy++) {
+			for (int vx = 0; vx < g.res.height_vxs; vx++) {
+				const size_t i = size_t(vy) * size_t(g.res.height_vxs) + size_t(vx);
+				const float a = eg->heights.h[i], b = g.res.heights[i];
+				for (Cls& c : cl) {
+					if (a < c.lo || a >= c.hi) continue;
+					c.n++;
+					const double d = std::fabs(double(a) - double(b));
+					if (a == b) c.exact++;
+					if (d < 0.01) c.near++;
+					else if (c.fx < 0) {
+						c.fx = vx;
+						c.fy = vy;
+					}
+					c.maxd = std::max(c.maxd, d);
+				}
+			}
+		}
+		if (const char* hd = arg_value(argc, argv, "--hdump")) {
+			// --hdump file: every vertex whose height differs by more than 0.01: x y save gen
+			if (FILE* f = std::fopen(hd, "w")) {
+				for (int vy = 0; vy < g.res.height_vys; vy++) {
+					for (int vx = 0; vx < g.res.height_vxs; vx++) {
+						const size_t i = size_t(vy) * size_t(g.res.height_vxs) + size_t(vx);
+						const float a = eg->heights.h[i], b = g.res.heights[i];
+						if (std::fabs(double(a) - double(b)) > 0.01) std::fprintf(f, "%d %d %.3f %.3f\n", vx, vy, double(a), double(b));
+					}
+				}
+				std::fclose(f);
+			}
+		}
+		for (const Cls& c : cl) {
+			std::printf("  %-22s %7ld vertices  bit-exact %7ld  within 0.01 %7ld  max |d| %9.3f  first (%d,%d)\n", c.name, c.n, c.exact, c.near, c.maxd, c.fx, c.fy);
+		}
+	}
 
 	std::printf("\nregions (sizes, sorted; land 1..63 / sea 64..126):\n");
 	for (int pass = 0; pass < 2; pass++) {
@@ -870,6 +1012,7 @@ int main(int argc, char** argv) {
 						c.error = a.res.error.empty() ? b.res.error : a.res.error;
 						c.fallback = a.res.fallback;
 						c.slow = c.seconds >= 2.0;
+						if (c.ok) c.water_gaps = water_gaps(a.world);
 						if (c.ok) c.nondeterministic = dump_text(files, rules, p, a) != dump_text(files, rules, p, b);
 					} catch (const std::exception& e) {
 						c.crash = true;
@@ -877,10 +1020,10 @@ int main(int argc, char** argv) {
 					}
 					if (!quiet) {
 						std::lock_guard<std::mutex> lock(out_mutex);
-						if (!c.ok || c.crash || c.nondeterministic || c.slow) {
+						if (!c.ok || c.crash || c.nondeterministic || c.slow || c.water_gaps) {
 							std::printf("style %2d size %d nations %d: %s%s%s%s %.2fs %s\n", c.style, c.size, c.nations,
 							            c.crash ? "CRASH " : "", !c.ok && !c.crash ? "ERROR " : "", c.nondeterministic ? "NONDETERMINISTIC " : "",
-							            c.slow ? "SLOW" : "", c.seconds, c.error.c_str());
+							            c.slow ? "SLOW" : (c.water_gaps ? "WATER-GAPS" : ""), c.seconds, c.error.c_str());
 						}
 					}
 				}
@@ -888,7 +1031,7 @@ int main(int argc, char** argv) {
 			std::vector<std::thread> threads;
 			for (int t = 0; t < jobs; t++) threads.emplace_back(worker);
 			for (std::thread& t : threads) t.join();
-			int ok = 0, crash = 0, nondet = 0, slow = 0, err = 0, fb = 0;
+			int ok = 0, crash = 0, nondet = 0, slow = 0, err = 0, fb = 0, gaps = 0;
 			double worst = 0;
 			for (const CaseResult& c : cases) {
 				if (c.crash) crash++;
@@ -896,13 +1039,14 @@ int main(int argc, char** argv) {
 				else ok++;
 				if (c.nondeterministic) nondet++;
 				if (c.slow) slow++;
+				if (c.water_gaps) gaps++;
 				if (c.fallback) fb++;
 				worst = std::max(worst, c.seconds);
 			}
 			std::printf("\nmatrix: styles %d-%d x sizes %d-%d x nations %d-%d = %zu cases (seed base %u)\n", s_lo, s_hi, z_lo, z_hi,
 			            n_lo, n_hi, cases.size(), base_seed);
-			std::printf("ok %d, error %d, crash %d, nondeterministic %d, slow(>=2s) %d, used the fallback layout %d; slowest %.2fs\n", ok,
-			            err, crash, nondet, slow, fb, worst);
+			std::printf("ok %d, error %d, crash %d, nondeterministic %d, slow(>=2s) %d, used the fallback layout %d, ocean tcoord gaps %d; slowest %.2fs\n",
+			            ok, err, crash, nondet, slow, fb, gaps, worst);
 			std::printf("\nper style (cases ok/total, fallback layouts, slowest seconds):\n");
 			for (int s = s_lo; s <= s_hi; s++) {
 				int tot = 0, good = 0, fbs = 0;
@@ -916,7 +1060,7 @@ int main(int argc, char** argv) {
 				}
 				std::printf("  %2d %-22s %3d/%3d  fallback %3d  slowest %.2fs\n", s, style_name(rules, s).c_str(), good, tot, fbs, w2);
 			}
-			return (crash || err || nondet || slow) ? 1 : 0;
+			return (crash || err || nondet || slow || gaps) ? 1 : 0;
 		}
 
 		Params p;

@@ -1,0 +1,11 @@
+re/decomp/mapgen_fid2/types_terrain.txt
+^TerrainOut$
+^TerrainList$
+^CoordInfo
+^WCoordData$
+^TCoordData$
+^TerrainData$
+^Terrain$
+^TileSetData$
+^InitCoastInfo$
+^TerrainGroup$

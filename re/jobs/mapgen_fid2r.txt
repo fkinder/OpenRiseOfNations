@@ -1,0 +1,2 @@
+re/decomp/mapgen_fid2
+World::add_starting_location

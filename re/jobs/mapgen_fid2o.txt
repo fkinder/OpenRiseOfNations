@@ -1,0 +1,7 @@
+re/decomp/mapgen_fid2
+Terrain::clear_halfland_wcoord
+Terrain::check_and_set_halfland_wcoord
+Terrain::check_and_set_halfland
+Terrain::mark_halfwater
+Terrain::verify_land
+Terrain::check_and_set_coastal

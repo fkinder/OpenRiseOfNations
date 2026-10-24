@@ -1,0 +1,5 @@
+re/decomp/mapgen_fid2/callers_45.txt
+2
+TerrainOut::ensure_45_deg_slope
+TerrainOut::terraform_for_building
+TerrainOut::has_plus_slope

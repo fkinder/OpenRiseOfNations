@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -138,6 +139,7 @@ public:
 	std::vector<uint8_t> partitions;
 	std::vector<uint8_t> fractal_raw;  // (xs + 1) * (ys + 1), x-major
 	std::vector<GroupEntry> groups;
+	std::array<int, 3> tile_counts{{4, 1, 1}};  // TileSetData num_tiles: BASELAND / COASTAL / OCEAN <BASE> counts
 
 	// ---- mapgen_data.cpp
 	void load_map_data();
@@ -265,12 +267,18 @@ public:
 	void load_mountain_lists();
 	std::vector<PlacedMountain> placed_mountains;
 	std::vector<uint8_t> doober_cells;
+	std::vector<uint8_t> mount_seen;                                          // add_mountain scratch (all zero between calls)
+	std::map<int, std::vector<Offset>> mount_faces;                                // face wcoords per range
+	std::map<int, const MountainRange*> mount_ptrs;                                // mount_range() results
 	int doober_count = 0;
 	// fairness state of place_all
 	std::array<int, 5> help_lowest_index{};
 	std::array<std::array<int, 5>, 8> player_scores{};
 	std::array<int, 5> lowest_player{};
 	void randomize_orthogs(int* ro, int* rc);
+
+	// ---- mapgen_terrain_init.cpp
+	void terrain_init();
 
 	// ---- mapgen_resources.cpp
 	void place_resources();

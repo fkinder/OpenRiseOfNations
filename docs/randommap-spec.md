@@ -313,4 +313,54 @@ Checked against `re/oracle/Saves/current 2.SVX` (seed 18119929, 100x100, lobby s
 - `Map::set_map` class table (stack image from byte 2): `{2,2,2,2,2,2,1,2,2,1,1,1,1,1,1,1,1}`, index i is style 6+i, 2 = land map, 1 = sea map. The earlier table was two bytes misaligned (picked 15, the save has 14).
 - The style-pick draws are rewound: `game_random` returns to its state after `world.seed`, so the tileset draws and base_edge reuse them; the Great Lakes start angle is draws (d4, d5).
 - Confirmed exact: `world.seed`, the five start positions (`angle = (d4%0xffff)<<16 + d5%0xffff`, step `0xffffffff/5`), the lake shapes.
-- Not ported: the `Terrain::init` post-pass on WData (half-land 0x100, shelf `land == 1`, COAST changes, region2, water tcoords, heights). It accounts for all remaining land/region differences (342 cells `is_ocean`).
+- (second pass, 2026-10-24) `Terrain::init` @850f70 is ported to `engine/sim/mapgen_terrain_init.cpp` (`Gen::terrain_init`, called between
+  `place_resources` and `make_rivers` in `build_game`). See the section below. `fix_water_tcoords` is gone from `newgame.cpp`: the generator
+  sets the water tcoords itself.
+
+### `Terrain::init` as far as it touches `WData` (ported)
+
+Order: `TerrainOut::generate_land` (`determine_land_height_color` and `smooth_tcoord` on three `Fractal`s: seeds `world.seed`,
+`world.seed * 2` and the texture fractal; then `build_coastal_data` = `mark_valid_coastal_influencers` @869070,
+`mark_coast_vert_influence` @868ca0 (Bresenham `LineState` @a48000 / @a48110 with the jitter `int(raw * 0.16f)`, at most 15),
+`adjust_aquatic_height` @868820, `relax_aquatic_verts` @868470 x5), then `check_and_set_halfland` @84e610 (`check_and_set_halfland_wcoord`
+@84dec0, `mark_halfwater` @84ece0, `clear_halfland_wcoord` @84e500, `check_and_set_coastal` @84dd70), `convert_beach_to_sandy` @84b8e0,
+`Map::make_rivers`, `RiversOut::calculate_all`, `adjust_for_mountains` @8703c0.
+
+- Heights: land `30 + 7.5 F1 + 1.875 F2` blended by the distance to the rim; open sea -273; the shelf `30 + (d/3)^2 (-273)` from the nearest
+  coast-line influence tcoord. All float arithmetic is done operation by operation (`#pragma clang fp contract(off)` in the new file).
+- A wcoord whose `CoordInfo.flags` has 0x84 gets its 16 tcoords tested: a water tcoord = all four corner heights `< -30`. Any water tcoord
+  makes it half-land (`mark_halfwater`: land 0, `spot_update_land` -> (1, 0)); sixteen of sixteen make it ocean (2, 0); none makes an ocean
+  cell land with `land_sub = coast_base`. `verify_land` @84d8a0 / `TileSet::is_combo_acceptable` @87abe0 smooth the `land_sub` of the
+  neighbours (the cascade is why a wrong half-land cell moves a few `land_sub` cells).
+- Region ids are rebuilt after the pass (`clear_all` + `find_all`); the original keeps the lists incrementally (same ids, same raster order).
+- `WData.flags` 0x80 (ROAD) and 0x4000 (BUILDING) in the save come from the start cities, not from the generator.
+
+### Result on the oracle saves (`ron-mapgen --compare`, cells of 10000 / 6400 that differ: before -> after the second pass)
+
+| layer / world | current 2 (Great Lakes, 100x100, frame 189) | current RN (East Indies 100) | east indies 2 (East Indies 100) | East indies final surround (80) | DO NOT DELETE (Old World 80) | DO NOT DELETE 2 (Old World 80) | curent dec 14 (Old World 80) |
+|---|---|---|---|---|---|---|---|
+| land | 1652 -> 10 | 3563 -> 32 | 3572 -> 49 | 2383 -> 20 | 0 -> 0 | 0 -> 0 | 0 -> 0 |
+| land_sub | 3756 -> 158 | 2141 -> 720 | 2538 -> 1230 | 1427 -> 636 | 4097 -> 3509 | 4182 -> 3643 | 3595 -> 2655 |
+| WData.flags | 4445 -> 368 | 3596 -> 1703 | 3807 -> 2412 | 2358 -> 1323 | 2437 -> 2220 | 2454 -> 2333 | 2138 -> 1732 |
+| forest 0x20 | 806 -> 0 | 120 -> 0 | 113 -> 0 | 57 -> 0 | 74 -> 0 | 55 -> 0 | 68 -> 0 |
+| mountain 0x10 | 643 -> 0 | 9 -> 0 | 19 -> 1 | 26 -> 1 | 0 -> 0 | 1 -> 0 | 0 -> 0 |
+| doober/rock 0x200 | 2053 -> 0 | 135 -> 0 | 101 -> 0 | 71 -> 0 | 78 -> 0 | 66 -> 0 | 91 -> 0 |
+| half-land 0x100 | 575 -> 30 | 1000 -> 63 | 989 -> 85 | 619 -> 40 | - | - | - |
+| river 0x1000 | 339 -> 175 | - | - | - | 1163 -> 1074 | 1192 -> 1202 | 1067 -> 768 |
+| goods exact / total | 12 -> 78 / 80 | 34 -> 134 / 136 | 39 -> 107 / 107 | 35 -> 111 / 112 | 11 -> 22 / 26 | 13 -> 24 / 26 | 12 -> 23 / 25 |
+| goodies exact / total | 1 -> 33 / 50 | 0 -> 3 / 3 | 0 -> 1 / 1 | - | 0 -> 9 / 9 | 0 -> 10 / 10 | 0 -> 14 / 15 |
+
+Only `current 2.SVX` is a fresh game (frame 189). The other saves were taken far into a game, so `val`, `land_sub` (farms, roads), the river
+flag and city flags carry game-time changes the generator cannot reproduce. Everything the generator decides before the game starts
+(land, half-land, mountains, forests, doobers/rocks, goods) agrees on all of them.
+
+### Still different on `current 2.SVX`
+
+- `land` 10 and half-land 30: the shelf heights at a few lake corners differ from the save (`TerrainOut::mark_coast_vert_influence` jitter /
+  influence ownership; relax passes other than 5, swapped line ends, other jitter rounding and an xy swap were tried and are worse). The
+  residue is 2615 of 15386 shelf vertices bit-exact (5997 within 0.01) and the rest of the shore band; sea floor 30397 of 30701 exact.
+- `val` (756 cells, `compute_all_vals` inputs: the half-land differences), `blocked` / `bad` / `solid` (51 / 87 / 51: cells next to those).
+- Rivers: 129 cells against 202 (78 common), three rivers each but shorter and partly other beds. The A* tie rule and dedup test are still
+  the open items listed in `randommap-rivers.md`.
+- Goodies 33 of 50 placed exactly (the others sit within two cells), oil 27 of 29, rocks 49 of 50: one group-7/8 rock clump grows a diagonal
+  neighbour differently ((10,79) against (12,80)).

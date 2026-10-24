@@ -1,0 +1,4 @@
+re/decomp/mapgen_fid2
+Doober::has_doobers
+Doober::add_doober
+Doober::add_doober.*

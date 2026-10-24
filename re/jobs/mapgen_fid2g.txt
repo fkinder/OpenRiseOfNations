@@ -1,0 +1,11 @@
+re/decomp/mapgen_fid2
+TerrainOut::mark_valid_coastal_influencers
+TerrainOut::adjust_aquatic_height
+TerrainOut::relax_aquatic_verts
+TerrainOut::prep_terrain_lighting
+TerrainOut::build_decorations
+TerrainOut::generate_skirts
+TerrainList::add_new_coord_info
+TerrainOut::one_time_init
+TerrainOut::adjust_for_mountains
+Terrain::adjust_aquatic

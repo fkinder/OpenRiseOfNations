@@ -1,0 +1,7 @@
+re/decomp/mapgen_fid2
+TileSet::is_combo_acceptable
+TileSet::convert_land_tex_to_linear
+World::clear_waterhalf
+WorldData::num_waterhalf
+Terrain::move_ocean_goody
+TerrainOut::sort_waterline_wcoords

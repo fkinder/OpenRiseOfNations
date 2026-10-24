@@ -1,0 +1,2 @@
+re/decomp/mapgen_fid2/grep_646c.txt
+\+ 0x646c\]|\+ 0x6460\]|\+ 0x6464\]

@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <list>
+#include <map>
 
 #include "sim/mapgen_internal.hpp"
 
@@ -25,7 +26,7 @@ int Gen::place_region_group(const GroupEntry& g, int size, int rid, int range_in
 	const Circles& C = circles();
 	const int np = int(starts.size());
 	const int stay = size / 4 + 1;
-	int idx0 = (n - 1 < 1) ? 0 : r.rnd_draw(n);
+	const int idx0 = (n - 1 < 1) ? 0 : r.rnd_draw(n);
 	const int start = idx0 + 1;
 	int cur = start;
 	const int hx = xs / 2, hy = ys / 2;

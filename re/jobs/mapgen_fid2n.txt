@@ -1,0 +1,4 @@
+re/decomp/mapgen_fid2/grep_6454.txt
+0x6454
+0x6458
+0x6450

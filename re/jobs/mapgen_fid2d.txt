@@ -1,0 +1,4 @@
+re/decomp/mapgen_fid2/callers_remove_mountain.txt
+2
+Mountains::remove_mountain
+Mountains::add_mountain

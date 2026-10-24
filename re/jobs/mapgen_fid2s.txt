@@ -1,0 +1,2 @@
+re/decomp/mapgen_fid2
+TerrainGroups::init_tileset_data

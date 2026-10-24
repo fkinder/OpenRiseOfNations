@@ -1,0 +1,2 @@
+re/decomp/mapgen_fid2/grep_4a4.txt
+\+ 0x4a4\]

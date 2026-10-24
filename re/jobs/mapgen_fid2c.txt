@@ -1,0 +1,2 @@
+re/decomp/mapgen_fid2
+Random::get

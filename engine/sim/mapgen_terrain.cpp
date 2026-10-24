@@ -49,10 +49,14 @@ void Gen::load_mountain_lists() {
 }
 
 const MountainRange* Gen::mount_range(int index) {
+	const auto cached = mount_ptrs.find(index);
+	if (cached != mount_ptrs.end()) return cached->second;
 	std::lock_guard<std::mutex> lock(g_mt_mutex);
 	std::unique_ptr<MountainTemplates>& p = g_mt[c.files.root()];
 	if (!p) p = std::make_unique<MountainTemplates>(c.files);
-	return p->get(index);
+	const MountainRange* mr = p->get(index);
+	mount_ptrs[index] = mr;
+	return mr;
 }
 
 // Mountains::randomize_mountains @89ca70: three circular lists; each with more than one entry draws its cursor.
@@ -120,9 +124,12 @@ bool Gen::add_mountain(int range_index, int wx, int wy, const GroupEntry& g, int
 	if (range_index < 0) return false;
 	const MountainRange* mr = mount_range(range_index);
 	if (!mr) return false;
-	const std::vector<Offset> face = face_wcoords_of(*mr);
+	auto fit = mount_faces.find(range_index);
+	if (fit == mount_faces.end()) fit = mount_faces.emplace(range_index, face_wcoords_of(*mr)).first;
+	const std::vector<Offset>& face = fit->second;
 	const Circles& C = circles();
-	std::vector<uint8_t> seen(size_t(xs) * size_t(ys), 0);
+	if (mount_seen.size() != size_t(xs) * size_t(ys)) mount_seen.assign(size_t(xs) * size_t(ys), 0);
+	std::vector<uint8_t>& seen = mount_seen;
 	std::vector<int> to_clear;
 	auto near_start = [&](int x, int y) {
 		for (const WCoord& s : starts) {
@@ -477,9 +484,9 @@ int Gen::grow_player(const GroupEntry& g, GroupRun& run, int size, WCoord st, in
 					dx = orthog_x[o];
 					dy = orthog_y[o];
 				} else {
-					const int o = 4 - (rc + k) % 4;
-					dx = kCornerX[o - 1];
-					dy = kCornerY[o - 1];
+					const int ci = 3 - (rc + k) % 4;
+					dx = kCornerX[ci];
+					dy = kCornerY[ci];
 				}
 				const WCoord src = run.tiles[size_t(s)];
 				const int cx = src.x + dx, cy = src.y + dy;

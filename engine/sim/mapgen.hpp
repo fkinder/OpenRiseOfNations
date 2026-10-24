@@ -99,6 +99,11 @@ struct Result {
 	std::vector<RiverPath> rivers;
 	int32_t river_beds = 0;
 	int32_t doobers = 0;
+	// TerrainOut's height grid after Terrain::init's coast pass (master_land_heights): (4 xs + 1) x (4 ys + 1) floats, x fastest.
+	// Land is the fractal height blended towards the coast, the sea is -273, the shelf follows the coast generators' influence
+	// lines; mountains and river troughs are not in it (adjust_for_mountains and RiversOut are later passes).
+	std::vector<float> heights;
+	int32_t height_vxs = 0, height_vys = 0;
 	int32_t retries = 0;           // restarts of the continent recipe
 	bool fallback = false;         // the recipe gave up and the guaranteed ring layout was used
 	// game_random draws consumed, in total and per phase

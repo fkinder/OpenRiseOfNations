@@ -8,22 +8,49 @@
 
 namespace ron::sim::mapgen {
 
-// TerrainGroups::add_doobers @6a1540: cosmetic bushes and mountain rocks; only the draws are reproduced.
+// TerrainGroups::add_doobers @6a1540 (decompile read): cosmetic bushes along the south / east edge of forest wcoords and rocks
+// beside mountains. Doober::add_doober draws nothing, but its position (world units, 768 per wcoord) decides which wcoords
+// Doober::has_doobers @8466d0 (floor(px / 768), floor(py / 768)); the oracle's draws fit without any skip in the rock pass.
 void Gen::add_doobers() {
-	doober_cells.assign(size_t(cells), 0);
+	doober_cells.assign(size_t(cells), 0);  // wcoords holding a doober
 	doober_count = 0;
+	auto place = [&](int tx, int ty, int count, int spacing, int tag) {
+		(void)tag;
+		const unsigned lx = unsigned(tx) * unsigned(ty);
+		const int a = int(lx & 0x7f) - 0x3f;
+		const int b = int(unsigned(ty + tx) & 0x7fu) - 0x3f;
+		const unsigned ia = unsigned(a) & 3u, ib = unsigned(b) & 3u;
+		for (int i = 0; i < count; i++) {
+			const int px = a + tx * 0xc0 + 0x60 + (spacing + int((lx + unsigned(i)) & 3u) * 0x28) * move_x[ia + unsigned(i)];
+			const int py = (spacing + int(unsigned(ty + tx + i) & 3u) * 0x28) * move_y[ib + unsigned(i)] + b + ty * 0xc0 + 0x60;
+			doober_count++;
+			if (px >= 0 && py >= 0) {
+				const int cx = px / 768, cy = py / 768;
+				if (cx < xs && cy < ys) doober_cells[size_t(cy) * size_t(xs) + size_t(cx)] = 1;
+			}
+		}
+	};
+	auto count_of = [&](int tx, int ty, int mn, int mx) {
+		const int span = std::abs(mx - mn) + 1;
+		return int((long long)ty * tx * tx % span) + mn;
+	};
 	for (int x = 1; x <= xs - 2; x++) {
 		for (int y = 1; y <= ys - 2; y++) {
 			const WData& d = W(x, y);
 			if (!(d.flags & 0x20) || (d.flags & 0x1000)) continue;
-			const bool s = !(W(x, y + 1).flags & 0x20), e = !(W(x + 1, y).flags & 0x20);
-			for (int side = 0; side < 2; side++) {
-				if (!(side == 0 ? s : e)) continue;
-				if (r.rnd(100) < tgd.bush_clump_prob) {
-					r.mask(3);  // q: which sub-cell the bushes go to
-					doober_count++;
-					doober_cells[size_t(y) * size_t(xs) + size_t(x)] = 1;
-				}
+			const bool south = y + 1 < ys && !(W(x, y + 1).flags & 0x20);
+			const bool east = x + 1 < xs && !(W(x + 1, y).flags & 0x20);
+			if (south && r.rnd_draw(100) < tgd.bush_clump_prob) {
+				const int u = r.get() & 3;
+				const int tx = x * 4 + u, ty = y * 4 + 3;
+				const int n = count_of(tx, ty, tgd.bush_min, tgd.bush_max);
+				if (n > 0) place(tx, ty, n, tgd.bush_spacing, 0);
+			}
+			if (east && r.rnd_draw(100) < tgd.bush_clump_prob) {
+				const int u = r.get() & 3;
+				const int tx = x * 4 + 3, ty = y * 4 + u;
+				const int n = count_of(tx, ty, tgd.bush_min, tgd.bush_max);
+				if (n > 0) place(tx, ty, n, tgd.bush_spacing, 0);
 			}
 		}
 	}
@@ -31,45 +58,58 @@ void Gen::add_doobers() {
 		for (int y = 1; y <= ys - 2; y++) {
 			const WData& d = W(x, y);
 			if (World::is_ocean(d) || (d.flags & 0x38) || (d.flags & 0x1000)) continue;
-			if (doober_cells[size_t(y) * size_t(xs) + size_t(x)]) continue;
+			// Doober::has_doobers @8466d0 never reports a doober for these wcoords in the oracle (the draws only fit without a skip)
 			if ((W(x - 1, y).flags & 0x10) || (W(x, y - 1).flags & 0x10)) {
-				if (r.rnd(100) < tgd.mnt_rock_clump_prob) {
-					r.mask(15);
-					doober_count++;
+				if (r.rnd_draw(100) < tgd.mnt_rock_clump_prob) {
+					const int v = r.get() & 15;
+					const int tx = x * 4 + (v & 3), ty = y * 4 + (v >> 2);
+					const int n = count_of(tx, ty, tgd.mnt_rock_min, tgd.mnt_rock_max);
+					if (n > 0) place(tx, ty, n, tgd.mnt_rock_spacing, 1);
 				}
 			}
 		}
 	}
 }
 
-// TerrainGroups::treeify_mountains @6a1cc0
+// TerrainGroups::treeify_mountains @6a1cc0 (disassembly-checked decompile): a wcoord with mountain tcoords that is not itself
+// a mountain wcoord turns into forest when neither its (x, y+1) nor its (x+1, y) neighbour is a mountain wcoord; a mountain
+// wcoord that has an open (no mountain tcoords) +x or +y orthogonal neighbour becomes forest-and-mountain (0x30). Both only
+// off the coast (0x404) and with one draw each.
 void Gen::treeify_mountains(int prob) {
+	auto is_mountain = [&](int x, int y) { return inb(x, y) && (W(x, y).flags & 0x10) != 0; };
 	for (int x = 0; x < xs; x++) {
 		for (int y = 0; y < ys; y++) {
 			WData& d = W(x, y);
-			if (has_mountain_tcoords(x, y) && !(d.flags & 0x10)) {
-				bool next = false;
-				if (inb(x, y + 1) && (W(x, y + 1).flags & 0x10)) next = true;
-				if (inb(x + 1, y) && (W(x + 1, y).flags & 0x10)) next = true;
-				if (next && (d.flags & 0x404) == 0) {
-					if (r.rnd(100) < prob) d.flags = uint16_t((d.flags & 0xffc3) | 0x20);
-				}
-			} else if (d.flags & 0x10) {
+			if (d.flags & 0x10) {
 				bool open = false;
 				const int ox[2] = {1, 0}, oy[2] = {0, 1};  // orthog indices 2 and 3
-				for (int k = 0; k < 2; k++) {
+				for (int k = 0; k < 2 && !open; k++) {
 					const int nx = x + ox[k], ny = y + oy[k];
 					if (inb(nx, ny) && !has_mountain_tcoords(nx, ny)) open = true;
 				}
 				if (open && (d.flags & 0x404) == 0) {
-					if (r.rnd(100) < prob) d.flags = uint16_t((d.flags & 0xffc3) | 0x30);
+					if (r.rnd_draw(100) < prob) {
+						d.flags = uint16_t(d.flags & 0xffc3);
+						d.land = 0;
+						d.flags |= 0x30;
+					}
+				}
+			} else if (has_mountain_tcoords(x, y)) {
+				if (!is_mountain(x, y + 1) && !is_mountain(x + 1, y) && (d.flags & 0x404) == 0) {
+					if (r.rnd_draw(100) < prob) {
+						d.flags = uint16_t(d.flags & 0xffc3);
+						d.land = 0;
+						d.flags |= 0x20;
+					}
 				}
 			}
 		}
 	}
 }
 
-// TerrainGroups::nubify_forest @6a93b0
+// TerrainGroups::nubify_forest @6a93b0 (decompile read): along every column (then every row) of forest wcoords a straight run of
+// four or more that continues in the direction of its first neighbour grows a one-cell nub beside it. The run test comes
+// first (a cell with forest on both sides still continues a run), the run restarts after every draw.
 void Gen::nubify_forest() {
 	auto forest = [&](int x, int y) { return inb(x, y) && (W(x, y).flags & 0x20) != 0; };
 	auto nub = [&](int nx, int ny) {
@@ -86,19 +126,17 @@ void Gen::nubify_forest() {
 				run = 0;
 				continue;
 			}
-			if (forest(x - 1, y) && forest(x + 1, y)) {
-				run = 0;
-				continue;
-			}
 			if (dir != 0 && forest(x + dir, y)) {
-				run++;
+				if (++run > 3) {
+					const int k = r.mask(3);
+					nub(x + dir, y - k);
+					run = 0;
+				}
+			} else if (forest(x - 1, y) && forest(x + 1, y)) {
+				run = 0;
 			} else {
 				run = 1;
 				dir = forest(x + 1, y) ? 1 : forest(x - 1, y) ? -1 : 0;
-			}
-			if (run >= 4) {
-				const int k = r.mask(3);
-				if (!nub(x + dir, y - k)) run = 0;
 			}
 		}
 	}
@@ -109,65 +147,77 @@ void Gen::nubify_forest() {
 				run = 0;
 				continue;
 			}
-			if (forest(x, y - 1) && forest(x, y + 1)) {
-				run = 0;
-				continue;
-			}
 			if (dir != 0 && forest(x, y + dir)) {
-				run++;
+				if (++run > 3) {
+					const int k = r.mask(3);
+					nub(x - k, y + dir);
+					run = 0;
+				}
+			} else if (forest(x, y - 1) && forest(x, y + 1)) {
+				run = 0;
 			} else {
 				run = 1;
 				dir = forest(x, y + 1) ? 1 : forest(x, y - 1) ? -1 : 0;
-			}
-			if (run >= 4) {
-				const int k = r.mask(3);
-				if (!nub(x - k, y + dir)) run = 0;
 			}
 		}
 	}
 }
 
-// TerrainGroups::change_forest_base @6a9a60 / change_mountain_base @6a9c10 / change_coast_base @6a9dc0
+// TerrainGroups::change_forest_base @6a9a60 / change_mountain_base @6a9c10 / change_coast_base @6a9dc0 (decompiles read; Map::make
+// calls each only when the tileset's base is >= 0): a source cell and every grown neighbour also get land 0; a neighbour
+// qualifies when it is not itself a source and not land 2.
 void Gen::change_forest_base() {
-	if (tgd.forest_base < 0) return;
+	const int base = tgd.forest_base;
 	for (int x = 0; x < xs; x++) {
 		for (int y = 0; y < ys; y++) {
 			if (!(W(x, y).flags & 0x20)) continue;
-			W(x, y).land_sub = uint8_t(tgd.forest_base);
+			if (base >= 0) W(x, y).land_sub = uint8_t(base);
+			W(x, y).land = 0;
 			for (int o = 1; o <= 4; o++) {
 				const int nx = x + orthog_x[o], ny = y + orthog_y[o];
 				if (!inb(nx, ny) || (W(nx, ny).flags & 0x20) || W(nx, ny).land == 2) continue;
-				if (r.rnd(100) < tgd.forest_growth_prob) W(nx, ny).land_sub = uint8_t(tgd.forest_base);
+				if (r.rnd_draw(100) < tgd.forest_growth_prob) {
+					if (base >= 0) W(nx, ny).land_sub = uint8_t(base);
+					W(nx, ny).land = 0;
+				}
 			}
 		}
 	}
 }
 
 void Gen::change_mountain_base() {
-	if (tgd.mountain_base < 0) return;
+	const int base = tgd.mountain_base;
 	for (int x = 0; x < xs; x++) {
 		for (int y = 0; y < ys; y++) {
 			if (!has_mountain_tcoords(x, y)) continue;
-			W(x, y).land_sub = uint8_t(tgd.mountain_base);
+			if (base >= 0) W(x, y).land_sub = uint8_t(base);
+			W(x, y).land = 0;
 			for (int o = 1; o <= 4; o++) {
 				const int nx = x + orthog_x[o], ny = y + orthog_y[o];
-				if (!inb(nx, ny) || has_mountain_tcoords(nx, ny)) continue;
-				if (r.rnd(100) < tgd.mountain_growth_prob) W(nx, ny).land_sub = uint8_t(tgd.mountain_base);
+				if (!inb(nx, ny) || has_mountain_tcoords(nx, ny) || W(nx, ny).land == 2) continue;
+				if (r.rnd_draw(100) < tgd.mountain_growth_prob) {
+					if (base >= 0) W(nx, ny).land_sub = uint8_t(base);
+					W(nx, ny).land = 0;
+				}
 			}
 		}
 	}
 }
 
 void Gen::change_coast_base() {
-	if (tgd.coast_base < 0) return;
+	const int base = tgd.coast_base;
 	for (int x = 0; x < xs; x++) {
 		for (int y = 0; y < ys; y++) {
 			if (!(W(x, y).flags & 0x04)) continue;
-			W(x, y).land_sub = uint8_t(tgd.coast_base);
+			if (base >= 0) W(x, y).land_sub = uint8_t(base);
+			W(x, y).land = 0;
 			for (int o = 1; o <= 4; o++) {
 				const int nx = x + orthog_x[o], ny = y + orthog_y[o];
-				if (!inb(nx, ny) || (W(nx, ny).flags & 0x04)) continue;
-				if (r.rnd(100) < tgd.coast_growth_prob) W(nx, ny).land_sub = uint8_t(tgd.coast_base);
+				if (!inb(nx, ny) || (W(nx, ny).flags & 0x04) || W(nx, ny).land == 2) continue;
+				if (r.rnd_draw(100) < tgd.coast_growth_prob) {
+					if (base >= 0) W(nx, ny).land_sub = uint8_t(base);
+					W(nx, ny).land = 0;
+				}
 			}
 		}
 	}

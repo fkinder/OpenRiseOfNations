@@ -151,6 +151,10 @@ void Gen::read_tileset_group_data() {
 	const XDoc ts = read_game_xml(c.files, "tilesets.xml", "", false);
 	for (const XNode* t : xml::children(ts.root, u"TILESET")) {
 		if (!iequal(to_utf8(xml::get_attrib(t, u"name")), tileset)) continue;
+		for (int li = 0; li < 3; li++) {
+			static const char16_t* names[3] = {u"BASELAND", u"COASTAL", u"OCEAN"};
+			if (const XNode* land = xml::child(t, names[li])) tile_counts[size_t(li)] = int(xml::children(land, u"BASE").size());
+		}
 		const XNode* g = xml::child(t, u"TERRAINGROUP");
 		if (!g) return;
 		auto num = [&](const char16_t* tag, int def) { return xml::get_attrib_num(xml::child(g, tag), u"value", def); };
@@ -301,46 +305,49 @@ void Gen::init_terrain_data() {
 	}
 }
 
-// Fractal::init @6aa2d0 (randommap-spec section 5): midpoint displacement on its own Random(world.seed).
+// Fractal::init @6aa2d0 (disassembly-checked decompile): midpoint displacement on its own Random(world.seed). The grid is
+// (xs+1) x (ys+1) bytes, zero at the start; level L runs from the smoothing S down to 0, each level visiting the lattice cells
+// X = i << L, Y = j << L (i < xs >> L, j < ys >> L; x outer, y inner, so the draws of the three cell kinds interleave). The top
+// level draws the raw bytes; the others set a cell between two coarser neighbours (i odd, j even: the X +- 2^L cells; i even,
+// j odd: the Y +- 2^L cells) or at the centre of four (both odd), value = average + get(0, 2^(e+1) - 1) - 2^e with
+// e = 7 - S + L, clamped to 0..255. Neighbours past ys stay zero; column xs is a copy of column 0 (flags & 1 == 0), made at
+// the start of every level and at the end.
 void Gen::fractal_init() {
 	const int smooth = std::min(5, std::max(0, tgd.clump_factor));
-	const int step = 1 << smooth;
 	const int W_ = xs + 1, H_ = ys + 1;
-	const int GW = ((W_ - 1 + step - 1) / step) * step + 1, GH = ((H_ - 1 + step - 1) / step) * step + 1;
-	std::vector<int> g(size_t(GW) * size_t(GH), 0);
+	std::vector<uint8_t> g(size_t(W_) * size_t(H_), 0);
+	auto at = [&](int x, int y) -> uint8_t& { return g[size_t(x) * size_t(H_) + size_t(y)]; };
 	Random fr(world_seed);
-	auto at = [&](int x, int y) -> int& { return g[size_t(x) * size_t(GH) + size_t(y)]; };
-	for (int x = 0; x < GW; x += step) {
-		for (int y = 0; y < GH; y += step) at(x, y) = fr.get(0, 255);
-	}
-	for (int level = smooth - 1; level >= 0; level--) {
-		const int s = 1 << level, s2 = s * 2;
-		const int range = 1 << (8 - smooth + level), half = 1 << (7 - smooth + level);
-		auto disp = [&]() { return fr.get(0, range - 1) - half; };
-		auto clamp = [](int v) { return std::min(255, std::max(0, v)); };
-		for (int x = 0; x + s2 < GW + 0 && x + s2 <= GW - 1; x += s2) {
-			for (int y = 0; y + s2 <= GH - 1; y += s2) {
-				at(x + s, y + s) = clamp((at(x, y) + at(x + s2, y) + at(x, y + s2) + at(x + s2, y + s2) + 2) / 4 + disp());
-			}
-		}
-		for (int x = 0; x < GW; x += s) {
-			for (int y = 0; y < GH; y += s) {
-				const bool xo = ((x / s) & 1) != 0, yo = ((y / s) & 1) != 0;
-				if (xo == yo) continue;
-				if (xo) {
-					if (x + s >= GW) continue;
-					at(x, y) = clamp((at(x - s, y) + at(x + s, y) + 1) / 2 + disp());
-				} else {
-					if (y + s >= GH) continue;
-					at(x, y) = clamp((at(x, y - s) + at(x, y + s) + 1) / 2 + disp());
+	auto wrap = [&]() {
+		for (int j = 0; j < H_; j++) at(xs, j) = at(0, j);
+	};
+	for (int L = smooth; L >= 0; L--) {
+		const int mask = (1 << (L + 1)) - 1;
+		const int e = (7 - smooth) + L;
+		wrap();
+		for (int i = 0; i < (xs >> L); i++) {
+			for (int j = 0; j < (ys >> L); j++) {
+				const int X = i << L, Y = j << L;
+				if (L >= smooth) {
+					at(X, Y) = uint8_t(fr.get(0, 0xff));
+					continue;
+				}
+				const int d = 1 << L;
+				auto clamp = [](int v) { return uint8_t(std::min(255, std::max(0, v))); };
+				if ((mask & X) != 0) {
+					int avg;
+					if ((mask & Y) == 0) avg = (int(at(X + d, Y)) + 1 + int(at(X - d, Y))) >> 1;
+					else avg = (int(at(X - d, Y - d)) + int(at(X + d, Y + d)) + int(at(X + d, Y - d)) + int(at(X - d, Y + d)) + 2) >> 2;
+					at(X, Y) = clamp(avg + (fr.get(0, (1 << (e + 1)) - 1) - (1 << e)));
+				} else if ((mask & Y) != 0) {
+					const int avg = (int(at(X, Y + d)) + int(at(X, Y - d)) + 1) >> 1;
+					at(X, Y) = clamp(avg + (fr.get(0, (1 << (e + 1)) - 1) - (1 << e)));
 				}
 			}
 		}
 	}
-	fractal_raw.assign(size_t(W_) * size_t(H_), 0);
-	for (int x = 0; x < W_; x++) {
-		for (int y = 0; y < H_; y++) fractal_raw[size_t(x) * size_t(H_) + size_t(y)] = uint8_t(at(x, y));
-	}
+	wrap();
+	fractal_raw = g;
 	partitions.clear();
 	int acc = 0;
 	for (int i = 0; i + 1 < base_freq_count; i++) {

@@ -100,9 +100,9 @@ void Gen::make() {
 	place_all();
 	check_player_forest();
 	nubify_forest();
-	change_forest_base();
-	change_mountain_base();
-	change_coast_base();
+	if (tgd.forest_base >= 0) change_forest_base();
+	if (tgd.mountain_base >= 0) change_mountain_base();
+	if (tgd.coast_base >= 0) change_coast_base();
 	fix_transitions();
 	phase("terrain groups");
 	place_resources();
@@ -149,7 +149,9 @@ void Gen::build_game() {
 	res.size = map_size;
 	make();
 	res.tileset = tileset;
-	// Terrain::init: rivers
+	// Terrain::init: the coast pass (half water, shelf, tile fixes), then the rivers
+	terrain_init();
+	phase("terrain_init");
 	make_rivers();
 	phase("make_rivers");
 	build_empires();
