@@ -4322,7 +4322,8 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 			const std::string r = _files->resolve(s);
 			return ron::to_lower(r.empty() ? s : r);
 		};
-		if (key(head.scenario) != key(_scenarioPath)) {
+		// _scenarioPath is "ctw:battle" for a generated Conquer the World battle; the save keeps what scenario_rel_path made of it (the battle's setup text).
+		if (key(head.scenario) != key(ron::sim::scenario_rel_path(*_files, _scenarioPath))) {
 			std::fprintf(stderr, "load: the save is for %s, this game is %s\n", head.scenario.c_str(), _scenarioPath.c_str());
 			[self say:"That save belongs to another scenario"];
 			return NO;
