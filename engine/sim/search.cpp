@@ -247,11 +247,14 @@ int32_t find_nearby_spot(Game& g, const Type& t, int32_t x, int32_t y, int32_t* 
 	}
 	// Naval units with an attack (or is(0x15f, strict)) avoid TData 0x2400.
 	const bool naval_care = t.domain == 1 && (t.attack != 0 || type_is(t, 0x15f, true));
-	int32_t bldg_flag = 0;
-	if (bo >= 0 && (t.type == 0x32 || t.type == 0x33)) {
-		// TODO(objects): ObjectData::is(0x1a1) of the building (lets citizens spawn inside it).
-		bldg_flag = 0;
-	}
+	// The building (bo, bwho) whose footprint the spot must stay out of (swarm_around's builders, gatherers and repairers pass their
+	// target; every other caller passes -1). Citizens heading for a farm (ObjectData::is(0x1a1)) may stand inside it. @61de70.
+	const Object* site = bo >= 0 ? g.object(bwho, bo) : nullptr;
+	if (site && site->is_unit) site = nullptr;  // vtable +0x20 (is a building): 0 for units
+	bool bldg_flag = false;
+	if (site && bo >= 0 && (t.type == 0x32 || t.type == 0x33)) bldg_flag = type_is(*site->ptype, kFarm);
+	Footprint site_fp{};
+	if (site) site_fp = footprint(*site->ptype, site->x, site->y);
 	int32_t c = 0;
 	for (;;) {
 		int32_t px = x, py = y;
@@ -270,12 +273,8 @@ int32_t find_nearby_spot(Game& g, const Type& t, int32_t x, int32_t y, int32_t* 
 			if (region >= 0 && int16_t(w.get_tregion(tx, ty)) != region) break;
 			const uint16_t m = w.t(tx, ty);
 			if (t.domain != 2 && (m & tmask::kBlocked)) break;
-			if (bo >= 0) {
-				// TODO(objects): the probe tcoord inside building (bo, bwho)'s footprint is refused unless bldg_flag.
-				// No movement caller passes a building.
-				(void)bwho;
-				(void)bldg_flag;
-			}
+			if (site && !bldg_flag && tx >= site_fp.x0 && tx < site_fp.x0 + site_fp.w && ty >= site_fp.y0 && ty < site_fp.y0 + site_fp.h)
+				break;  // inside the building's footprint
 			if (t.domain == 1) {
 				if ((m & tmask::kMedium) != tmask::kWater) break;
 				if (naval_care && (m & 0x2400)) break;

@@ -22,6 +22,7 @@
 //   --field-report    how many members of each original class the engine maps (the rest stays in the shadow)
 //   other options: --quiet --no-diag --mutate N (self-test) --json F --csv F --game DIR --no-art --no-commands --verbose
 // Exit code: 1 if the decode fails, 2 if a recomputed value differs from the stored/expected one under --verify / --engine-roundtrip.
+#include <cmath>
 #include <csignal>
 #include <cxxabi.h>
 #include <dlfcn.h>
@@ -1456,7 +1457,12 @@ void rng_hook_fn() {
 
 struct IdlePick { int frame; int who; int o; int type; uint32_t seed_after; };
 std::vector<IdlePick> g_idle_picks;
-void idle_pick_hook(sim::Game& g, sim::Unit& u) { g_idle_picks.push_back({g.frame, u.who, u.o, u.type, g.rng.seed()}); }
+int g_idle_trace_lo = -1, g_idle_trace_hi = -1;  // RON_IDLE_TRACE=F0:F1 prints every idle-variant pick of Guy::set_anim in the frames
+void idle_pick_hook(sim::Game& g, sim::Unit& u) {
+	g_idle_picks.push_back({g.frame, u.who, u.o, u.type, g.rng.seed()});
+	if (g.frame >= g_idle_trace_lo && g.frame <= g_idle_trace_hi)
+		std::printf("IDLEPICK frame %d who %d o %d type %d seed %08x pos %d,%d\n", g.frame, u.who, u.o, u.type, g.rng.seed(), u.x, u.y);
+}
 // The gaia animals of list 8 re-pick their idle variant in lock step ("cur_time" = frames since the last pick, all fish of one burst picked in
 // the same frame): the variants stored in a save are the classes (r < 70 -> 0, < 83 -> 1, < 96 -> 2, else 3) of CONSECUTIVE generator outputs
 // (the fish are processed in object order in Objects::inc_time, nothing else draws in between). So the saved fish give the position of the
@@ -1755,7 +1761,8 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 	const bool fish_timeline = std::getenv("RON_FISH_TIMELINE") != nullptr;
 	std::vector<std::pair<int, uint32_t>> frame_seeds;
 	const uint32_t seed_load = game->rng.seed();
-	if (fish_timeline) sim::g_idle_pick_hook = idle_pick_hook;
+	if (const char* it = std::getenv("RON_IDLE_TRACE")) std::sscanf(it, "%d:%d", &g_idle_trace_lo, &g_idle_trace_hi);
+	if (fish_timeline || g_idle_trace_lo >= 0) sim::g_idle_pick_hook = idle_pick_hook;
 	// stepping
 	sim::CommandPackage package;
 	size_t ri = 0;
@@ -1926,7 +1933,14 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 						const uint32_t h0 = adler_of(t0.bytes), want = it->second[size_t(part)];
 						auto subm = [&](uint32_t x, uint32_t y) { return std::pair<int64_t, int64_t>{(int64_t(x & 0xffff) - int64_t(y & 0xffff) + M) % M, (int64_t(x >> 16) - int64_t(y >> 16) + M) % M}; };
 						const auto target = subm(want, h0);
-						std::vector<sim::MemberChange> all = sim::members_of(*game, {"Unit.*", "MoveOrder.*", "AttackOrder.*", "GatherOrder.*", "TargetOrder.*", "GroupOrder.*", "PathData.*"});
+						std::vector<std::string> pair_pats = {"Unit.*", "MoveOrder.*", "AttackOrder.*", "GatherOrder.*", "TargetOrder.*", "GroupOrder.*", "PathData.*"};
+						if (const char* pp = std::getenv("RON_PAIR_PATTERNS")) {  // e.g. "Build.*,Object.*" for part 1 (builds): the members searched instead of the unit ones
+							pair_pats.clear();
+							std::stringstream ps2(pp);
+							std::string t2;
+							while (std::getline(ps2, t2, ',')) pair_pats.push_back(t2);
+						}
+						std::vector<sim::MemberChange> all = sim::members_of(*game, pair_pats);
 						struct Eff { size_t mi; int dl; int64_t a, b; };
 						std::vector<Eff> effs;
 						size_t tried = 0;
@@ -2508,6 +2522,12 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 					bool skip = false;
 					for (const char* i : ignored) skip = skip || rc.name == i;
 					if (skip) continue;
+					if (const char* sk = std::getenv("RON_SKIP_CMD")) {  // experiment: RON_SKIP_CMD=NAME[:frame] drops that command (every one, or those of that record frame)
+						char nm[48] = {0};
+						int sf = -1;
+						std::sscanf(sk, "%47[^:]:%d", nm, &sf);
+						if (rc.name == nm && (sf < 0 || int(rec.num("frame")) == sf)) continue;
+					}
 					if (rc.name == "UNITMASK" && use_commands) {
 						apply_unitmask(*game, package.group, uint32_t(rc.mask_arg));
 						++cmds_run;
@@ -2537,6 +2557,61 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 					}
 				}
 			}
+			if (const char* dp = std::getenv("RON_DUMP_PART")) {  // RON_DUMP_PART=part:F:prefix writes the hashed stream of a part before frame F to prefix.bin and its ranges to prefix.rng
+				int dpart = 0, df = 0;
+				char dpre[256] = {0};
+				if (std::sscanf(dp, "%d:%d:%255s", &dpart, &df, dpre) == 3 && f == df) {
+					sim::EngineProvider epd(*game);
+					PartTrace trd;
+					if (trace_part(epd, dpart, trd)) {
+						std::ofstream ob(std::string(dpre) + ".bin", std::ios::binary);
+						ob.write(reinterpret_cast<const char*>(trd.bytes.data()), std::streamsize(trd.bytes.size()));
+						std::ofstream orr(std::string(dpre) + ".rng");
+						for (const auto& r : trd.ranges) orr << r.begin << ' ' << r.len << ' ' << r.who << ' ' << r.o << ' ' << r.step << '\n';
+					}
+				}
+			}
+			if (const char* ph = std::getenv("RON_PHASE")) {
+				// experiment: RON_PHASE="F:who:o:delta[,..]" adds delta to the animation clock of guy 0 of unit who/o before frame F (a hidden pen animal
+				// whose cycle is delta frames early/late: list 9 is in no checksum part, so its draws are the only trace it leaves)
+				std::stringstream is(ph);
+				std::string tk;
+				while (std::getline(is, tk, ',')) {
+					int fr = 0, wh = 0, oo = 0, dl = 0;
+					if (std::sscanf(tk.c_str(), "%d:%d:%d:%d", &fr, &wh, &oo, &dl) == 4 && fr == f) {
+						sim::Unit* u = game->unit(wh, oo);
+						if (u && !u->guys.empty()) u->guys[0].cur_time = uint32_t(int32_t(u->guys[0].cur_time) + dl);
+					}
+				}
+			}
+			if (const char* nr = std::getenv("RON_DUMP_NEAR")) {  // RON_DUMP_NEAR=F0:F1:x:y:r: every object (all lists) within r ucoords of (x, y), before frames F0..F1
+				int f0 = 0, f1 = 0, nx = 0, ny = 0, nrr = 0;
+				if (std::sscanf(nr, "%d:%d:%d:%d:%d", &f0, &f1, &nx, &ny, &nrr) == 5 && f >= f0 && f <= f1) {
+					for (int w = 0; w < sim::kNumLeaders; ++w) {
+						for (int o = 0; o < game->objects[size_t(w)].unit_mark; ++o) {
+							const sim::Unit* u = game->unit(w, o);
+							if (u && u->alive() && std::abs(u->x - nx) <= nrr && std::abs(u->y - ny) <= nrr) std::printf("  NEAR f%d unit %d/%d type %d at %d,%d orders %zu\n", int(f), w, o, u->type, u->x, u->y, u->orders.size());
+						}
+						for (int o = sim::kBuildBase; o < game->objects[size_t(w)].build_mark; ++o) {
+							const sim::Build* b = game->build(w, o);
+							if (b && b->alive() && std::abs(b->x - nx) <= nrr + 1500 && std::abs(b->y - ny) <= nrr + 1500) std::printf("  NEAR f%d build %d/%d type %d at %d,%d flags %x\n", int(f), w, o, b->type, b->x, b->y, unsigned(b->flags));
+						}
+					}
+				}
+			}
+			if (const char* dm = std::getenv("RON_DUMP_MEMBERS")) {  // RON_DUMP_MEMBERS=F:who/o[:pattern]: every mapped member of one object before frame F
+				int mf = 0, mw = 0, mo = 0;
+				char pat[64] = "*";
+				const int nsc = std::sscanf(dm, "%d:%d/%d:%63s", &mf, &mw, &mo, pat);
+				if (nsc >= 3 && f == mf) {
+					for (const sim::MemberChange& c : sim::members_of(*game, {std::string(pat)})) {
+						if (c.id.a != mw || c.id.b != mo) continue;
+						std::printf("  MEMBER f%d %s (%d,%d,%d):", int(f), c.key.c_str(), c.id.a, c.id.b, c.id.c);
+						for (uint8_t by : c.now) std::printf(" %02x", by);
+						std::printf("\n");
+					}
+				}
+			}
 			if (const char* gd = std::getenv("RON_DUMP_GAIA")) {  // RON_DUMP_GAIA=F0:F1 (+ RON_DUMP_GAIA_WHO, default 9): the gaia list's units before frames F0..F1
 				int f0 = 0, f1 = 0;
 				if (std::sscanf(gd, "%d:%d", &f0, &f1) == 2 && f >= f0 && f <= f1) {
@@ -2544,8 +2619,12 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 					for (int o = 0; o < game->objects[size_t(gw)].unit_mark; ++o) {
 						const sim::Unit* u = game->unit(gw, o);
 						if (!u || !u->alive()) continue;
-						std::printf("  GAIA f%d %d/%d type %d x %d y %d orders %zu path %zu aid %d spell_time %d cara %d", int(f), gw, o, u->type, u->x, u->y, u->orders.size(), u->path.size(), int(u->animal_aid), int(u->spell_time), int(u->cara));
-						for (const sim::Guy& gy : u->guys) { std::printf(" | anim %d cur %u end %u", int(gy.cur_anim), unsigned(gy.cur_time), unsigned(gy.end_time)); if (std::getenv("RON_DUMP_GAIA_TURRET")) std::printf(" turret %d,%d,%d,%d des %d,%d,%d,%d track %d,%d ang %x/%x last_ang %x", gy.turret_angles[0], gy.turret_angles[1], gy.turret_angles[2], gy.turret_angles[3], gy.des_turret_angles[0], gy.des_turret_angles[1], gy.des_turret_angles[2], gy.des_turret_angles[3], gy.track_dx, gy.track_dy, unsigned(gy.angle), unsigned(gy.des_angle), unsigned(gy.last_angle)); }
+						std::printf("  GAIA f%d %d/%d type %d x %d y %d orders %zu path %zu aid %d spell_time %d cara %d speed %d", int(f), gw, o, u->type, u->x, u->y, u->orders.size(), u->path.size(), int(u->animal_aid), int(u->spell_time), int(u->cara), int(u->myspeed));
+						if (std::getenv("RON_DUMP_GAIA_ORDERS")) {
+							if (const sim::Order* o0 = u->front()) std::printf(" ord{t%d x%d y%d dx%d dy%d tol%d att%d ang%x}", int(o0->type), o0->x, o0->y, o0->dest_x, o0->dest_y, o0->tolerance, o0->attempts, unsigned(o0->angle));
+							for (const sim::PathData& pd : u->path) std::printf(" p(%d,%d,t%d,f%x)", pd.x, pd.y, pd.tol, unsigned(pd.flags));
+						}
+						for (const sim::Guy& gy : u->guys) { std::printf(" | anim %d cur %u end %u avg %d last %d", int(gy.cur_anim), unsigned(gy.cur_time), unsigned(gy.end_time), int(gy.avg_speed), int(gy.last_speed)); if (std::getenv("RON_DUMP_GAIA_TURRET")) std::printf(" turret %d,%d,%d,%d des %d,%d,%d,%d track %d,%d ang %x/%x last_ang %x", gy.turret_angles[0], gy.turret_angles[1], gy.turret_angles[2], gy.turret_angles[3], gy.des_turret_angles[0], gy.des_turret_angles[1], gy.des_turret_angles[2], gy.des_turret_angles[3], gy.track_dx, gy.track_dy, unsigned(gy.angle), unsigned(gy.des_angle), unsigned(gy.last_angle)); }
 						std::printf("\n");
 					}
 				}
@@ -2672,6 +2751,69 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 		std::printf("  at frame %lld, engine against the next save:", (long long)next_frame);
 		for (int k = 0; k < dw::kCheckPartCount; ++k) std::printf(" %s=%s", dw::kCheckPartNames[k], a1.v[k] == a2.v[k] ? "=" : "!");
 		std::printf("\n");
+		{
+			// The terrain height grid (Terrain::master_land_heights, saved): buildings terraform it (TerrainOut::terraform_for_building), so after the
+			// same BUILD commands the engine's grid must be the next save's. Reported: vertices that differ, their bounding box and the largest gap.
+			const auto& he = game->heights;
+			const auto& ht = truth->heights;
+			if (he.h.size() == ht.h.size() && !he.h.empty()) {
+				int64_t nd = 0;
+				int32_t x0 = 1 << 30, y0 = 1 << 30, x1 = -1, y1 = -1;
+				float worst = 0.0f;
+				for (size_t i = 0; i < he.h.size(); ++i) {
+					if (he.h[i] == ht.h[i]) continue;
+					++nd;
+					const int32_t x = int32_t(i % size_t(he.vxs)), y = int32_t(i / size_t(he.vxs));
+					x0 = std::min(x0, x), y0 = std::min(y0, y), x1 = std::max(x1, x), y1 = std::max(y1, y);
+					worst = std::max(worst, std::fabs(he.h[i] - ht.h[i]));
+				}
+				if (const char* hw = std::getenv("RON_HEIGHTS_WINDOW")) {  // RON_HEIGHTS_WINDOW=x0:y0:x1:y1: print engine -> next save heights of the window
+					int a0 = 0, b0 = 0, a1 = 0, b1 = 0;
+					if (std::sscanf(hw, "%d:%d:%d:%d", &a0, &b0, &a1, &b1) == 4)
+						for (int y = b0; y <= b1; ++y) {
+							std::printf("   y%3d:", y);
+							for (int x = a0; x <= a1; ++x) {
+								const size_t i = size_t(y) * size_t(he.vxs) + size_t(x);
+								if (he.h[i] == ht.h[i]) std::printf(" %7.2f      =", double(he.h[i]));
+								else std::printf(" %7.2f>%7.2f", double(he.h[i]), double(ht.h[i]));
+							}
+							std::printf("\n");
+						}
+				}
+				std::printf("  terrain heights: %lld of %zu vertices differ from the next save", (long long)nd, he.h.size());
+				if (nd) std::printf(" (x %d..%d, y %d..%d, largest gap %.3f)", x0, x1, y0, y1, double(worst));
+				std::printf("\n");
+			} else {
+				std::printf("  terrain heights: not comparable (%zu / %zu samples)\n", he.h.size(), ht.h.size());
+			}
+		}
+		if (const char* tw = std::getenv("RON_TILES_WINDOW")) {  // RON_TILES_WINDOW=x0:y0:x1:y1: tile masks (hex) of the next save (T) and the engine (E) in a tcoord window
+			int a0 = 0, b0 = 0, a1 = 0, b1 = 0;
+			if (std::sscanf(tw, "%d:%d:%d:%d", &a0, &b0, &a1, &b1) == 4)
+				for (int y = b0; y <= b1; ++y) {
+					std::printf("   T y%3d:", y);
+					for (int x = a0; x <= a1; ++x) std::printf(" %04x", unsigned(truth->world.t(x, y)));
+					std::printf("   E:");
+					for (int x = a0; x <= a1; ++x) std::printf(" %04x", unsigned(game->world.t(x, y)));
+					std::printf("\n");
+				}
+		}
+		if (const char* cb = std::getenv("RON_CMP_BUILD")) {  // RON_CMP_BUILD=who,o: the building as the next save has it (T) and as the engine has it (E)
+			int cw = 0, co = 0;
+			std::sscanf(cb, "%d,%d", &cw, &co);
+			const sim::Build* bt = truth->build(cw, co);
+			const sim::Build* be = game->build(cw, co);
+			auto line = [](const char* tag, const sim::Build* b) {
+				if (!b) { std::printf("  %s: none\n", tag); return; }
+				std::printf("  %s: type %d alive %d x %d y %d z %d uid %u flags %02x masks %04x myhits %d damage %d construct_hits %d constr_time %d job_counter %d job_counter_2 %d frame_started %d helpers %d demolition %d "
+				            "orig_type %d stance %d founder %d max_age %d city %d city_down %d gather_down %d queued %d recharging %d mylos %d ever_seen %d/%d up %d down %d down_who %d near %d/%d hold %u\n",
+				            tag, b->type, int(b->alive()), b->x, b->y, b->z, unsigned(b->uid), unsigned(b->flags), unsigned(b->build_masks), b->myhits, b->damage, b->construct_hits, b->constr_time, b->job_counter, b->job_counter_2,
+				            b->frame_started, b->helpers, b->demolition, b->orig_type, int(b->stance), int(b->founder), int(b->max_age), int(b->city), int(b->city_down), int(b->gather_down), int(b->queued), int(b->recharging), int(b->mylos),
+				            int(b->ever_seen), int(b->ever_seen_completed), int(b->up), int(b->down), int(b->down_who), int(b->near_o), int(b->near_who), unsigned(b->hold_frames));
+			};
+			line("T", bt);
+			line("E", be);
+		}
 		std::vector<sim::AuditLine> d = sim::diff_mapped_state(*truth, *game);
 		std::sort(d.begin(), d.end(), [](const sim::AuditLine& x, const sim::AuditLine& y) { return x.mismatches > y.mismatches; });
 		int shown = 0;

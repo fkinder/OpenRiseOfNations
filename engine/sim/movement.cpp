@@ -6,6 +6,7 @@
 #include <algorithm>
 
 #include "sim/ai.hpp"
+#include "sim/animals.hpp"
 #include "sim/combat.hpp"
 #include "sim/combat_internal.hpp"
 #include "sim/fog.hpp"
@@ -185,6 +186,15 @@ int32_t unit_speed(const Game& g, const Unit& u) {
 // UnitData::get_speed @608720 (vtable +0x17c).
 int32_t get_speed(const Game& g, const Unit& u, int32_t x, int32_t y, bool nocap) {
 	int32_t s = unit_speed(g, u);
+	if (is_animal_who(u.who)) {
+		// AnimalData::get_speed @5d8380 (vtable +0x17c of Animal; none of the UnitData terms below apply): an animal whose first order is a
+		// move runs at 3/2 of its speed while more than 0x180 away from the order's x / y (a pen chicken crossing its pen, a herd animal
+		// walking back to the herd); aircraft (domain 2) return the plain speed; the floor is 3.
+		if (u.ptype->domain == 2) return s;
+		const Order* o = u.front();
+		if (o && order_is_move(o->type) && vector_dist(iabs(u.x - o->x), iabs(u.y - o->y)) > 0x180) s = (s * 3) / 2;
+		return s < 3 ? 3 : s;
+	}
 	const Order* act = get_action(u);
 	const OrderType at = act ? act->type : kOrderNone;
 	if (at == kAttack) s = s * 9 / 8;

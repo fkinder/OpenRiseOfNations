@@ -4,6 +4,7 @@
 #include <algorithm>
 
 #include "sim/aircraft.hpp"
+#include "sim/compass.hpp"
 #include "sim/heroes.hpp"
 #include "sim/roads.hpp"
 #include "sim/combat.hpp"
@@ -341,6 +342,93 @@ void find_gather_tiles(Game& g, Build& b) {
 
 // ---------------------------------------------------------------- creation (3.3)
 
+// TerrainOut::terraform_for_building @875210 (the render-side normals / tangents / visibility calls left out): flatten the height grid
+// under a new building. Averages the heights of the vertices from (tx - 1, ty - 1) to (tx + tw + 1, ty + th + 1) (the far corner row and
+// column included, in the original's summing order; nothing changes when any sampled height is not above 0), then writes the average on the
+// vertices of each wcoord that is land (WData.land 0) and not next to a mountain / cliff tile, and the mean of the old height and the average
+// on the outer ring of the rectangle. Wcoords with a good on a resource tile and open-water wcoords (land 1 / 2 without the 0x100 flag) are
+// left alone. (The same routine as TerrainInit::terraform_for_building in the generator, which places the rocky patches under oil.)
+void terraform_for_building(Game& g, int32_t tx, int32_t ty, int32_t tw, int32_t th) {
+	World& w = g.world;
+	Heights& H = g.heights;
+	if (H.h.empty()) return;
+	const int32_t side = 4 * w.xs;  // the original compares both coordinates with 4 * xs - 1
+	if (tx == 0 || ty == 0 || tx == side - 1 || ty == side - 1) return;
+	const int32_t x0 = std::max(tx - 1, 0), y0 = std::max(ty - 1, 0);
+	int32_t y1 = th + ty + 2, x1 = tw + tx + 2;
+	if (w.ys * 4 <= y1) y1 = w.ys * 4 - 1;
+	if (w.xs * 4 <= x1) x1 = w.xs * 4 - 1;
+	auto h = [&](int32_t x, int32_t y) -> float& { return H.h[size_t(y) * size_t(H.vxs) + size_t(x)]; };
+	float sum = 0.0f;
+	int32_t count = 0;
+	for (int32_t y = y0; y < y1; y++) {
+		const float v = h(x1, y);
+		sum = sum + v;
+		if (v <= 0.0f) return;
+		count++;
+	}
+	for (int32_t x = x0; x < x1; x++) {
+		const float v = h(x, y1);
+		sum = sum + v;
+		if (v <= 0.0f) return;
+		count++;
+	}
+	for (int32_t y = y0; y < y1; y++) {
+		for (int32_t x = x0; x < x1; x++) {
+			const float v = h(x, y);
+			sum = sum + v;
+			if (v <= 0.0f) return;
+			count++;
+		}
+	}
+	const float avg = sum / float(count);
+	for (int32_t y = y0; y < y1; y++) {
+		for (int32_t x = x0; x < x1; x++) {
+			const int32_t wx = x >> 2, wy = y >> 2;
+			const WData& d = w.w(wx, wy);
+			if ((d.flags & 0x100) == 0 && (d.land == 1 || d.land == 2)) continue;  // open water
+			bool next_to_mountain = false;
+			for (int32_t k = 0; k < 9 && !next_to_mountain; k++) {
+				const int32_t nx = x + move_x[k], ny = y + move_y[k];
+				if (nx < 0 || ny < 0 || nx >= w.tile_xs || ny >= w.tile_ys) continue;
+				const uint16_t m = w.t(nx, ny) & 3;
+				if (m == 2 || m == 1) next_to_mountain = true;
+			}
+			if (next_to_mountain) continue;
+			if (d.land != 0) continue;
+			if ((w.t(x, y) & tmask::kResource) && find_good_at_wcoord(g, wx, wy) >= 0) continue;
+			float nv = avg;
+			if (y == y0 || y == y1 - 1 || x == x0 || x == x1 - 1) nv = (h(x, y) + avg) * 0.5f;
+			h(x, y) = nv;
+		}
+	}
+}
+
+// Wall::init's last loop: Unit::update_z @606590 on every live domain-0 unit of the first `cells` wcoords of the spiral around (x, y):
+// the z of the unit from the (changed) heights, and of each of its guys (0 for ships). The loop asks vtable +0x8 (is_active) first: the
+// slot is Window::get_button (returns 0) in the Build vtable, so buildings in the cell lists are skipped.
+void update_z_around(Game& g, int32_t x, int32_t y, int32_t cells) {
+	World& w = g.world;
+	const int32_t cwx = wcoord_of(x), cwy = wcoord_of(y);
+	for (int32_t k = 0; k < cells; k++) {
+		const int32_t wx = cwx + move_x[k], wy = cwy + move_y[k];
+		if (!w.in_w(wx, wy)) continue;
+		int32_t o = w.w(wx, wy).down, who = w.w(wx, wy).down_who;
+		for (int32_t guard = 0; o >= 0 && guard < 100000; guard++) {
+			Object* ob = g.object(who, o);
+			if (!ob) break;
+			const int32_t no = ob->down, nw = ob->down_who;
+			if (ob->is_unit && ob->alive() && ob->ptype && ob->ptype->domain == 0) {
+				ob->z = g.world.in_t(tcoord_of(ob->x), tcoord_of(ob->y)) ? find_tcoord_z(g, tcoord_of(ob->x), tcoord_of(ob->y), 1) : 0;
+				Unit& u = static_cast<Unit&>(*ob);
+				for (Guy& gy : u.guys) guy_update_z(g, u, gy);
+			}
+			o = no;
+			who = nw;
+		}
+	}
+}
+
 int32_t init_build_site(Game& g, int32_t who, int32_t type, int32_t x, int32_t y, bool preplaced, int32_t forced) {
 	const int32_t o = find_free(g, who, kBuildBase, kBuildLimit, forced);
 	if (o < 0) return o;
@@ -395,9 +483,18 @@ int32_t init_build_site(Game& g, int32_t who, int32_t type, int32_t x, int32_t y
 	wall_update_hits(g, b, false);
 	build_update_los(g, b);
 	check_ever_seen(g, b, false);
-	// Not preplaced: tile_corner; TerrainOut::terraform_for_building (heights), Terrain::refresh_good_z,
-	// Farms::recalc_heights. TODO(spec 3.12.5): terraforming is not reproduced (heights unchanged), so the Unit::update_z
-	// pass over the 81 / 25 wcoords around the building changes nothing either.
+	// Wall::init @63e9b0, the rest: not preplaced -> tile_corner, TerrainOut::terraform_for_building (heights; not for a FARM),
+	// Terrain::refresh_good_z (goods and items take their z from the heights when they are emitted),
+	// Farms::recalc_heights (presentation: the farm's corner heights for drawing), SubObject::set_new_location (z); then, whatever the
+	// flag, Unit::update_z on every domain-0 object in the 81 (a city) / 25 wcoords around the building.
+	if (!preplaced) {
+		if (!type_is(*b.ptype, ptype::kFarm)) {
+			const Footprint f = footprint(*b.ptype, b.x, b.y);
+			terraform_for_building(g, f.x0, f.y0, b.ptype->x_size, b.ptype->y_size);
+		}
+		b.z = g.world.in_t(tcoord_of(b.x), tcoord_of(b.y)) ? find_tcoord_z(g, tcoord_of(b.x), tcoord_of(b.y), 1) : 0;
+		update_z_around(g, b.x, b.y, is_city_type(*b.ptype) ? 0x51 : 0x19);
+	}
 	// ---- Build::init (continued)
 	build_clear_gather(g, b);
 	if (!preplaced) l.buildings_built++;

@@ -19,7 +19,7 @@
 
 namespace ron::sim {
 
-constexpr uint32_t kSaveVersion = 4;  // 4: Leader::capital_stamp / ally_stamp (do_damage warning stamps)
+constexpr uint32_t kSaveVersion = 5;  // 5: section HGHT (the terraformed height grid); 4: Leader::capital_stamp / ally_stamp (do_damage warning stamps)
 
 // What the header of a save says (read_save_info) and what the loader found out (load_game).
 struct SaveInfo {

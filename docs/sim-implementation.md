@@ -1565,3 +1565,33 @@ draws and the `cur_time * T / T` of an animation change (asm @5db2b8..5db561), `
 draws ~10 numbers per frame more than the engine from a true state, the road-art driven `world` differences of the mid-game replays, the `leaders` `explored` of the scouts at 566.
 **Checks** (scratch build with the build-mac.sh flags, zero warnings in a clean full build): `ron-check` 0 failures; `sim-all 600 --ai-every 8` 156/156 self-check OK, native `--roundtrip 200` 156/156;
 `ron-sav --engine-roundtrip` 69/69 PASS (45 replays + 24 saves).
+
+### Fidelity log, seventh pass (2026-10-24, the animals' speed, collision and scout rules, terraforming; docs/original-save.md 6.7)
+
+29. **`AnimalData::get_speed` @5d8380** (Animal vtable +0x17c; `movement.cpp` `get_speed`): an animal (gaia lists 8 and 9) takes none of the `UnitData::get_speed` terms (attack, guard, ZOC, ford, group cap); when its first order
+is a move and it is more than 0x180 from the order's x / y (`vector_dist(|u.x - o.x|, |u.y - o.y|)`) its speed is `speed * 3 / 2`; aircraft return the plain speed, the floor is 3. This was **the missing draw of
+`21'23'34`**: a pen chicken crossing its pen (hidden, list 9) walked 28 frames instead of 25-26, so its arrival pick came after the 71-fish burst of frame 302 instead of before it; the earlier hunt (+1 at 293, +1 at 307, -1 at 333) was
+three symptoms of one chicken (`RON_PHASE="280:9:6:+2"` alone reproduces it). `units` / `guys` / `world` first differ 308 -> 422 with this alone.
+30. **`Unit::think_scout` @5f6180** (`ai_unit.cpp`): the city scouting (B) runs for every unit WITH `UNIT_AUTO_EXPLORE` and for the units without it that are not citizens, spies or ships; the engine had the test inverted (`skipB = auto_explore || ...`),
+so an auto-exploring scout went straight to the unexplored cells (C) and never marked its cities `scouted` (`City.scouted` +0x4c, the `cities` difference at 422, the scouts' `explored` of `leaders` at 566). `units` 422 -> 902, `leaders` 566 -> 1166.
+31. **`Unit::resolve_unit_collision` @5f9d30** (`collision.cpp`): vtable +0x30 is `Window::get_button` (0) for a Unit but the shared `return 1` stub @41e0e0 for an Animal (the same slot the bird census reads); an animal that runs into anything
+just clears its orders (`clear_orders`) and returns, it does not sidestep or repath. A herd sheep stopped by another sheep at frame 898 was the next wall. `units` 902 -> 1352.
+32. **`TerrainOut::terraform_for_building` @875210** (`build.cpp`, `terraform_for_building`, `update_z_around`): `Wall::init` flattens the height grid under every new non-farm building (average of the 8 x 8 vertices from tile corner - 1,
+the average on the footprint and the mean of old height and average on the ring; nothing happens next to water / mountains / a good) and then sets the building's z and `Unit::update_z` for the units in the 25 (81 for a city) wcoords around it.
+The grid is saved natively now (section HGHT, `kSaveVersion` 5). Checked against the next save: the engine's grid around the first Barracks of `21'23'34` equals the save's float for float (`--compare-next` prints `terrain heights: N vertices differ`;
+`RON_HEIGHTS_WINDOW=x0:y0:x1:y1` prints the window).
+33. **`UnitType::find_nearby_spot` @61de70, the building argument** (`search.cpp`): a candidate tile inside the footprint of the object (bo, bwho) is refused unless the unit is a citizen and the object a farm (`is(0x1a1)`).
+`Group::action_swarm_around` passes its target; the engine ignored it, so the first builder walked to a spot on the Barracks' own edge tile. The builder now reaches the site at frame 1407 like the original (`Build.frame_started` 1407 in the next save as in the engine).
+`units` / `guys` / `world` 1352 -> 1412.
+34. **Diagnostics** (`apps/sav`): `RON_IDLE_TRACE=F0:F1`, `RON_PHASE=F:who:o:delta`, `RON_DUMP_NEAR`, `RON_DUMP_MEMBERS`, `RON_DUMP_PART=part:F:prefix` (+ `RON_SKIP_CMD=NAME[:frame]`) to diff a part's hashed stream with and without a command,
+`RON_DUMP_GAIA_ORDERS` / speed fields, `RON_PAIR_PATTERNS`, and in `--compare-next`: the height-grid comparison, `RON_HEIGHTS_WINDOW`, `RON_TILES_WINDOW`, `RON_CMP_BUILD=who,o`.
+
+**First differing boundary of `21'23'34`, before -> after**: units 308 -> 1,412, builds 338 -> 1,352, groups 422 -> 1,520, guys 308 -> 1,412, leaders 566 -> 1,628, cities 422 -> 1,604, world 308 -> 1,412 (walls ok; ammo 6,896, deaths 7,094,
+items 6,752, goods 2,318 unchanged); boundaries with all 15 parts equal 50 -> 224. `21'45'58`: groups 19,047 -> 20,271, cities 18,915 -> 18,603 (it diverges at the first row anyway), the rest unchanged; `21'57'16` unchanged.
+Draw distance over the 44 pairs of the chain, sum of |engine - original|: 391,788 -> 353,264 (mixed per pair: the animal speed also moves fights' segments).
+**Digests**: 146 of the 156 `sim-all 600 --ai-every 8` digests change (animal speed alone accounts for the bulk: scenarios with moving gaia animals; the collision rule, the terraform and the spot rule add the scenarios with
+animals bumping or buildings); self-check 156/156, native `--roundtrip` 156/156 (needs HGHT: without it 120/156).
+**Open**: `builds` at 1,352: the new Barracks record (0/2012) differs by a constant (a=346, b=10721 with z 120; a=327 with the pre-terraform z 85) that no single field and no pair of single-byte changes explains; the next save agrees on its uid, constr_time,
+stance, city, frame_started, z. `units` at 1,412 is the first road search of a building (`find_road` laid by `build_start` at 1,407: the engine draws 363 numbers and lays 18 tiles with a detour along existing roads; the save's road shows the straight
+route; no insertion of +-400 draws moves the wall, so it is the path, not only the count). The mature-economy draw gap (item 2 of the brief) was not reached: from 1,412 on the first segment diverges again.
+**Checks** (clean copy of HEAD + these files, build-mac.sh flags, zero warnings): `ron-check` 0 failures; `sim-all 600 --ai-every 8` 156/156 self-check OK; `--roundtrip 200` 156/156; `ron-sav --engine-roundtrip` 69/69 PASS.

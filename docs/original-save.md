@@ -398,6 +398,21 @@ Boundaries with all 15 parts equal on `21'23'34`: 33 -> 50. `21'49'39` (first ro
 *Diagnostics added* (`apps/sav`): `RON_DUMP_FARMS=F0:F1` (per farm: owner, gate, bare cells), `RON_DUMP_GAIA=F0:F1` (+ `RON_DUMP_GAIA_WHO`, `RON_DUMP_GAIA_TURRET`: a gaia list's units with anim / clock),
 `RON_PERTURB_WDATA=F:x:y:field:delta` (which parts a WData field feeds), `RON_INSERT_N=F:n:k` (profile build only, with `RON_RNG_PROFILE=1`).
 
+### 6.7 Seventh pass (2026-10-24): the animals' speed, the collision and scout rules, terraforming
+
+First differing boundary of `21'23'34`, before -> after: units / guys / world 308 -> **1,412**, builds 338 -> 1,352, groups 422 -> 1,520, leaders 566 -> 1,628, cities 422 -> 1,604; all 15 parts equal at 224 boundaries (was 50).
+
+1. **The extra draw of 292-302 was a pen chicken.** List 9 (chickens, birds) is in no hash, so its only trace is the generator. `RON_PHASE` (adds a delta to one animal's animation clock) over the ten chickens showed that chicken 6 two frames
+   earlier makes `units` / `guys` match through 367. Its walk from (64344,9240) to (63960,8664) took 28 frames; `AnimalData::get_speed` @5d8380 runs an animal at 3/2 speed while more than 0x180 from its move order's target, so 25 frames
+   and its arrival pick (a draw) falls before the fish burst of 302. The +1 / +1 / -1 transients were the same chicken's later cycles. `movement.cpp`.
+2. **`Unit::think_scout` @5f6180**: AUTO_EXPLORE forces the city scouting (the engine skipped it); `City.scouted` was the `cities` byte at 422 and the scouts' `explored` of 566. `ai_unit.cpp`.
+3. **Animals and collisions**: Unit vtable +0x30 = 0, Animal's = 1 (`resolve_unit_collision` clears an animal's orders and returns). The vtable diff of Animal against Unit is 16 slots: log_data, +0x30, +0x44 / +0xb4 (return `this`),
+   is_seen, walk_data, init, process, valid_target_const, close, update_los (los = 0), get_speed, think_bird, do_idle, work. `collision.cpp`.
+4. **Terraforming and the builder's spot** (`build.cpp`, `search.cpp`): see sim-implementation "seventh pass", items 32-33. The saved height grid is the terraformed one: after the same BUILD the engine's grid equals the next save's float for float
+   around the first Barracks; `--compare-next` now reports `terrain heights: N of 160801 vertices differ` (1,146 for the whole first segment: the buildings the engine never built or built elsewhere).
+5. **What is left at 1,352 / 1,412** (a `builds` constant on the new Barracks record, and the first building road search) is in the sim-implementation log; the tools that found the rest: `RON_DUMP_PART` + `RON_SKIP_CMD` (hashed
+   stream with and without a command, byte by byte), `RON_TILES_WINDOW`, `RON_CMP_BUILD`.
+
 ## 7. What blocks exact checksums
 
 State of the fidelity work (2026-10-24; the log of each fix is in docs/sim-implementation.md "Fidelity log"). **Fixed** since the first table:

@@ -265,7 +265,8 @@ int32_t think_scout(Game& g, Unit& u, int32_t region_mode) {  // Unit::think_sco
 	if (home < 0) home = 0;
 	const int32_t dom = u.ptype->domain;
 	const bool auto_explore = (u.unit_masks & umask::kAutoExplore) != 0;
-	bool skipB = auto_explore || u.type == 50 || u.type == 51 || type_is(*u.ptype, ptype::kSpy) || dom == 1;
+	// @5f6180: with AUTO_EXPLORE (0x100) the city scouting runs for every unit; without it citizens, spies and ships go straight to (C).
+	bool skipB = !auto_explore && (u.type == 50 || u.type == 51 || type_is(*u.ptype, ptype::kSpy) || dom == 1);
 	int32_t evals = 0;
 	bool doC = skipB || L.city_num == 0;
 	if (!doC) {

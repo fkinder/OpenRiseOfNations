@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdlib>
 
+#include "sim/animals.hpp"
 #include "sim/combat.hpp"
 #include "sim/compass.hpp"
 #include "sim/game.hpp"
@@ -417,7 +418,13 @@ int32_t detect_unit_collision(Game& g, Unit& u, int32_t x, int32_t y, bool test_
 void resolve_unit_collision(Game& g, Unit& u, int32_t x, int32_t y) {
 	(void)x;
 	(void)y;
-	// (The leading vtable +0x30 test is a folded `return 0` for units and animals.)
+	// The leading vtable +0x30 test: Unit's slot is Window::get_button (returns 0), Animal's is the shared `return 1` stub @41e0e0 (the same one
+	// the bird census reads): an animal that runs into anything just drops its orders and stands (masks &= ~MULTIMOVE, path length 0,
+	// close_orders, clear_partial_path, update_action; return 1).
+	if (is_animal_who(u.who)) {
+		clear_orders(g, u);
+		return;
+	}
 	const int32_t bo = u.collide_o, bw = u.collide_who;
 	if (u.ptype->unit_flags & 0x2000) {
 		// Units that die attacking (fire ships ramming).

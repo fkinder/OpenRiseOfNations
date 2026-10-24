@@ -1,4 +1,4 @@
-# Save format (native, version 3)
+# Save format (native, version 5)
 
 The engine's own save format for its simulation state: `engine/sim/save.hpp` / `save.cpp` (API and the section walks),
 `save_archive.hpp` (the writer / reader), `save_walk.inc` (the member lists, generated). It is **not** the original game's
@@ -40,7 +40,7 @@ strings and containers as a `u32` count followed by the elements (`std::u16strin
 member by member in declaration order, so there is no padding in the file and equal states give byte-identical files.
 
 ```
-"RONS" | u32 version (3) | u32 flags (0) | section*
+"RONS" | u32 version (5) | u32 flags (0) | section*
 section = tag (4 ASCII bytes) | u64 payload length | u32 CRC-32 of the payload | payload
 ```
 
@@ -70,6 +70,7 @@ reads gzip and plain files alike (`gzopen` on a plain file). Writing goes to `<p
 | `LEAD` | the 10 `Leader`s (all ~270 members, the hero / special records included: economy, production, census, AI personality / sites / make list, diplomacy, victory clocks, stamps ...) |
 | `OBJS` | per leader: `unit_mark`, `build_mark`, `obj_ctr`, then every `unique_ptr<Unit>` and `unique_ptr<Build>` slot **including dead and empty ones** (a presence byte, the `ptype` index, the object; a unit also its time-sliced search) |
 | `GOOD` | `goods`, `items` (`GoodObj`) |
+| `HGHT` | `heights.h` (the terrain height grid: `TerrainOut::terraform_for_building` flattens it under every new building, sim-implementation.md fidelity log item 32; version 5) |
 | `CITY` | `cities`, `forts`, `wonder_records`, `unbuilt_*`, `wonders`, `terra_cotta_total`, `world_pop`, `world_cities`, `starting`, `supplies`, `caravans`, `farms`, `hold_doobers` |
 | `GRUP` | the 512 `Group`s, `last_group`, `proc_group`, the global `forms`, `grouppath`, `group_cols` |
 | `PATH` | `PathFinder`: tunables, request state and the pathfinder's own search trees (the valid-answer cache and block snapshot a returning `find_upath` leaves behind are behaviour) |

@@ -562,6 +562,7 @@ void walk_body(Ar& top, Game& g, bool has_scripts) {
 	top.section("LEAD", [&](auto& ar) { fields(ar, g.leaders); });
 	top.section("OBJS", [&](auto& ar) { walk_objects(ar, g); });
 	top.section("GOOD", [&](auto& ar) { fields(ar, g.goods, g.items, g.herds); });
+	top.section("HGHT", [&](auto& ar) { fields(ar, g.heights.h); });  // the terrain height grid: buildings terraform it (TerrainOut::terraform_for_building)
 	top.section("CITY", [&](auto& ar) {
 		fields(ar, g.cities, g.forts, g.wonder_records, g.unbuilt_cities, g.unbuilt_forts, g.unbuilt_wonders, g.wonders,
 		       g.terra_cotta_total, g.world_pop, g.world_cities, g.starting, g.supplies, g.caravans, g.farms,
