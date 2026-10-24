@@ -118,10 +118,42 @@ void wall_decrement_stats(Game& g, Build& b) {
 	}
 }
 
+// GraphicPieces::get_build_gpiece @90bce0 (load 1, param_5 1: the first piece that exists is returned). The candidates, each from the
+// building's age (clamped to 0..7) down to age 0: the tribe's BUILD_CONTINENT style, its BACKUP_BUILD_CONTINENT style when that differs, the
+// DEFAULT style; none: age 0 of the DEFAULT style. A piece exists when building_graphics.xml has its <BUILD name="GRAPH-STYLE-AGEn"> and the
+// art files are there (AnimSource::build_piece_exists); without art data nothing does.
+int32_t build_gpiece(const Game& g, int32_t type, int32_t who, int32_t age) {
+	using namespace gpiece;
+	const int32_t t = type - kFirstBuildType;
+	age = std::clamp(age, 0, 7);
+	if (g.anims && who >= 0 && who < kNumLeaders) {
+		const Leader& l = g.leaders[size_t(who)];
+		const Tribe* tr = size_t(l.tribe) < g.rules->tribes.size() ? &g.rules->tribes[size_t(l.tribe)] : nullptr;
+		std::vector<int32_t> styles;
+		if (tr) {
+			styles.push_back(tr->build_continent);
+			if (tr->backup_build_continent != tr->build_continent) styles.push_back(tr->backup_build_continent);
+		}
+		styles.push_back(0);
+		for (const int32_t style : styles) {
+			if (style < 0 || style > 8) continue;
+			for (int32_t a = age; a >= 0; a--)
+				if (g.anims->build_piece_exists(type, style, a)) return kFirstBuild + kBuildPerStyle * style + kBuildPerAge * a + t;
+		}
+	}
+	return kFirstBuild + t;
+}
+
+void build_update_gpiece(Game& g, Build& b) {
+	if (!b.ptype) return;
+	b.gpiece = build_gpiece(g, b.type, b.founder, b.max_age);
+}
+
 void wall_set_type(Game& g, Build& b, int32_t t, int32_t mode) {
 	if (mode == 0) wall_decrement_stats(g, b);
-	b.type = t;  // SubObject::set_type (Wall::update_gpiece is presentation)
+	b.type = t;  // SubObject::set_type
 	b.ptype = &g.type(t);
+	build_update_gpiece(g, b);  // Wall::update_gpiece
 	if (mode != 2) wall_increment_stats(g, b);
 }
 
@@ -450,6 +482,7 @@ int32_t init_build_site(Game& g, int32_t who, int32_t type, int32_t x, int32_t y
 	b.flags = objflag::kValid;
 	b.type = type;
 	b.ptype = &g.type(type);
+	build_update_gpiece(g, b);  // SubObject::init -> set_type(INIT) -> Wall::update_gpiece (founder and max_age are set above)
 	if (is_city_type(*b.ptype)) b.flags |= objflag::kCity;
 	b.city = -1;  // (Build.city is reset later by Build::init; increment_stats on an inactive site ignores it)
 	wall_increment_stats(g, b);
@@ -627,7 +660,7 @@ void build_start(Game& g, Build& b, bool msg) {
 			           auto* p = static_cast<std::pair<Game*, Build*>*>(c);
 			           place_roads_regen(*p->first, *p->second, true, Regen::Force);  // mask_me(1, REGEN_FORCE): the road to the city
 		           },
-		           &ctx);
+		           &ctx, b.city >= 0);  // the ring of BuildType::place_roads needs Build +0x72 >= 0
 	}
 	if (b.flags & objflag::kCity) wall_mask_city(g, b, true, b.city < 0 ? get_radius(g, b.who, b.type) : city_get_radius(g, b.who, b.city));
 	check_ever_seen(g, b, false);

@@ -115,8 +115,8 @@ void mark_behind_tiles(World& w, const Type& bt, int32_t cx, int32_t cy, bool on
 	}
 }
 
-void wall_start(World& w, const Type& bt, int32_t cx, int32_t cy, int32_t who, void (*after_mask)(void*), void* ctx) {
-	mask_me(w, bt, cx, cy, true, Regen::Force);
+void wall_start(World& w, const Type& bt, int32_t cx, int32_t cy, int32_t who, void (*after_mask)(void*), void* ctx, bool city_of_building) {
+	mask_me(w, bt, cx, cy, true, Regen::Force, city_of_building);
 	if (after_mask) after_mask(ctx);
 	const Footprint f = footprint(bt, cx, cy);
 	const uint8_t bit = uint8_t(1u << (uint32_t(who) & 31));  // x86 shl: who 8 or -1 sets nothing in the byte

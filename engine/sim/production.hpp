@@ -165,6 +165,10 @@ void build_activate_full(Game& g, Build& b, bool loading, bool msg, bool count);
 void build_start(Game& g, Build& b, bool msg);
 // Wall::update_hits(full) @63f0d0: myhits and construct_hits; returns hits.
 int32_t wall_update_hits(Game& g, Build& b, bool full);
+// GraphicPieces::get_build_gpiece @90bce0 (the tribe of `who`, building age `age`) and Wall::update_gpiece @643070 (+0x58 from the founder's tribe
+// and the building's max_age).
+int32_t build_gpiece(const Game& g, int32_t type, int32_t who, int32_t age);
+void build_update_gpiece(Game& g, Build& b);
 // Wall::increment_stats @643270 / decrement_stats @642da0.
 void wall_increment_stats(Game& g, Build& b);
 void wall_decrement_stats(Game& g, Build& b);

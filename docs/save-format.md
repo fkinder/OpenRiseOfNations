@@ -1,4 +1,4 @@
-# Save format (native, version 6)
+# Save format (native, version 7)
 
 The engine's own save format for its simulation state: `engine/sim/save.hpp` / `save.cpp` (API and the section walks),
 `save_archive.hpp` (the writer / reader), `save_walk.inc` (the member lists, generated). It is **not** the original game's
@@ -40,7 +40,7 @@ strings and containers as a `u32` count followed by the elements (`std::u16strin
 member by member in declaration order, so there is no padding in the file and equal states give byte-identical files.
 
 ```
-"RONS" | u32 version (6) | u32 flags (0) | section*
+"RONS" | u32 version (7) | u32 flags (0) | section*
 section = tag (4 ASCII bytes) | u64 payload length | u32 CRC-32 of the payload | payload
 ```
 
@@ -49,6 +49,8 @@ reader and **requires that every payload byte was consumed**. A corrupt section 
 a section whose layout differs from this build's (`N bytes were not read`, or running past its end) and a wrong tag are all
 reported with the section name. The version is bumped on any layout change; there is no migration (a save loads only into
 the build that wrote it, and only against the same rules tables: the hash in `META` is checked).
+
+Version 7: `Build::gpiece` (WallData +0x58, the graphics piece of the building's art: `Wall::update_gpiece` / `GraphicPieces::get_build_gpiece`, part of the `builds` checksum; sim-implementation.md fidelity log, eighth pass, item 36).
 
 Version 6: `Leader::flock_stamp` (LeaderData +0x7b8, the frame of the leader's last bird flock; `Objects::add_flock` allows one per 225 frames, docs/aircraft-spec.md 15). The debris of crashed
 aircraft is ordinary `Ammo` state (`gpiece = -2`, `bank_dx` / `bank_dy` were already walked).

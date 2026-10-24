@@ -1205,7 +1205,11 @@ void gain_tech(Game& g, int32_t who, int32_t t, int32_t x, int32_t y, bool notif
 			// TODO(garrison): the original also re-places garrisoned units; only units on the map are moved here.
 			if (u->on_map()) unit_set_new_location(g, *u, u->x, u->y, true, true);
 		}
-		// Wall::update_gpiece for every building (presentation, 7.14 open question 3).
+		// Wall::update_gpiece for every valid building (Leader::gain_tech @6dcb60; the max_age raised in step 23 picks the new age art).
+		for (int32_t o = kBuildBase; o < g.objects[size_t(who)].build_mark; o++) {
+			Build* b = g.build(who, o);
+			if (b && (b->flags & objflag::kValid)) build_update_gpiece(g, *b);
+		}
 	}
 }
 

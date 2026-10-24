@@ -135,7 +135,7 @@ int32_t build_swap_team(Game& g, Build& b, int32_t who) {
 			g.farms[size_t(b.fort)].o = n;
 			b.fort = -1;
 		}
-		// (Wall::update_gpiece: presentation)
+		build_update_gpiece(g, nb);  // Wall::update_gpiece (the founder and the older max_age carried over)
 	}
 	if (type_is(*b.ptype, ptype::kSpaceProgram)) LD(g, who).flags |= leaderflag::kRevealEnemy;
 	return n;

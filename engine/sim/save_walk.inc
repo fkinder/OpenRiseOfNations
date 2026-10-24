@@ -194,7 +194,7 @@ template <class Ar> void walk(Ar& ar, Unit& v) {
 
 template <class Ar> void walk(Ar& ar, Build& v) {
 	walk(ar, static_cast<Object&>(v));
-	FIELDS(ar, v.build_masks, v.attack_ox, v.recharging, v.attack_whom, v.job_counter, v.job_counter_2, v.constr_time, v.construct_hits);
+	FIELDS(ar, v.build_masks, v.attack_ox, v.recharging, v.attack_whom, v.job_counter, v.job_counter_2, v.constr_time, v.construct_hits, v.gpiece);
 	FIELDS(ar, v.frame_started, v.helpers, v.demolition, v.orig_type, v.stance, v.founder, v.gather_max, v.queued, v.max_age);
 	FIELDS(ar, v.gather_down, v.city, v.city_down, v.wonder, v.fort, v.infiltrate, v.build_queue, v.gather_from, v.mtn, v.cliff);
 	FIELDS(ar, v.gather, v.ever_seen, v.ever_seen_completed);
@@ -372,7 +372,7 @@ static_assert(sizeof(Order) == 264, "Order changed: update its walk() in save_wa
 static_assert(sizeof(Guy) == 152, "Guy changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Object) == 96, "Object changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Unit) == 392, "Unit changed: update its walk() in save_walk.inc");  // (path_size / path_inc are not saved)
-static_assert(sizeof(Build) == 256, "Build changed: update its walk() in save_walk.inc");
+static_assert(sizeof(Build) == 264, "Build changed: update its walk() in save_walk.inc");
 static_assert(sizeof(BuildQueue) == 32, "BuildQueue changed: update its walk() in save_walk.inc");
 static_assert(sizeof(QueueItem) == 20, "QueueItem changed: update its walk() in save_walk.inc");
 static_assert(sizeof(GatherPoint) == 12, "GatherPoint changed: update its walk() in save_walk.inc");

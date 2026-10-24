@@ -40,12 +40,21 @@ struct PlaneRelease {
 namespace gpiece {
 constexpr int32_t kFirstUnit = 0, kPerStyle = 0x160, kPerAge = 0x840, kPerGender = 0x18c0, kPerCrew = 0x3180;
 constexpr int32_t kTotalUnit = 0xc606, kFirstBuild = 0xc606, kFirstBird = 0xea8d, kNumBird = 0x24;
+// The building piece space (init_piece_ranges @8f70e0): (type - 414) + style * kBuildPerStyle + age * kBuildPerAge from kFirstBuild;
+// style 0 DEFAULT, 1 NEUROPE, 2 ASIAN, 3 KOREAN, 4 AMERICAN, 5 ARAB, 6 IROQUOIS, 7 COLONIAL, 8 EINDIAN (say_build_art_style_name), age 0..7.
+constexpr int32_t kBuildPerStyle = 0x81, kBuildPerAge = 0x489, kFirstBuildType = 414;
 }  // namespace gpiece
 
 struct AnimSource {
 	virtual ~AnimSource() = default;
 	// GraphicPieces data_pieces[piece] != 0 after verify_load: the piece's <UNIT> exists and its model loads.
 	virtual bool piece_exists(int32_t piece) const = 0;
+	// The same for a building piece (kFirstBuild + ...): the <BUILD name="GRAPH-STYLE-AGEn"> of building_graphics.xml exists. Sources
+	// without building art answer false (GraphicPieces::get_build_gpiece then falls through to the default art of age 0).
+	virtual bool build_piece_exists(int32_t type, int32_t style, int32_t age) const {
+		(void)type, (void)style, (void)age;
+		return false;
+	}
 	// The piece has an AnimationPacket (RData packets[0x13]).
 	virtual bool has_packet(int32_t piece) const = 0;
 	// AnimationPacket::get_animobj(anim) != 0: the action maps to an animmgr entry whose .bha loaded.

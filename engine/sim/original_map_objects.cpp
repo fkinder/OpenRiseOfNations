@@ -516,7 +516,7 @@ const ClassMap& map_build() {
 		});
 		// WallData [0x48, 0x66)
 		b.f("job_counter", &Build::job_counter).f("job_counter_2", &Build::job_counter_2).f("constr_time", &Build::constr_time);
-		b.f("construct_hits", &Build::construct_hits).f("frame_started", &Build::frame_started);
+		b.f("construct_hits", &Build::construct_hits).f("gpiece", &Build::gpiece).f("frame_started", &Build::frame_started);
 		b.fu("build_masks", &Build::build_masks).f("ever_seen", &Build::ever_seen).f("ever_seen_completed", &Build::ever_seen_completed);
 		b.f("helpers", &Build::helpers).f("demolition", &Build::demolition);
 		b.f("orig_type", &Build::orig_type);

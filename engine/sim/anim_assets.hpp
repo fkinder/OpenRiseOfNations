@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "assets/files.hpp"
@@ -25,6 +26,7 @@ public:
 	AssetAnimSource(const GameFiles& files, const Rules& rules);
 
 	bool piece_exists(int32_t piece) const override;
+	bool build_piece_exists(int32_t type, int32_t style, int32_t age) const override;
 	bool has_packet(int32_t piece) const override;
 	bool has_anim(int32_t piece, int32_t anim) const override;
 	int32_t frames(int32_t piece, int32_t anim) const override;
@@ -82,7 +84,8 @@ private:
 	void force_load(const Entry& e) const;
 
 	GameFiles files_;
-	std::vector<std::string> graph_;    // per type index: GRAPH (graph_name), "" for non-units
+	std::vector<std::string> graph_;    // per type index: GRAPH (graph_name), "" for types that were never loaded
+	std::unordered_set<std::string> build_pieces_;  // uppercase <BUILD name> of building_graphics.xml whose texture / zbuffer files exist
 	std::vector<bool> gender_packed_;   // per type index: gender slot means -PACKED (else -FEMALE)
 	std::vector<UnitArt> units_;
 	std::unordered_map<std::string, int32_t> unit_by_name_;  // uppercase <UNIT> name -> units_ (first wins)

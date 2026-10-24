@@ -64,6 +64,21 @@ AssetAnimSource::AssetAnimSource(const GameFiles& files, const Rules& rules) : f
 			gender_packed_[i] = (t.role & 0x10000) || is_merchant_type(int32_t(i)) || type_is(t, 317);
 	}
 
+	// ---- building pieces (building_graphics.xml ROOT > BUILDINGS > BUILD): GraphicPieces::build_node_from_gpiece looks a piece up by
+	// the name GRAPH-STYLE-AGEn; the piece exists when the node is there and its art files load (a node naming a missing file does not).
+	{
+		const XmlElement doc = ron::parse_xml(files.read_text("Data/building_graphics.xml"));
+		ron::for_each_element(doc, "BUILD", [&](const XmlElement& b) {
+			const std::string name = upper(b.get("name"));
+			if (name.empty()) return;
+			auto ok = [&](const char* attr) {
+				const std::string f = normalize_game_path(b.get(attr));
+				return f.empty() || !files.resolve(f).empty();
+			};
+			if (ok("texture") && ok("zbuffer")) build_pieces_.insert(name);
+		});
+	}
+
 	// ---- animmgr entries (init_anims_pool: ROOT > ANIMATIONS > LOOPING, NONLOOPING, BUILDING, PATH).
 	std::unordered_map<std::string, int32_t> entry_by_name;  // lowercase name -> first entry (decipher_animation)
 	{
@@ -192,6 +207,12 @@ AssetAnimSource::AssetAnimSource(const GameFiles& files, const Rules& rules) : f
 			units_.push_back(std::move(art));
 		}
 	}
+}
+
+bool AssetAnimSource::build_piece_exists(int32_t type, int32_t style, int32_t age) const {
+	static const char* const kStyle[9] = {"DEFAULT", "NEUROPE", "ASIAN", "KOREAN", "AMERICAN", "ARAB", "IROQUOIS", "COLONIAL", "EINDIAN"};
+	if (type < 0 || size_t(type) >= graph_.size() || style < 0 || style > 8 || graph_[size_t(type)].empty()) return false;
+	return build_pieces_.count(graph_[size_t(type)] + "-" + kStyle[style] + "-AGE" + std::to_string(age)) != 0;
 }
 
 std::string AssetAnimSource::piece_name(int32_t piece) const {

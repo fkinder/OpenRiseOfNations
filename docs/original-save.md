@@ -413,6 +413,26 @@ First differing boundary of `21'23'34`, before -> after: units / guys / world 30
 5. **What is left at 1,352 / 1,412** (a `builds` constant on the new Barracks record, and the first building road search) is in the sim-implementation log; the tools that found the rest: `RON_DUMP_PART` + `RON_SKIP_CMD` (hashed
    stream with and without a command, byte by byte), `RON_TILES_WINDOW`, `RON_CMP_BUILD`.
 
+### 6.8 Eighth pass (2026-10-24): the ring road, `WallData::gpiece`, the rally spot
+
+First differing boundary of `21'23'34`, before -> after: units 1,412 -> **1,514**, guys 1,412 -> **1,628**, world 1,412 -> **1,592**, builds 1,352 -> **1,628**, groups 1,520 -> **1,760**, cities 1,604 -> **1,802**, leaders 1,628 (unchanged); all 15 parts equal at 252 boundaries (was 224).
+The detail is in sim-implementation "eighth pass", items 35-38; what the hashes taught:
+
+1. **Equations are only as good as the stream length.** `--solve-at B` assumes the engine's stream has the original's length. `world` includes one 96-byte `CollBlock` per wcoord that ever held a unit: its length varies by hundreds of bytes, so the solver's
+   "single byte at the end of the stream" for `world` at 1,592 is an artefact (a swap or a different block count). `a = 0` with `b` small means two equal and opposite changes (list heads swapping, a footprint moved by whole rows: 3 rows of 0x38 moved by 2 rows = b 672).
+2. **A constant delta over time is a static field.** `builds` kept (a = 346, b = 10,721) for 60 boundaries, then (679, 3,255) when the next building appeared: each new building record was short by a constant. `a` = the byte sum of the missing word
+   (0x94 + 0xc6 = 346, 0x87 + 0xc6 = 333), and the walker comment "job_counter ... construct_hits, gpiece, frame_started" named it. Checking the shadow image of every saved building (`RON_RAW_BUILDS=-1`) gave `kFirstBuild + 129 * style + 1161 * age + type - 414`.
+   Unmapped bytes of a new object are 0 in the engine (the shadow of an image the engine created is zeroed): look for them whenever a new record differs by a constant; the `(a, b)` of a record is cheap to compare with the byte sums of the walker's raw ranges.
+3. **`--compare-next` and `RON_TILES_WINDOW` show the later state.** The "straight road" at the first Barracks was the road of a later search; the ring road of `place_roads` (tiles outside the footprint, laid before the search) explained the whole difference at 1,407:
+   with the ring the search lays the same 18 tiles and `world` matches. Test a hypothesis at the boundary with the hash itself (`RON_FRAME_DIFF` to see what the engine changes, then the replay for the first differing boundary).
+4. **Placement sweep.** For a unit whose position is in doubt apply a shift of the final spot (`RON_EXP_RELOC` was a throw-away switch: +-96 in 48 steps) and read the three parts: `guys` and `world` jumped from 1,448 to 1,466 / 1,472 at exactly (-48, 0), which led to the stack-slot reading
+   of `Unit::come_out` (the latest spot, not the node). The decompile hides the argument registers of `find_angle` / `add_move_facing_order`: the disassembly (`DisasmFunctions.java`) shows `[esp+0x40]` / `[esp+0x44]` as the outputs of the last `find_nearby_spot`.
+5. **Still open** (details in the sim-implementation log): `units` at 1,514 (a static `a = -2,146` that stays for 54 boundaries while `guys` match), the collision-block count of `world` at 1,592, a single byte of leader 1's `Diplomacy` at `leaders` 1,628.
+   The mature-economy draw gap of the brief is not an economy site: the segment `21'57'16 -> 21'57'36` (+334 draws) is one MAKE_ROAD search whose flag the original sets again after a city changes hands later than the engine does.
+
+*Diagnostics added* (`apps/sav`): `RON_FRAME_DIFF`, `RON_CMD_TRACE`, `RON_RAW_BUILDS`, `RON_POS_SEARCH` / `RON_POS_W`, `RON_TARGET_SEARCH` / `RON_TARGET_W` / `RON_TARGET_STEP`, `RON_PAIR_VALUES` / `RON_PAIR_STEP` / `RON_PAIR_DEBUG`, `RON_TRY_PATH` with allocations;
+`RON_PAIR_SEARCH` now runs at the `--solve-at` point (after the boundary's commands).
+
 ## 7. What blocks exact checksums
 
 State of the fidelity work (2026-10-24; the log of each fix is in docs/sim-implementation.md "Fidelity log"). **Fixed** since the first table:

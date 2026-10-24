@@ -346,6 +346,9 @@ struct Build : Object {
 	// (progress not reduced by damage, used by refunds), constr_time +0x50, construct_hits +0x54, frame_started +0x5c,
 	// helpers +0x64 (builders served this frame), demolition +0x65.
 	int32_t job_counter = 0, job_counter_2 = 0, constr_time = 0, construct_hits = 0, frame_started = -1;
+	// WallData::gpiece +0x58 (Wall::update_gpiece @643070): the graphics piece of the building's art, part of the saved state and of the builds
+	// checksum: kFirstBuild + style * 129 + age * 1161 + (type - 414) for the style / age the install has art for (build_gpiece in build.cpp).
+	int32_t gpiece = 0;
 	int32_t helpers = 0, demolition = 0;
 	int32_t orig_type = -1;  // +0x6c
 	int8_t stance = 0;       // +0x7e

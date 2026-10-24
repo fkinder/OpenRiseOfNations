@@ -757,6 +757,7 @@ int32_t unit_come_out(Game& g, Unit& u0, int32_t param) {
 		// TODO(economy): the city alarm flag reset (CITY_ALARM with no worker garrisoned).
 		bool final_pt = false;
 		int32_t fx = 0, fy = 0, fact = 0, prevx = sx, prevy = sy;
+		int32_t last_spot_x = gp_x, last_spot_y = gp_y;  // the stack slots the spot searches write: the latest spot found (@619e61 reads them, not the node)
 		if (!XB.gather.empty() && !build_gather_inside(XB) && u.order_type() == kOrderNone) {
 			const int32_t n = int32_t(XB.gather.size());
 			for (int32_t i = 0; i < n; i++) {
@@ -769,6 +770,8 @@ int32_t unit_come_out(Game& g, Unit& u0, int32_t param) {
 					qx = gp_x;
 					qy = gp_y;
 				}
+				last_spot_x = qx;
+				last_spot_y = qy;
 				if (i == n - 1) {
 					final_pt = true;
 					fx = p.x;
@@ -908,9 +911,11 @@ int32_t unit_come_out(Game& g, Unit& u0, int32_t param) {
 						group_action_move_to(g, g.groups.g[size_t(slot)], qx, qy, kQueueLast, true, find_angle(qx - prevx, qy - prevy), orders,
 						                     1, -1, -1, 0);
 					} else {
-						relocate(fx, fy);
-						add_move_facing_order(g, u, fx / 48, fy / 48, find_angle(fx - u.x, fy - u.y), orders, false, kQueueLast, true, -1,
-						                      -1, -1, false);
+						// The plain captain's final move (@619ea2): the relocation angle, the order's target and its facing all come from
+						// the latest spot (the stack slots the spot searches fill), not from the gather node itself.
+						relocate(last_spot_x, last_spot_y);
+						add_move_facing_order(g, u, last_spot_x / 48, last_spot_y / 48, find_angle(last_spot_x - u.x, last_spot_y - u.y), orders,
+						                      false, kQueueLast, true, -1, -1, -1, false);
 					}
 				}
 			}

@@ -55,6 +55,7 @@
 #include "sim/combat.hpp"
 #include "sim/orders.hpp"
 #include "sim/original_save.hpp"
+#include "sim/production.hpp"
 #include "sim/ai.hpp"
 #include "sim/economy.hpp"
 #include "sim/guys.hpp"
@@ -1918,76 +1919,7 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 						}
 					}
 				}
-				if (const char* ps = std::getenv("RON_PAIR_SEARCH")) {
-					// experiment: every small-integer member (<= 4 bytes) of the listed units (Unit.*, their order bodies, path entries) off by a delta in [-W, W] (RON_PAIR_W, default 70);
-					// one or two of them together must give the target delta of part RON_PAIR_PART (default units) at boundary RON_SEARCH_AT
-					if (f == (std::getenv("RON_SEARCH_AT") ? std::atoll(std::getenv("RON_SEARCH_AT")) : start + 1)) {
-						const int W = std::getenv("RON_PAIR_W") ? std::atoi(std::getenv("RON_PAIR_W")) : 70;
-						const int part = std::getenv("RON_PAIR_PART") ? std::atoi(std::getenv("RON_PAIR_PART")) : 0;
-						std::set<std::pair<int, int>> objs;
-						{ std::stringstream ss(ps); std::string t; while (std::getline(ss, t, ',')) { int a = 0, b = 0; if (std::sscanf(t.c_str(), "%d/%d", &a, &b) == 2) objs.insert({a, b}); } }
-						const int64_t M = 65521;
-						PartTrace t0;
-						{ sim::EngineProvider ep0(*game); trace_part(ep0, part, t0); }
-						const int64_t N = int64_t(t0.bytes.size());
-						const uint32_t h0 = adler_of(t0.bytes), want = it->second[size_t(part)];
-						auto subm = [&](uint32_t x, uint32_t y) { return std::pair<int64_t, int64_t>{(int64_t(x & 0xffff) - int64_t(y & 0xffff) + M) % M, (int64_t(x >> 16) - int64_t(y >> 16) + M) % M}; };
-						const auto target = subm(want, h0);
-						std::vector<std::string> pair_pats = {"Unit.*", "MoveOrder.*", "AttackOrder.*", "GatherOrder.*", "TargetOrder.*", "GroupOrder.*", "PathData.*"};
-						if (const char* pp = std::getenv("RON_PAIR_PATTERNS")) {  // e.g. "Build.*,Object.*" for part 1 (builds): the members searched instead of the unit ones
-							pair_pats.clear();
-							std::stringstream ps2(pp);
-							std::string t2;
-							while (std::getline(ps2, t2, ',')) pair_pats.push_back(t2);
-						}
-						std::vector<sim::MemberChange> all = sim::members_of(*game, pair_pats);
-						struct Eff { size_t mi; int dl; int64_t a, b; };
-						std::vector<Eff> effs;
-						size_t tried = 0;
-						for (size_t i = 0; i < all.size(); ++i) {
-							const auto& c = all[i];
-							if (!objs.count({c.id.a, c.id.b}) || c.now.empty() || c.now.size() > 4) continue;
-							++tried;
-							const size_t n = c.now.size();
-							std::vector<uint8_t> inv(n);
-							for (size_t k = 0; k < n; ++k) inv[k] = uint8_t(~c.now[k]);
-							sim::apply_member_bytes(*game, c, inv);
-							sim::EngineProvider ep3(*game);
-							PartTrace t1;
-							const bool ok = trace_part(ep3, part, t1) && t1.bytes.size() == t0.bytes.size();
-							sim::apply_member_bytes(*game, c, c.now);
-							if (!ok) continue;
-							std::vector<int64_t> pos(n, -1);
-							int cnt = 0;
-							for (size_t q = 0; q < t0.bytes.size(); ++q) if (t0.bytes[q] != t1.bytes[q])
-								for (size_t k = 0; k < n; ++k) if (t0.bytes[q] == c.now[k] && t1.bytes[q] == inv[k] && !(cnt & (1 << k))) { pos[k] = int64_t(q); cnt |= 1 << k; break; }
-							if (cnt != (1 << n) - 1) continue;
-							uint64_t v = 0;
-							for (size_t k = 0; k < n; ++k) v |= uint64_t(c.now[k]) << (8 * k);
-							const uint64_t mod = uint64_t(1) << (8 * n);
-							for (int dl = -W; dl <= W; ++dl) {
-								if (dl == 0) continue;
-								const uint64_t nv = (v + mod + uint64_t(int64_t(dl) % int64_t(mod) + int64_t(mod))) % mod;
-								int64_t sa = 0, sb = 0;
-								for (size_t k = 0; k < n; ++k) { const int e = int((nv >> (8 * k)) & 0xff) - int(c.now[k]); sa += e; sb += int64_t(e) * (N - pos[k]); }
-								effs.push_back({i, dl, ((sa % M) + M) % M, ((sb % M) + M) % M});
-							}
-						}
-						std::printf("  pair search: %zu members tried, %zu (member, delta) effects; target (a=%lld b=%lld)\n", tried, effs.size(), (long long)target.first, (long long)target.second);
-						auto k2 = [](int64_t a, int64_t b) { return uint64_t(a) << 32 | uint64_t(b); };
-						std::unordered_map<uint64_t, std::vector<size_t>> by;
-						for (size_t i = 0; i < effs.size(); ++i) by[k2(effs[i].a, effs[i].b)].push_back(i);
-						int shown = 0;
-						for (size_t i = 0; i < effs.size(); ++i) {
-							if (effs[i].a == target.first && effs[i].b == target.second && shown++ < 20) std::printf("    PAIR HIT (1): %s (%d,%d,%d) %+d\n", all[effs[i].mi].key.c_str(), all[effs[i].mi].id.a, all[effs[i].mi].id.b, all[effs[i].mi].id.c, effs[i].dl);
-							auto fnd = by.find(k2(((target.first - effs[i].a) % M + M) % M, ((target.second - effs[i].b) % M + M) % M));
-							if (fnd == by.end()) continue;
-							for (size_t j : fnd->second) if (j > i && effs[j].mi != effs[i].mi && shown++ < 40)
-								std::printf("    PAIR HIT (2): %s (%d,%d,%d) %+d  and  %s (%d,%d,%d) %+d\n", all[effs[i].mi].key.c_str(), all[effs[i].mi].id.a, all[effs[i].mi].id.b, all[effs[i].mi].id.c, effs[i].dl,
-									all[effs[j].mi].key.c_str(), all[effs[j].mi].id.a, all[effs[j].mi].id.b, all[effs[j].mi].id.c, effs[j].dl);
-						}
-					}
-				}
+
 				if (const char* fg = std::getenv("RON_FOG_DIFF")) {
 					// diagnostic: how many fog bytes (seen / seen2 / seen3 / wcoord_seen) the engine changed since the loaded save, by bit pattern, at boundary RON_FOG_DIFF
 					if (baseline_for_search && f == std::atoll(fg)) {
@@ -2430,8 +2362,11 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 							const std::vector<sim::PathData> orig = tu->path;
 							const size_t n = orig.size();
 							int hits = 0;
+							const int32_t size0 = tu->path_size;
+							for (int32_t psz = 10; psz <= 60; psz += 10)
 							for (uint32_t mask = 0; mask < (1u << n); ++mask)
 								for (int fv = 0; fv < 3; ++fv) {
+									tu->path_size = psz;
 									std::vector<sim::PathData> v;
 									for (size_t i = 0; i < n; ++i) if (mask >> i & 1) {
 										sim::PathData pd = orig[i];
@@ -2442,8 +2377,9 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 									tu->path = v;
 									sim::EngineProvider ept(*game);
 									dw::CheckSumParts gt = dw::compute_check_sums(ept);
-									if (gt.ok && gt.v[0] == it->second[0]) { std::printf("  PATH HIT: mask %x flags-variant %d\n", mask, fv); ++hits; }
+									if (gt.ok && gt.v[0] == it->second[0]) { std::printf("  PATH HIT: mask %x flags-variant %d alloc %d\n", mask, fv, psz); ++hits; }
 								}
+							tu->path_size = size0;
 							tu->path = orig;
 							std::printf("  path variants of %d/%d tried (%zu entries): %d hits\n", tw, to, n, hits);
 						}
@@ -2493,6 +2429,185 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 						}
 					}
 				}
+				if (const char* tss = std::getenv("RON_TARGET_SEARCH")) {  // RON_TARGET_SEARCH=who/o (+RON_TARGET_W steps of RON_TARGET_STEP, default 12 x 48) at RON_SEARCH_AT: the unit's move target (MoveOrder x / y / dest_x / dest_y / off_x / off_y, Unit.orders_x / y, the final path entry) shifted by (dx, dy)
+					if (f == (std::getenv("RON_SEARCH_AT") ? std::atoll(std::getenv("RON_SEARCH_AT")) : start + 1)) {
+						const int W = std::getenv("RON_TARGET_W") ? std::atoi(std::getenv("RON_TARGET_W")) : 12;
+						const int STEP = std::getenv("RON_TARGET_STEP") ? std::atoi(std::getenv("RON_TARGET_STEP")) : 48;
+						int tw = 0, to = 0;
+						std::sscanf(tss, "%d/%d", &tw, &to);
+						const std::vector<sim::MemberChange> all = sim::members_of(*game, {"MoveOrder.*", "Unit.*", "PathData.*"});
+						struct M { const sim::MemberChange* c; int axis; int kind; int64_t v; };  // kind 0: plain int, 1: off_ (16 bit, value mod 0x300)
+						std::vector<M> ms;
+						for (const auto& c : all) {
+							if (c.id.a != tw || c.id.b != to) continue;
+							const std::string& k = c.key;
+							int axis = -1, kind = 0;
+							if (k == "MoveOrder.x" || k == "MoveOrder.dest_x" || k == "Unit.orders_x") axis = 0;
+							else if (k == "MoveOrder.y" || k == "MoveOrder.dest_y" || k == "Unit.orders_y") axis = 1;
+							else if (k == "MoveOrder.off_x") axis = 0, kind = 1;
+							else if (k == "MoveOrder.off_y") axis = 1, kind = 1;
+							else if (k == "PathData.to_x" && c.id.c == 0) axis = 0;
+							else if (k == "PathData.to_y" && c.id.c == 0) axis = 1;
+							if (axis < 0 || c.now.size() != (kind ? 2u : 4u)) continue;
+							int64_t v = 0;
+							for (size_t i = 0; i < c.now.size(); ++i) v |= int64_t(c.now[i]) << (8 * i);
+							ms.push_back({&c, axis, kind, v});
+						}
+						std::printf("  target search %d/%d: %zu members\n", tw, to, ms.size());
+						auto apply = [&](int dx, int dy) {
+							for (const M& m : ms) {
+								int64_t nv = m.v + (m.axis == 0 ? dx : dy);
+								if (m.kind == 1) {  // off_x / off_y = x - (x / 0x300) * 0x300 of the shifted target
+									int64_t base = 0;
+									for (const M& q : ms) if (q.kind == 0 && q.axis == m.axis && q.c->key == (m.axis == 0 ? "MoveOrder.x" : "MoveOrder.y")) base = q.v;
+									const int64_t t = base + (m.axis == 0 ? dx : dy);
+									nv = t - (t / 0x300) * 0x300;
+								}
+								std::vector<uint8_t> b(m.c->now.size());
+								for (size_t i = 0; i < b.size(); ++i) b[i] = uint8_t(nv >> (8 * i));
+								sim::apply_member_bytes(*game, *m.c, b);
+							}
+						};
+						for (int ix = -W; ix <= W; ++ix)
+							for (int iy = -W; iy <= W; ++iy) {
+								apply(ix * STEP, iy * STEP);
+								sim::EngineProvider epp(*game);
+								PartTrace tu;
+								if (trace_part(epp, 0, tu) && adler_of(tu.bytes) == it->second[0]) std::printf("    TARGET HIT units: %d/%d dx %d dy %d\n", tw, to, ix * STEP, iy * STEP);
+								apply(0, 0);
+							}
+					}
+				}
+				if (const char* pss = std::getenv("RON_POS_SEARCH")) {  // RON_POS_SEARCH=who/o[,..] (+RON_POS_W, default 60) at RON_SEARCH_AT: every (dx, dy) shift of the unit's guys' x / y members (x, des_x, last_x, ..) and Unit.x_internal / y_internal that makes units and guys equal the original's
+					if (f == (std::getenv("RON_SEARCH_AT") ? std::atoll(std::getenv("RON_SEARCH_AT")) : start + 1)) {
+						const int W = std::getenv("RON_POS_W") ? std::atoi(std::getenv("RON_POS_W")) : 60;
+						std::set<std::pair<int, int>> objs;
+						{ std::stringstream ss(pss); std::string t; while (std::getline(ss, t, ',')) { int a = 0, b = 0; if (std::sscanf(t.c_str(), "%d/%d", &a, &b) == 2) objs.insert({a, b}); } }
+						const std::vector<sim::MemberChange> all = sim::members_of(*game, {"Guy.*", "Unit.*"});
+						for (const auto& wo : objs) {
+							struct M { const sim::MemberChange* c; int axis; bool enc; int32_t v; };
+							std::vector<M> ms;
+							for (const auto& c : all) {
+								if (c.id.a != wo.first || c.id.b != wo.second || c.now.size() != 4) continue;
+								const std::string& k = c.key;
+								int axis = -1; bool enc = false;
+								if (k == "Guy.x" || k == "Guy.des_x" || k == "Guy.last_x") axis = 0;
+								else if (k == "Guy.y" || k == "Guy.des_y" || k == "Guy.last_y") axis = 1;
+								else if (k == "Unit.x_internal") axis = 0, enc = true;
+								else if (k == "Unit.y_internal") axis = 1, enc = true;
+								if (axis < 0) continue;
+								uint32_t v = uint32_t(c.now[0]) | uint32_t(c.now[1]) << 8 | uint32_t(c.now[2]) << 16 | uint32_t(c.now[3]) << 24;
+								if (enc) v ^= 0x63637u;
+								ms.push_back({&c, axis, enc, int32_t(v)});
+							}
+							std::printf("  pos search %d/%d: %zu members\n", wo.first, wo.second, ms.size());
+							auto apply = [&](int dx, int dy) {
+								for (const M& m : ms) {
+									uint32_t nv = uint32_t(m.v + (m.axis == 0 ? dx : dy));
+									if (m.enc) nv ^= 0x63637u;
+									std::vector<uint8_t> b{uint8_t(nv), uint8_t(nv >> 8), uint8_t(nv >> 16), uint8_t(nv >> 24)};
+									sim::apply_member_bytes(*game, *m.c, b);
+								}
+							};
+							for (int dx = -W; dx <= W; ++dx)
+								for (int dy = -W; dy <= W; ++dy) {
+									apply(dx, dy);
+									sim::EngineProvider epp(*game);
+									PartTrace tu, tg;
+									const bool ok = trace_part(epp, 0, tu) && trace_part(epp, 6, tg);
+									if (ok && adler_of(tu.bytes) == it->second[0]) std::printf("    POS HIT units: %d/%d dx %d dy %d (guys %s)\n", wo.first, wo.second, dx, dy, adler_of(tg.bytes) == it->second[6] ? "equal too" : "differ");
+									else if (ok && adler_of(tg.bytes) == it->second[6]) std::printf("    POS HIT guys: %d/%d dx %d dy %d\n", wo.first, wo.second, dx, dy);
+									apply(0, 0);
+								}
+						}
+					}
+				}
+				if (const char* ps = std::getenv("RON_PAIR_SEARCH")) {
+					// experiment: every small-integer member (<= 4 bytes) of the listed units (Unit.*, their order bodies, path entries) off by a delta in [-W, W] (RON_PAIR_W, default 70);
+					// one or two of them together must give the target delta of part RON_PAIR_PART (default units) at boundary RON_SEARCH_AT
+					if (f == (std::getenv("RON_SEARCH_AT") ? std::atoll(std::getenv("RON_SEARCH_AT")) : start + 1)) {
+						const int W = std::getenv("RON_PAIR_W") ? std::atoi(std::getenv("RON_PAIR_W")) : 70;
+						const int part = std::getenv("RON_PAIR_PART") ? std::atoi(std::getenv("RON_PAIR_PART")) : 0;
+						std::set<std::pair<int, int>> objs;
+						{ std::stringstream ss(ps); std::string t; while (std::getline(ss, t, ',')) { int a = 0, b = 0; if (std::sscanf(t.c_str(), "%d/%d", &a, &b) == 2) objs.insert({a, b}); } }
+						const int64_t M = 65521;
+						PartTrace t0;
+						{ sim::EngineProvider ep0(*game); trace_part(ep0, part, t0); }
+						const int64_t N = int64_t(t0.bytes.size());
+						const uint32_t h0 = adler_of(t0.bytes), want = it->second[size_t(part)];
+						auto subm = [&](uint32_t x, uint32_t y) { return std::pair<int64_t, int64_t>{(int64_t(x & 0xffff) - int64_t(y & 0xffff) + M) % M, (int64_t(x >> 16) - int64_t(y >> 16) + M) % M}; };
+						const auto target = subm(want, h0);
+						if (std::getenv("RON_PAIR_DEBUG")) std::printf("  pair debug: part %d bytes %lld h0 %08x want %08x\n", part, (long long)N, h0, want);
+						std::vector<std::string> pair_pats = {"Unit.*", "MoveOrder.*", "AttackOrder.*", "GatherOrder.*", "TargetOrder.*", "GroupOrder.*", "PathData.*"};
+						if (const char* pp = std::getenv("RON_PAIR_PATTERNS")) {  // e.g. "Build.*,Object.*" for part 1 (builds): the members searched instead of the unit ones
+							pair_pats.clear();
+							std::stringstream ps2(pp);
+							std::string t2;
+							while (std::getline(ps2, t2, ',')) pair_pats.push_back(t2);
+						}
+						std::vector<sim::MemberChange> all = sim::members_of(*game, pair_pats);
+						struct Eff { size_t mi; int dl; int64_t a, b; };
+						std::vector<Eff> effs;
+						size_t tried = 0;
+						for (size_t i = 0; i < all.size(); ++i) {
+							const auto& c = all[i];
+							if (!objs.count({c.id.a, c.id.b}) || c.now.empty() || c.now.size() > 4) continue;
+							++tried;
+							const size_t n = c.now.size();
+							std::vector<uint8_t> inv(n);
+							for (size_t k = 0; k < n; ++k) inv[k] = uint8_t(~c.now[k]);
+							sim::apply_member_bytes(*game, c, inv);
+							sim::EngineProvider ep3(*game);
+							PartTrace t1;
+							const bool ok = trace_part(ep3, part, t1) && t1.bytes.size() == t0.bytes.size();
+							sim::apply_member_bytes(*game, c, c.now);
+							if (!ok) continue;
+							std::vector<int64_t> pos(n, -1);
+							int cnt = 0;
+							for (size_t q = 0; q < t0.bytes.size(); ++q) if (t0.bytes[q] != t1.bytes[q])
+								for (size_t k = 0; k < n; ++k) if (t0.bytes[q] == c.now[k] && t1.bytes[q] == inv[k] && !(cnt & (1 << k))) { pos[k] = int64_t(q); cnt |= 1 << k; break; }
+							if (cnt != (1 << n) - 1) continue;
+							uint64_t v = 0;
+							for (size_t k = 0; k < n; ++k) v |= uint64_t(c.now[k]) << (8 * k);
+							const uint64_t mod = uint64_t(1) << (8 * n);
+							std::vector<std::pair<int, uint64_t>> cand;  // (label delta, new value)
+							if (std::getenv("RON_PAIR_VALUES")) {  // instead of deltas: the member's values in the other objects of the class, and small constants
+								std::set<uint64_t> seen{v};
+								auto add = [&](uint64_t x) { x &= mod - 1; if (seen.insert(x).second) cand.push_back({int(int64_t(x) - int64_t(v)), x}); };
+								for (const auto& o2 : all) if (o2.key == c.key && o2.now.size() == n) { uint64_t x = 0; for (size_t k = 0; k < n; ++k) x |= uint64_t(o2.now[k]) << (8 * k); add(x); }
+								for (uint64_t x : {uint64_t(0), uint64_t(1), uint64_t(2), uint64_t(3), mod - 1}) add(x);
+							} else {
+								{
+								const int64_t step = std::getenv("RON_PAIR_STEP") ? std::atoll(std::getenv("RON_PAIR_STEP")) : 1;  // e.g. 65536 for the angle members
+								for (int dl0 = -W; dl0 <= W; ++dl0) {
+									const int64_t dl = dl0 * step;
+									if (dl != 0) cand.push_back({int(dl), (v + mod + uint64_t(dl % int64_t(mod) + int64_t(mod))) % mod});
+								}
+							}
+							}
+							for (const auto& cd : cand) {
+								const int dl = cd.first;
+								const uint64_t nv = cd.second;
+								int64_t sa = 0, sb = 0;
+								for (size_t k = 0; k < n; ++k) { const int e = int((nv >> (8 * k)) & 0xff) - int(c.now[k]); sa += e; sb += int64_t(e) * (N - pos[k]); }
+								effs.push_back({i, dl, ((sa % M) + M) % M, ((sb % M) + M) % M});
+							}
+						}
+						std::printf("  pair search: %zu members tried, %zu (member, delta) effects; target (a=%lld b=%lld)\n", tried, effs.size(), (long long)target.first, (long long)target.second);
+						auto k2 = [](int64_t a, int64_t b) { return uint64_t(a) << 32 | uint64_t(b); };
+						std::unordered_map<uint64_t, std::vector<size_t>> by;
+						for (size_t i = 0; i < effs.size(); ++i) by[k2(effs[i].a, effs[i].b)].push_back(i);
+						int shown = 0;
+						for (size_t i = 0; i < effs.size(); ++i) {
+							if (effs[i].a == target.first && effs[i].b == target.second && shown++ < 20) std::printf("    PAIR HIT (1): %s (%d,%d,%d) %+d\n", all[effs[i].mi].key.c_str(), all[effs[i].mi].id.a, all[effs[i].mi].id.b, all[effs[i].mi].id.c, effs[i].dl);
+							auto fnd = by.find(k2(((target.first - effs[i].a) % M + M) % M, ((target.second - effs[i].b) % M + M) % M));
+							if (fnd == by.end()) continue;
+							for (size_t j : fnd->second) if (j > i && effs[j].mi != effs[i].mi && shown++ < 40)
+								std::printf("    PAIR HIT (2): %s (%d,%d,%d) %+d  and  %s (%d,%d,%d) %+d\n", all[effs[i].mi].key.c_str(), all[effs[i].mi].id.a, all[effs[i].mi].id.b, all[effs[i].mi].id.c, effs[i].dl,
+									all[effs[j].mi].key.c_str(), all[effs[j].mi].id.a, all[effs[j].mi].id.b, all[effs[j].mi].id.c, effs[j].dl);
+						}
+					}
+				}
 			}
 			if (g_pshift_at >= 0 && f >= g_pshift_at - 8 && f <= g_pshift_at + 8) {
 				std::map<std::pair<std::tuple<int, int, int>, std::string>, std::vector<uint8_t>> snap;
@@ -2537,6 +2652,22 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 						++unsupported[rc.name];
 						if (first_unsupported_frame < 0) { first_unsupported_frame = f; first_unsupported = rc.name; }
 						continue;
+					}
+					if (const char* ct = std::getenv("RON_CMD_TRACE")) {  // RON_CMD_TRACE=F0:F1: the commands run in those frames (record frame, seat, name, group, args)
+						int c0 = 0, c1 = 0;
+						std::sscanf(ct, "%d:%d", &c0, &c1);
+						if (f >= c0 && f <= c1) {
+							std::printf("  CMD f%lld seat %d who %d %s group %d", (long long)f, play, who, rc.name.c_str(), package.group);
+							std::function<void(const Json&, const std::string&)> dump = [&](const Json& j, const std::string& pre) {
+								for (const auto& kv : j.o) {
+									if (kv.second.t == Json::Num) std::printf(" %s%s=%lld", pre.c_str(), kv.first.c_str(), (long long)kv.second.n);
+									else if (kv.second.t == Json::Str) std::printf(" %s%s=%s", pre.c_str(), kv.first.c_str(), kv.second.s.c_str());
+									else if (kv.second.t == Json::Obj) dump(kv.second, pre + kv.first + ".");
+								}
+							};
+							dump(c, "");
+							std::printf("\n");
+						}
 					}
 					package.process(*game, rc.cmd, play, who);
 					++cmds_run;
@@ -2595,6 +2726,52 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 						for (int o = sim::kBuildBase; o < game->objects[size_t(w)].build_mark; ++o) {
 							const sim::Build* b = game->build(w, o);
 							if (b && b->alive() && std::abs(b->x - nx) <= nrr + 1500 && std::abs(b->y - ny) <= nrr + 1500) std::printf("  NEAR f%d build %d/%d type %d at %d,%d flags %x\n", int(f), w, o, b->type, b->x, b->y, unsigned(b->flags));
+						}
+					}
+				}
+			}
+			if (const char* fd = std::getenv("RON_FRAME_DIFF")) {  // RON_FRAME_DIFF=F0:F1[:pattern]: every mapped member (of the pattern, default all) the engine changes between the boundaries F0 and F1
+				int d0 = 0, d1 = 0;
+				char pat[256] = "Unit.*,Guy.*,Build.*,Object.*,SubObject.*,WData.*,CollBlock.*,TCoordData.*,Wall.*,WallData.*,City.*,LeaderData.*";
+				static std::map<std::pair<std::tuple<int, int, int>, std::string>, std::vector<uint8_t>> fd_snap;
+				if (std::sscanf(fd, "%d:%d:%255s", &d0, &d1, pat) >= 2 && (f == d0 || f == d1)) {
+					std::map<std::pair<std::tuple<int, int, int>, std::string>, std::vector<uint8_t>> cur;
+					std::vector<std::string> pats;
+					for (const char* q = pat; *q;) { const char* e = std::strchr(q, ','); pats.emplace_back(q, e ? size_t(e - q) : std::strlen(q)); q = e ? e + 1 : q + std::strlen(q); }
+					for (const sim::MemberChange& c : sim::members_of(*game, pats)) cur[{{c.id.a, c.id.b, c.id.c}, c.key}] = c.now;
+					if (f == d0) fd_snap = std::move(cur);
+					else {
+						int shown = 0;
+						for (const auto& kv : cur) {
+							auto it0 = fd_snap.find(kv.first);
+							if (it0 != fd_snap.end() && it0->second == kv.second) continue;
+							if (shown++ >= 400) break;
+							std::printf("  FDIFF %s (%d,%d,%d):", kv.first.second.c_str(), std::get<0>(kv.first.first), std::get<1>(kv.first.first), std::get<2>(kv.first.first));
+							if (it0 != fd_snap.end()) for (uint8_t by : it0->second) std::printf(" %02x", by);
+							std::printf(" ->");
+							for (uint8_t by : kv.second) std::printf(" %02x", by);
+							std::printf("\n");
+						}
+					}
+				}
+			}
+			if (const char* rb = std::getenv("RON_RAW_BUILDS")) {  // RON_RAW_BUILDS=F: at that boundary every Build's unmapped bytes in [0x48, 0x66) (the shadow image: +0x58 is WallData::gpiece)
+				if ((std::atoll(rb) < 0 ? f == start + 1 : f == std::atoll(rb)) && game->original) {
+					for (const auto& kv : game->original->segs) {
+						const dw::Rec& rec = *kv.first;
+						for (const sim::omap::Segment& seg : kv.second) {
+							if (!seg.map || seg.map->name != "Build") continue;
+							for (const sim::omap::Entry& e : seg.map->entries) if (e.name == "construct_hits") {
+								uint8_t raw[4] = {0, 0, 0, 0};
+								rec.read(seg.base + 0x58 - 0x54 + e.off, raw, 4);
+								const sim::Build* bd = game->build(seg.id.a, seg.id.b);
+								{
+									const sim::Leader& lf = game->leaders[size_t(bd ? bd->founder : 0)];
+									const sim::Leader& lw = game->leaders[size_t(seg.id.a)];
+									const sim::Tribe* tr = size_t(lf.tribe) < game->rules->tribes.size() ? &game->rules->tribes[size_t(lf.tribe)] : nullptr;
+									std::printf("  RAWBUILD %d/%d type %d active %d who %d founder %d tribe %d build_continent %d unit_continent %d max_age %d age_owner %d age_founder %d gpiece %u computed %d\n", seg.id.a, seg.id.b, bd ? bd->type : -1, bd ? int(bd->flags & sim::objflag::kActive) : 0, seg.id.a, bd ? int(bd->founder) : -1, int(lf.tribe), tr ? tr->build_continent : -1, tr ? tr->unit_continent : -1, bd ? int(bd->max_age) : -1, int(lw.age), int(lf.age), unsigned(raw[0] | raw[1] << 8 | raw[2] << 16 | uint32_t(raw[3]) << 24), bd ? sim::build_gpiece(*game, bd->type, bd->founder, bd->max_age) : -1);
+								}
+							}
 						}
 					}
 				}
@@ -2918,6 +3095,18 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 				if (mname == "city") return b.city;
 				if (mname == "damage") return b.damage;
 				if (mname == "flags") return b.flags;
+				if (mname == "up_who") return b.up_who;
+				if (mname == "up") return b.up;
+				if (mname == "down") return b.down;
+				if (mname == "down_who") return b.down_who;
+				if (mname == "uid") return b.uid;
+				if (mname == "city_down") return b.city_down;
+				if (mname == "gather_down") return b.gather_down;
+				if (mname == "ever_seen") return b.ever_seen;
+				if (mname == "ever_seen_completed") return b.ever_seen_completed;
+				if (mname == "helpers") return b.helpers;
+				if (mname == "wonder") return b.wonder;
+				if (mname == "fort") return b.fort;
 				return 0;
 			};
 			int n = 0;
