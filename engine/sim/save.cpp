@@ -16,6 +16,7 @@
 
 #include "assets/chunk.hpp"
 #include "assets/scenario.hpp"
+#include "sim/newgame.hpp"
 #include "sim/pathfinder_search.hpp"
 #include "sim/save_archive.hpp"
 #include "sim/script_host.hpp"
@@ -39,7 +40,8 @@ static_assert(sizeof(PathNode) == 40 && sizeof(SavedSearch) == 176, "the pathfin
 static_assert(sizeof(ObjectList) == 64, "ObjectList changed: update walk_objects()");
 static_assert(sizeof(Groups) == 1282084, "Groups changed: update walk_groups()");
 static_assert(sizeof(Regions) == 10248, "Regions changed: update the REGN section in walk_body()");
-static_assert(sizeof(Game) == 1647392, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
+// 1647392 + 16: Game::original (the original-save shadow, sim/original_save.hpp) is derived state the native save never writes.
+static_assert(sizeof(Game) == 1647408, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
 static_assert(sizeof(ScriptHost) == 1608, "ScriptHost changed: update walk_scripts()");
 #endif
 
@@ -658,6 +660,7 @@ SaveInfo read_header(Reader& top) {
 
 std::string scenario_rel_path(const GameFiles& files, const std::string& file) {
 	namespace fs = std::filesystem;
+	if (is_random_scenario(file)) return file;  // a random game: the setup text (sim/newgame.hpp)
 	std::error_code ec;
 	std::string root = fs::weakly_canonical(files.root(), ec).string();
 	const std::string abs = fs::weakly_canonical(file, ec).string();
@@ -770,22 +773,34 @@ std::unique_ptr<Game> load_game_bytes(const GameFiles& files, const Rules& rules
 		throw std::runtime_error("save: section 'META': the save was made with different rules tables than the ones loaded");
 
 	// Game::load first: it rebuilds everything derived from the install's files (rules, art, terrain heights, regions,
-	// mountains), then every piece of state is overwritten from the file.
-	std::string scx = info.scenario;
-	std::error_code ec;
-	if (!std::filesystem::exists(scx, ec) || std::filesystem::path(scx).is_relative()) {
-		const std::string r = files.resolve(scx);
-		if (!r.empty()) scx = r;
-	}
-	if (!std::filesystem::exists(scx, ec)) throw std::runtime_error("save: section 'META': scenario not found: " + info.scenario);
-	const Scenario sc = parse_scenario(read_file(scx));
+	// mountains), then every piece of state is overwritten from the file. A random game (the scenario slot holds its
+	// setup text) is regenerated from the setup instead: new_random_game gives the same world, objects and scripts.
 	auto g = std::make_unique<Game>();
-	g->anims = anims;
-	g->info = ginfo;  // the options the original run set before loading (reveal map, difficulty ...)
-	g->load(files, sc, rules, info.seed);
-	if (info.has_scripts) {
-		ScriptLoadReport rep = script_host_load(*g, files, std::filesystem::absolute(scx).string(), sc);
-		info.script_errors = std::move(rep.errors);
+	if (is_random_scenario(info.scenario)) {
+		RandomGameSetup setup;
+		if (!parse_random_setup(info.scenario, setup)) throw std::runtime_error("save: section 'META': malformed random game setup");
+		if (setup.seed != info.seed) throw std::runtime_error("save: section 'META': the random game's seed does not match its setup");
+		RandomExtras extras;
+		g = new_random_game(files, rules, anims, setup, &extras);
+		if (!g) throw std::runtime_error("save: section 'META': cannot regenerate the random game: " + extras.error);
+		if (static_cast<bool>(g->scripts) != info.has_scripts)
+			throw std::runtime_error("save: section 'META': the regenerated random game differs in its scripts");
+	} else {
+		std::string scx = info.scenario;
+		std::error_code ec;
+		if (!std::filesystem::exists(scx, ec) || std::filesystem::path(scx).is_relative()) {
+			const std::string r = files.resolve(scx);
+			if (!r.empty()) scx = r;
+		}
+		if (!std::filesystem::exists(scx, ec)) throw std::runtime_error("save: section 'META': scenario not found: " + info.scenario);
+		const Scenario sc = parse_scenario(read_file(scx));
+		g->anims = anims;
+		g->info = ginfo;  // the options the original run set before loading (reveal map, difficulty ...)
+		g->load(files, sc, rules, info.seed);
+		if (info.has_scripts) {
+			ScriptLoadReport rep = script_host_load(*g, files, std::filesystem::absolute(scx).string(), sc);
+			info.script_errors = std::move(rep.errors);
+		}
 	}
 	save::walk_body(top, *g, info.has_scripts);
 	if (top.remaining() != 0) throw std::runtime_error("save: " + std::to_string(top.remaining()) + " bytes after the last section");

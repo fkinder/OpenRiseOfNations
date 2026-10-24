@@ -408,6 +408,55 @@ the AI's ferrying (`think_civilian_transport`, `do_transporting`), sounds, the c
 BOARD_SHIP (no stock scenario issues it); `action_board_ship`'s QUEUE_FIRST re-insert runs `finish_insert` on the group (the
 decompile uses a temporary group holding the ship).
 
+## Aircraft (docs/aircraft-spec.md; engine/sim/aircraft.{hpp,cpp}, aircraft_cmd.cpp)
+
+Planes, helicopters, airbases, carriers and missile silos (2026-10-24). `aircraft.cpp` holds the containers and capacity
+(`can_carry` air branches, `home_base`, `num_aircraft_here / limit`, `has_nuke`), the three air orders and their adders, the
+flight (`do_air_physics` with the guy's bank / pitch floats, `check_fuel`, `land_plane`), `do_strafe / do_air_patrol /
+do_air_attack_ground`, the target searches, the fuel / recharge / healing block of `Unit::process`, `do_launch`,
+`attempt_launch`, `Build::do_missile_launch`, the carrier's PLANERELEASE events, the aircraft-housing branch of `Build::train`,
+the airbase gather-point hooks and `air_describe`; `aircraft_cmd.cpp` the command layer. The file is compiled with
+`#pragma clang fp contract(off)`: the float bank / pitch math must not be fused.
+- **State** (save version 3): `Order` air fields, `Guy` bank / pitch, `Object::launch_timer / launch_list`, `Unit::mana_burn`
+  (fuel used). The two simulation RNG draws of the flight (the altitude reroll every 8th frame of `(o + frame)` and the edge-turn
+  draw) are in call order; a new carrier takes exactly 7 draws (one `init_unit` per plane; `RON_AIR_TRACE=1` prints the count).
+- **Commands**: FLIGHT 28 (`Command::orders` 10 attack / 1 rebase, shift / ctrl / alt), PATROL 10, LAUNCH_PATROL 11,
+  ATTACK_GROUND 9, SCRAMBLE 36, RECALL 35, UNQUEUE of a unit (`Unit::action_unqueue`), the airbase rally point (gather action 3),
+  and the scenario builtins `unit_attack_order`, `unit_clear_orders`, `air_unit_transfer_order`, `create_missile_and_target_build`,
+  `create_unit` (planes fly at once, a carrier gets its wing), `num_garrisoned_in`, `building_full`. The console messages and
+  sounds of the original are not modelled (marked "(message)" in the code).
+- **Hooks in older files**: `can_carry` (transport.cpp), the Strafe / AirPatrol / AirAttackGround / SpecialAnim cases of
+  `Unit::work` (orders.cpp), `unit_process` (objects.cpp), `Build::process / finished / train / queue_up` gates (queues.cpp, build.cpp,
+  construct.cpp: HOLDS_AIR | REPEAT_AIR on air containers, the 10-plane airbase limit in `Build::finished`), AA bands
+  (`is_flying_low / high`, combat_target.cpp), the carrier's strafes (combat_orders.cpp), eject / garrison (garrison.cpp,
+  ai_diplo.cpp), the carrier closing (combat_death.cpp `carrier_closed`), guys.cpp (aircraft z) and the animation lookups.
+- **Where the exe contradicts the spec** (the exe wins): (1) the launch cadence is **16** frames, not 15: `do_launch` @64f46a
+  compares the timer **before** the increment (`CMP ECX,15; JL`), so after a launch (timer 0) the next walk is 16 calls later;
+  (2) `Build::queue_up` @620f40 does **not** refuse a plane over the airbase limit (it only prints "building full"): the item
+  waits in the queue because `Build::finished` @628490 returns -1, so `num_aircraft_here(0) <= 10` holds and the queue keeps the
+  rest; (3) `vslot 8` of the object is `is_live_unit`: the relative patrol waypoints (`add_air_patrol_order` @5e4350,
+  `do_air_patrol` @5ea620, `Unit::close` @60ee50) apply to a **carrier** only, never to an airbase; (4) `ObjectData::is_in_range`
+  @64e4a0 returns 1 for a MISSILE that is **not** inside a container (`get_inside(0) < 0`; combat-spec and the old engine code had
+  the sign reversed), and a missile type's range is 99999, so a missile fires its ground ammo and dies the first frame it
+  runs after leaving the silo; (5) `Group::action_gather_point` @6ff1b0 (action 3) calls `action_flight(x, y, ATTACK, ...)` with
+  the point's coordinates in the `(ox, whom)` slots: it never finds a target and does nothing; (6) `Group::action_flight`
+  @6fb260 MOVE_TO on a no-fuel STRAFE refuses a base farther than the plane's current one (the two `vector_dist` calls compare
+  the new base against the old home); (7) `ObjectData::has_nuke` @643d40 is "the silo holds, queues or expects any missile".
+- **Harness**: `--flight`, `--air-patrol`, `--launch-patrol`, `--attack-ground`, `--scramble`, `--recall`, `--air-every K`,
+  `--list` (airbases / carriers / silos with their chain, planes with fuel, base, order, low / high band), the test aids `--kill`
+  and `--stock`, `RON_AIR_TRACE=1`. The digest hashes the aircraft block only when some aircraft state is non-default
+  (`RON_NO_AIR_DIGEST=1` leaves it out; `RON_DIGEST_PARTS=1` prints the running hash per section).
+- **Validated** (2026-10-24, scratch build with the build-mac.sh flags, zero warnings): `ron-check` 0 failures; `sim-all`
+  600 frames `--ai-every 8`: 156 / 156 self-check OK, `--roundtrip` OK with planes in the air, landing and based
+  (korea.scx at frames 20, 300, 1085, 1095); digests against a build of the previous tree: 134 scenarios identical, 22 changed,
+  every one of them with an airbase, carrier or silo (13: `build_masks` 0x88 on the air containers from the start or when the
+  AI's silo completes (central, f9); 5: planes inside bases, only the new aircraft digest block; 4 real divergences from AI
+  launches: korea3 / korea4 (units f21, RNG f31), suez2 (f36 / f42), Tutorial6 (f587, RNG unchanged)).
+- **Not ported / ❓**: `Group::action_guard` (an ally target of FLIGHT sends the non-planes there), the ground halves of PATROL
+  and ATTACK_GROUND (`GroupPatrolOrder`, `Unit::add_attack_ground_order`), the counters and refund of `Unit::action_unqueue`
+  (nothing queues planes on a carrier), vslot 0x10 of the home object in the FLIGHT no-fuel check (read as "alive"), the
+  paradrop (spec 9), the strafing impact slide (combat_fight.cpp) and the carrier deck node position (render data).
+
 ## Healing and attrition
 
 `engine/sim/attrition.cpp` (combat-spec 7, economy-spec 7.2-7.3, 2026-10-23):
@@ -884,3 +933,79 @@ caravan repath of City::close.
 - Plunder: `unit_plunder` (Aztec / THE DESPOT / Spitamenes draws `rnd(25)` per available good, Inca refund) from `take_damage` and
   `Object::disband`; `build_plunder` from `do_damage` kills and the DISBAND queue.
 - Harness: `ron-sim --cast WHO:o@SPELL[@FRAME]`, `--heroes-every K`, `--list` (hero radius and powers); `RON_HERO_TRACE=1` logs casts.
+
+
+## Random games (docs/randommap-spec.md section 1; engine/sim/newgame.{hpp,cpp}, mapgen*.cpp)
+
+`new_random_game(files, rules, anims, setup, &extras)` is `Setup::build_game` for a random map on top of the generator
+(`mapgen::generate_into`) and leaves a `Game` in the same shape `Game::load` does: rules and `GameInfo`, world / regions /
+goods / items / mountains, terrain heights, leaders initialised, the empires and herds created as objects, territory,
+danger map and first fog refresh done, the scripts (AI production scripts) attached. AI, save / load and the renderer need
+nothing else. `RandomGameSetup` carries what the lobby's `GameInfo` does (map style 0..22 incl. the random pickers 0..5, map
+size 0..6, seed, 1..8 seats each with tribe (-1 random) / team (-1 or 0..3) / human or AI / difficulty / colour, start town,
+resources, start and end age, victory / elimination and their option lists, population, tech cost, rush rules, reveal map,
+game rules, game speed, randomize starts, no tribe powers). `RandomExtras` returns the generator `Result`, the resolved setup
+and a `Scenario` snapshot (terrain + the finished objects as scenario records) that the renderer draws from.
+
+**Steps, in the order of `Setup::build_game` (section 1) and `Game::run`:**
+
+| Step | Here |
+|---|---|
+| `Game::run`: `game_random := seed`, `init_starting_resources` (the S1 / S2 draws) | `new_random_game`, before the generator reseeds, as in `Game::load` |
+| 1, 3: reseed, **draw 1** `world.seed = rnd(0xffff) + 1` | first thing `generate_into` does |
+| 4: `Map::new_map` (random pickers), `Map::make`, `Terrain::init`'s rivers | the generator (`mapgen.cpp`, `make_rivers`) |
+| 7: start order (`rnd & 7` with `randomize_starts`) | the generator (`res.start_order`) |
+| 7: `Leader::init(who, tribe, who)` in start order | `new_random_game`: diplomacy (team style 12 "Custom Teams" with teams, else 1 "Survival of the Fittest": locked, everyone else at war), starting techs, economy (starting stockpile), attrition, `leader_init_ai` (personality draws, production script name), then difficulty / name / flags |
+| 9: `build_empire` per seat (team mates consecutively) | the generator draws `place_unit`'s ring draws and lists the placements; `create_empires` creates them in list order: the city (`init_build_site`, `build_activate_full`, `update_seen_ally`, `compute_all_territory`), its buildings through the AI's `produce_building(t, city, 0)`, the units with `init_unit` (+ `unit_come_out` / `add_gather_order` at the first farm for the town-start citizens, `unit_go_inside` the university for Greek scholars, `build_train` when no ring spot was found) |
+| 10: `Herd::create_units` | `create_herds`: `init_unit` for gaia, spread with `find_nearby_spot`, angle from the generator |
+| `World::analyze_map`, `compute_all_territory`, `calc_danger`, `update_all_seen` | end of `new_random_game` |
+| scripts (`Leaders::init_production_script`) | `script_host_load` with an empty scenario: the AI production scripts compile, there is no scenario script |
+
+**Approximate or missing (nothing here is bit-exact with the original yet):**
+- The generator's terrain-group placement is not bit-exact (see `randommap-terrain-groups.md`); the whole map is therefore only
+  plausible, and a seed does not give the original's map.
+- `Leader::init`'s personality draws and the objects' `init_unit` draws (`Guy::init_real`) come **after** all the generator's
+  draws; the original interleaves them (start order, then `Leader::init`, then each `build_empire`'s `place_unit` draws with
+  the units created in between). Same draws, other order: the game is deterministic, not the original's stream.
+- **The generator leaves `TData`'s water tcoords unset** (it works on `WData.land`; 638 deep wcoords gave 0 water tcoords on
+  Great Lakes / size 2). `newgame.cpp` `fix_water_tcoords` makes every tcoord of an open-water wcoord water (`mask & 0x30 == 0x20`)
+  right after generation, which the passability, the terrain and the AI read; it runs after the generator's `compute_all_vals` /
+  `adjust_for_blocking`, which therefore saw dry tcoords (their map-edge-water BAD_PATH rim is missing), and it is idempotent, so it
+  can move into the generator. `TData` COASTAL (0x400) is not set either (on stock files it marks water tcoords, by a rule not
+  decoded) and the generator makes no shelf (land 1) or half-water cells.
+- Terrain heights are synthesised (`synthesize_terrain`): land 250 +- noise, rivers carved, the template z of each mountain
+  added (adjust_for_mountains(0) rule), and the shoreline made from a blurred water indicator because the generator's coastlines
+  follow wcoord edges (no shelf / half-water cells yet). `TerrainOut` heights were never decoded. The land doobers are
+  placed by a hash (the generator only counts them). No cliffs. The sim reads these heights for z only.
+- Not ported: `Herds::process` (herd animals stand still), `Setup::mark_forest`, `Leader::reset_score`, `game.start_index`, the
+  Spanish `EXPLORE_MAP` flag and the `info.flags & 4` farm / granary build flags of `build_empire`, the 8-seat "team 8" special
+  case of team style 7, CtW maps, `BLANK_MAP` / `SCENARIO_MAP` / `CONQUEST` styles (`new_random_game` takes 0..23).
+- The starting citizens of a town start (`n_farm`) are created at the *first farm* of the seat (spec: slot 2001), the others near
+  the city; the spec marks this branch as unread.
+- Per-seat difficulty: the simulation's `get_diff` reads one `GameInfo.difficulty` outside multiplayer, so the setup's per-seat
+  value is stored in `Leader::difficulty` and `GameInfo.difficulty` takes the first AI seat's.
+- Random picks (a seat's tribe set to Random, start age "Random Age!") are made with their own generator seeded from the setup
+  seed, so `game_random` never sees them; the saved setup text holds the resolved values.
+
+**Save / load.** A save of a random game stores the setup text (`random:style=14;size=2;seed=123;n=2;...;p0=10,-1,1,2,0;...`,
+`random_setup_string`) in the scenario-path slot of `META` and the seed in the seed slot; `load_game` regenerates the game with
+`new_random_game` (0.1 - 0.3 s) and then overwrites every saved section, exactly as for a scenario. No `Game` member was added
+(`sizeof(Game)` is unchanged) and the format version stays 2. `scenario_rel_path` leaves a `random:` string alone.
+
+**Commands.**
+```
+./build/ron-mapgen <game> --style 14 --size 2 --seed 123 --nations 2 --png map.png     # the generator alone
+./build/ronmap <game> --random 14,2,123,2 --frames 600 --census --save-game a.ronsave  # headless random game
+./build/ronmap <game> --random 12,3,7,4,r,r,5,9 --all-ai --difficulty 2 --frames 1200 --census --snapshot out.png
+./build/ronmap <game> --menu skirmish-setup --snapshot setup.png                       # the setup screen
+```
+`--random STYLE,SIZE,SEED,NATIONS[,TRIBES...]`: STYLE a MapStyleIndex or a name ("Great Lakes"), SIZE 0..6, TRIBES per seat
+(`r` or -1 = random). `--all-ai` makes every seat a computer player, `--difficulty` sets theirs, `--census` prints the per-seat
+objects, queues, stockpiles and buildings after the frames. Seat 0 is the human otherwise.
+
+**For `ron-sim`** (not edited by this port; the grammar to add): `--random STYLE,SIZE,SEED,NATIONS[,TRIBES...]` replaces the scenario
+argument: `RandomGameSetup s = default_random_setup(); std::string e = parse_random_option(rules, spec, s);` then
+`auto g = new_random_game(files, rules, art.get(), s, &x);` instead of `Game::load` + `script_host_load`; `--all-ai` clears
+`s.nation[i].human`; `--town N`, `--resources N`, `--age N`, `--end-age N`, `--teams a,b,..`, `--randomize-starts`, `--reveal N`
+set the matching fields; save with `save_game(*g, random_setup_string(x.setup), x.setup.seed, path)`. `--frames`, `--ai-every`, the
+digests and `--load` of such a save (which regenerates by itself) work unchanged.

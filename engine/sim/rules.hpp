@@ -235,6 +235,9 @@ Bytes write_image(const Rules& rules, std::vector<ImageField>* layout = nullptr)
 // Decodes an image starting at `offset` (the marker byte) into the walked fields of `out` (types are created with
 // their constructor defaults first; unwalked fields keep them). Returns the end offset. Throws FormatError.
 size_t read_image(const Bytes& b, size_t offset, Rules& out);
+// The same over tables that are already loaded: only the walked fields change (the loader-only state - masks, icons, category
+// lists - stays). Used to adopt the rules block of a save or replay (sim/original_save.cpp).
+size_t read_image_into(const Bytes& b, size_t offset, Rules& rules);
 
 // A replay's rules block: the first offset where a whole image decodes (rulesimage.mjs findImage).
 struct ReplayRules {

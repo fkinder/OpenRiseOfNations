@@ -1,4 +1,4 @@
-# Save format (native, version 2)
+# Save format (native, version 3)
 
 The engine's own save format for its simulation state: `engine/sim/save.hpp` / `save.cpp` (API and the section walks),
 `save_archive.hpp` (the writer / reader), `save_walk.inc` (the member lists, generated). It is **not** the original game's
@@ -22,6 +22,11 @@ and the `Game::load` seed. `load_game` then:
 3. walks every other section with the `Reader`, **overwriting** the state `Game::load` built. Pointers into the rules
    (`Object::ptype`) are re-derived; the pathfinder's block-list pointer is re-pointed.
 
+**Random games.** When the scenario slot of `META` starts with `random:` it holds the setup text of a random-map game
+(`random_setup_string`, sim/newgame.hpp) and the seed slot its seed; step 2 then runs `new_random_game` (the generator, the
+objects, the scripts) instead of `Game::load`, and step 3 overwrites the state as usual. No `Game` member was added, so the
+layout and the version are unchanged; `scenario_rel_path` passes such a string through.
+
 API (`sim/save.hpp`): `save_game(game, scenario_rel, seed, path)`, `save_game_bytes`, `read_save_info`,
 `load_game(files, rules, anims, path, &info)` / `load_game_bytes`, `scenario_rel_path(files, file)`,
 `describe_save_difference(bytes, bytes)` and `describe_game_difference(game, game, ...)` (the latter names the member where
@@ -35,7 +40,7 @@ strings and containers as a `u32` count followed by the elements (`std::u16strin
 member by member in declaration order, so there is no padding in the file and equal states give byte-identical files.
 
 ```
-"RONS" | u32 version (2) | u32 flags (0) | section*
+"RONS" | u32 version (3) | u32 flags (0) | section*
 section = tag (4 ASCII bytes) | u64 payload length | u32 CRC-32 of the payload | payload
 ```
 
@@ -44,6 +49,10 @@ reader and **requires that every payload byte was consumed**. A corrupt section 
 a section whose layout differs from this build's (`N bytes were not read`, or running past its end) and a wrong tag are all
 reported with the section name. The version is bumped on any layout change; there is no migration (a save loads only into
 the build that wrote it, and only against the same rules tables: the hash in `META` is checked).
+
+Version 3 (aircraft, docs/aircraft-spec.md): `Order` gains the air-order fields (cruising altitude, sharp turn, returning, the
+last target position, the patrol waypoints and index, the SPECIAL_ANIM fields), `Guy` the bank / pitch floats and `Object` the
+`launch_timer` and `launch_list` of airbases, carriers and silos.
 
 A path ending in `.gz` is written gzipped (a save compresses to about 2 % of its size, 40 KB for a Tutorial 2 game); the loader
 reads gzip and plain files alike (`gzopen` on a plain file). Writing goes to `<path>.tmp` and is renamed over the target.

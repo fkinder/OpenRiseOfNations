@@ -330,6 +330,12 @@ size_t read_image(const Bytes& b, size_t offset, Rules& out) {
 	return r.pos();
 }
 
+size_t read_image_into(const Bytes& b, size_t offset, Rules& rules) {
+	Reader r(b, offset);
+	walk_rules(r, rules);
+	return r.pos();
+}
+
 bool find_image(const Bytes& b, ReplayRules& out) {
 	for (size_t p = 0; p + 200 < b.size(); ++p) {
 		// Marker, type 0, and a non-zero tribe_mask in the first record.

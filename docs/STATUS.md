@@ -8,15 +8,15 @@ aircraft / Conquer the World; see docs/roadmap.md for the phases). Read this fir
 
 | Phase | State |
 |---|---|
-| 0 replay oracle | **unblocked**: 95 `.rcx` (≈60 multiplayer with per-turn CHECK_SUMS) and 10 `.SVX` saves from the original game live in `re/oracle/` (gitignored, personal). In progress: decoder fixes + corpus inventory (`docs/oracle-corpus.md`), the DataWalk description rebuilt and validated on the real saves (`docs/state-spec.md` §8), then `ron-sim --replay` with checksum comparison and the original `.sav` loader |
+| 0 replay oracle | **working**: `re/oracle/` (gitignored, personal) holds 95 `.rcx` (59 multiplayer with per-turn CHECK_SUMS) and 10 `.SVX`; `docs/oracle-corpus.md`. The original save format is decoded and verified bit for bit (`docs/state-spec.md` §8, `ron-sav`: all 69 saves, every verify entry); the engine loads the original saves and re-emits the identical checksum image (`docs/original-save.md`: 69/69 round trips exact); `ron-sav --replay` steps a save-based MP replay and compares the 15 parts per turn — the simulation diverges from the original at the first frame (`units`, `builds`, `guys`, `leaders`, `world`): that list is the fidelity work queue. Random-map replays need the generator to be bit-exact |
 | 1 leader bonuses, 2 garrisons | done (`stats.cpp`, `garrison.cpp`; 156/156) |
 | 3 save / load | done, native format (`docs/save-format.md`, `engine/sim/save.*`, `ron-sim --save-at/--load/--roundtrip`, `ronmap` F5 / F9): round trip bit-exact on 156/156 scenarios. Original `.sav` compatibility is phase 0 work |
-| 4 random maps + skirmish | spec complete (`randommap-spec.md` + `-terrain-groups` + `-resources` + `-rivers`); generator port in progress (`engine/sim/mapgen_*`, `ron-mapgen`); skirmish setup screen pending |
-| transports (pulled from 5) | spec `transport-spec.md`; port in progress (`spells.cpp`, `transport.cpp`) |
-| 5 heroes / aircraft / spells / spies … | specs `heroes-spec.md`, `aircraft-spec.md`; ports pending |
-| 6 UI / polish | pending |
+| 4 random maps + skirmish | spec complete (`randommap-spec.md` + `-terrain-groups` + `-resources` + `-rivers`); generator ported (`engine/sim/mapgen_*`, `ron-mapgen`: 17 styles, deterministic; terrain-group placement approximate, no shelf / coast cells yet); **playable random skirmish** (`engine/sim/newgame.*`, `ronmap` Skirmish > Random Map... setup screen, `--random`, save / load: sim-implementation.md "Random games") |
+| transports (pulled from 5) | done (`transport-spec.md`, `spells.cpp`, `transport.cpp`; 156/156, crossings in persia / carib / italy) |
+| 5 heroes / aircraft / spells / spies … | heroes done (`heroes-spec.md`, `heroes.cpp`), aircraft done (`aircraft-spec.md`, `aircraft.cpp`); spies / packers / the other crafts specified (`spells-spec.md`), port pending |
+| 6 UI / polish | part 1 done (tooltips, game messages, market / infrastructure / mini library, minimap territory and pings, streamlined mode, key map: `ui-port.md`); library panel, formation drag, localisation pending |
 | 7 Conquer the World | spec `ctw-spec.md`; port pending |
-| 8 multiplayer | pending |
+| 8 multiplayer | spec `multiplayer-spec.md` (lockstep design, drops, OOS recovery); port pending |
 
 ## Where things stand
 

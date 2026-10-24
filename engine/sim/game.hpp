@@ -430,6 +430,7 @@ struct GameEvent {
 // ---------------------------------------------------------------- the game
 
 class ScriptHost;  // sim/script_host.hpp
+struct OriginalShadow;  // sim/original_save.hpp
 
 class Game {
 public:
@@ -584,6 +585,10 @@ public:
 	int32_t rnd(int32_t n);
 	// game_random.get(0, 0xffff) % n with a draw even for n == 1 (the movement call sites draw unconditionally).
 	int32_t rnd_draw(int32_t n) { return rng.get(0, 0xffff) % n; }
+
+	// The original bytes of a game loaded from an original-game save (sim/original_save.hpp, docs/original-save.md): the
+	// decoded save with the members the engine does not model. Null for every other game; the native save ignores it.
+	std::shared_ptr<OriginalShadow> original;
 };
 
 // ---------------------------------------------------------------- objects.cpp
