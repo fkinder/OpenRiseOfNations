@@ -1,7 +1,22 @@
 # Project status and how to resume
 
-Last updated 2026-10-23 (healing / attrition, leader stat bonuses, garrisons; see docs/roadmap.md for the phases). Read this first when picking the work back up; then `CLAUDE.md`, `docs/systems-map.md`, and
-the spec for whatever you touch.
+Last updated 2026-10-24 (native save / load, the recorded-games oracle, specs for transports / random maps / heroes /
+aircraft / Conquer the World; see docs/roadmap.md for the phases). Read this first when picking the work back up; then
+`CLAUDE.md`, `docs/systems-map.md`, and the spec for whatever you touch.
+
+## Roadmap phases (docs/roadmap.md), 2026-10-24
+
+| Phase | State |
+|---|---|
+| 0 replay oracle | **unblocked**: 95 `.rcx` (≈60 multiplayer with per-turn CHECK_SUMS) and 10 `.SVX` saves from the original game live in `re/oracle/` (gitignored, personal). In progress: decoder fixes + corpus inventory (`docs/oracle-corpus.md`), the DataWalk description rebuilt and validated on the real saves (`docs/state-spec.md` §8), then `ron-sim --replay` with checksum comparison and the original `.sav` loader |
+| 1 leader bonuses, 2 garrisons | done (`stats.cpp`, `garrison.cpp`; 156/156) |
+| 3 save / load | done, native format (`docs/save-format.md`, `engine/sim/save.*`, `ron-sim --save-at/--load/--roundtrip`, `ronmap` F5 / F9): round trip bit-exact on 156/156 scenarios. Original `.sav` compatibility is phase 0 work |
+| 4 random maps + skirmish | spec complete (`randommap-spec.md` + `-terrain-groups` + `-resources` + `-rivers`); generator port in progress (`engine/sim/mapgen_*`, `ron-mapgen`); skirmish setup screen pending |
+| transports (pulled from 5) | spec `transport-spec.md`; port in progress (`spells.cpp`, `transport.cpp`) |
+| 5 heroes / aircraft / spells / spies … | specs `heroes-spec.md`, `aircraft-spec.md`; ports pending |
+| 6 UI / polish | pending |
+| 7 Conquer the World | spec `ctw-spec.md`; port pending |
+| 8 multiplayer | pending |
 
 ## Where things stand
 
@@ -82,13 +97,17 @@ BUY / SELL / TRIBUTE / ACCEPT / REJECT, fishermen, merchants and caravans (roads
    the capital clock, defeat, the game-over test and the victory clocks). Next: transports, spells, heroes, garrisons,
    script save / load, CTW. (The renderer side of the scripts and audio are done: ui-port.md 8-9; left there: unit
    acknowledgement sounds, the profile volumes, the rare-goods / mini-library offsets of MessageWin.)
-6. **Saves**: port `re/tools/savdump.mjs` to C++ (load a save into the sim and render it).
+6. **Saves**: native save / load is done (phase 3 above). Next: the original `.sav` / `.SVX` loader and the CHECK_SUMS
+   walker from the validated DataWalk description (phase 0).
 
-## Wanted: recorded games
+## Recorded games (the oracle)
 
-No saves or replays from the original game are in the project yet (only a 6-frame sample replay used locally). Single-
-player replays (skirmish and scenario), saves and especially multiplayer replays from the Windows game are the oracle for
-bit-exactness (`.rcx` files carry checksums every turn in multiplayer; see `replay-spec.md`). Contributions welcome.
+`re/oracle/` (gitignored: personal recordings, never committed) holds 95 `.rcx` replays — single player and ≈60
+multiplayer games with a CHECK_SUMS package every turn — and 10 `.SVX` saves of the original game, all version
+`00.2024.06.2000`. `node re/tools/rcxdump.mjs --survey re/oracle/Recorded\ Games` lists them; `docs/oracle-corpus.md`
+(in progress) says which ones to use first. Multiplayer replays of random maps give the checksum of the freshly
+generated world at the first turn (the generator's oracle), replays with an embedded save and the `.SVX` files are the
+save-format oracle (`replay-spec.md` §11, `state-spec.md` §6).
 
 ## How work was organised
 
