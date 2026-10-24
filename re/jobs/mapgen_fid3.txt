@@ -1,0 +1,12 @@
+re/decomp/mapgen_fid
+Terrain::check_and_set_halfland
+Terrain::check_and_set_halfland_wcoord
+Terrain::mark_halfwater
+Terrain::verify_land
+TerrainOut::build_coastal_data
+TerrainOut::determine_land_height_color
+World::set_waterhalf
+World::set_tocean
+World::set_coastal
+World::set_land
+World::clear_waterhalf

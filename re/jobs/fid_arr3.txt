@@ -1,0 +1,6 @@
+re/decomp/fidelity/arr3
+SimpleArray<int>::init
+SimpleArray<int>::init_len
+SimpleArray<int>::remove
+SimpleArray<int>::make_valid
+SimpleArray<int>::<ctor>

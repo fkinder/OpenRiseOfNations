@@ -1,0 +1,6 @@
+re/decomp/fidelity/cmd
+Group::action_unitmask
+Group::action_buildmask
+Group::action_guard
+Group::action_follow
+Group::action_flight

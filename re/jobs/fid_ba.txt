@@ -1,0 +1,2 @@
+re/decomp/fidelity/build
+Build::activate

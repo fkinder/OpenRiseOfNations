@@ -27,9 +27,10 @@ int isqrt_newton(int v) {
 // Map::set_map @6a1340: styles 0..5 pick one of 6..22 by a class table.
 void Gen::set_map() {
 	if (style >= 6) return;
-	// ❓ randommap-spec §2: the class bytes were read from a stack image (2 = land map, 1 = sea map, 0 = neither); the
-	// table puts Mediterranean among the land maps and Great Lakes among the sea maps, which may be mis-ordered.
-	static const int cls[17] = {0, 0, 2, 2, 2, 2, 2, 2, 1, 2, 2, 1, 1, 1, 1, 1, 1};
+	// The class table is a 19-byte stack image `00 00 | 02 02 02 02 02 02 01 02 02 01 01 01 01 01 01 01 01` read from byte 2
+	// (oracle: current 2.SVX, seed 18119929: lobby style 1 draws 13, 16, 8 and resolves to 14 = Great Lakes; three more
+	// recorded games confirm). 2 = land map, 1 = sea map: Mediterranean (12) and Warring States (15) are sea maps.
+	static const int cls[17] = {2, 2, 2, 2, 2, 2, 1, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1};
 	for (int guard = 0; guard < 4000; guard++) {
 		const int i = r.rnd(17);
 		const int s = 6 + i, c_ = cls[i];

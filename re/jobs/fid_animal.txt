@@ -1,0 +1,7 @@
+re/decomp/fidelity
+Animal::do_idle
+Animal::think_farm_animal
+Animal::think_bird
+Animal::init
+Animal::close
+Unit::do_job

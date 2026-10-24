@@ -1,0 +1,3 @@
+re/decomp/fidelity
+WorldData::is_valid
+vector_dist

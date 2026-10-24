@@ -1,0 +1,3 @@
+re/decomp/mapgen_fid
+Terrain::spot_update_land
+Terrain::spot_update_land_batch

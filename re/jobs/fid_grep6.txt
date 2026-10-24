@@ -1,0 +1,2 @@
+re/decomp/fidelity/grep_5c.txt
+^(MOV|ADD|SUB|LEA|IMUL) .*\[[A-Z]+ \+ 0x5c\]

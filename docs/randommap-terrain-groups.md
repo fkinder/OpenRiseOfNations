@@ -609,3 +609,13 @@ marks the unit types that become available). That belongs to the conquest campai
 | recipes | OldWorld @69c0e0, Sahara @69bf70, Amazon @69be00, Himalayas @69bc90, SouthwestMesa @69bb20, AfricanWateringHole @69b650, AustralianOutback @69a650, GreatLakes @699e40, WarringStates @698b60, NewWorld @6984d0, ColonialPowers @697dd0, EastIndies @697540, EastMeetsWest @696640, SeaPower @696080, NileDelta @695bf0, BritishIsles @695130 |
 | conquest / scenario | `MapConquest::make_continents` @68dba0, `check_sea_map` @68d1a0, `add_additional_players` @68d260, `check_starting_loc` @68d7e0, `MapScenario::make` @68c8f0, `Map::run_map_script` @68c870, `MapScript::run_map_script` @68c860 |
 | data | `mapstyles/*.xml` (`default.xml` groups and `TILESET_DATA`), `Data/tilesets.xml` (`TERRAINGROUP`), PDB types `Map` (0x2f0: `start_mode` +0x24, `start_dist` +0x28, `avoid_center` +0x2c, `avoid_continent` +0x30, `avoid_edge` +0x34, `base_edge` +0x44, `sea_map` +0x48, `avoid_modify` +0x64), `TerrainGroup` (0x9c), `TileSetGroupData` (0x40) |
+
+## Oracle: current 2.SVX (2026-10-24)
+
+Confirmed against the save (cells placed that are also in the save): home trees groups 0 and 1 30/30 each, home mountains group 2 (ranges 9,8,7,14,13) 72/73, home rocks group 3 10/10.
+
+- Pattern-0 tree sizes are rounded up to ODD (even +1), cap 9. The tree shape array is stale after a stuck growth and is reset only per clump.
+- Direction and mountain-range lists are built by head insertion: forward walks read in reverse of file order (medium list 14..7). `randomize_mountains` draws medium (`%8`) then large (`%7`).
+- `Mountains::add_mountain` @0089c2e0: mode 4 `excluding_verify` (drop_tile, region groups), mode 5 `sliding_excluding_verify` (player groups); `quick_verify_template` @00898ab0. Rings: mountain 0x10|0x40, coast 0x4, forest 0x20, rock 0x8.
+- `place_region_group`: LFSR 0xB400 walk from `idx0 = rnd % n`, orthogonal growth only, returns the last seed-drop result.
+- Open: the world-pattern mediums (group 4) do not reproduce. The saved placement order is known (r12@(8,57) r11@(93,48) r10@(8,9) ...), every position passes our acceptance rules when earlier ones are placed, but no consecutive-draw LFSR schedule (about 400k offsets tested) yields these start cells. Sea oil (group 9) matches 7/9 with a +78 draw offset, so draws are consumed differently somewhere in groups 4-8.

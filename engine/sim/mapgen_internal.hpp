@@ -241,18 +241,21 @@ public:
 	void set_oil_at(int x, int y, bool on);
 	bool available_rough_tile(int x, int y, int kind, int mount_sp, int forest_sp, int rock_sp, int coast_sp,
 	                          const GroupRun* run);
-	bool drop_tile(const GroupEntry& g, GroupRun& run, int x, int y, int stay_near);
+	bool drop_tile(const GroupEntry& g, GroupRun& run, int x, int y, int stay_near, int range_index = -1);
 	void clear_group(GroupRun& run, int type);
 	void place_oil_deposits(GroupRun& run, int count);
 	bool add_mountain(int range_index, int wx, int wy, const GroupEntry& g, int space_m, int space_f, int space_r,
-	                  int space_c, int start_min);
+	                  int space_c, int start_min, int mode);
+	bool quick_verify_template(const std::vector<Offset>& face, int wx, int wy);
 	int grow_clump(const GroupEntry& g, GroupRun& run, int cx, int cy, int size, int sx, int sy, bool has_start,
 	               Shape* shape, bool copy);
 	bool tile_tests(const GroupEntry& g, int x, int y);
+	int grow_player(const GroupEntry& g, GroupRun& run, int size, WCoord st, int smin, int smax, Shape* shape);
 	bool place_player_group(const GroupEntry& g, int type_t, int size, int p, int oilcount, int range_index,
 	                        Shape* shape, bool copy, GroupRun& run);
-	bool place_region_group(const GroupEntry& g, int type_t, int size, int rid, int range_index, int oilcount,
-	                        bool is_helping, GroupRun& run);
+	int place_region_group(const GroupEntry& g, int size, int rid, int range_index, int oilcount, GroupRun& run);
+	void run_group(size_t gi, int nc, const std::vector<int>& sizes, const std::vector<int>& oils);
+	int is_helping = 0;  // TerrainGroup::is_helping (a global of the original, set by place_all before every region group)
 	int get_range(int size);
 	void randomize_mountains();
 	std::vector<int> mountain_lists[4];  // [1] small, [2] medium, [3] large: range indices
@@ -317,6 +320,7 @@ public:
 	void note(const std::string& s) { res.notes.push_back(s); }
 };
 
+class Gen;
 int good_key(const Rules& rules, const std::string& name);
 int pool_age(const Rules& rules, int g);
 // Style index helpers

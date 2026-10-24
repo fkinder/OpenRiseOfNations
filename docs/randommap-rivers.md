@@ -265,3 +265,7 @@ Rejected candidates (acceptance fails, or `P >= 400`) still consumed their draws
 | `WorldData::has_mountain_tcoords` / `start_city_rad_wcoord` / `get_land` | 6b3050 / 6b3850 / 6b4730 | bed tests |
 | `Map` vtable | b45d68 | slots: `init_rivers` +0xc, `make_riverbeds` +0x44, `make_riverlist` +0x48, `make_rivers` +0x4c |
 | Style XML | `mapstyles/*.xml` | `RIVERLIST`, `RIVER_THRESHOLD`; rules.xml has no river constants |
+
+## Oracle: current 2.SVX (2026-10-24)
+
+River cells (0x1000): save 202, generated 157, 10 common. Rivers are made in `Terrain::init` after the waterline lists; they depend on the post-pass heights, which are not ported. Not settled by this oracle.

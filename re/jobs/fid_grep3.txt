@@ -1,0 +1,3 @@
+re/decomp/fidelity/grep_bts.txt
+^OR byte ptr \[[A-Z]+ \+ 0x2\],0x80$
+^OR byte ptr \[[A-Z]+ \+ 0x2\],0x[0-9a-f]+$

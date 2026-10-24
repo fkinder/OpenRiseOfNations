@@ -1,0 +1,2 @@
+re/decomp/fidelity/grep_7a.txt
+word ptr \[[A-Z]+ \+ 0x7a\]

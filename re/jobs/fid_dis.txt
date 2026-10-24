@@ -1,0 +1,4 @@
+re/decomp/fidelity
+Animal::do_idle
+vector_dist
+Unit::set_anim

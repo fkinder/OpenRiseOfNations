@@ -1,0 +1,3 @@
+re/decomp/fidelity
+WallData::covers_tile
+BuildData::num_gatherers

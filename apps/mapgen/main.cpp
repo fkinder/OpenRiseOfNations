@@ -2,12 +2,16 @@
 //
 // Usage: ron-mapgen <game dir> --style N|NAME --size N --seed S --nations K [--teams a,b,..] [--randomize]
 //                   [--town N] [--tribes a,b,..] [--png out.png] [--scale N] [--dump out.txt] [--quiet]
+//        ron-mapgen <game dir> --compare <file.SVX> [--style N] [--side out.png] [--quiet]
 //        ron-mapgen <game dir> --all [--seed S] [--jobs N] [--styles a-b] [--sizes a-b] [--nations a-b] [--quiet]
 //
 // --style takes a MapStyleIndex (0..5 pickers, 6..22 the shipped styles, 23 blank map) or a name ("Old World", "OLDWORLD").
 // --png writes a top-down preview (water / land by subtype / forest / mountain / rock / river / resources / goodies /
 // starts); --dump a text digest (grid hashes per layer, regions, resources, starts, empire placements, draw counts).
+// --compare loads an original save (re/oracle/Saves/*.SVX), regenerates its map from the save's setup (seed, size, lobby style,
+// nations, tribes, teams) and prints, per layer, the number of differing cells and the first one (docs/randommap-spec.md).
 // --all runs every shipped style x every map size x nations 2..8, each generation twice (determinism) and timed.
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -22,7 +26,15 @@
 
 #include <zlib.h>
 
+#include <fstream>
+#include <iterator>
+#include <set>
+
+#include "sim/datawalk.hpp"
+#include "sim/game.hpp"
 #include "sim/mapgen.hpp"
+#include "sim/trig.hpp"
+#include "sim/original_save.hpp"
 
 using namespace ron;
 using namespace ron::sim;
@@ -245,7 +257,7 @@ struct Png {
 	}
 };
 
-bool write_png(const std::string& path, const Rules& rules, const Generated& g, int scale) {
+Png render_png(const Generated& g, int scale) {
 	const World& w = g.world;
 	Png png(w.xs * scale, w.ys * scale);
 	static const uint8_t grass[4][3] = {{84, 150, 62}, {118, 156, 62}, {160, 156, 76}, {180, 150, 100}};
@@ -300,9 +312,10 @@ bool write_png(const std::string& path, const Rules& rules, const Generated& g, 
 		mark(sx, sy, 255, 255, 255, scale + 4);
 		mark(sx, sy, 230, 30, 30, scale + 1);
 	}
-	(void)rules;
-	return png.save(path);
+	return png;
 }
+
+bool write_png(const std::string& path, const Rules&, const Generated& g, int scale) { return render_png(g, scale).save(path); }
 
 // ---------------------------------------------------------------- --all
 
@@ -312,6 +325,486 @@ struct CaseResult {
 	double seconds = 0;
 	std::string error;
 };
+
+// ---------------------------------------------------------------- --compare
+
+namespace dw = ron::sim::datawalk;
+
+bool read_whole(const std::string& path, std::vector<uint8_t>& out) {
+	std::ifstream f(path, std::ios::binary);
+	if (!f) return false;
+	out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+	return true;
+}
+
+bool gunzip_maybe(const std::vector<uint8_t>& in, std::vector<uint8_t>& out) {
+	if (!(in.size() > 2 && in[0] == 0x1f && in[1] == 0x8b)) {
+		out = in;
+		return true;
+	}
+	z_stream zs{};
+	if (inflateInit2(&zs, 15 + 32) != Z_OK) return false;
+	zs.next_in = const_cast<Bytef*>(in.data());
+	zs.avail_in = uInt(in.size());
+	out.clear();
+	std::vector<uint8_t> buf(1 << 20);
+	int rc;
+	do {
+		zs.next_out = buf.data();
+		zs.avail_out = uInt(buf.size());
+		rc = inflate(&zs, Z_NO_FLUSH);
+		out.insert(out.end(), buf.data(), buf.data() + (buf.size() - zs.avail_out));
+	} while (rc == Z_OK);
+	inflateEnd(&zs);
+	return rc == Z_STREAM_END || !out.empty();
+}
+
+int64_t peek_int(const dw::Tree& t, const char* path) {
+	dw::FieldValue v;
+	std::string err;
+	return dw::read_field(t, path, v, err) ? v.i : -1;
+}
+
+// The SimpleArray<WCoord> blocks of World::walk_data part 2 / 3, in walk order: start_x, start_y, start_city_x, start_city_y,
+// oil_x, oil_y. Elements are int32 or int16 (inferred from the block size).
+std::vector<std::vector<int32_t>> world_coord_arrays(const dw::Tree& t) {
+	std::vector<std::vector<int32_t>> out;
+	const int gid = t.description().find_global("world");
+	const dw::Rec* w = gid >= 0 ? t.find_global(gid) : nullptr;
+	if (!w) return out;
+	for (const dw::Event& e : w->ev) {
+		if (e.type != 2 || !e.cd) continue;
+		std::vector<int32_t> v;
+		const size_t n = size_t(std::max(e.cd->length, 0));
+		const size_t esz = n ? e.cd->data.size() / n : 4;
+		for (size_t i = 0; i < n && (i + 1) * esz <= e.cd->data.size(); i++) {
+			const uint8_t* p = &e.cd->data[i * esz];
+			v.push_back(esz == 2 ? int32_t(int16_t(p[0] | (p[1] << 8)))
+			                     : int32_t(uint32_t(p[0]) | uint32_t(p[1]) << 8 | uint32_t(p[2]) << 16 | uint32_t(p[3]) << 24));
+		}
+		out.push_back(v);
+		if (out.size() >= 6) break;
+	}
+	return out;
+}
+
+struct Layer {
+	std::string name;
+	long diff = 0, total = 0;
+	std::string first;
+};
+
+void print_layer(const Layer& l) {
+	std::printf("  %-22s %7ld / %-7ld  %s\n", l.name.c_str(), l.diff, l.total, l.diff ? l.first.c_str() : "exact");
+}
+
+template <class F>
+Layer cell_layer(const char* name, const World& e, const World& g, F get) {
+	Layer l;
+	l.name = name;
+	l.total = e.size;
+	for (int y = 0; y < e.ys; y++) {
+		for (int x = 0; x < e.xs; x++) {
+			const long a = get(e.w(x, y)), b = get(g.w(x, y));
+			if (a != b) {
+				if (!l.diff) {
+					char buf[96];
+					std::snprintf(buf, sizeof buf, "first (%d,%d) exp=%ld got=%ld", x, y, a, b);
+					l.first = buf;
+				}
+				l.diff++;
+			}
+		}
+	}
+	return l;
+}
+
+// Bit-by-bit: for each bit the cells where only the save has it (-) and where only the generator has it (+).
+template <class F>
+void bit_layers(const char* name, int nbits, const World& e, const World& g, F get, bool tiles) {
+	const int xs = tiles ? e.tile_xs : e.xs, ys = tiles ? e.tile_ys : e.ys;
+	for (int b = 0; b < nbits; b++) {
+		long only_e = 0, only_g = 0, both = 0;
+		std::string first;
+		for (int y = 0; y < ys; y++) {
+			for (int x = 0; x < xs; x++) {
+				const bool a = (get(e, x, y) >> b) & 1, c = (get(g, x, y) >> b) & 1;
+				if (a && c) both++;
+				if (a && !c) only_e++;
+				if (!a && c) only_g++;
+				if (a != c && first.empty()) {
+					char buf[96];
+					std::snprintf(buf, sizeof buf, "first (%d,%d) exp=%d got=%d", x, y, a ? 1 : 0, c ? 1 : 0);
+					first = buf;
+				}
+			}
+		}
+		if (!only_e && !only_g && !both) continue;
+		char label[64];
+		std::snprintf(label, sizeof label, "%s bit %02d (0x%x)", name, b, 1u << b);
+		std::printf("  %-22s save %6ld  gen %6ld  both %6ld  diff %6ld (-%ld +%ld)  %s\n", label, only_e + both, only_g + both, both,
+		            only_e + only_g, only_e, only_g, first.empty() ? "exact" : first.c_str());
+	}
+}
+
+struct GoodKey {
+	int32_t type, x, y;
+	bool operator<(const GoodKey& o) const { return type != o.type ? type < o.type : x != o.x ? x < o.x : y < o.y; }
+};
+
+void compare_goods(const char* name, const Rules& rules, const std::vector<GoodObj>& e, const std::vector<GoodObj>& g) {
+	std::multiset<GoodKey> a, b;
+	std::map<int, std::pair<int, int>> by_type;
+	std::multiset<std::pair<int32_t, int32_t>> ca, cb;
+	for (const GoodObj& o : e) {
+		if (!o.alive()) continue;
+		a.insert({o.type, o.x, o.y});
+		ca.insert({o.x, o.y});
+		by_type[o.type].first++;
+	}
+	for (const GoodObj& o : g) {
+		if (!o.alive()) continue;
+		b.insert({o.type, o.x, o.y});
+		cb.insert({o.x, o.y});
+		by_type[o.type].second++;
+	}
+	long exact = 0, cells = 0;
+	for (const GoodKey& k : a) {
+		auto it = b.find(k);
+		if (it != b.end()) {
+			exact++;
+			b.erase(it);
+		}
+	}
+	for (const auto& k : ca) {
+		auto it = cb.find(k);
+		if (it != cb.end()) {
+			cells++;
+			cb.erase(it);
+		}
+	}
+	long na = 0, nb = 0;
+	for (const auto& t : by_type) {
+		na += t.second.first;
+		nb += t.second.second;
+	}
+	std::printf("  %-22s save %5ld  gen %5ld  exact (type+pos) %5ld  same position any type %5ld\n", name, na, nb, exact, cells);
+	for (const auto& t : by_type) {
+		if (t.second.first == t.second.second) continue;
+		std::printf("      type %-3d %-16s save %4d gen %4d\n", t.first, to_utf8(rules.types[size_t(t.first)].name).c_str(), t.second.first, t.second.second);
+	}
+}
+
+int run_compare(const GameFiles& files, const Rules& rules, const char* save_path, int argc, char** argv) {
+	std::vector<uint8_t> raw, save;
+	if (!read_whole(save_path, raw) || !gunzip_maybe(raw, save)) {
+		std::fprintf(stderr, "cannot read %s\n", save_path);
+		return 1;
+	}
+	auto peek = std::make_unique<dw::Tree>(dw::Description::get());
+	dw::SaveDecode sd = dw::decode_save(*peek, save.data(), save.size(), 0);
+	if (!sd.result.ok) {
+		std::fprintf(stderr, "decode failed: %s\n", sd.result.error.c_str());
+		return 1;
+	}
+	GameSetup setup;
+	setup.starting_technology = int32_t(peek_int(*peek, "game.info.starting_technology"));
+	setup.starting_technology2 = int32_t(peek_int(*peek, "game.info.starting_technology2"));
+	setup.ending_technology = int32_t(peek_int(*peek, "game.info.ending_technology"));
+	setup.game_rules = int32_t(peek_int(*peek, "game.info.game_rules"));
+	setup.flag8 = (peek_int(*peek, "game.info.flags") & 8) != 0;
+	Rules srules = rules;
+	start_game(srules, setup);
+	OriginalLoadReport rep;
+	std::unique_ptr<Game> eg = load_original_save(files, srules, nullptr, save, &rep);
+	if (!eg) {
+		std::fprintf(stderr, "load failed: %s\n", rep.error.c_str());
+		return 1;
+	}
+	Params p;
+	p.seed = uint32_t(peek_int(*peek, "game.info.seed"));
+	p.size = int(peek_int(*peek, "game.info.map_size"));
+	const int lobby_style = int(peek_int(*peek, "game.info.map_style"));
+	const int resolved_style = int(peek_int(*peek, "world.map"));
+	p.style = lobby_style;
+	if (const char* st = arg_value(argc, argv, "--style")) p.style = style_from_name(rules, st);
+	int nations = 0;
+	for (int i = 0; i < 8; i++) {
+		if (!(eg->leaders[size_t(i)].flags & 1)) continue;
+		nations = i + 1;
+		p.tribe[size_t(i)] = eg->leaders[size_t(i)].tribe;
+		p.team[size_t(i)] = eg->info.team[size_t(i)] >= 0 ? eg->info.team[size_t(i)] : 8;
+	}
+	p.nations = nations;
+	p.team_style = eg->info.team_style;
+	p.starting_town = eg->info.starting_town;
+	p.starting_resources = eg->info.starting_resources;
+	p.reveal_map = eg->info.reveal_map;
+	std::printf("save %s: frame %d seed %u size %d (%dx%d) lobby style %d resolved %d sea_map %d nations %d team_style %d town %d\n", save_path,
+	            eg->frame, p.seed, p.size, eg->world.xs, eg->world.ys, lobby_style, resolved_style, eg->world.sea_map, nations, p.team_style,
+	            p.starting_town);
+	std::printf("  tribes:");
+	for (int i = 0; i < nations; i++) std::printf(" %d", p.tribe[size_t(i)]);
+	std::printf("  teams:");
+	for (int i = 0; i < nations; i++) std::printf(" %d", p.team[size_t(i)]);
+	std::printf("\n");
+
+	Generated g;
+	run_one(files, rules, p, g);
+	if (!g.res.ok) {
+		std::fprintf(stderr, "generation failed: %s\n", g.res.error.c_str());
+		return 1;
+	}
+	const World& E = eg->world;
+	const World& G = g.world;
+	std::printf("generated: picked style %d (save %d)%s, %dx%d, world.seed %u (save %d), sea_map %d (save %d), %llu draws\n", g.res.picked_style,
+	            resolved_style, g.res.picked_style == resolved_style ? "" : " MISMATCH", G.xs, G.ys, g.res.world_seed,
+	            int(peek_int(*peek, "world.seed")), G.sea_map, E.sea_map, (unsigned long long)g.res.draws);
+	if (E.xs != G.xs || E.ys != G.ys) {
+		std::printf("map sizes differ: nothing else comparable\n");
+		return 0;
+	}
+	if (const char* cs = arg_value(argc, argv, "--cells")) {
+		// --cells x0,y0,x1,y1 [--layer land|sub|flags|region|region2|mask]: grids of the save (left) and generator (right)
+		const std::vector<int> b = parse_list(cs);
+		const char* ly = arg_value(argc, argv, "--layer");
+		const std::string layer = ly ? ly : "land";
+		const bool tiles = layer == "mask";
+		auto val = [&](const World& w, int x, int y) -> int {
+			if (layer == "mask") return w.t(x, y);
+			const WData& d = w.w(x, y);
+			return layer == "land" ? d.land : layer == "sub" ? d.land_sub : layer == "flags" ? d.flags : layer == "region" ? d.region : d.region2;
+		};
+		(void)tiles;
+		if (b.size() == 4 && layer == "feat") {
+			auto ch = [](const WData& d) -> char {
+				if (World::is_ocean(d)) return d.land == 1 ? '-' : '~';
+				if (d.flags & 0x1000) return 'r';
+				if (d.flags & 0x10) return 'M';
+				if (d.flags & 0x08) return 'R';
+				if (d.flags & 0x20) return 'F';
+				if (d.flags & 0x800) return 'o';
+				if (d.flags & 0x100) return 'h';
+				if (d.flags & 0x04) return 'c';
+				return '.';
+			};
+			for (int y = b[1]; y <= b[3]; y++) {
+				std::string l, r;
+				for (int x = b[0]; x <= b[2]; x++) l += ch(E.w(x, y));
+				for (int x = b[0]; x <= b[2]; x++) r += ch(G.w(x, y));
+				std::printf("%3d | %s | %s\n", y, l.c_str(), r.c_str());
+			}
+		} else if (b.size() == 4) {
+			for (int y = b[1]; y <= b[3]; y++) {
+				std::string l, r;
+				char t[16];
+				for (int x = b[0]; x <= b[2]; x++) {
+					std::snprintf(t, sizeof t, layer == "flags" || layer == "mask" ? "%04x " : "%3d ", val(E, x, y));
+					l += t;
+					std::snprintf(t, sizeof t, layer == "flags" || layer == "mask" ? "%04x " : "%3d ", val(G, x, y));
+					r += t;
+				}
+				std::printf("%3d | %s | %s\n", y, l.c_str(), r.c_str());
+			}
+		}
+		return 0;
+	}
+	if (has_flag(argc, argv, "--table")) {
+		// contingency of the generator's cell class (water / coast flag) against the save's land, half-land and coast bits
+		std::map<std::string, int> tab;
+		for (int y = 0; y < E.ys; y++) {
+			for (int x = 0; x < E.xs; x++) {
+				const WData& a = E.w(x, y);
+				const WData& b = G.w(x, y);
+				char k[160];
+				std::snprintf(k, sizeof k, "gen[%s%s] -> save[land=%d half=%d coast=%d c400=%d]", World::is_ocean(b) ? "water" : "land",
+				              (b.flags & 4) ? "+coast" : "", a.land, (a.flags & 0x100) ? 1 : 0, (a.flags & 4) ? 1 : 0, (a.flags & 0x400) ? 1 : 0);
+				tab[k]++;
+			}
+		}
+		for (const auto& kv : tab) std::printf("  %6d  %s\n", kv.second, kv.first.c_str());
+		return 0;
+	}
+	if (has_flag(argc, argv, "--mlist")) {
+		std::printf("save mountains in placement order (range at wx,wy):");
+		for (const PlacedRange& pr : eg->mountains) std::printf(" r%d@(%d,%d)", pr.range, pr.wx, pr.wy);
+		std::printf("\ngenerated:");
+		for (const PlacedMountain& pm : g.res.mountains) std::printf(" r%d@(%d,%d)", pm.range, pm.wx, pm.wy);
+		std::printf("\n");
+		return 0;
+	}
+	if (has_flag(argc, argv, "--mstat")) {
+		// distance statistics of the save's mountain cells (flag 0x10): to water (is_ocean or half-land), to the nearest start, to the map edge
+		std::map<int, int> dw, ds, de;
+		for (int y = 0; y < E.ys; y++)
+			for (int x = 0; x < E.xs; x++) {
+				if (!(E.w(x, y).flags & 0x10)) continue;
+				int bw = 99, bs = 99;
+				for (int yy = 0; yy < E.ys; yy++)
+					for (int xx = 0; xx < E.xs; xx++) {
+						const WData& d = E.w(xx, yy);
+						if (World::is_ocean(d) || (d.flags & 0x100)) bw = std::min(bw, vector_dist(xx - x, yy - y));
+					}
+				for (const auto& sp : g.res.starts) bs = std::min(bs, vector_dist(sp[0] - x, sp[1] - y));
+				dw[bw]++;
+				ds[std::min(bs, 40)]++;
+				de[std::min(std::min(x, y), std::min(E.xs - 1 - x, E.ys - 1 - y))]++;
+			}
+		std::printf("mountain cells: distance to water (incl. half):");
+		for (auto& kv : dw) std::printf(" %d:%d", kv.first, kv.second);
+		std::printf("\n distance to the nearest start:");
+		for (auto& kv : ds) std::printf(" %d:%d", kv.first, kv.second);
+		std::printf("\n distance to the map edge:");
+		for (auto& kv : de) std::printf(" %d:%d", kv.first, kv.second);
+		std::printf("\n");
+		return 0;
+	}
+	if (has_flag(argc, argv, "--oil")) {
+		for (int side = 0; side < 2; side++) {
+			const World& Wd = side == 0 ? E : G;
+			std::printf("%s oil cells:", side == 0 ? "save" : "gen ");
+			for (int y = 0; y < Wd.ys; y++)
+				for (int x = 0; x < Wd.xs; x++)
+					if (Wd.w(x, y).flags & 0x800) std::printf(" (%d,%d%s r%d)", x, y, World::is_ocean(Wd.w(x, y)) ? "w" : "", Wd.w(x, y).region);
+			std::printf("\n");
+		}
+		return 0;
+	}
+	if (const char* rd = arg_value(argc, argv, "--regdump")) {
+		FILE* f = std::fopen(rd, "w");
+		if (f) {
+			for (const WCoord& c : (has_flag(argc, argv, "--regdump-save") ? eg->regions : g.regions).r[size_t(std::atoi(arg_value(argc, argv, "--regid") ? arg_value(argc, argv, "--regid") : "1"))].coords) std::fprintf(f, "%d %d\n", c.x, c.y);
+			std::fclose(f);
+		}
+		return 0;
+	}
+	if (const char* rs = arg_value(argc, argv, "--regcells")) {
+		const int rid = std::atoi(rs);
+		for (int side = 0; side < 2; side++) {
+			const Regions& R = side == 0 ? eg->regions : g.regions;
+			const Region& rr = R.r[size_t(rid)];
+			std::printf("%s region %d: size %d coords %zu first:", side == 0 ? "save" : "gen ", rid, rr.size, rr.coords.size());
+			for (size_t i = 0; i < rr.coords.size() && i < 14; i++) std::printf(" (%d,%d)", rr.coords[i].x, rr.coords[i].y);
+			std::printf("\n");
+		}
+		return 0;
+	}
+	if (const char* hs = arg_value(argc, argv, "--heights")) {
+		// --heights x0,y0,x1,y1: the save's height field (vertex coordinates, (4 xs + 1) per row), rounded
+		const std::vector<int> b = parse_list(hs);
+		if (b.size() == 4) {
+			for (int y = b[1]; y <= b[3]; y++) {
+				std::printf("%3d |", y);
+				for (int x = b[0]; x <= b[2]; x++) std::printf(" %7.1f", double(eg->heights.h[size_t(y) * size_t(eg->heights.vxs) + size_t(x)]));
+				std::printf("\n");
+			}
+		}
+		return 0;
+	}
+	std::printf("\nlayer                       differing / total   first difference\n");
+	print_layer(cell_layer("land", E, G, [](const WData& d) { return long(d.land); }));
+	print_layer(cell_layer("water (is_ocean)", E, G, [](const WData& d) { return long(World::is_ocean(d) ? 1 : 0); }));
+	print_layer(cell_layer("land_sub", E, G, [](const WData& d) { return long(d.land_sub); }));
+	print_layer(cell_layer("WData.flags (all)", E, G, [](const WData& d) { return long(d.flags); }));
+	print_layer(cell_layer("region", E, G, [](const WData& d) { return long(d.region); }));
+	print_layer(cell_layer("region2", E, G, [](const WData& d) { return long(d.region2); }));
+	print_layer(cell_layer("val", E, G, [](const WData& d) { return long(d.val); }));
+	print_layer(cell_layer("goods (near bits)", E, G, [](const WData& d) { return long(d.goods); }));
+	print_layer(cell_layer("blocked", E, G, [](const WData& d) { return long(d.blocked); }));
+	print_layer(cell_layer("bad", E, G, [](const WData& d) { return long(d.bad); }));
+	print_layer(cell_layer("solid", E, G, [](const WData& d) { return long(d.solid); }));
+	{
+		Layer l;
+		l.name = "tdata (all)";
+		l.total = E.tile_size;
+		for (int y = 0; y < E.tile_ys; y++) {
+			for (int x = 0; x < E.tile_xs; x++) {
+				if (E.t(x, y) != G.t(x, y)) {
+					if (!l.diff) {
+						char buf[96];
+						std::snprintf(buf, sizeof buf, "first tile (%d,%d) exp=0x%04x got=0x%04x", x, y, E.t(x, y), G.t(x, y));
+						l.first = buf;
+					}
+					l.diff++;
+				}
+			}
+		}
+		print_layer(l);
+	}
+	std::printf("\nWData.flags bit by bit (cells: save, generated, both, differing -only save +only generated):\n");
+	bit_layers("flags", 16, E, G, [](const World& w, int x, int y) { return unsigned(w.w(x, y).flags); }, false);
+	std::printf("\nTData.mask bit by bit:\n");
+	bit_layers("tdata", 16, E, G, [](const World& w, int x, int y) { return unsigned(w.t(x, y)); }, true);
+
+	std::printf("\nregions (sizes, sorted; land 1..63 / sea 64..126):\n");
+	for (int pass = 0; pass < 2; pass++) {
+		for (int side = 0; side < 2; side++) {
+			const Regions& R = side == 0 ? eg->regions : g.regions;
+			std::vector<int> v;
+			for (int i = pass ? 64 : 1; i < (pass ? 127 : 64); i++) {
+				if (R.r[size_t(i)].size) v.push_back(R.r[size_t(i)].size);
+			}
+			std::sort(v.rbegin(), v.rend());
+			std::printf("  %s %-4s:", pass ? "sea " : "land", side == 0 ? "save" : "gen");
+			for (int s : v) std::printf(" %d", s);
+			std::printf("\n");
+		}
+	}
+
+	if (const char* side = arg_value(argc, argv, "--side")) {
+		// expected | generated | difference (red: land or coast differs; orange: forest / mountain / rock differ)
+		Generated ex;
+		ex.world = eg->world;
+		ex.goods = eg->goods;
+		ex.items = eg->items;
+		const auto arrs = world_coord_arrays(*peek);
+		if (arrs.size() >= 2) {
+			for (size_t i = 0; i < arrs[0].size() && i < arrs[1].size(); i++) ex.res.starts.push_back({arrs[0][i], arrs[1][i]});
+		}
+		const int sc = 6;
+		Png a = render_png(ex, sc), b = render_png(g, sc);
+		Png out(a.w * 3 + 8, a.h);
+		for (int y = 0; y < a.h; y++) {
+			for (int x = 0; x < a.w; x++) {
+				const uint8_t* pa = &a.rgb[(size_t(y) * size_t(a.w) + size_t(x)) * 3];
+				const uint8_t* pb = &b.rgb[(size_t(y) * size_t(b.w) + size_t(x)) * 3];
+				out.put(x, y, pa[0], pa[1], pa[2]);
+				out.put(a.w + 4 + x, y, pb[0], pb[1], pb[2]);
+				const int wx = x / sc, wy = y / sc;
+				const WData& d1 = E.w(wx, wy);
+				const WData& d2 = G.w(wx, wy);
+				uint8_t r = 40, gg = 40, bl = 40;
+				if (d1.land != d2.land || (d1.flags & 0x104) != (d2.flags & 0x104)) r = 230, gg = 40, bl = 40;
+				else if ((d1.flags & 0x78) != (d2.flags & 0x78)) r = 230, gg = 150, bl = 30;
+				else if (d1.flags != d2.flags) r = 120, gg = 120, bl = 200;
+				out.put(a.w * 2 + 8 + x, y, r, gg, bl);
+			}
+		}
+		if (!out.save(side)) std::fprintf(stderr, "cannot write %s\n", side);
+	}
+
+	std::printf("\nresources / goodies:\n");
+	compare_goods("goods", rules, eg->goods, g.goods);
+	compare_goods("goodies (items)", rules, eg->items, g.items);
+
+	const auto arrays = world_coord_arrays(*peek);
+	if (arrays.size() >= 2) {
+		std::printf("\nstart positions (save World.start_x/y vs generator):\n  save:");
+		for (size_t i = 0; i < arrays[0].size() && i < arrays[1].size(); i++) std::printf(" (%d,%d)", arrays[0][i], arrays[1][i]);
+		std::printf("\n  gen: ");
+		for (const auto& s : g.res.starts) std::printf(" (%d,%d)", s[0], s[1]);
+		std::printf("\n");
+		if (arrays.size() >= 6) {
+			std::printf("  oil save:");
+			for (size_t i = 0; i < arrays[4].size() && i < arrays[5].size(); i++) std::printf(" (%d,%d)", arrays[4][i], arrays[5][i]);
+			std::printf("\n  oil gen: ");
+			for (const auto& s : g.res.oil_locations) std::printf(" (%d,%d)", s[0], s[1]);
+			std::printf("\n");
+		}
+	}
+	return 0;
+}
+
 
 }  // namespace
 
@@ -331,6 +824,8 @@ int main(int argc, char** argv) {
 		const bool quiet = has_flag(argc, argv, "--quiet");
 		const char* sa = arg_value(argc, argv, "--seed");
 		const uint32_t base_seed = sa ? uint32_t(std::strtoul(sa, nullptr, 0)) : 12345u;
+
+		if (const char* cmp = arg_value(argc, argv, "--compare")) return run_compare(files, rules, cmp, argc, argv);
 
 		if (has_flag(argc, argv, "--all")) {
 			int s_lo = 6, s_hi = 23, z_lo = 0, z_hi = 6, n_lo = 2, n_hi = 8;

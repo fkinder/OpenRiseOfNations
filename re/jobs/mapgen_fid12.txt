@@ -1,0 +1,4 @@
+re/decomp/mapgen_fid
+Mountains::add_mountain
+Mountains::excluding_verify
+Mountains::quick_verify_template

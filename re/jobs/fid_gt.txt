@@ -1,0 +1,6 @@
+re/decomp/fidelity/guy
+Guy::turn_towards
+Guy::get_turn_speed
+Guy::get_speed
+Guy::set_new_location
+Guy::inc_time

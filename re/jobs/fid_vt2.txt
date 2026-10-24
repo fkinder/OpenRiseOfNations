@@ -1,0 +1,3 @@
+re/decomp/fidelity/vt_build.txt
+Build
+Wall

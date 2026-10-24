@@ -1,0 +1,6 @@
+re/decomp/fidelity/arr2
+.*PAVGuy.*Array::make_valid
+.*SimpleArray.*make_valid
+.*Stack.*PathData.*push
+.*Stack.*PathData.*increase.*
+.*Stack.*PathData.*make_valid

@@ -1,0 +1,3 @@
+re/decomp/fidelity/rng_callers.txt
+CALL 0x00a39d70
+CALL 0x00a39cf0

@@ -1,0 +1,3 @@
+re/decomp/fidelity/spd
+UnitData::get_speed
+Unit::update_speed

@@ -1,0 +1,3 @@
+re/decomp/mapgen_fid
+Terrain::check_and_set_coastal
+TerrainOut::sort_waterline_wcoords

@@ -1,0 +1,2 @@
+re/decomp/fidelity/farm
+Animal::think_farm_animal

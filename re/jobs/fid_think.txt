@@ -1,0 +1,4 @@
+re/decomp/fidelity/think
+Unit::think
+Unit::do_idle
+Unit::check_idle

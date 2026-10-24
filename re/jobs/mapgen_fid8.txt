@@ -1,0 +1,4 @@
+re/decomp/mapgen_fid
+TerrainOut::determine_land_height_color
+TerrainOut::find_closest_coordinfo
+TerrainOut::generate_land

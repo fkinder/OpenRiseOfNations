@@ -1,0 +1,2 @@
+re/decomp/fidelity/grep_800000.txt
+0x800000\b

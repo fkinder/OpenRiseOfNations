@@ -309,3 +309,7 @@ there). `find_avail_regions`' list is in descending id order (§5). `find_region
 
 Open ❓: (1) the `pattern` fallback for an unknown name; (2) `get_age_slow` for goods (Sulphur early/late); (3) draws inside
 `Objects::init_unit` / `Unit::set_new_location` during `Herd::create_units` (none seen in `find_nearby_spot`).
+
+## Oracle: current 2.SVX (2026-10-24)
+
+Goods: save 80, generated 87 (12 exact type+position). Fish 33 vs 38, relics and wine exist in the save and not in the output. Helping fairness is confirmed (the lagging player gets extra oil). Positions follow group placement, so they stay off until the group 4-8 draw schedule is solved.

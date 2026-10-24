@@ -1,0 +1,3 @@
+re/decomp/mapgen_fid/callers_halfland.txt
+6
+Terrain::check_and_set_halfland

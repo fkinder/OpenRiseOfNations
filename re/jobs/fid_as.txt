@@ -1,0 +1,2 @@
+re/decomp/fidelity/fog
+AnimalData::is_seen

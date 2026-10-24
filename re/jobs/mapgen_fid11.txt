@@ -1,0 +1,4 @@
+re/decomp/mapgen_fid
+TerrainGroup::place_region_group
+TerrainGroup::place_player_group
+TerrainGroup::randomize_orthogs

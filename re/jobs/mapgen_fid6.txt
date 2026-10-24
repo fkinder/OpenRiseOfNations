@@ -1,0 +1,8 @@
+re/decomp/mapgen_fid
+TerrainOut::get_vert_codes
+TerrainOut::find_closest_coordinfo
+TerrainOut::smooth_tcoord
+TerrainOut::fill_coord_info_mapper
+TerrainOut::build_coastal_data
+TerrainOut::generate_water
+Terrain::move_ocean_goody

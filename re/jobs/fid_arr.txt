@@ -1,0 +1,4 @@
+re/decomp/fidelity/arr
+.*ArrayBaseSimpleCopy.*increase_size
+.*SimpleArray.*increase_size
+.*ObjectArray.*increase_size

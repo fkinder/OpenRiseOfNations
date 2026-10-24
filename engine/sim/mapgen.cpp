@@ -47,6 +47,7 @@ std::string style_name(const Rules& rules, int style) {
 	return "?";
 }
 
+
 Gen::Gen(Context& ctx, const Params& p, Result& out)
     : c(ctx), P(p), res(out), r(ctx.rng), w(ctx.world), rg(ctx.regions), rules(ctx.rules) {
 	nations = std::max(1, std::min(8, p.nations));
@@ -126,7 +127,16 @@ void Gen::build_game() {
 	// step 4: Map::new_map, Map::make
 	if (P.style < 0 || P.style >= kStyleConquest) throw std::runtime_error("map style " + std::to_string(P.style) + " is not a random map style");
 	res.style = P.style;
-	set_map();
+	{
+		// oracle: current 2.SVX (lobby style 1 -> 14, seed 18119929): the picks of Map::set_map are d1..d3 of the stream, and
+		// the tileset (d1, d2: early_autumn), base_edge (d3) and the Great Lakes start angle (d4, d5) that follow reuse the
+		// same draws: game_random is back at its post-world.seed state after the pick (the draws of the pick are not kept).
+		const uint32_t after_world_seed = c.rng.seed();
+		const uint64_t draws0 = r.draws;
+		set_map();
+		c.rng.reseed(after_world_seed);
+		r.draws = draws0;
+	}
 	res.picked_style = style;
 	phase("set_map");
 	w.init(xs, ys);

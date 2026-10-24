@@ -1,0 +1,6 @@
+re/decomp/fidelity/move
+Unit::do_move
+Unit::kill_current_order
+Unit::work
+Unit::update_order
+Unit::update_action

@@ -1,0 +1,4 @@
+re/decomp/fidelity/air
+Unit::do_air_patrol
+Unit::do_air_physics
+Unit::add_air_patrol_order

@@ -1,0 +1,4 @@
+re/decomp/mapgen_fid
+TerrainOut::generate_land
+TerrainOut::generate_land_lists
+Terrain::convert_beach_to_sandy

@@ -1,0 +1,6 @@
+re/decomp/fidelity
+Objects::process_all
+Animal::process
+Animal::work
+Herds::process
+Herd::process

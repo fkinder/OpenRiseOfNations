@@ -305,3 +305,12 @@ and `(flags & 3) ≠ 3`, `WData.flags` bit 15 clear → `Objects::init_unit(who,
 2. `WData.val` before `compute_all_vals` (the `d` of the base generator): what writes it ❓.
 3. Nothing is validated against the original: a recorded random game (seed, style, size, players) from the Windows
    build is the oracle; until then only plausibility (land fraction, start spacing, resource counts) can be checked.
+
+## Oracle: current 2.SVX (2026-10-24)
+
+Checked against `re/oracle/Saves/current 2.SVX` (seed 18119929, 100x100, lobby style 1 resolved to 14, Great Lakes) with `ron-mapgen --compare`.
+
+- `Map::set_map` class table (stack image from byte 2): `{2,2,2,2,2,2,1,2,2,1,1,1,1,1,1,1,1}`, index i is style 6+i, 2 = land map, 1 = sea map. The earlier table was two bytes misaligned (picked 15, the save has 14).
+- The style-pick draws are rewound: `game_random` returns to its state after `world.seed`, so the tileset draws and base_edge reuse them; the Great Lakes start angle is draws (d4, d5).
+- Confirmed exact: `world.seed`, the five start positions (`angle = (d4%0xffff)<<16 + d5%0xffff`, step `0xffffffff/5`), the lake shapes.
+- Not ported: the `Terrain::init` post-pass on WData (half-land 0x100, shelf `land == 1`, COAST changes, region2, water tcoords, heights). It accounts for all remaining land/region differences (342 cells `is_ocean`).

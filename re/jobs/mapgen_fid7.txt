@@ -1,0 +1,9 @@
+re/decomp/mapgen_fid
+TerrainOut::build_ocean_floor
+TerrainOut::calculate_norms
+TerrainOut::recolor_mountain_verts
+TerrainOut::rebuild_terrain_lists
+TerrainOut::add_update_wcoord
+TerrainOut::mark_coast_vert_influence
+Terrain::clear_halfland_wcoord
+TerrainOut::refresh_data

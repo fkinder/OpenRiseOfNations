@@ -1,0 +1,3 @@
+re/decomp/fidelity/grep_newunits.txt
+(OR|AND|TEST|XOR) .*0x800000$
+(OR|AND) .*0xff7fffff$

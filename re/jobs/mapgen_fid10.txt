@@ -1,0 +1,10 @@
+re/decomp/mapgen_fid
+Mountains::add_mountain
+Mountains::quick_verify_template
+Mountains::verify_template
+Mountains::excluding_verify
+Mountains::sliding_excluding_verify
+Mountains::sliding_verify
+Mountains::set_behind_flags
+Mountains::set_edge_flags
+Mountains::add_range

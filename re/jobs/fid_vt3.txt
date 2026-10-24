@@ -1,0 +1,4 @@
+re/decomp/fidelity/vt_ot.txt
+BuildTypeData
+BuildType
+UnitType
