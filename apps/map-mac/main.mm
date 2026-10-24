@@ -93,6 +93,7 @@
 #include "sim/commands.hpp"
 #include "sim/game.hpp"
 #include "sim/garrison.hpp"
+#include "sim/newgame.hpp"
 #include "sim/rules.hpp"
 #include "sim/rules_xml.hpp"
 #include "sim/save.hpp"
@@ -382,6 +383,8 @@ static int64_t sim_key(int32_t who, int32_t o, int32_t guy = 0) { return (int64_
 // GameInfo difficulty from --difficulty (0 easiest .. 5; -1 keeps the default 2). AI armies only attack once they
 // have enough standard units for the current military epoch (ai-spec find_target); in tut5 that takes difficulty 4.
 static int g_difficulty = -1;
+// --all-ai: every seat of a --random game is a computer player (AI-versus-AI checks).
+static bool g_randomAllAi = false;
 
 // Debugging aid: RON_SKIP=floor,land,trans,coral,water skips those passes.
 static bool debug_skip(const char* pass) {
@@ -399,6 +402,14 @@ static bool debug_skip(const char* pass) {
                       simulate:(BOOL)simulate
                           seed:(uint32_t)seed
                          error:(NSString* __autoreleasing*)error;
+// A random-map skirmish (sim/newgame.hpp): `setup` from the setup screen, or `spec` (the --random option text) when setup is null.
++ (instancetype)randomGameWithDevice:(id<MTLDevice>)device
+                             gameDir:(NSString*)dir
+                               setup:(const ron::sim::RandomGameSetup*)setup
+                                spec:(NSString*)spec
+                               error:(NSString* __autoreleasing*)error;
+// Headless: per-leader census of the simulation (units, buildings, population, stockpiles, age) printed to stdout.
+- (void)printCensus;
 - (void)lookAtX:(float)x y:(float)y;
 - (BOOL)placeBuilding:(const std::string&)name x:(float)x y:(float)y team:(int)team;
 - (BOOL)placeUnit:(const std::string&)name x:(float)x y:(float)y angle:(float)deg team:(int)team;
@@ -587,7 +598,10 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	std::unique_ptr<ron::sim::Rules> _simRules;
 	std::unique_ptr<ron::sim::AssetAnimSource> _art;  // animation lengths and graphics pieces (docs/anim-spec.md)
 	std::unique_ptr<ron::sim::Game> _game;
-	std::string _scenarioPath;  // the scenario file as Game::load got it (a save records it relative to the install)
+	std::string _scenarioPath;  // the scenario file as Game::load got it (a save records it relative to the install); a random game: its setup text
+	BOOL _randomActive;         // a random-map skirmish (sim/newgame.hpp) instead of a scenario file
+	ron::sim::RandomGameSetup _randomSetup;
+	std::string _randomSpec;    // the --random option text, parsed once the rules are loaded
 	std::unordered_map<int32_t, int> _pieceGraphic;    // gpiece -> unit graphic (-1: unknown)
 	ron::sim::CommandManager _cm;
 	ron::sim::GameView _prevView, _curView;
@@ -737,10 +751,43 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		const float* ud = _lighting.unit_diffuse;
 		_units.set_unit_material(simd_make_float4(ua[0], ua[1], ua[2], 1), simd_make_float4(ud[0], ud[1], ud[2], 1));
 		_ammo = ron::load_ammo_catalog(files, anim_names);
-		std::string path = scenarioPath.UTF8String;
-		if (!files.resolve(path).empty()) path = files.resolve(path);  // allow paths relative to the game dir
+		std::string path;
+		ron::Scenario sc;
+		std::unique_ptr<ron::sim::Game> randomGame;
+		if (_randomActive) {
+			// Setup::build_game for a random map: the game first, then the scenario-shaped records the renderer draws from.
+			_simRules = std::make_unique<ron::sim::Rules>(ron::sim::load_rules(files));
+			ron::sim::start_game(*_simRules, ron::sim::GameSetup());
+			_art = ron::sim::load_anim_source(files, *_simRules);
+			if (!_randomSpec.empty()) {
+				const std::string perr = ron::sim::parse_random_option(*_simRules, _randomSpec, _randomSetup);
+				if (!perr.empty()) {
+					*error = @(perr.c_str());
+					return nil;
+				}
+				if (g_randomAllAi) {
+					for (ron::sim::NationSetup& n : _randomSetup.nation) n.human = false;
+				}
+				if (g_difficulty >= 0) {
+					for (ron::sim::NationSetup& n : _randomSetup.nation) n.difficulty = g_difficulty;
+				}
+			}
+			ron::sim::RandomExtras extras;
+			randomGame = ron::sim::new_random_game(files, *_simRules, _art.get(), _randomSetup, &extras);
+			if (!randomGame) {
+				*error = [NSString stringWithFormat:@"The random map could not be generated: %s", extras.error.c_str()];
+				return nil;
+			}
+			_randomSetup = extras.setup;
+			_simSeed = extras.setup.seed;
+			path = ron::sim::random_setup_string(extras.setup);
+			sc = std::move(extras.scenario);
+		} else {
+			path = scenarioPath.UTF8String;
+			if (!files.resolve(path).empty()) path = files.resolve(path);  // allow paths relative to the game dir
+			sc = ron::parse_scenario(ron::read_file(path));
+		}
 		_scenarioPath = path;
-		const ron::Scenario sc = ron::parse_scenario(ron::read_file(path));
 		const ron::Tileset ts = ron::load_tileset(files, sc.terrain.tileset);
 		const std::vector<ron::TransitionMask> masks = ron::load_transition_masks(files);
 		_mesh = ron::build_terrain_mesh(sc.terrain, ts, &masks, sc.world_seed);
@@ -829,21 +876,25 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		std::printf("transitions: %zu patches in %zu batches\n", patches, _transitions.size());
 
 		// The scenario's objects (docs/scenario-objects-spec.md): buildings, cities and units with their graphics.
-		const std::string rel = path.rfind(files.root() + "/", 0) == 0 ? path.substr(files.root().size() + 1) : path;
+		const std::string rel = _randomActive ? std::string() : path.rfind(files.root() + "/", 0) == 0 ? path.substr(files.root().size() + 1) : path;
 		const ron::Battlefield bf = ron::resolve_battlefield(files, sc, rel, ron::load_rules(files),
 		                                                     _builds, _units.units());
 		if (_simEnabled) {
 			try {
-				_simRules = std::make_unique<ron::sim::Rules>(ron::sim::load_rules(files));
-				ron::sim::start_game(*_simRules, ron::sim::GameSetup());
-				_art = ron::sim::load_anim_source(files, *_simRules);
-				_game = std::make_unique<ron::sim::Game>();
-				_game->anims = _art.get();
-				if (g_difficulty >= 0) _game->info.difficulty = uint8_t(g_difficulty);
-				_game->load(files, sc, *_simRules, _simSeed);
-				// Scenario, general powers and AI production scripts (sim/script_host.hpp).
-				const ron::sim::ScriptLoadReport srep = ron::sim::script_host_load(*_game, files, path, sc);
-				for (const std::string& e : srep.errors) std::fprintf(stderr, "script: %s\n", e.c_str());
+				if (randomGame) {
+					_game = std::move(randomGame);  // built above, scripts included
+				} else {
+					_simRules = std::make_unique<ron::sim::Rules>(ron::sim::load_rules(files));
+					ron::sim::start_game(*_simRules, ron::sim::GameSetup());
+					_art = ron::sim::load_anim_source(files, *_simRules);
+					_game = std::make_unique<ron::sim::Game>();
+					_game->anims = _art.get();
+					if (g_difficulty >= 0) _game->info.difficulty = uint8_t(g_difficulty);
+					_game->load(files, sc, *_simRules, _simSeed);
+					// Scenario, general powers and AI production scripts (sim/script_host.hpp).
+					const ron::sim::ScriptLoadReport srep = ron::sim::script_host_load(*_game, files, path, sc);
+					for (const std::string& e : srep.errors) std::fprintf(stderr, "script: %s\n", e.c_str());
+				}
 				_curView = ron::sim::make_view(*_game);
 				_prevView = _curView;
 				[self indexPrevView];
@@ -899,6 +950,11 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		}
 		std::printf("objects: %zu buildings, %zu units, %zu goods, %zu farms (%zu animal pens), %zu without a graphic\n", nb, nu,
 		            _placedGoods.size(), _farms.size(), pens, bf.unresolved.size());
+		if (getenv("RON_UNRESOLVED")) {
+			std::map<std::string, int> counts;
+			for (const std::string& u : bf.unresolved) counts[u]++;
+			for (const auto& [name, n] : counts) std::printf("  unresolved: %s x%d\n", name.c_str(), n);
+		}
 		for (size_t i = 0; i < 8; i++) {
 			if (sc.camera_x[i] >= 0 && sc.camera_y[i] >= 0) {
 				_startCamera = simd_make_float3(float(sc.camera_x[i]), float(sc.camera_y[i]), 0);
@@ -976,6 +1032,59 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		}
 	}
 	return self;
+}
+
++ (instancetype)randomGameWithDevice:(id<MTLDevice>)device
+                             gameDir:(NSString*)dir
+                               setup:(const ron::sim::RandomGameSetup*)setup
+                                spec:(NSString*)spec
+                               error:(NSString* __autoreleasing*)error {
+	MapRenderer* r = [MapRenderer alloc];
+	r->_randomActive = YES;
+	if (setup) r->_randomSetup = *setup;
+	else if (spec) r->_randomSpec = spec.UTF8String;
+	return [r initWithDevice:device gameDir:dir scenario:@"" simulate:YES seed:(setup ? setup->seed : 1) error:error];
+}
+
+// Headless census (--census): what each seat owns after the frames ran. The AI's own counters (units / buildings / training
+// queues) show that it builds and trains; stockpiles show the economy running.
+- (void)printCensus {
+	if (!_game) return;
+	std::printf("census at frame %d (tick %d), %zu events\n", _game->frame, _game->tick, _game->events.size());
+	for (int who = 0; who < 8; who++) {
+		const ron::sim::Leader& L = _game->leaders[size_t(who)];
+		if (!(L.flags & ron::sim::leaderflag::kValid)) continue;
+		const ron::sim::ObjectList& ol = _game->objects[size_t(who)];
+		int units = 0, citizens = 0, military = 0, builds = 0, sites = 0, queued = 0, cities = 0;
+		std::map<std::string, int> kinds;
+		for (int o = 0; o < ol.unit_mark; o++) {
+			const ron::sim::Unit* u = _game->unit(who, o);
+			if (!u || !u->alive()) continue;
+			units++;
+			if (u->type == ron::sim::ptype::kPeasants) citizens++;
+			else if (u->ptype && u->ptype->attack > 0) military++;
+		}
+		for (int o = ron::sim::kBuildBase; o < ol.build_mark; o++) {
+			const ron::sim::Build* b = _game->build(who, o);
+			if (!b || !b->alive()) continue;
+			if (b->flags & ron::sim::objflag::kActive) {
+				builds++;
+				kinds[ron::sim::to_utf8(_game->type(b->type).name)]++;
+			} else {
+				sites++;
+			}
+			if (b->flags & ron::sim::objflag::kCity) cities++;
+			queued += b->build_queue.queue_size;
+		}
+		std::string bl;
+		for (const auto& [name, n] : kinds) bl += (bl.empty() ? "" : ", ") + name + (n > 1 ? " x" + std::to_string(n) : std::string());
+		std::printf("  seat %d %s tribe %d %s age %d: %d units (%d citizens, %d military), %d buildings + %d sites, %d cities, %d queued, "
+		            "stock F%d T%d W%d K%d M%d O%d pop %d/%d\n",
+		            who, (L.flags & ron::sim::leaderflag::kHuman) ? "human" : "AI", L.tribe, L.name.c_str(), L.age, units, citizens,
+		            military, builds, sites, cities, queued, L.bucket[0], L.bucket[1], L.bucket[2], L.bucket[3], L.bucket[4],
+		            L.bucket[5], L.control, L.pop_cap);
+		if (!bl.empty()) std::printf("      buildings: %s\n", bl.c_str());
+	}
 }
 
 // Batches every tree into one vertex buffer (CPU-transformed rest poses) with an index list per texture slot.
@@ -5020,6 +5129,29 @@ static int vk_of(NSEvent* e) {
 	});
 }
 
+// A random-map skirmish from the setup screen (sim/newgame.hpp): the map is generated, then the game opens as for a scenario.
+- (void)frontEndPlayRandom:(const ron::sim::RandomGameSetup&)setup {
+	const ron::sim::RandomGameSetup copy = setup;
+	[self.menu setBusy:@"Generating the map…"];
+	[self.view draw];
+	dispatch_async(dispatch_get_main_queue(), ^{
+		NSString* err = nil;
+		MapRenderer* r = [MapRenderer randomGameWithDevice:self.device gameDir:self.gameDir setup:&copy spec:nil error:&err];
+		if (!r) {
+			[self.menu setBusy:nil];
+			[self.menu showError:[NSString stringWithFormat:@"Could not create the map: %@", err ?: @"unknown error"]];
+			return;
+		}
+		const CGSize ds = self.view.drawableSize;
+		const float scale = float(self.window.backingScaleFactor > 0 ? self.window.backingScaleFactor : 1);
+		[r setUiWidth:int(ds.width) height:int(ds.height) scale:scale];
+		[self.menu stopAudio];
+		self.view.frontEnd = nil;
+		self.menu = nil;
+		[self attachGame:r];
+	});
+}
+
 - (void)frontEndChangeFolder {
 	NSString* dir = launcher::choose_install(self.gameDir);
 	if (!dir || [dir isEqualToString:self.gameDir]) return;
@@ -5101,7 +5233,8 @@ int main(int argc, const char* argv[]) {
 		};
 		std::vector<QueueArg> queues;
 		bool sel_builds = false;
-		NSString *load_game = nil, *save_game = nil;
+		NSString *load_game = nil, *save_game = nil, *random_spec = nil;
+		bool census = false;
 		std::vector<int32_t> sel_objs;
 		float place_x = 0, place_y = 0;
 		uint32_t seed = 12345;
@@ -5141,6 +5274,12 @@ int main(int argc, const char* argv[]) {
 				load_game = @(argv[++i]);
 			} else if (a == "--save-game" && more) {
 				save_game = @(argv[++i]);
+			} else if (a == "--random" && more) {
+				random_spec = @(argv[++i]);  // STYLE,SIZE,SEED,NATIONS[,TRIBES...]: a random-map skirmish (sim/newgame.hpp)
+			} else if (a == "--all-ai") {
+				g_randomAllAi = true;  // every seat of the --random game is a computer player
+			} else if (a == "--census") {
+				census = true;  // print the per-seat census after the frames
 			} else if (a == "--size" && more) {
 				std::sscanf(argv[++i], "%dx%d", &w, &h);
 			} else if (a == "--build" && more) {
@@ -5287,14 +5426,15 @@ int main(int argc, const char* argv[]) {
 				bloom = false;
 			} else if (a == "--menu") {
 				menu = true;
-				static const char* const screens[] = {"main", "tutorials", "skirmish", "scenarios", "quit-popup"};
+				static const char* const screens[] = {"main", "tutorials", "skirmish", "skirmish-setup", "scenarios", "quit-popup"};
 				for (const char* sname : screens) {
 					if (more && std::strcmp(argv[i + 1], sname) == 0) menuScreen = @(argv[++i]);
 				}
 			} else if (a.rfind("--", 0) == 0) {
-				std::printf("usage: %s [game-dir] [--menu [main|tutorials|skirmish|scenarios|quit-popup]] [--snapshot out.png [--size WxH]]\n"
+				std::printf("usage: %s [game-dir] [--menu [main|tutorials|skirmish|skirmish-setup|scenarios|quit-popup]] [--snapshot out.png [--size WxH]]\n"
+				            "       %s [game-dir] --random STYLE,SIZE,SEED,NATIONS[,TRIBES...] [--all-ai] [--difficulty 0..5] [--frames N] [--census] [--save-game FILE] [--snapshot out.png]\n"
 				            "       %s [game-dir] <scenario.scx> [--zoom 0..6] [--at X,Y] [--no-bloom] [--farm-time S] [--no-sim] [--seed S] "
-				            "[--move WHO:o1,o2@X,Y[@FRAME]]... [--frames N] [--load-game FILE] [--save-game FILE] [--snapshot out.png [--size WxH]]\n", argv[0], argv[0]);
+				            "[--move WHO:o1,o2@X,Y[@FRAME]]... [--frames N] [--load-game FILE] [--save-game FILE] [--snapshot out.png [--size WxH]]\n", argv[0], argv[0], argv[0]);
 				return a == "--help" ? 0 : 2;
 			} else {
 				if (a.rfind("-psn_", 0) != 0) positional.push_back(@(argv[i]));  // Finder's process serial number
@@ -5307,7 +5447,7 @@ int main(int argc, const char* argv[]) {
 			if (launcher::looks_like_install(positional[0])) explicitDir = gameDir = positional[0];
 			else scenario = positional[0];
 		}
-		if (!scenario) menu = true;
+		if (!scenario && !random_spec) menu = true;
 		if (menu) {
 			// The front end: headless with --snapshot, else the app opens its window on the Main Menu.
 			id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -5339,7 +5479,8 @@ int main(int argc, const char* argv[]) {
 			return 1;
 		}
 		NSString* error = nil;
-		MapRenderer* r = [[MapRenderer alloc] initWithDevice:device gameDir:gameDir scenario:scenario simulate:simulate seed:seed error:&error];
+		MapRenderer* r = random_spec ? [MapRenderer randomGameWithDevice:device gameDir:gameDir setup:nullptr spec:random_spec error:&error]
+		                             : [[MapRenderer alloc] initWithDevice:device gameDir:gameDir scenario:scenario simulate:simulate seed:seed error:&error];
 		if (!r) {
 			std::fprintf(stderr, "%s\n", error.UTF8String);
 			return 1;
@@ -5407,6 +5548,7 @@ int main(int argc, const char* argv[]) {
 			if (f < sim_frames) [r stepSimulation:1];
 		}
 		if (select_all) [r selectAll];
+		if (census) [r printCensus];
 		if (save_game && ![r saveGameTo:save_game]) {
 			std::fprintf(stderr, "--save-game failed\n");
 			return 1;

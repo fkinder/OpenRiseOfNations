@@ -23,8 +23,11 @@
 #import <QuartzCore/QuartzCore.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <functional>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -61,21 +64,22 @@ struct MainItem {
 };
 const MainItem kMainItems[5] = {
     {"Tutorials", "Learn to play, step by step. Start with Tutorial 1.", true},
-    {"Skirmish", "Battle computer opponents on a ready-made map.", true},
+    {"Skirmish", "Battle computer opponents on a ready-made map, or set up a random map.", true},
     {"Scenarios", "Chess exercises and the battle maps of the Conquer the World campaigns.", true},
     {"Multiplayer", "Not available yet.", false},
     {"Quit", "Leave Rise of Nations and return to the desktop.", true},
 };
 
-enum Screen { kMain = 0, kTutorials, kSkirmish, kScenarios };
-const char* const kScreenNames[4] = {"main", "tutorials", "skirmish", "scenarios"};
-const char* const kListTitles[4] = {"Main Menu", "Tutorials", "Skirmish", "Scenarios"};
-const char* const kListNotes[4] = {
+enum Screen { kMain = 0, kTutorials, kSkirmish, kScenarios, kSkirmishSetup };
+const char* const kScreenNames[5] = {"main", "tutorials", "skirmish", "scenarios", "skirmish-setup"};
+const char* const kListTitles[5] = {"Main Menu", "Tutorials", "Skirmish", "Scenarios", "Skirmish Setup"};
+const char* const kListNotes[5] = {
     "",
     "Start with Tutorial 1. The tutorials guide you with voice-overs, arrows and objectives.",
-    ("You play the map's human player against computer opponents. Random maps and the full skirmish setup (nations, "
-     "teams, map size) are not supported yet."),
+    ("You play the map's human player against computer opponents. Press Random Map to choose a map style, its size, "
+     "the nations and the teams, and play on a map made for you."),
     "Chess exercises and the battle maps of the Conquer the World campaigns.",
+    "",
 };
 
 // Hit-test ids.
@@ -93,6 +97,11 @@ enum : int {
 	kTrack = 33,
 	kPopupBtn = 40,  // + button
 	kRow = 100,      // + entry
+	kRandomMap = 14,  // the Skirmish list's Random Map… button
+	kSeedField = 15,  // the setup screen's seed field and its Random button
+	kSeedRandom = 16,
+	kSetupCombo = 1000,  // + combo of the setup screen
+	kSetupItem = 2000,   // + visible item of its open list
 };
 
 struct AnimLayer {
@@ -107,13 +116,34 @@ struct Anim {
 
 constexpr int kRowH = 40;
 
+// The skirmish setup screen's controls (rebuilt from the setup every frame, frontend.mm "the skirmish setup screen").
+struct SetupCombo {
+	IfaceRect r;
+	std::vector<std::string> items;
+	int sel = 0;
+	bool enabled = true;
+	int seat = -1;  // player table row, -1 for a rules combo
+	std::string label;
+	int lx = 0, ly = 0;
+	std::function<void(int)> set;
+};
+struct SetupText {
+	int x, y;
+	std::string text;
+	int kind;  // 0 label, 1 dimmed, 2 player name
+};
+struct SetupLists {
+	bool loaded = false;
+	std::vector<std::string> style, size, town, resources, start, end, victory, elim, pop, reveal, diff, tribes;
+};
+
 struct Layout {
 	IfaceRect title, title_text, frame;
 	std::vector<IfaceRect> buttons;
 	IfaceRect info, edit, change;
 	int folder_y = 0, label_x = 0;
 	IfaceRect list_frame, list, scroll, up, down, track, thumb;
-	IfaceRect drop, back, play;
+	IfaceRect drop, back, play, rand;
 	std::vector<IfaceRect> drop_items;
 	int note_y = 0;
 	int rows = 0;
@@ -263,6 +293,15 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	double _lastClickMs;
 	int _lastClickRow;
 	NSCursor* _cursor;
+	// the skirmish setup screen (random maps; ron::sim::RandomGameSetup)
+	ron::sim::RandomGameSetup _setup;
+	SetupLists _lists;
+	std::vector<SetupCombo> _sc;
+	std::vector<SetupText> _st;
+	IfaceRect _seedRect, _seedBtn, _setupListRect;
+	int _rulesBottom, _setupListVis, _openCombo, _openTop;
+	BOOL _seedRandom, _seedFocus;
+	std::string _seedText;
 }
 
 - (NSString*)gameDir {
@@ -527,13 +566,14 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		return;
 	}
 	Screen s = kMain;
-	for (int i = 0; i < 4; i++) {
+	for (int i = 0; i < 5; i++) {
 		if ([name isEqualToString:@(kScreenNames[i])]) s = Screen(i);
 	}
 	_screen = s;
 	_sel = 0, _top0 = 0, _focus = 0;
 	_entries.clear();
-	if (s != kMain) {
+	if (s == kSkirmishSetup) [self openSetup];
+	if (s != kMain && s != kSkirmishSetup) {
 		_entries = launcher::entries_for(s == kTutorials ? launcher::Mode::Tutorials : s == kSkirmish ? launcher::Mode::Skirmish
 		                                                                                              : launcher::Mode::Scenarios,
 		                                 _dir);
@@ -670,6 +710,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		L.drop = {0, 0, 652, 673};  // placed after the label
 		L.play = {912 - 173, 912, 646, 678};
 		L.back = {L.play.l - 12 - 173, L.play.l - 12, 646, 678};
+		L.rand = {396, 546, 646, 678};
 	}
 	return L;
 }
@@ -955,6 +996,8 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	const int fb = _ui.font(14, -1);
 	[self popupButton:L.back label:"Back" state:(_pressed == kBack ? 2 : _hover == kBack ? 1 : 0) font:fb];
 	[self popupButton:L.play label:"Play" state:(_pressed == kPlay ? 2 : _hover == kPlay ? 1 : 0) font:fb];
+	if (_screen == kSkirmish)
+		[self popupButton:L.rand label:"Random Map…" state:(_pressed == kRandomMap ? 2 : _hover == kRandomMap ? 1 : 0) font:fb];
 }
 
 - (void)drawPopup {
@@ -1021,6 +1064,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	_ui.begin(_uiW, _uiH, scale, kW);
 	const Layout L = [self layout];
 	if (_screen == kMain) [self drawMain:L];
+	else if (_screen == kSkirmishSetup) [self drawSetup:L];
 	else [self drawList:L];
 	[self drawPopup];
 	_ui.encode(enc);
@@ -1082,8 +1126,10 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		if (L.change.contains(x, y)) return kChange;
 		return kNone;
 	}
+	if (_screen == kSkirmishSetup) return [self hitSetup:x y:y];
 	if (L.back.contains(x, y)) return kBack;
 	if (L.play.contains(x, y)) return kPlay;
+	if (_screen == kSkirmish && L.rand.contains(x, y)) return kRandomMap;
 	if (_screen != kTutorials) {
 		const IfaceRect drop = [self dropRect];
 		if (_dropOpen) {
@@ -1141,6 +1187,16 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 - (void)mouseDown:(CGPoint)p clicks:(NSInteger)clicks {
 	_mouse = [self canvas:p];
 	const int h = [self hit:_mouse];
+	if (_screen == kSkirmishSetup && !_popup.open) {
+		// An open list closes on a press outside it; the press itself then starts nothing.
+		if (_openCombo >= 0 && !(h >= kSetupItem && h < kSetupItem + 100) && h != kSetupCombo + _openCombo) {
+			_openCombo = -1;
+			return;
+		}
+		if (_seedFocus && h != kSeedField) _seedFocus = NO;
+		_pressed = h;
+		return;
+	}
 	if (_dropOpen && !(h >= kDropItem && h < kDropItem + 6) && h != kDrop) {
 		_dropOpen = NO;
 		return;
@@ -1189,6 +1245,16 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 
 - (void)scrollWheel:(CGFloat)dy at:(CGPoint)p {
 	if (_screen == kMain || _popup.open) return;
+	if (_screen == kSkirmishSetup) {
+		if (_openCombo >= 0 && size_t(_openCombo) < _sc.size()) {
+			static CGFloat sacc = 0;
+			sacc += dy;
+			const int n = int(_sc[size_t(_openCombo)].items.size());
+			while (sacc >= 1) _openTop = std::max(0, _openTop - 1), sacc -= 1;
+			while (sacc <= -1) _openTop = std::min(std::max(0, n - 12), _openTop + 1), sacc += 1;
+		}
+		return;
+	}
 	static CGFloat acc = 0;
 	acc += dy;
 	while (acc >= 1) [self scrollBy:-1], acc -= 1;
@@ -1237,12 +1303,40 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	if (h == kChange) {
 		[self click];
 		[self.host frontEndChangeFolder];
+	} else if (h == kBack && _screen == kSkirmishSetup) {
+		[self click];
+		[self showScreen:@"skirmish"];
 	} else if (h == kBack) {
 		[self click];
 		[self showScreen:@"main"];
 		_focus = std::max(0, int(_screen));
+	} else if (h == kPlay && _screen == kSkirmishSetup) {
+		[self playSetup];
 	} else if (h == kPlay) {
 		[self play];
+	} else if (h == kRandomMap) {
+		[self click];
+		[self showScreen:@"skirmish-setup"];
+	} else if (h == kSeedField) {
+		_seedFocus = YES;
+		_openCombo = -1;
+	} else if (h == kSeedRandom) {
+		[self click];
+		_seedRandom = YES;
+		_seedText.clear();
+		_seedFocus = NO;
+	} else if (h >= kSetupItem && h < kSetupItem + 100) {
+		[self chooseCombo:_openCombo item:_openTop + (h - kSetupItem)];
+		_openCombo = -1;
+	} else if (h >= kSetupCombo && h < kSetupCombo + 200) {
+		const int i = h - kSetupCombo;
+		if (_openCombo == i) {
+			_openCombo = -1;
+		} else if (size_t(i) < _sc.size()) {
+			_openCombo = i;
+			_seedFocus = NO;
+			_openTop = std::clamp(_sc[size_t(i)].sel - 5, 0, std::max(0, int(_sc[size_t(i)].items.size()) - 12));
+		}
 	} else if (h == kDrop) {
 		_dropOpen = !_dropOpen;
 	} else if (h >= kDropItem && h < kDropItem + 6) {
@@ -1257,6 +1351,10 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	const unichar c = chars.length ? [chars characterAtIndex:0] : 0;
 	const bool ret = c == '\r' || c == 3, esc = e.keyCode == 53;
 	_hover = kNone;
+	if (_screen == kSkirmishSetup && !_popup.open) {
+		[self setupKey:e];
+		return;
+	}
 	if (_popup.open) {
 		if (_popup.kind == 2) return;  // busy
 		if (esc) {
@@ -1312,6 +1410,402 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	_sel = std::max(0, _sel);
 	[self scrollToSelection];
 	[self remember];
+}
+
+// ---------------------------------------------------------------- the skirmish setup screen (random maps)
+
+// The original's solo setup window (setupwin.xml PLAYERSWINSOLO + RULESWIN): a players table (name, nation, who, difficulty,
+// team) on the left and the game rules as combo boxes on the right, drawn with the same pieces as the other front-end screens.
+// The lists come from Data/rules.xml (the CATEGORIES the lobby's combo boxes fill from).
+
+- (void)loadSetupLists {
+	if (_lists.loaded) return;
+	_lists.loaded = true;
+	auto trim = [](std::string s) {
+		const size_t a = s.find_first_not_of(" \t\r\n");
+		if (a == std::string::npos) return std::string();
+		return s.substr(a, s.find_last_not_of(" \t\r\n") - a + 1);
+	};
+	try {
+		const ron::XmlElement doc = ron::parse_xml(_files->read_text("Data/rules.xml"));
+		auto cats = [&](const char* id) {
+			std::vector<std::string> out;
+			ron::for_each_element(doc, "CATEGORIES", [&](const ron::XmlElement& e) {
+				if (!out.empty() || ron::to_lower(e.get("id")) != id) return;
+				for (const ron::XmlElement& c : e.children) {
+					if (c.name != "CATEGORY") continue;
+					std::string name = c.get("name");
+					if (name.rfind("#ICON", 0) == 0) {  // "#ICON90Old World": an icon id, then the name
+						size_t k = 5;
+						while (k < name.size() && name[k] >= '0' && name[k] <= '9') k++;
+						name = name.substr(k);
+					}
+					out.push_back(trim(name));
+				}
+			});
+			return out;
+		};
+		_lists.style = cats("mapstyles");
+		_lists.size = cats("mapsizes");
+		_lists.town = cats("startingtowns");
+		_lists.resources = cats("startingresources");
+		_lists.start = cats("startingtechs");
+		_lists.end = cats("endingtechs");
+		_lists.victory = cats("victories");
+		_lists.elim = cats("eliminations");
+		_lists.pop = cats("poplimits");
+		_lists.reveal = cats("revealmaps");
+		_lists.diff = cats("difficulties");
+		bool first = true;
+		ron::for_each_element(doc, "TRIBES", [&](const ron::XmlElement& e) {
+			if (!first) return;
+			first = false;
+			for (const ron::XmlElement& t : e.children) {
+				if (t.name != "TRIBE") continue;
+				const ron::XmlElement* k = t.child("KEY");
+				std::string n = k ? trim(k->get("#text")) : std::string("?");
+				if (!n.empty()) n[0] = char(std::toupper(static_cast<unsigned char>(n[0])));
+				if (n == "Persian") n = "Persians";
+				_lists.tribes.push_back(n);
+			}
+		});
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "skirmish setup lists: %s\n", e.what());
+	}
+	auto fallback = [](std::vector<std::string>& v, size_t n, const char* prefix) {
+		for (size_t i = v.size(); i < n; i++) v.push_back(std::string(prefix) + " " + std::to_string(i + 1));
+	};
+	fallback(_lists.style, 23, "Map Style");
+	fallback(_lists.size, 7, "Size");
+	fallback(_lists.town, 4, "Start");
+	fallback(_lists.resources, 13, "Resources");
+	fallback(_lists.start, 10, "Age");
+	fallback(_lists.end, 8, "Age");
+	fallback(_lists.victory, 10, "Victory");
+	fallback(_lists.elim, 4, "Elimination");
+	fallback(_lists.pop, 6, "Population");
+	fallback(_lists.reveal, 4, "Reveal");
+	fallback(_lists.diff, 6, "Difficulty");
+	fallback(_lists.tribes, 24, "Nation");
+	if (_lists.victory.size() > 10) _lists.victory.resize(10);  // the shipped list ends with "Scenario Victory"
+	if (_lists.start.size() > 10) _lists.start.resize(10);
+}
+
+// Entering the screen: the last setup (NSUserDefaults), seed on "random".
+- (void)openSetup {
+	[self loadSetupLists];
+	_setup = ron::sim::default_random_setup(2);
+	_setup.map_style = ron::sim::mapgen::kStyleOldWorld;
+	_setup.map_size = 3;
+	if (NSString* saved = [NSUserDefaults.standardUserDefaults stringForKey:@"SkirmishSetup"]) {
+		ron::sim::RandomGameSetup s;
+		if (ron::sim::parse_random_setup(saved.UTF8String, s)) _setup = s;
+	}
+	_setup.num_nations = std::clamp(_setup.num_nations, 2, 8);
+	_setup.map_style = std::clamp(_setup.map_style, 0, 22);
+	_setup.seed = 0;
+	_seedRandom = YES;
+	_seedText.clear();
+	_seedFocus = NO;
+	_openCombo = getenv("RON_SETUP_OPEN") ? atoi(getenv("RON_SETUP_OPEN")) : -1;  // snapshot check of an open list
+	_openTop = 0;
+	_sc.clear();
+	_st.clear();
+}
+
+- (void)saveSetup {
+	ron::sim::RandomGameSetup s = _setup;
+	s.seed = 0;
+	[NSUserDefaults.standardUserDefaults setObject:@(ron::sim::random_setup_string(s).c_str()) forKey:@"SkirmishSetup"];
+}
+
+static std::vector<std::string> numbered(int lo, int hi) {
+	std::vector<std::string> v;
+	for (int i = lo; i <= hi; i++) v.push_back(std::to_string(i));
+	return v;
+}
+
+// Rebuilds the controls from the setup (positions follow setupwin.xml's two windows, in canvas pixels).
+- (void)layoutSetup {
+	[self loadSetupLists];
+	_sc.clear();
+	_st.clear();
+	ron::sim::RandomGameSetup* sp = &_setup;  // the closures outlive this call: capture the ivar's address, not self
+	// ---- RULESWIN: the rules, label at the left, combo at the right
+	{
+		const int cx = 770, cw = 222, dy = 33;
+		int y = 106;
+		auto add = [&](const char* label, const std::vector<std::string>& items, int sel, std::function<void(int)> set) {
+			SetupCombo c;
+			c.r = {cx, cx + cw, y, y + 21};
+			c.items = items;
+			c.sel = std::clamp(sel, 0, std::max(0, int(items.size()) - 1));
+			c.set = std::move(set);
+			c.label = label;
+			c.lx = 592, c.ly = y;
+			_sc.push_back(std::move(c));
+			y += dy;
+		};
+		std::vector<std::string> styles = _lists.style;
+		if (styles.size() > 23) styles.resize(23);
+		add("Map Style:", styles, _setup.map_style, [sp](int v) { sp->map_style = v; });
+		add("Map Size:", _lists.size, _setup.map_size, [sp](int v) { sp->map_size = v; });
+		add("Nations:", numbered(2, 8), _setup.num_nations - 2, [sp](int v) { sp->num_nations = v + 2; });
+		add("Start With:", _lists.town, _setup.starting_town, [sp](int v) { sp->starting_town = v; });
+		add("Resources:", _lists.resources, _setup.starting_resources, [sp](int v) { sp->starting_resources = v; });
+		add("Start Age:", _lists.start, _setup.starting_technology, [sp](int v) { sp->starting_technology = v; });
+		add("End Age:", _lists.end, _setup.ending_technology, [sp](int v) { sp->ending_technology = v; });
+		add("Victory:", _lists.victory, _setup.victory, [sp](int v) { sp->victory = v; });
+		add("Elimination:", _lists.elim, _setup.elimination, [sp](int v) { sp->elimination = v; });
+		add("Population:", _lists.pop, _setup.pop_limit, [sp](int v) { sp->pop_limit = v; });
+		add("Reveal Map:", _lists.reveal, _setup.reveal_map, [sp](int v) { sp->reveal_map = v; });
+		add("Random Starts:", {"No", "Yes"}, _setup.randomize_starts ? 1 : 0, [sp](int v) { sp->randomize_starts = v == 1; });
+		_seedRect = {cx, cx + cw - 84, y, y + 21};
+		_seedBtn = {cx + cw - 78, cx + cw, y - 3, y + 25};
+		_st.push_back({592, y, "Seed:", 0});
+		_rulesBottom = y + dy;
+	}
+	// ---- PLAYERSWINSOLO: one row per seat
+	{
+		const int rowH = 38, y0 = 134;
+		const int xn = 126, wn = 132, xw = 264, ww = 100, xd = 370, wd = 94, xt = 470, wt = 76;
+		std::vector<std::string> nations{"Random"};
+		for (const std::string& t : _lists.tribes) nations.push_back(t);
+		std::vector<std::string> teams{"None", "1", "2", "3", "4"};
+		for (int i = 0; i < 8; i++) {
+			const int y = y0 + i * rowH;
+			if (i >= _setup.num_nations) {
+				_st.push_back({36, y + 3, "Seat " + std::to_string(i + 1) + ": closed", 1});
+				continue;
+			}
+			ron::sim::NationSetup& ns = _setup.nation[size_t(i)];
+			_st.push_back({36, y + 3, ns.human ? "Player" : "Computer " + std::to_string(i + 1), 2});
+			auto seat = [&](int x, int w, const std::vector<std::string>& items, int sel, bool enabled, std::function<void(int)> set) {
+				SetupCombo c;
+				c.r = {x, x + w, y, y + 21};
+				c.items = items;
+				c.sel = std::clamp(sel, 0, std::max(0, int(items.size()) - 1));
+				c.set = std::move(set);
+				c.enabled = enabled;
+				c.seat = i;
+				_sc.push_back(std::move(c));
+			};
+			seat(xn, wn, nations, ns.tribe + 1, true, [sp, i](int v) { sp->nation[size_t(i)].tribe = v - 1; });
+			seat(xw, ww, {"Human", "Computer"}, ns.human ? 0 : 1, true, [sp, i](int v) { sp->nation[size_t(i)].human = v == 0; });
+			seat(xd, wd, _lists.diff, ns.difficulty, !ns.human, [sp, i](int v) { sp->nation[size_t(i)].difficulty = v; });
+			seat(xt, wt, teams, ns.team + 1, true, [sp, i](int v) { sp->nation[size_t(i)].team = v - 1; });
+		}
+	}
+}
+
+- (std::string)seedShown {
+	return _seedRandom ? std::string("Random") : _seedText;
+}
+
+- (void)drawCombo:(const SetupCombo&)c index:(int)idx {
+	const IfaceRect D = c.r.offset(_ox, _oy);
+	if (_combo[0].valid()) {
+		const IfaceRect field{D.l, D.r - _combo[3].width + 2, D.t, D.b};
+		_ui.expander(_combo[0], _combo[1], _combo[2], field);
+		_ui.add(_combo[3], float(D.r - _combo[3].width), float(D.t));
+	} else {
+		[self thinBox:c.r fill:rgb(240, 240, 240)];
+	}
+	_ui.next_layer();
+	const int fo = _ui.font(12, 1);
+	const ron::FontMetrics* om = _ui.font_metrics(fo);
+	const int oh = om ? om->font_height : 14;
+	std::string text = c.items.empty() ? "" : c.items[size_t(c.sel)];
+	const int room = c.r.w() - _combo[3].width - 12;
+	while (text.size() > 3 && _ui.text_width(fo, text) > room) text.pop_back();
+	_ui.text(fo, text, float(D.l + 7), float(D.t + (D.h() - oh) / 2), c.enabled ? kBlack : rgb(130, 130, 130));
+	(void)idx;
+}
+
+- (void)drawSetup:(const Layout&)L {
+	[self banner:L text:kListTitles[kSkirmishSetup]];
+	[self layoutSetup];
+	const int f14 = _ui.font(14, -1), f12 = _ui.font(12, -1);
+	const ron::FontMetrics* m14 = _ui.font_metrics(f14);
+	const int lh = m14 ? m14->line_height : 16;
+	// The two windows: dark wash and the thin border of the setup windows.
+	_ui.next_window();
+	const IfaceRect players{20, 566, 88, 628}, rules{578, 1004, 88, 628};
+	[self thinBox:players fill:argb(120, 0, 0, 0)];
+	[self thinBox:rules fill:argb(120, 0, 0, 0)];
+	_ui.next_layer();
+	// Column titles (setupwin title_name / title_nation / title_who / title_diff / title_team)
+	const struct {
+		int x;
+		const char* t;
+	} cols[5] = {{36, "Player"}, {126, "Nation"}, {264, "Type"}, {370, "Difficulty"}, {470, "Team"}};
+	for (const auto& c : cols) [self textAt:f14 text:c.t x:float(c.x) y:104 color:kSecondary];
+	_ui.next_layer();
+	for (const SetupText& t : _st) {
+		[self textAt:f14 text:t.text x:float(t.x) y:float(t.y) color:t.kind == 1 ? rgb(130, 130, 130) : t.kind == 2 ? kWhite : kLabel];
+	}
+	for (const SetupCombo& c : _sc) {
+		if (!c.label.empty()) [self textAt:f14 text:c.label x:float(c.lx) y:float(c.ly + 2) color:kLabel];
+	}
+	// Summary under the table: what the choices make.
+	{
+		_ui.next_layer();
+		const std::string style = _setup.map_style < int(_lists.style.size()) ? _lists.style[size_t(_setup.map_style)] : "";
+		const std::string size = _setup.map_size < int(_lists.size.size()) ? _lists.size[size_t(_setup.map_size)] : "";
+		std::string text = style + ", " + size + ". ";
+		if (_setup.map_style <= 5) text += "A map style is picked at random from the list. ";
+		text += "Nations set to Random get a nation of their own; Computer players use their own difficulty.";
+		int y = 134 + 8 * 38 + 4;
+		for (const std::string& line : wrap_text(_ui, f12, text, players.w() - 32)) {
+			[self textAt:f12 text:line x:36 y:float(y) color:kSecondary];
+			y += lh;
+		}
+	}
+	// The seed field and its Random button
+	_ui.next_layer();
+	{
+		const IfaceRect D = _seedRect.offset(_ox, _oy);
+		if (_combo[0].valid()) {
+			_ui.expander(_combo[0], _combo[1], _combo[2], D);
+		} else {
+			[self thinBox:_seedRect fill:rgb(240, 240, 240)];
+		}
+		_ui.next_layer();
+		const int fo = _ui.font(12, 1);
+		const ron::FontMetrics* om = _ui.font_metrics(fo);
+		const int oh = om ? om->font_height : 14;
+		std::string shown = [self seedShown];
+		if (_seedFocus && ((int)(_timeMs / 500) & 1) == 0) shown += "|";
+		_ui.text(fo, shown, float(D.l + 7), float(D.t + (D.h() - oh) / 2), _seedRandom && !_seedFocus ? rgb(110, 110, 110) : kBlack);
+		[self popupButton:_seedBtn label:"Random" state:(_pressed == kSeedRandom ? 2 : _hover == kSeedRandom ? 1 : 0) font:f12];
+	}
+	// Combos (closed state), then the open list on top
+	_ui.next_layer();
+	for (size_t i = 0; i < _sc.size(); i++) {
+		[self drawCombo:_sc[i] index:int(i)];
+		_ui.next_layer();
+	}
+	if (_openCombo >= 0 && size_t(_openCombo) < _sc.size()) {
+		const SetupCombo& c = _sc[size_t(_openCombo)];
+		const int ih = 20, n = int(c.items.size()), vis = std::min(n, 12);
+		IfaceRect list{c.r.l, c.r.r - _combo[3].width, c.r.b + 1, c.r.b + 1 + vis * ih + 6};
+		if (list.b > kH - 8) {
+			const int h = list.b - list.t;
+			list.b = c.r.t - 1;
+			list.t = list.b - h;
+		}
+		_ui.next_window();
+		[self thinBox:list fill:rgb(244, 244, 240)];
+		_ui.next_layer();
+		const int fo = _ui.font(12, 1);
+		const ron::FontMetrics* om = _ui.font_metrics(fo);
+		const int oh = om ? om->font_height : 14;
+		for (int k = 0; k < vis; k++) {
+			const int item = _openTop + k;
+			if (item >= n) break;
+			const IfaceRect it{list.l + 3, list.r - 3, list.t + 3 + k * ih, list.t + 3 + (k + 1) * ih};
+			const IfaceRect I = it.offset(_ox, _oy);
+			const bool hot = _hover == kSetupItem + k || (_hover < kSetupItem && item == c.sel);
+			if (hot) _ui.fill(float(I.l), float(I.t), float(I.w()), float(I.h()), rgb(53, 47, 132), UiType::ColorBlend);
+			_ui.next_layer();
+			_ui.text(fo, c.items[size_t(item)], float(I.l + 5), float(I.t + (ih - oh) / 2), hot ? kWhite : kBlack);
+		}
+		_setupListRect = list;
+		_setupListVis = vis;
+	} else {
+		_setupListVis = 0;
+	}
+	_ui.next_window();
+	const int fb = _ui.font(14, -1);
+	[self popupButton:L.back label:"Back" state:(_pressed == kBack ? 2 : _hover == kBack ? 1 : 0) font:fb];
+	[self popupButton:L.play label:"Play" state:(_pressed == kPlay ? 2 : _hover == kPlay ? 1 : 0) font:fb];
+}
+
+- (int)hitSetup:(int)x y:(int)y {
+	const Layout L = [self layout];
+	[self layoutSetup];
+	if (_openCombo >= 0 && size_t(_openCombo) < _sc.size()) {
+		const SetupCombo& c = _sc[size_t(_openCombo)];
+		const int ih = 20, vis = std::min(int(c.items.size()), 12);
+		IfaceRect list{c.r.l, c.r.r - _combo[3].width, c.r.b + 1, c.r.b + 1 + vis * ih + 6};
+		if (list.b > kH - 8) {
+			const int h = list.b - list.t;
+			list.b = c.r.t - 1;
+			list.t = list.b - h;
+		}
+		for (int k = 0; k < vis; k++) {
+			if (_openTop + k >= int(c.items.size())) break;
+			if (IfaceRect{list.l + 3, list.r - 3, list.t + 3 + k * ih, list.t + 3 + (k + 1) * ih}.contains(x, y)) return kSetupItem + k;
+		}
+		if (c.r.contains(x, y)) return kSetupCombo + _openCombo;
+		return list.contains(x, y) ? kNone : kNone;
+	}
+	if (L.back.contains(x, y)) return kBack;
+	if (L.play.contains(x, y)) return kPlay;
+	if (_seedBtn.contains(x, y)) return kSeedRandom;
+	if (_seedRect.contains(x, y)) return kSeedField;
+	for (size_t i = 0; i < _sc.size(); i++) {
+		if (_sc[i].enabled && _sc[i].r.contains(x, y)) return kSetupCombo + int(i);
+	}
+	return kNone;
+}
+
+- (void)chooseCombo:(int)idx item:(int)item {
+	if (idx < 0 || size_t(idx) >= _sc.size()) return;
+	SetupCombo& c = _sc[size_t(idx)];
+	if (item < 0 || size_t(item) >= c.items.size()) return;
+	c.sel = item;
+	if (c.set) c.set(item);
+	[self saveSetup];
+}
+
+- (void)playSetup {
+	[self click];
+	ron::sim::RandomGameSetup s = _setup;
+	if (_seedRandom || _seedText.empty()) s.seed = arc4random();
+	else s.seed = uint32_t(std::strtoull(_seedText.c_str(), nullptr, 10));
+	if (s.seed == 0) s.seed = 1;
+	[self saveSetup];
+	[self.host frontEndPlayRandom:s];
+}
+
+// Keys on the setup screen: the open list (arrows, Return, Escape), the seed field (digits), Escape back to the list.
+- (void)setupKey:(NSEvent*)e {
+	NSString* chars = e.charactersIgnoringModifiers;
+	const unichar c = chars.length ? [chars characterAtIndex:0] : 0;
+	const bool ret = c == '\r' || c == 3, esc = e.keyCode == 53;
+	if (_openCombo >= 0 && size_t(_openCombo) < _sc.size()) {
+		SetupCombo& cb = _sc[size_t(_openCombo)];
+		const int n = int(cb.items.size());
+		if (c == NSUpArrowFunctionKey) [self chooseCombo:_openCombo item:std::max(0, cb.sel - 1)];
+		else if (c == NSDownArrowFunctionKey) [self chooseCombo:_openCombo item:std::min(n - 1, cb.sel + 1)];
+		else if (ret || esc) _openCombo = -1;
+		if (_openCombo >= 0) {
+			const int sel = _sc[size_t(_openCombo)].sel;
+			if (sel < _openTop) _openTop = sel;
+			if (sel >= _openTop + 12) _openTop = sel - 11;
+		}
+		return;
+	}
+	if (_seedFocus) {
+		if (c >= '0' && c <= '9' && _seedText.size() < 10) {
+			if (_seedRandom) _seedText.clear();
+			_seedRandom = NO;
+			_seedText += char(c);
+		} else if (e.keyCode == 51 || c == 127) {  // Delete
+			if (!_seedText.empty()) _seedText.pop_back();
+			if (_seedText.empty()) _seedRandom = YES;
+		} else if (ret || esc) {
+			_seedFocus = NO;
+		}
+		return;
+	}
+	if (esc) {
+		[self click];
+		[self showScreen:@"skirmish"];
+	} else if (ret) {
+		[self playSetup];
+	}
 }
 
 - (NSCursor*)cursor {

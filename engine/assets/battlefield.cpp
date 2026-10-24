@@ -86,6 +86,11 @@ Battlefield resolve_battlefield(const GameFiles& files, const Scenario& sc, cons
 			if (!found.empty()) break;
 		}
 		if (found.empty()) {
+			// Gaia herd animals (Herd Bear, Herd Fish ...) are drawn as <GRAPH>-TYPE0..2, one variant per slot.
+			const std::string variant = g->second + "-TYPE" + std::to_string(u.o % 3);
+			if (unit_exists(variant)) found = variant;
+		}
+		if (found.empty()) {
 			out.unresolved.push_back(u.type + " (" + g->second + ")");
 			continue;
 		}

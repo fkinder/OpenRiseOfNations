@@ -352,6 +352,32 @@ here); the menu's drop-in slide (`GravWindow::animate`, S_MENU_DOWN / S_MENU_UP)
 logo's lighting (approximated: `tex · (0.42 + 0.78 N·L)` plus a small highlight); which animation plays first (the
 port starts with the Destroyer, index 0); whether the menu music is INTROS or FULLINTROS.
 
+### 10.1 Skirmish setup screen (random maps, 2026-10-24)
+
+The Skirmish list keeps the ready-made maps and gains a **Random Map...** button (left of Back) that opens `skirmish-setup`
+(`--menu skirmish-setup --snapshot x.png`; `RON_SETUP_OPEN=n` opens combo n for a snapshot). It follows the original's solo
+setup (`Data/setupwin.xml`: `PLAYERSWINSOLO` at left 2 % / top 2.6 % / 55 % wide with the columns name, nation, who, difficulty,
+team; `RULESWIN` at the right, 40.5 % wide, with a stack of combo boxes) on the same 1024 x 768 canvas, ribbon and backdrop as the
+other screens:
+
+| Part | What |
+|---|---|
+| Players window (left) | one row per seat (rows 38 px apart): name (`Player` for the human, `Computer N`), Nation combo (Random + the 24 tribes in rules.xml TRIBES order), Type (Human / Computer), Difficulty (the 6 `difficulties`, greyed for a human), Team (None, 1..4). Seats beyond the Nations combo read "Seat N: closed". A line below describes the map and the Random nation rule |
+| Rules window (right) | Map Style (the 23 `mapstyles` names, the random pickers first), Map Size (`mapsizes`), Nations 2..8, Start With (`startingtowns`), Resources (`startingresources`), Start Age (`startingtechs`, incl. All Technologies and Random Age), End Age, Victory, Elimination, Population (`poplimits`), Reveal Map, Random Starts (No / Yes), **Seed** (an edit field and a Random button; empty = random, digits only, 10 at most) |
+| Controls | the GAMESPYREJOIN combo pieces as the AI Difficulty box (white field, black Arial 12 B, blue arrow); an open list is 12 rows high (wheel and arrows scroll, it opens upward near the bottom edge); `motd_border` boxes with the setup windows' alpha-120 wash; Back / Play are the popup buttons |
+| Keys | Esc back to the Skirmish list (closes an open list first), Return plays, Up / Down change the value of an open list, digits and Delete edit the focused seed |
+| Play | `frontEndPlayRandom:` shows "Generating the map..." and builds a `MapRenderer` through `+randomGameWithDevice:` (`newgame.cpp`: the generator, the objects, the scripts), then opens it like a scenario. A seed left on random is drawn from `arc4random` at Play and recorded in the setup, so a save regenerates the same map |
+| Remembered | the setup (not the seed) in NSUserDefaults `SkirmishSetup` as the setup text of `random_setup_string` |
+
+Lists come from `Data/rules.xml` CATEGORIES (the lobby fills its combos from the same table), parsed once when the screen opens
+(`#ICONnn` prefixes of the style names are dropped). Per-seat difficulty is kept per seat; the simulation reads the first AI seat's
+(sim-implementation.md "Random games"). Not offered yet: custom colours, handicaps, game rules, rush rules, tech cost, victory option
+lists (score goal, time limit, wonder / population / economic settings), a map preview, named saves.
+
+In a random game F5 / F9 work as in a scenario (the save records the setup text, the load regenerates the map and overwrites the
+state), and `--random STYLE,SIZE,SEED,NATIONS[,TRIBES...] [--all-ai] [--frames N] [--census] [--save-game f] [--snapshot f]` runs one
+headless (`--difficulty` sets every computer seat).
+
 ## 11. HUD leftovers (2026-10-24)
 
 ### 11.1 Mouse-over help (`tips.*`, `main.mm` `tipFor`)

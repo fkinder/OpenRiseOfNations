@@ -10,11 +10,14 @@
 #import <MetalKit/MetalKit.h>
 
 #include "assets/files.hpp"
+#include "sim/newgame.hpp"
 
 // What the menu asks of the app.
 @protocol FrontEndHost <NSObject>
 // Play a scenario (path relative to the install); difficulty 0..5, or -1 to keep the scenario's default (tutorials).
 - (void)frontEndPlay:(NSString*)scenario difficulty:(int)difficulty;
+// Play a random-map skirmish built by the setup screen (sim/newgame.hpp); the seed is already drawn.
+- (void)frontEndPlayRandom:(const ron::sim::RandomGameSetup&)setup;
 - (void)frontEndChangeFolder;
 - (void)frontEndQuit;
 @end
@@ -24,7 +27,7 @@
 @property(nonatomic, weak) MTKView* view;
 @property(nonatomic, readonly) NSString* gameDir;
 - (instancetype)initWithDevice:(id<MTLDevice>)device gameDir:(NSString*)dir error:(NSString* __autoreleasing*)error;
-// main, tutorials, skirmish, scenarios; "quit-popup" = the Main Menu with the Quit popup open.
+// main, tutorials, skirmish, skirmish-setup, scenarios; "quit-popup" = the Main Menu with the Quit popup open.
 - (void)showScreen:(NSString*)screen;
 // A message box without buttons (e.g. "Loading…") until cleared with nil; an error box with an OK button.
 - (void)setBusy:(NSString*)text;
