@@ -113,6 +113,34 @@ void View::add_message(const std::string& text, uint32_t color, int ticks, const
 	if (messages_.size() > 200) messages_.erase(messages_.begin());
 }
 
+void View::say(const std::string& text, const Env& env) { add_message(text, 0xFFFFFFFF, kStdTicks, env); }
+
+void View::reset(const ScriptPresentation* p) {
+	messages_.clear();
+	instructions_.clear();
+	feedback_.clear();
+	feedback_start_ = -1000000;
+	scen_msg_start_ = -1;
+	scen_msg_seq_ = 0;
+	bubbles_.clear();
+	notices_.clear();
+	pings_.clear();
+	announces_.clear();
+	marks_.clear();
+	popup_open_ = goals_open_ = false;
+	over_ = won_ = false;
+	over_text_.clear();
+	last_seq_ = 0;
+	if (!p) return;
+	for (const ScriptEvent& e : p->events) {
+		if (e.kind == ScriptEvent::kInstruction) instructions_ = e.text;
+		last_seq_ = std::max(last_seq_, e.seq);
+	}
+	if (p->next_seq > 0) last_seq_ = std::max(last_seq_, p->next_seq - 1);
+	// Objective marks already completed in the saved game show as completed, not as newly ticked.
+	for (const ron::sim::ScriptObjective& o : p->objectives) marks_.push_back({o.id, o.text, o.frame, o.completed ? 0 : -1});
+}
+
 void View::consume(const ScriptPresentation& p, const Env& env, const Callbacks& cb) {
 	for (const ScriptEvent& e : p.events) {
 		if (e.seq <= last_seq_) continue;

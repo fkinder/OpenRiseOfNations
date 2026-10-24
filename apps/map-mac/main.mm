@@ -8,7 +8,7 @@
 //               [--farm-time SECONDS] [--snapshot out.png [--size WxH]] [--no-hud] [--ui-scale S]
 //               [--play WHO] [--select WHO:o1,o2,...] [--place-click] [--queue WHO:O@TYPE[*N]] [--select-build WHO:o1,...] [--build-page N] [--place TYPE@X,Y]
 //               [--select WHO:o1,...@FRAME] [--option N[:MENU[:TYPE]]@FRAME] [--cursor X,Y@FRAME] [--look X,Y@FRAME]
-//               [--zoom-at LEVEL@FRAME] [--script-log]
+//               [--zoom-at LEVEL@FRAME] [--script-log] [--load-game FILE] [--save-game FILE]
 //   LEVEL is the game's zoom level 0 (far) .. 6 (closest); the game starts at 5. X,Y is the look-at point in world
 //   units (default: player 1's start camera, else the map centre). The scenario's buildings and units are placed
 //   automatically; --build / --unit add more by graphic name (static). --snapshot renders offscreen to a PNG and exits.
@@ -30,6 +30,12 @@
 //   over world point X,Y; --look / --zoom-at move the camera as the player would; --script-log prints the
 //   presentation queue as it is consumed.
 //
+//   Save / load (engine/sim/save.hpp, docs/save-format.md): F5 quick-saves and F9 quick-loads the one save slot
+//   ~/Library/Application Support/OpenRiseOfNations/Saves/quicksave.ronsave (the game menu has Save Game / Load Game
+//   entries for the same slot: the front end has no text entry for names). A save loads only into the scenario it was
+//   made in. Headless: --load-game FILE loads a save before the first frame, --save-game FILE writes one after the
+//   --frames have run (before the snapshot).
+//
 //   Without a scenario the window opens in the front end (docs/ui-port.md "Front end"): the Main Menu drawn with the
 //   install's own menu art, its Tutorials / Skirmish / Scenarios lists, Play starting the chosen map in the same window.
 //   --menu SCREEN (main, tutorials, skirmish, scenarios, quit-popup) opens that screen; with --snapshot it is rendered
@@ -41,7 +47,8 @@
 //           look, right-click to order; Ctrl+0..9 stores a control group (no selection: a camera bookmark), 0..9 recalls,
 //           twice centres; edge scrolling (2 px), mouse wheel / pinch zoom toward the cursor, trackpad scroll pans;
 //           arrows scroll   + - zoom level   P pause   F fog   B bloom   H HUD   Esc cancel / clear / game menu   F10 game menu
-//           (Resume, Return to Main Menu, Quit); the game-over screen offers Return to Main Menu.
+//           (Resume, Save Game, Load Game, Return to Main Menu, Quit)   F5 quick save   F9 quick load; the game-over
+//           screen offers Return to Main Menu.
 #import <Cocoa/Cocoa.h>
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
@@ -88,6 +95,7 @@
 #include "sim/garrison.hpp"
 #include "sim/rules.hpp"
 #include "sim/rules_xml.hpp"
+#include "sim/save.hpp"
 #include "sim/script_host.hpp"
 #include "sim/view.hpp"
 #include "assets/cursors.hpp"
@@ -437,6 +445,11 @@ static bool debug_skip(const char* pass) {
 @property(nonatomic, copy) void (^onExit)(BOOL quit);
 // Opens the game menu (Esc / F10): 1 the pause menu, 2 the game-over choices.
 - (void)openGameMenu:(int)kind;
+// Save / load of the simulation (engine/sim/save.hpp). A save loads only into the scenario it was made in.
+- (BOOL)saveGameTo:(NSString*)path;
+- (BOOL)loadGameFrom:(NSString*)path;
+- (BOOL)quickSave;
+- (BOOL)quickLoad;
 @end
 
 // ---- HUD data adapter: the console player's numbers for the resource panel and the top strip, from the production view
@@ -560,6 +573,7 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	std::unique_ptr<ron::sim::Rules> _simRules;
 	std::unique_ptr<ron::sim::AssetAnimSource> _art;  // animation lengths and graphics pieces (docs/anim-spec.md)
 	std::unique_ptr<ron::sim::Game> _game;
+	std::string _scenarioPath;  // the scenario file as Game::load got it (a save records it relative to the install)
 	std::unordered_map<int32_t, int> _pieceGraphic;    // gpiece -> unit graphic (-1: unknown)
 	ron::sim::CommandManager _cm;
 	ron::sim::GameView _prevView, _curView;
@@ -698,6 +712,7 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		_ammo = ron::load_ammo_catalog(files, anim_names);
 		std::string path = scenarioPath.UTF8String;
 		if (!files.resolve(path).empty()) path = files.resolve(path);  // allow paths relative to the game dir
+		_scenarioPath = path;
 		const ron::Scenario sc = ron::parse_scenario(ron::read_file(path));
 		const ron::Tileset ts = ron::load_tileset(files, sc.terrain.tileset);
 		const std::vector<ron::TransitionMask> masks = ron::load_transition_masks(files);
@@ -1983,6 +1998,14 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		[self openGameMenu:1];
 		return;
 	}
+	if (event.keyCode == 96 && !_inPopup) {  // F5: quick save
+		[self quickSave];
+		return;
+	}
+	if (event.keyCode == 101 && !_inPopup) {  // F9: quick load
+		[self quickLoad];
+		return;
+	}
 	if ([self handleGroupKey:event]) {
 		[self updateTitle];
 		return;
@@ -2680,11 +2703,108 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	_ui.encode(enc);
 }
 
+// ---------------------------------------------------------------- save / load (engine/sim/save.hpp, docs/save-format.md)
+
+// The one save slot: ~/Library/Application Support/OpenRiseOfNations/Saves/quicksave.ronsave. (The front end has no text
+// entry, so named saves wait for one.)
+- (NSString*)quickSavePath {
+	NSArray* dirs = NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
+	NSString* base = dirs.count ? dirs[0] : [NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support"];
+	NSString* dir = [base stringByAppendingPathComponent:@"OpenRiseOfNations/Saves"];
+	[[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
+	return [dir stringByAppendingPathComponent:@"quicksave.ronsave"];
+}
+
+- (void)say:(const std::string&)text {
+	std::printf("%s\n", text.c_str());
+	if (_sviewOn) _sview.say(text, [self scriptEnv]);
+}
+
+- (BOOL)saveGameTo:(NSString*)path {
+	if (!_game || _inPopup) return NO;
+	try {
+		ron::sim::save_game(*_game, ron::sim::scenario_rel_path(*_files, _scenarioPath), _simSeed, path.UTF8String);
+		[self say:"Game saved"];
+		return YES;
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "save failed: %s\n", e.what());
+		[self say:"Could not save the game"];
+		return NO;
+	}
+}
+
+// Replaces the simulation with the saved one (the same scenario only: the terrain, trees and art the renderer built stay).
+- (BOOL)loadGameFrom:(NSString*)path {
+	if (!_game || !_simRules || _inPopup) return NO;
+	try {
+		const ron::sim::SaveInfo head = ron::sim::read_save_info(path.UTF8String);
+		auto key = [&](const std::string& s) {
+			const std::string r = _files->resolve(s);
+			return ron::to_lower(r.empty() ? s : r);
+		};
+		if (key(head.scenario) != key(_scenarioPath)) {
+			std::fprintf(stderr, "load: the save is for %s, this game is %s\n", head.scenario.c_str(), _scenarioPath.c_str());
+			[self say:"That save belongs to another scenario"];
+			return NO;
+		}
+		ron::sim::SaveInfo info;
+		std::unique_ptr<ron::sim::Game> g = ron::sim::load_game(*_files, *_simRules, _art.get(), path.UTF8String, &info);
+		for (const std::string& e : info.script_errors) std::fprintf(stderr, "script: %s\n", e.c_str());
+		_game = std::move(g);
+		_cm = ron::sim::CommandManager();
+		_selected.clear(), _selectedBuilds.clear();
+		_targeting = -1, _placeType = -1, _buildPage = -1;
+		_ghostValid = NO;
+		_clipClocks.clear();
+		_curView = ron::sim::make_view(*_game);
+		_prevView = _curView;
+		[self indexPrevView];
+		[self syncSimBuildings];
+		_fogUploaded = NO;
+		_gameEventsSeen = _game->events.size();
+		const ron::sim::ScriptPresentation* p = [self pres];
+		_logSeq = p && p->next_seq > 0 ? p->next_seq - 1 : 0;
+		_logObjectives = p ? p->objectives.size() : 0;
+		_logDone.clear();
+		if (p) {
+			for (const ron::sim::ScriptObjective& o : p->objectives) {
+				if (o.completed) _logDone.push_back({o.id, o.frame});
+			}
+		}
+		if (_sviewOn) _sview.reset(p);
+		if (_audio) _audio->stop_voice();
+		_hiliteOverride = -1;
+		_pan = CameraPan();
+		_overMs = -1, _overOffered = NO;
+		_simMs = 0;
+		_lastFrame = 0;
+		[self say:"Game loaded"];
+		return YES;
+	} catch (const std::exception& e) {
+		std::fprintf(stderr, "load failed: %s\n", e.what());
+		[self say:"Could not load the game"];
+		return NO;
+	}
+}
+
+- (BOOL)quickSave {
+	return [self saveGameTo:[self quickSavePath]];
+}
+
+- (BOOL)quickLoad {
+	NSString* path = [self quickSavePath];
+	if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+		[self say:"No saved game"];
+		return NO;
+	}
+	return [self loadGameFrom:path];
+}
+
 // ---------------------------------------------------------------- the game menu (docs/ui-port.md "Front end")
 
 - (std::vector<std::string>)gameMenuItems {
 	if (_gameMenu == 2) return {"Return to Main Menu", "Keep Watching", "Quit"};
-	return {"Resume Game", "Return to Main Menu", "Quit"};
+	return {"Resume Game", "Save Game", "Load Game", "Return to Main Menu", "Quit"};
 }
 
 - (void)openGameMenu:(int)kind {
@@ -2757,7 +2877,9 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	const std::string& it = items[size_t(i)];
 	_gameMenu = 0;
 	_lastFrame = 0;  // no catch-up after the pause
-	if (it == "Return to Main Menu" && self.onExit) self.onExit(NO);
+	if (it == "Save Game") [self quickSave];
+	else if (it == "Load Game") [self quickLoad];
+	else if (it == "Return to Main Menu" && self.onExit) self.onExit(NO);
 	else if (it == "Quit") {
 		if (self.onExit) self.onExit(YES);
 		else [NSApp terminate:nil];
@@ -4151,6 +4273,7 @@ int main(int argc, const char* argv[]) {
 		};
 		std::vector<QueueArg> queues;
 		bool sel_builds = false;
+		NSString *load_game = nil, *save_game = nil;
 		std::vector<int32_t> sel_objs;
 		float place_x = 0, place_y = 0;
 		uint32_t seed = 12345;
@@ -4186,6 +4309,10 @@ int main(int argc, const char* argv[]) {
 				std::sscanf(argv[++i], "%f,%f", &atX, &atY);
 			} else if (a == "--snapshot" && more) {
 				snapshot = @(argv[++i]);
+			} else if (a == "--load-game" && more) {
+				load_game = @(argv[++i]);
+			} else if (a == "--save-game" && more) {
+				save_game = @(argv[++i]);
 			} else if (a == "--size" && more) {
 				std::sscanf(argv[++i], "%dx%d", &w, &h);
 			} else if (a == "--build" && more) {
@@ -4329,7 +4456,7 @@ int main(int argc, const char* argv[]) {
 			} else if (a.rfind("--", 0) == 0) {
 				std::printf("usage: %s [game-dir] [--menu [main|tutorials|skirmish|scenarios|quit-popup]] [--snapshot out.png [--size WxH]]\n"
 				            "       %s [game-dir] <scenario.scx> [--zoom 0..6] [--at X,Y] [--no-bloom] [--farm-time S] [--no-sim] [--seed S] "
-				            "[--move WHO:o1,o2@X,Y[@FRAME]]... [--frames N] [--snapshot out.png [--size WxH]]\n", argv[0], argv[0]);
+				            "[--move WHO:o1,o2@X,Y[@FRAME]]... [--frames N] [--load-game FILE] [--save-game FILE] [--snapshot out.png [--size WxH]]\n", argv[0], argv[0]);
 				return a == "--help" ? 0 : 2;
 			} else {
 				if (a.rfind("-psn_", 0) != 0) positional.push_back(@(argv[i]));  // Finder's process serial number
@@ -4400,6 +4527,10 @@ int main(int argc, const char* argv[]) {
 		}
 		if (place_type >= 0 && place_click) [r placeAtWorldX:place_x y:place_y modifiers:0];
 		for (const QueueArg& q : queues) [r queueWho:q.who building:q.o type:q.type count:q.n];
+		if (load_game && ![r loadGameFrom:load_game]) {
+			std::fprintf(stderr, "--load-game failed\n");
+			return 1;
+		}
 		// Scripted moves, then N simulation frames (headless checks with --snapshot).
 		for (int f = 0; f <= sim_frames && r.simulating; f++) {
 			for (const MoveArg& m : moves) {
@@ -4432,6 +4563,10 @@ int main(int argc, const char* argv[]) {
 			if (f < sim_frames) [r stepSimulation:1];
 		}
 		if (select_all) [r selectAll];
+		if (save_game && ![r saveGameTo:save_game]) {
+			std::fprintf(stderr, "--save-game failed\n");
+			return 1;
+		}
 		if (snapshot) return [r snapshotTo:snapshot width:w height:h scale:ui_scale] ? 0 : 1;
 
 		MapAppDelegate* d = [MapAppDelegate new];

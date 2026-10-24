@@ -15,6 +15,7 @@
 //                [--starting-resources N] [--difficulty N] [--no-scripts] [--script-log]
 //                [--select WHO:o1,..@FRAME]... [--option N[:MENU[:TYPE]]@FRAME]...
 //                [--garrison WHO:o1,..@BO:BWHO[@FRAME][%queue]]... [--eject-all WHO:o1,..[@FRAME][/back_to_work]]...
+//                [--save-at FRAME:path]... [--load path] [--roundtrip FRAME]
 //        ron-sim --dump circle|ring|stamps
 // Scripts: --script-log prints the scenario builtins' presentation queue as it fills (messages, sounds, objectives,
 // camera, pings; sim/script_ui.hpp) and the run-time messages; --select / --option set the seat-local input a renderer
@@ -46,6 +47,13 @@
 // fog map of that seat at the end; --fog-check verifies at every refresh (frame % 100 == 33) that the stale trail of
 // moving units is cleared and stationary areas survive. --dump prints the circle / ring tables or every stamp range
 // in the format of `node re/tools/los-ref.mjs dump circle|ring|stamps` (diff them).
+// Save / load (sim/save.hpp, docs/save-format.md): --save-at FRAME:path writes the game state at the start of FRAME
+// (before that frame's scripted commands; repeatable; a path ending in .gz is gzipped); --load path continues a save
+// (the scenario argument may then be omitted: `ron-sim <game dir> --load path`), --frames N runs N more frames from the
+// saved frame and the scripted commands still apply by absolute frame. --roundtrip FRAME is the self-check: run to FRAME,
+// save to a temporary file here, keep running to the end recording the digests, then load that file, run the same
+// remaining frames and compare digest by digest (and the full saved state of the last frame); it prints
+// `save round-trip: OK` or the first differing frame, after the determinism self-check.
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -59,6 +67,8 @@
 #include <string>
 #include <vector>
 
+#include <unistd.h>
+
 #include "assets/scenario.hpp"
 #include "sim/anim_assets.hpp"
 #include "sim/combat.hpp"
@@ -70,6 +80,7 @@
 #include "sim/garrison.hpp"
 #include "sim/guys.hpp"
 #include "sim/rules.hpp"
+#include "sim/save.hpp"
 #include "sim/script_host.hpp"
 #include "sim/placement.hpp"
 #include "sim/view.hpp"
@@ -658,6 +669,14 @@ struct FogOpts {
 	bool scripts = true;              // --no-scripts: no scenario / general powers / AI production scripts
 	bool script_log = false;          // --script-log: script run-time messages and prints
 	std::string scenario_path;        // the scenario file (the scenario script is <dir>/<base>.bhs)
+	// Save / load (sim/save.hpp).
+	std::vector<std::pair<int32_t, std::string>> save_at;  // --save-at FRAME:path
+	std::string load_path;            // --load path: start from a save instead of loading the scenario
+	std::string save_scenario;        // the scenario path as a save records it (game-relative)
+	uint32_t save_seed = 0;           // the Game::load seed a save records
+	int32_t roundtrip_at = -1;        // the --roundtrip pass: save at this frame to roundtrip_file
+	std::string roundtrip_file;
+	bool capture_final = false;       // keep the full saved state of the last frame (the round-trip comparison)
 };
 
 // The presentation queue of the scenario builtins (sim/script_ui.hpp), printed as it fills (--script-log).
@@ -985,8 +1004,14 @@ struct RunResult {
 	std::vector<uint64_t> digests;
 	std::vector<Tracked> tracked;
 	std::vector<std::array<int32_t, 2>> watched;  // buildings (who, o) named by --garrison / --eject-all
-	int32_t final_frame = 0;
+	int32_t final_frame = 0, start_frame = 0;
+	std::vector<uint8_t> final_state;  // save_game_bytes of the last frame (FogOpts::capture_final)
+	std::unique_ptr<Game> final_game;  // that game (to name the field of a difference)
 	bool fog_failed = false;
+	int64_t saved_bytes = 0;  // size of the round-trip save file
+	bool roundtrip_saved = false;
+	int32_t roundtrip_frame = 0;  // the frame it was taken at
+	size_t roundtrip_iter = 0;    // loop iterations (digests) done before it
 	std::array<uint16_t, kNumLeaders> initial_uids{};  // obj_ctr after loading (objects created later have higher uids)
 };
 
@@ -1242,18 +1267,32 @@ void print_event(const Game& g, const GameEvent& e) {
 RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules& rules, const AnimSource* anims,
               uint32_t seed, int32_t frames, const std::vector<Script>& scripts, int32_t dump_every,
               int32_t digest_every, bool print, const FogOpts& fo, int32_t combat_every = 0, int32_t prod_every = 0) {
-	auto g = std::make_unique<Game>();
-	g->anims = anims;
-	if (fo.reveal >= 0) g->info.reveal_map = uint8_t(fo.reveal);
-	if (fo.starting_resources >= 0) g->info.starting_resources = uint8_t(fo.starting_resources);
-	if (fo.difficulty >= 0) g->info.difficulty = uint8_t(fo.difficulty);
-	g->load(files, sc, rules, seed);
-	size_t ev_seen = g->events.size();
+	std::unique_ptr<Game> g;
 	ScriptLoadReport srep;
-	if (fo.scripts) {
-		srep = script_host_load(*g, files, fo.scenario_path, sc);
-		g->scripts->verbose = fo.script_log;
+	if (!fo.load_path.empty()) {
+		SaveInfo sinfo;
+		g = load_game(files, rules, anims, fo.load_path, &sinfo);
+		srep.errors = sinfo.script_errors;
+		if (g->scripts) g->scripts->verbose = fo.script_log;
+		if (fo.capture_final) {  // the round trip: saving the loaded game again must give the file's own bytes
+			const std::string why = describe_save_difference(ron::read_file(fo.load_path), save_game_bytes(*g, sinfo.scenario, sinfo.seed));
+			if (!why.empty()) throw std::runtime_error("re-saving the loaded game gives different bytes: " + why);
+		}
+		if (print) std::printf("loaded %s: scenario %s, seed %u, frame %d tick %d\n", fo.load_path.c_str(), sinfo.scenario.c_str(),
+		                       sinfo.seed, g->frame, g->tick);
+	} else {
+		g = std::make_unique<Game>();
+		g->anims = anims;
+		if (fo.reveal >= 0) g->info.reveal_map = uint8_t(fo.reveal);
+		if (fo.starting_resources >= 0) g->info.starting_resources = uint8_t(fo.starting_resources);
+		if (fo.difficulty >= 0) g->info.difficulty = uint8_t(fo.difficulty);
+		g->load(files, sc, rules, seed);
+		if (fo.scripts) {
+			srep = script_host_load(*g, files, fo.scenario_path, sc);
+			g->scripts->verbose = fo.script_log;
+		}
 	}
+	size_t ev_seen = g->events.size();
 	FogCheck fc;
 	CommandManager cm;
 	RunResult rr;
@@ -1261,6 +1300,27 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 	size_t objectives_seen = 0;
 	std::vector<std::pair<std::string, int32_t>> objectives_done;
 	for (int32_t who = 0; who < kNumLeaders; who++) rr.initial_uids[size_t(who)] = g->objects[size_t(who)].obj_ctr;
+	rr.start_frame = g->frame;
+	const int32_t end_frame = g->frame + frames;
+	// --save-at / the round-trip pass: the state at the start of a frame, before its scripted commands.
+	std::vector<bool> saved_at(fo.save_at.size(), false);
+	bool roundtrip_saved = false;
+	auto write_saves = [&]() {
+		for (size_t i = 0; i < fo.save_at.size(); i++) {
+			if (saved_at[i] || fo.save_at[i].first != g->frame) continue;
+			saved_at[i] = true;
+			save_game(*g, fo.save_scenario, fo.save_seed, fo.save_at[i].second);
+			if (print) std::printf("saved %s at frame %d\n", fo.save_at[i].second.c_str(), g->frame);
+		}
+		if (fo.roundtrip_at == g->frame && !roundtrip_saved) {
+			roundtrip_saved = true;
+			rr.roundtrip_saved = true;
+			rr.roundtrip_frame = g->frame;
+			rr.roundtrip_iter = rr.digests.size();
+			save_game(*g, fo.save_scenario, fo.save_seed, fo.roundtrip_file);
+			rr.saved_bytes = int64_t(std::filesystem::file_size(fo.roundtrip_file));
+		}
+	};
 	// Every scripted unit is tracked from its first command.
 	for (const Script& s : scripts) {
 		for (int32_t o : s.objs) {
@@ -1287,6 +1347,7 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 		}
 	}
 	for (int32_t f = 0; f < frames; f++) {
+		write_saves();
 		for (const Script& s : scripts) {
 			if (s.frame != g->frame) continue;
 			cm.play = s.who;
@@ -1386,7 +1447,7 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 			t.py = u->y;
 			if (t.arrive < 0 && g->frame > t.cmd_frame && u->orders.empty()) t.arrive = g->frame;
 		}
-		if (print && digest_every > 0 && (g->frame % digest_every == 0 || g->frame == frames))
+		if (print && digest_every > 0 && (g->frame % digest_every == 0 || g->frame == end_frame))
 			std::printf("frame %5d digest %016llx rng %08x\n", g->frame, (unsigned long long)d, g->rng.seed());
 		if (print && combat_every > 0 && g->frame % combat_every == 0) {
 			std::printf("  f%-5d", g->frame);
@@ -1436,6 +1497,8 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 			}
 		}
 	}
+	write_saves();
+	if (fo.capture_final) rr.final_state = save_game_bytes(*g, fo.save_scenario, fo.save_seed);
 	rr.final_frame = g->frame;
 	if (print) {
 		std::printf("\nmoved units (target, start -> end, distance left, arrival frame, frames moving, max step):\n");
@@ -1466,6 +1529,7 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 		print_scripts(*g, srep, fo.script_log);
 	}
 	rr.fog_failed = fo.fog_check && (fc.violations != 0 || fc.lost != 0);
+	if (fo.capture_final) rr.final_game = std::move(g);
 	return rr;
 }
 
@@ -1498,6 +1562,24 @@ int main(int argc, char** argv) {
 	}
 	try {
 		const ron::GameFiles files(argv[1]);
+		// `ron-sim <game dir> --load path ...`: the scenario and the seed come from the save.
+		std::vector<std::string> arg_store;
+		std::vector<char*> arg_ptrs;
+		SaveInfo load_info;
+		bool loading = false;
+		for (int i = 2; i + 1 < argc; i++) {
+			if (std::strcmp(argv[i], "--load") != 0) continue;
+			loading = true;
+			load_info = read_save_info(argv[i + 1]);
+			if (std::strncmp(argv[2], "--", 2) == 0) {
+				arg_store.assign(argv, argv + argc);
+				arg_store.insert(arg_store.begin() + 2, load_info.scenario);
+				for (std::string& a : arg_store) arg_ptrs.push_back(a.data());
+				argv = arg_ptrs.data();
+				argc = int(arg_ptrs.size());
+			}
+			break;
+		}
 		std::string file = argv[2];
 		std::error_code ec;
 		if (!std::filesystem::exists(file, ec)) {
@@ -1511,7 +1593,7 @@ int main(int argc, char** argv) {
 		const char* fa = arg_value(argc, argv, "--frames");
 		const int32_t frames = fa ? int32_t(std::strtol(fa, nullptr, 0)) : 300;
 		const char* sa = arg_value(argc, argv, "--seed");
-		const uint32_t seed = sa ? uint32_t(std::strtoul(sa, nullptr, 0)) : 12345u;
+		const uint32_t seed = loading ? load_info.seed : sa ? uint32_t(std::strtoul(sa, nullptr, 0)) : 12345u;
 		const char* da = arg_value(argc, argv, "--dump-every");
 		const int32_t dump_every = da ? int32_t(std::strtol(da, nullptr, 0)) : 0;
 		const char* ca = arg_value(argc, argv, "--combat-every");
@@ -1562,6 +1644,17 @@ int main(int argc, char** argv) {
 			else if (std::strcmp(argv[i], "--respond") == 0) scripts.push_back(parse_prod(Script::Respond, argv[i + 1]));
 			else if (std::strcmp(argv[i], "--peasants") == 0) scripts.push_back(parse_prod(Script::Peasants, argv[i + 1]));
 		}
+		FogOpts fo;
+		for (int i = 3; i + 1 < argc; i++) {
+			if (std::strcmp(argv[i], "--save-at") == 0) {  // FRAME:path
+				const std::string a = argv[i + 1];
+				const size_t colon = a.find(':');
+				if (colon == std::string::npos || colon == 0 || colon + 1 >= a.size())
+					throw std::runtime_error("bad --save-at " + a + " (FRAME:path)");
+				fo.save_at.emplace_back(int32_t(std::strtol(a.c_str(), nullptr, 0)), a.substr(colon + 1));
+			}
+		}
+		if (loading) fo.load_path = arg_value(argc, argv, "--load");
 		const char* pa = arg_value(argc, argv, "--prod-every");
 		const int32_t prod_every = pa ? int32_t(std::strtol(pa, nullptr, 0)) : 0;
 		// GameInfo.reveal_map: --reveal N, else the scenario header's value, else 1 (Normal).
@@ -1603,7 +1696,6 @@ int main(int argc, char** argv) {
 			g.load(files, sc, rules, seed);
 			print_anim_table(g, *art);
 		}
-		FogOpts fo;
 		if (const char* fw = arg_value(argc, argv, "--fog")) fo.fog_who = int32_t(std::strtol(fw, nullptr, 0));
 		fo.fog_check = has_flag(argc, argv, "--fog-check");
 		fo.reveal = reveal;
@@ -1615,6 +1707,18 @@ int main(int argc, char** argv) {
 		fo.scripts = !has_flag(argc, argv, "--no-scripts");
 		fo.script_log = has_flag(argc, argv, "--script-log");
 		fo.scenario_path = std::filesystem::absolute(file).string();
+		fo.save_scenario = scenario_rel_path(files, fo.scenario_path);
+		fo.save_seed = seed;
+		// --roundtrip FRAME: the first run saves at FRAME; the load pass below continues from that file.
+		const char* rtv = arg_value(argc, argv, "--roundtrip");
+		const int32_t rt_at = rtv ? int32_t(std::strtol(rtv, nullptr, 0)) : -1;
+		std::string rt_file;
+		if (rtv) {
+			rt_file = "ron-roundtrip-" + std::to_string(long(getpid())) + ".ronsave";
+			fo.roundtrip_at = rt_at;
+			fo.roundtrip_file = rt_file;
+			fo.capture_final = true;
+		}
 		const RunResult a = run(files, sc, rules, art.get(), seed, frames, scripts, dump_every, digest_every, true, fo,
 		                        combat_every, prod_every);
 		if (a.fog_failed) return 1;
@@ -1633,6 +1737,54 @@ int main(int argc, char** argv) {
 				std::printf("determinism self-check: FAILED at frame %zu\n", diff + 1);
 				return 1;
 			}
+		}
+		if (rtv) {
+			// The run may never reach the frame (a game that ends early stops advancing): then take the round trip one
+			// frame before its end instead, with a second run.
+			RunResult a2;
+			if (!a.roundtrip_saved) {
+				fo.roundtrip_at = std::max<int32_t>(0, a.final_frame - 1);
+				std::printf("save round-trip: frame %d is not reached (the game stops at frame %d); using frame %d\n", rt_at,
+				            a.final_frame, fo.roundtrip_at);
+				a2 = run(files, sc, rules, art.get(), seed, frames, scripts, 0, 0, false, fo);
+			}
+			const RunResult& A = a.roundtrip_saved ? a : a2;
+			if (!A.roundtrip_saved) {
+				std::printf("save round-trip: FAILED: could not save at frame %d\n", fo.roundtrip_at);
+				return 1;
+			}
+			const int32_t R = A.roundtrip_frame;
+			FogOpts fo2 = fo;
+			fo2.roundtrip_at = -1;
+			fo2.save_at.clear();
+			fo2.load_path = rt_file;
+			fo2.capture_final = true;
+			const int32_t remaining = int32_t(A.digests.size() - A.roundtrip_iter);
+			RunResult c;
+			try {
+				c = run(files, sc, rules, art.get(), seed, remaining, scripts, 0, 0, false, fo2);
+			} catch (const std::exception& e) {
+				std::remove(rt_file.c_str());
+				std::printf("save round-trip: FAILED: %s\n", e.what());
+				return 1;
+			}
+			std::remove(rt_file.c_str());
+			for (size_t j = 0; j < c.digests.size(); j++) {
+				if (A.roundtrip_iter + j >= A.digests.size() || A.digests[A.roundtrip_iter + j] != c.digests[j]) {
+					std::printf("save round-trip: FAILED at frame %d (saved at %d)\n", R + int32_t(j) + 1, R);
+					return 1;
+				}
+			}
+			std::string why = describe_save_difference(A.final_state, c.final_state);
+			if (!why.empty() && A.final_game && c.final_game)
+				why = describe_game_difference(*A.final_game, *c.final_game, fo.save_scenario, fo.save_seed);
+			if (!why.empty()) {
+				std::printf("save round-trip: FAILED: digests identical but the saved state of frame %d differs: %s\n",
+				            A.final_frame, why.c_str());
+				return 1;
+			}
+			std::printf("save round-trip: OK (saved at frame %d, %lld bytes; %zu frames compared, final state of %zu bytes identical)\n",
+			            R, (long long)A.saved_bytes, c.digests.size(), A.final_state.size());
 		}
 		return 0;
 	} catch (const std::exception& e) {

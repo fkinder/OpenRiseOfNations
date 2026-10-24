@@ -113,6 +113,9 @@ struct Order {
 	uint16_t uid = 0xffff;
 	// GarrisonOrder (+0x14 find): look for another building of the target's city when the target is full.
 	int8_t find = 0;
+	// CastOrder (CAST_SPELL; transport-spec 4.1): x / y +0x14 / +0x18 above (the cast target), paid +0x1c (the cost was
+	// charged), spell +0x20 (the craft index, 0x275..0x2ab; 0x28a TRANSPORT).
+	int32_t spell = 0, paid = 0;
 
 	// GroupOrder (GROUP_MOVE, GROUP_ATTACK_TO, GROUP_ATTACK, GROUP_PATROL)
 	int32_t oxx = -1, whose = -1, id = -1, form_id = 0;

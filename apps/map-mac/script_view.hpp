@@ -55,6 +55,12 @@ public:
 
 	// Consumes the events posted since the last call (ScriptEvent::seq cursor).
 	void consume(const ron::sim::ScriptPresentation& p, const Env& env, const Callbacks& cb);
+	// A line in the message window from the interface itself (save / load feedback), in the standard colour and duration.
+	void say(const std::string& text, const Env& env);
+	// Forgets everything shown for the previous game (messages, notices, bubbles, pings, objective marks, popups, the
+	// game-over line) after a save is loaded, and makes the event cursor skip the queue the loaded game carries so its
+	// old sounds and messages do not play again. The current instruction line is kept from the saved queue.
+	void reset(const ron::sim::ScriptPresentation* p);
 	// Game over from the simulation's event log (victory / defeat of the local leader): the AnimNotice, YOU_WIN /
 	// YOU_LOSE and the game-over line.
 	void game_over(bool won, const std::string& message, const Env& env, const Callbacks& cb);
