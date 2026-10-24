@@ -27,9 +27,13 @@ std::string normalize_game_path(const std::string& p) {
 GameFiles::GameFiles(std::string root) : root_(std::move(root)) {
 	std::error_code ec;
 	if (!fs::is_directory(root_, ec)) throw std::runtime_error("not a directory: " + root_);
-	for (auto it = fs::recursive_directory_iterator(root_, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
-		if (!it->is_regular_file(ec)) continue;
-		const std::string rel = fs::relative(it->path(), root_, ec).generic_string();
+	// Follow symlinks (files and directories) so a mod overlay built from links to the install works as a game dir.
+	const auto opts = fs::directory_options::follow_directory_symlink | fs::directory_options::skip_permission_denied;
+	for (auto it = fs::recursive_directory_iterator(root_, opts, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+		std::error_code stat_ec;  // a broken link must not stop the walk
+		if (!fs::is_regular_file(it->path(), stat_ec)) continue;
+		// lexically_relative, not fs::relative: the latter canonicalizes and would follow a link out of the root.
+		const std::string rel = it->path().lexically_relative(root_).generic_string();
 		by_lower_[to_lower(rel)] = it->path().string();
 	}
 }
