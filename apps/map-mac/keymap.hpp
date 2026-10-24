@@ -4,7 +4,9 @@
 #pragma once
 
 #include <functional>
+#include <map>
 #include <string>
+#include <vector>
 
 namespace keymap {
 
@@ -27,5 +29,20 @@ const Entry* lookup(const std::string& keys, int mode, const std::function<bool(
 // The key an option / parameter is bound to ("G", "Ctrl+G"), empty when unbound. `param` -2 matches any parameter,
 // `mode` -1 any mode.
 std::string hotkey(const std::string& option, int param, const std::function<bool(int ctx)>& ctx_ok = {}, int mode = -1);
+
+// The Options page's Hotkeys pane (docs/ui-port.md section 15): the table by index, the key an entry is bound to now (the default or the
+// user's), a signature that survives table changes ("name|mode|ctx|param"), and the overrides the preferences file keeps.
+size_t count();
+const Entry& entry(size_t i);
+std::string keys_of(size_t i);
+std::string signature(size_t i);
+void set_keys(size_t i, const std::string& keys);  // "" unbinds
+void reset_keys();                                  // every entry back to its default
+// Applies a prefs.hotkeys map (signature -> keys) over the defaults; entries not in the map are reset.
+void apply_overrides(const std::map<std::string, std::string>& hotkeys);
+// The map of the entries that differ from the default.
+std::map<std::string, std::string> overrides();
+// The other entries bound to `keys` that would clash with entry `i` (same mode and a context that can be active together).
+std::vector<size_t> conflicts(size_t i, const std::string& keys);
 
 }  // namespace keymap

@@ -239,7 +239,14 @@ void Hud::draw_library(UiRenderer& ui, const State& s) {
 // ---------------------------------------------------------------- garrison
 
 // The window right of the selection panel (IFaceMain::position_windows): from the panel's right edge to the display button.
-IfaceRect Hud::garrison_rect() const {
+IfaceRect Hud::garrison_rect(bool air) const {
+	if (!opened_) {
+		// Streamlined (IFaceMain::position_windows): the window sits at x = 25 of the right slot, level with the selection window. The
+		// air panel is 50 px of buttons in the narrow layout (the computed width is under 101), the plain garrison grid keeps the 294 of
+		// its window.
+		const int l = right_.l + 25 - 4, r = air ? l + 58 : std::min(right_.r - 2, l + 294);
+		return {l, r, right_.t, right_.b};
+	}
 	const int l = sel_win_.r + 2, r = std::max(l + 40, display_btn_.l - 4);
 	return {l, r, right_.t, right_.b};
 }
@@ -248,7 +255,7 @@ IfaceRect Hud::garrison_rect() const {
 // shrink by k (the smallest with k^2 cells >= count) and use the small icons. Units of one type and owner merge into a counted
 // button; with several owners each button is outlined in its owner's colour (on_button_redraw @00805cc0).
 int Hud::garrison_index_at(int x, int y, const State& s, IfaceRect* cell_out) const {
-	if (!s.garrison.active || !opened_) return -1;
+	if (!s.garrison.active) return -1;
 	const IfaceRect g = garrison_rect();
 	const IfaceRect area{g.l + 4, g.r - 4, g.t + 4, g.b - 4};
 	const int cw = 50, chh = 30, sp = 2;
@@ -270,7 +277,7 @@ int Hud::garrison_index_at(int x, int y, const State& s, IfaceRect* cell_out) co
 }
 
 void Hud::draw_garrison(UiRenderer& ui, const State& s) {
-	if (!s.garrison.active || !opened_) return;
+	if (!s.garrison.active) return;
 	const ron::XmlElement* ge = layout_->find("IFACEGARRISON");
 	const IfaceRect g = garrison_rect();
 	ui.next_window();

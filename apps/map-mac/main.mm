@@ -114,6 +114,8 @@
 #include "sim/production.hpp"
 #include "hud.hpp"
 #include "keymap.hpp"
+#include "options_ui.hpp"
+#include "prefs.hpp"
 #include "notices.hpp"
 #include "script_view.hpp"
 #include "tips.hpp"
@@ -491,6 +493,7 @@ static bool debug_skip(const char* pass) {
 - (void)setHoverX:(float)x y:(float)y;
 - (void)setGameSpeed:(int)speed;
 - (void)setProgressButtons:(BOOL)on;
+- (void)harnessCarrier:(const char*)spec;
 - (void)mouseEvent:(const std::string&)kind x:(float)x y:(float)y;
 - (void)setPanels:(int)flags streamlined:(BOOL)streamlined help:(int)level;
 - (void)runKeyString:(const std::string&)keys;
@@ -755,6 +758,7 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	int _gameMenu;
 	std::vector<ron::IfaceRect> _gmRects;
 	int _gmHover, _gmPress;
+	std::unique_ptr<optui::Page> _optPage;  // the Options page over the game menu (_gameMenu == 3, docs/ui-port.md section 15)
 	double _overMs;  // when the local game-over was first seen (-1 not yet)
 	BOOL _overOffered;
 	BOOL _uiReady;
@@ -3291,9 +3295,9 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 			opt(hud::kOptAlarmPeasant, 4, 0, false);
 		}
 		opt(hud::kOptHalt, 0, 3, own);
-		opt(hud::kOptGarrison, 1, 3, own);
 		{
 			uix::Ctx uc = [self uixCtx];
+			if (!uix::lone_carrier(uc)) opt(hud::kOptGarrison, 1, 3, own);  // a carrier has REPEAT there instead
 			uix::unit_extra_options(uc, out);  // carriers; the advanced rows (stance, formation, patrol, guard, disband)
 		}
 		return out;
@@ -4442,8 +4446,8 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 
 - (std::vector<std::string>)gameMenuItems {
 	if (_gameMenu == 2) return {"Return to Main Menu", "Keep Watching", "Quit"};
-	if (_mp) return {"Resume Game", "Save Game", "Resign", "Return to Main Menu", "Quit"};  // a multiplayer save is synchronized (no loading mid-game)
-	return {"Resume Game", "Save Game", "Load Game", "Return to Main Menu", "Quit"};
+	if (_mp) return {"Resume Game", "Save Game", "Resign", "Options", "Return to Main Menu", "Quit"};  // a multiplayer save is synchronized (no loading mid-game)
+	return {"Resume Game", "Save Game", "Load Game", "Options", "Return to Main Menu", "Quit"};
 }
 
 - (void)openGameMenu:(int)kind {
@@ -4451,6 +4455,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	_gameMenu = kind;
 	_gmHover = 0, _gmPress = -1;
 	_pressing = _boxing = _hudPress = _rightPress = NO;
+	if (kind == 3) [self openOptions];  // harness: RON_GAME_MENU=3 shows the Options page
 }
 
 // MainMenuBase (interface.xml MAINMENU): the 9-piece scroll background bg0..bg8, the title in font 24, a column of
@@ -4458,6 +4463,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 - (void)drawGameMenu {
 	_gmRects.clear();
 	if (!_gameMenu || !_layout) return;
+	if (_gameMenu == 3) {
+		[self drawOptions];
+		return;
+	}
 	const ron::XmlElement* mm = nullptr;
 	for (const ron::XmlElement& c : _layout->root().children) {
 		if (ron::iface_tag_is(c, "MAINMENU")) mm = &c;
@@ -4514,6 +4523,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	const std::vector<std::string> items = [self gameMenuItems];
 	if (i < 0 || size_t(i) >= items.size()) return;
 	const std::string& it = items[size_t(i)];
+	if (it == "Options") {
+		[self openOptions];
+		return;
+	}
 	_gameMenu = 0;
 	_lastFrame = 0;  // no catch-up after the pause
 	if (it == "Resign") {
@@ -4541,11 +4554,110 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 - (void)gameMenuKey:(NSEvent*)e {
 	NSString* chars = e.charactersIgnoringModifiers;
 	const unichar c = chars.length ? [chars characterAtIndex:0] : 0;
+	if (_gameMenu == 3) {
+		if (_optPage) {
+			const NSEventModifierFlags m = e.modifierFlags;
+			_optPage->key(e.keyCode, c, (m & (NSEventModifierFlagControl | NSEventModifierFlagCommand)) != 0, (m & NSEventModifierFlagOption) != 0,
+			              (m & NSEventModifierFlagShift) != 0);
+		}
+		return;
+	}
 	const int n = int([self gameMenuItems].size());
 	if (c == NSUpArrowFunctionKey) _gmHover = (std::max(_gmHover, 0) + n - 1) % n;
 	else if (c == NSDownArrowFunctionKey) _gmHover = (_gmHover + 1) % n;
 	else if (c == '\r' || c == 3) [self gameMenuChoose:std::max(_gmHover, 0)];
 	else if (e.keyCode == 53 || e.keyCode == 109) _gameMenu = 0, _lastFrame = 0;  // Esc / F10: back to the game
+}
+
+// ---------------------------------------------------------------- the Options page (docs/ui-port.md section 15)
+
+// Steps the game speed to `target` (0..3) the way the keys do: SPEED_UP / SPEED_DOWN commands, so a recording and the other machines
+// follow. A multiplayer game keeps the host's speed (the session owns it).
+- (void)stepGameSpeedTo:(int)target {
+	if (!_game || _mp) return;
+	target = std::clamp(target, 0, 3);
+	for (int guard = 0; guard < 6 && _speed != target; guard++) {
+		_game->ctl.speed = _speed, _game->ctl.target_frame_time = int32_t(kTimings[std::clamp(_speed, 0, 4)]);
+		if (target > _speed) _cm.issue_speed_up();
+		else _cm.issue_speed_down();
+		_cm.process_turn(*_game);
+		if (_game->ctl.speed == _speed) break;
+		_speed = _game->ctl.speed;
+	}
+}
+
+// What OK hands to the window: the preferences that act on a running game (the rest are read when a game or the menu starts).
+- (void)applyPrefs:(const prefs::Prefs&)p {
+	if (p.has("game_speed") && p.game_speed != _speed && !(p.game_speed >= 3 && _speed >= 3)) [self stepGameSpeedTo:p.game_speed];
+	if (p.has("help_detail")) {
+		_helpOn = p.help_detail > 0;
+		if (p.help_detail > 0) _verbosity = std::clamp(p.help_detail, 1, 3);
+	}
+	if (p.has("advanced_menu") && _hud.advanced() != p.advanced_menu) {
+		_hud.set_advanced(p.advanced_menu);
+		[[NSUserDefaults standardUserDefaults] setBool:p.advanced_menu forKey:@"AdvancedMenu"];
+	}
+	if (p.has("progress_bars")) [self setProgressButtons:p.progress_bars];
+	if (p.has("prefer_military")) _hud.set_prefer_military(p.prefer_military);
+	if (p.has("streamlined") && _hud.opened() == p.streamlined) _hud.set_opened(!p.streamlined);
+	if (_audio && (p.has("fx_volume") || p.has("music_volume") || p.has("music_in_game"))) {
+		const float fx = float(p.fx_volume) / 255.0f;
+		_audio->set_volumes(fx, fx, p.music_in_game ? float(p.music_volume) / 255.0f : 0.0f);
+	}
+	NSWindow* win = self.view.window;
+	if (win && p.has("fullscreen") && ((win.styleMask & NSWindowStyleMaskFullScreen) != 0) != p.fullscreen) [win toggleFullScreen:nil];
+}
+
+// Harness (RON_CARRIER_TEST=WHO:O, docs/ui-port.md 14.1): the unit becomes a Carrier (type 351) so the card's REPEAT can be looked at.
+- (void)harnessCarrier:(const char*)spec {
+	int who = 0, o = 0;
+	std::sscanf(spec, "%d:%d", &who, &o);
+	if (!_game) return;
+	if (ron::sim::Unit* u = _game->unit(who, o)) u->type = ron::sim::ptype::kCarrier, u->ptype = &_game->type(ron::sim::ptype::kCarrier);
+}
+
+- (void)openOptions {
+	if (!_uiReady || !_layout || !_files) return;
+	if (!_optPage) _optPage = std::make_unique<optui::Page>(*_files, *_layout);
+	if (!_optPage->ready()) {
+		[self say:"The options window (Data/optionswin.xml) could not be read"];
+		return;
+	}
+	optui::Host h;
+	__unsafe_unretained MapRenderer* me = self;
+	h.live = [me](prefs::Prefs& p) {  // the running game's own values win over the saved ones
+		p.game_speed = std::clamp(me->_speed, 0, 4);
+		p.help_detail = me->_helpOn ? me->_verbosity : 0;
+		p.advanced_menu = me->_hud.advanced();
+		p.progress_bars = me->_progressButtons;
+		p.prefer_military = me->_hud.prefer_military();
+		p.streamlined = !me->_hud.opened();
+		if (NSWindow* w = me.view.window) p.fullscreen = (w.styleMask & NSWindowStyleMaskFullScreen) != 0;
+	};
+	h.apply = [me](const prefs::Prefs& p) { [me applyPrefs:p]; };
+	h.preview = [me](const prefs::Prefs& p) {
+		if (me->_audio) me->_audio->set_volumes(float(p.fx_volume) / 255.0f, float(p.fx_volume) / 255.0f, p.music_in_game ? float(p.music_volume) / 255.0f : 0.0f);
+	};
+	h.type_name = [me](int t) -> std::string { return me->_game && t >= 0 && t < ron::sim::kNumTypes ? [me typeName:t] : std::string(); };
+	h.resolution = [me]() { return std::to_string(me->_uiW) + " x " + std::to_string(me->_uiH); };
+	h.closed = [me]() {
+		me->_gameMenu = 1;  // back to the game menu
+		me->_gmHover = 0, me->_gmPress = -1;
+	};
+	int pane = 0;
+	if (const char* e = getenv("RON_OPT_PANE")) pane = std::atoi(e);  // snapshot checks
+	_gameMenu = 3;
+	_optPage->open(h, pane);
+	if (const char* e = getenv("RON_OPT_HK")) _optPage->test_select_hotkey(e);
+	if (const char* e = getenv("RON_OPT_COMBO")) _optPage->test_open_combo(std::atoi(e));
+}
+
+- (void)drawOptions {
+	if (!_optPage || !_optPage->is_open()) return;
+	_ui.next_window();
+	_ui.fill(0, 0, float(_uiW), float(_uiH), rm::argb(120, 0, 0, 0), rm::UiType::ColorBlend);
+	_ui.next_layer();
+	_optPage->draw(_ui, (_uiW - optui::Page::kW) / 2, (_uiH - optui::Page::kH) / 2);
 }
 
 // ---------------------------------------------------------------- building placement (docs/ui-spec.md 4.5)
@@ -4945,6 +5057,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 			return 1;
 		}
 	}
+	if (o == "OPTION_OPTIONS") {  // F11: the Options page (docs/ui-port.md section 15)
+		if (!_gameMenu && !_inPopup) [self openGameMenu:3];
+		return 1;
+	}
 	if (o == "OPTION_TOGGLE_ADVANCED") {  // the bar's Advanced Options button (pref 0x2: the card's stance / formation / patrol rows)
 		_hud.set_advanced(!_hud.advanced());
 		[[NSUserDefaults standardUserDefaults] setBool:_hud.advanced() forKey:@"AdvancedMenu"];
@@ -5318,6 +5434,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 - (void)uiMouseDown:(CGPoint)p right:(BOOL)right modifiers:(NSEventModifierFlags)m clicks:(NSInteger)clicks {
 	_mouse = p;
 	_mouseInside = YES;
+	if (_gameMenu == 3 && _optPage) {
+		if (!right) _optPage->mouse_down(int(p.x), int(p.y));
+		return;
+	}
 	if (_gameMenu) {
 		_gmPress = right ? -1 : [self gameMenuAt:p];
 		return;
@@ -5348,6 +5468,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 
 - (void)uiMouseDragged:(CGPoint)p right:(BOOL)right delta:(CGPoint)d {
 	_mouse = p;
+	if (_gameMenu == 3 && _optPage) {
+		_optPage->mouse_drag(int(p.x), int(p.y));
+		return;
+	}
 	if (_gameMenu) {
 		_gmHover = [self gameMenuAt:p];
 		return;
@@ -5378,6 +5502,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 
 - (void)uiMouseUp:(CGPoint)p right:(BOOL)right modifiers:(NSEventModifierFlags)m {
 	_mouse = p;
+	if (_gameMenu == 3 && _optPage) {
+		if (!right) _optPage->mouse_up(int(p.x), int(p.y));
+		return;
+	}
 	if (_gameMenu) {
 		const int i = [self gameMenuAt:p];
 		const int pressed = _gmPress;
@@ -5435,6 +5563,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 - (void)uiMouseMoved:(CGPoint)p {
 	_mouse = p;
 	_mouseInside = YES;
+	if (_gameMenu == 3 && _optPage) {
+		_optPage->mouse_move(int(p.x), int(p.y));
+		return;
+	}
 	if (_gameMenu) {
 		const int i = [self gameMenuAt:p];
 		if (i >= 0) _gmHover = i;
@@ -5468,6 +5600,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 
 // A mouse wheel notch zooms (ZOOM_IN3 / ZOOM_OUT3); trackpad scrolling pans the map.
 - (void)uiScrollWheel:(NSEvent*)e at:(CGPoint)p {
+	if (_gameMenu == 3 && _optPage) {
+		_optPage->wheel(double(e.scrollingDeltaY), int(p.x), int(p.y));
+		return;
+	}
 	if (_gameMenu) return;
 	if (_formDrag && e.scrollingDeltaY != 0) {  // the wheel changes the formation's spacing by 5 (0..100)
 		_formWidth = std::clamp(_formWidth + (e.scrollingDeltaY > 0 ? 5 : -5), 0, 100);
@@ -5502,7 +5638,8 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	if (!NSPointInRect(wp, b)) return;
 	const float x = float(wp.x), y = float(b.size.height - wp.y), W = float(b.size.width), H = float(b.size.height);
 	static const float speeds[7] = {48, 32, 24, 16, 12, 9, 8};
-	const float step = float(std::min(1.0, dtMs / 67.0 * 0.5) * 63.9936) * speeds[std::clamp(_zoom, 0, 6)] * (_boxing ? 0.25f : 1.0f);
+	const float option = prefs::get().has("scroll_speed") ? prefs::scroll_factor(prefs::get().scroll_speed) : 1.0f;  // speed_option of the Options page
+	const float step = float(std::min(1.0, dtMs / 67.0 * 0.5) * 63.9936) * option * speeds[std::clamp(_zoom, 0, 6)] * (_boxing ? 0.25f : 1.0f);
 	const bool sides = ![self hudVisible] || y < float(_hud.bar_top() - 40) || _boxing;
 	float dx = 0, dy = 0;
 	if (x < 2 && sides) dx = -1;
@@ -6041,6 +6178,18 @@ static int group_key_order(int i) { return (i + 1) % kGroupKeys; }  // panel / f
 	if ([d objectForKey:@"AdvancedMenu"]) _hud.set_advanced([d boolForKey:@"AdvancedMenu"]);      // pref 0x2
 	if ([d objectForKey:@"GroupByType"]) _hud.set_group_by_type([d boolForKey:@"GroupByType"]);  // pref 0x20000
 	if ([d objectForKey:@"PreferMilitary"]) _hud.set_prefer_military([d boolForKey:@"PreferMilitary"]);
+	{  // preferences.txt (the Options page) wins over the profile for the keys it names
+		const prefs::Prefs& P = prefs::get();
+		if (P.has("game_speed")) _speed = std::clamp(P.game_speed, 0, 4);
+		if (P.has("help_detail")) {
+			_helpOn = P.help_detail > 0;
+			if (P.help_detail > 0) _verbosity = std::clamp(P.help_detail, 1, 3);
+		}
+		if (P.has("advanced_menu")) _hud.set_advanced(P.advanced_menu);
+		if (P.has("progress_bars")) [self setProgressButtons:P.progress_bars];
+		if (P.has("prefer_military")) _hud.set_prefer_military(P.prefer_military);
+		if (P.has("streamlined")) _hud.set_opened(!P.streamlined);
+	}
 	_profile[0] = _hud.panel_flags(), _profile[1] = _hud.minilib_open(), _profile[2] = _verbosity, _profile[3] = _progressButtons, _profile[4] = _speed;
 }
 
@@ -6062,6 +6211,10 @@ static int group_key_order(int i) { return (i + 1) % kGroupKeys; }  // panel / f
 	[self loadProfile];
 	_drawW = _drawH = 0;
 	_audio = std::make_unique<ron::audio::Audio>();
+	if (const prefs::Prefs& pp = prefs::get(); pp.has("fx_volume") || pp.has("music_volume")) {  // the Options page's sound pane
+		const float fx = float(pp.fx_volume) / 255.0f;
+		_audio->set_volumes(fx, fx, float(pp.music_volume) / 255.0f);
+	}
 	try {
 		std::map<std::string, std::vector<std::string>> moods;
 		std::string win, lose;
@@ -6090,7 +6243,7 @@ static int group_key_order(int i) { return (i + 1) % kGroupKeys; }  // panel / f
 		});
 		_audio->set_music(moods, win, lose);
 		_audio->update(_timeMs);
-		_audio->music_start();
+		if (prefs::get().music_in_game) _audio->music_start();
 	} catch (const std::exception& e) {
 		std::fprintf(stderr, "music unavailable: %s\n", e.what());
 	}
@@ -6687,6 +6840,7 @@ static int vk_of(NSEvent* e) {
 	if (@available(macOS 14.0, *)) [NSApp activate];
 	else [NSApp activateIgnoringOtherApps:YES];
 	[self.window orderFrontRegardless];
+	if (prefs::get().has("fullscreen") && prefs::get().fullscreen) [self.window toggleFullScreen:nil];  // the Options page's Graphics pane
 	if (getenv("RON_FLOW_TEST")) [self flowTest:0];
 	if (getenv("RON_CTW_FLOW_TEST") && _ctwSession) [self ctwFlowTest:0];
 }
@@ -7483,7 +7637,7 @@ int main(int argc, const char* argv[]) {
 				ctwVerbose = true;
 			} else if (a == "--menu") {
 				menu = true;
-				static const char* const screens[] = {"main", "tutorials", "skirmish", "skirmish-setup", "scenarios", "quit-popup", "ctw", "ctw-map", "multiplayer", "mp-lobby"};
+				static const char* const screens[] = {"main", "tutorials", "skirmish", "skirmish-setup", "scenarios", "quit-popup", "ctw", "ctw-map", "multiplayer", "mp-lobby", "options"};
 				for (const char* sname : screens) {
 					if (more && std::strcmp(argv[i + 1], sname) == 0) {
 						menuScreen = @(argv[++i]);
@@ -7491,7 +7645,7 @@ int main(int argc, const char* argv[]) {
 					}
 				}
 			} else if (a.rfind("--", 0) == 0) {
-				std::printf("usage: %s [game-dir] [--menu [main|tutorials|skirmish|skirmish-setup|scenarios|quit-popup]] [--snapshot out.png [--size WxH]]\n"
+				std::printf("usage: %s [game-dir] [--menu [main|tutorials|skirmish|skirmish-setup|scenarios|quit-popup|ctw|ctw-map|multiplayer|mp-lobby|options]] [--snapshot out.png [--size WxH]]\n"
 				            "       %s [game-dir] --random STYLE,SIZE,SEED,NATIONS[,TRIBES...] [--all-ai] [--difficulty 0..5] [--frames N] [--census] [--save-game FILE] [--snapshot out.png]\n"
 				            "       %s [game-dir] <scenario.scx> [--zoom 0..6] [--at X,Y] [--no-bloom] [--farm-time S] [--no-sim] [--seed S] "
 				            "[--move WHO:o1,o2@X,Y[@FRAME]]... [--frames N] [--load-game FILE] [--save-game FILE] [--snapshot out.png [--size WxH]]\n", argv[0], argv[0], argv[0]);
@@ -7508,6 +7662,7 @@ int main(int argc, const char* argv[]) {
 			else scenario = positional[0];
 		}
 		uistr::choose(lang_arg);
+		keymap::apply_overrides(prefs::get().hotkeys);  // the Options page's Hotkeys pane
 		if (ctwCheck) return ctwcli::check(gameDir.UTF8String);
 		if (ctwSelftest) return ctwcli::selftest(gameDir.UTF8String);
 		if (ctwSim) return ctwcli::simulate(gameDir.UTF8String, ctwCampaign.UTF8String, seed, ctwRounds, g_difficulty >= 0 ? g_difficulty : 2,
@@ -7945,7 +8100,8 @@ int main(int argc, const char* argv[]) {
 		if (progress_arg) [r setProgressButtons:YES];
 		if (!std::isnan(hover_x)) [r setHoverX:hover_x y:hover_y];
 		if (const char* t = getenv("RON_POPUP_TEST")) [r testPopup:t];
-		if (const char* t = getenv("RON_GAME_MENU")) [r openGameMenu:std::atoi(t)];  // 1 the game menu, 2 game over
+		if (const char* t = getenv("RON_GAME_MENU")) [r openGameMenu:std::atoi(t)];  // 1 the game menu, 2 game over, 3 the Options page
+		if (const char* t = getenv("RON_CARRIER_TEST")) [r harnessCarrier:t];       // "WHO:O" turns that unit into a Carrier (no stock scenario has one)
 		if (play >= 0) [r setLocalPlayer:play];
 		if (sel_who >= 0) [r selectWho:sel_who objects:sel_objs buildings:sel_builds];
 		if (build_page >= 0) [r setBuildPage:build_page];

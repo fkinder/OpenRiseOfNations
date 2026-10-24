@@ -9,6 +9,17 @@ namespace {
 const Entry kTable[] = {
 #include "keymap_table.inc"
 };
+constexpr size_t kCount = sizeof(kTable) / sizeof(kTable[0]);
+
+// The key of each entry now: the compiled default until the Options page (or the preferences file) rebinds it.
+std::vector<std::string>& keys_table() {
+	static std::vector<std::string> t = [] {
+		std::vector<std::string> v;
+		for (const Entry& e : kTable) v.push_back(e.keys);
+		return v;
+	}();
+	return t;
+}
 
 // Mac virtual key codes (kVK_*, ANSI layout) to the key names of the table.
 const char* key_name(unsigned short code) {
@@ -55,7 +66,7 @@ const Entry* lookup(const std::string& keys, int mode, const std::function<bool(
 	auto find = [&](int m, const std::string& k, bool train_only) -> const Entry* {
 		for (int pass = 0; pass < 2; pass++) {
 			for (const Entry& e : kTable) {
-				if (e.mode != m || k != e.keys) continue;
+				if (e.mode != m || k != keys_table()[size_t(&e - kTable)]) continue;
 				if ((pass == 0) != (e.ctx >= 0)) continue;
 				if (train_only && std::strcmp(e.option, "OPTION_TRAIN") != 0) continue;
 				if (ctx_ok && !ctx_ok(e.ctx)) continue;
@@ -85,10 +96,58 @@ std::string hotkey(const std::string& option, int param, const std::function<boo
 		if (param != -2 && e.param != param) continue;
 		if (mode >= 0 && e.mode != mode) continue;
 		if (ctx_ok && !ctx_ok(e.ctx)) continue;
-		if (std::strncmp(e.keys, "Mouse", 5) == 0 || std::strncmp(e.keys, "Wheel", 5) == 0) continue;
-		return e.keys;
+		const std::string& k = keys_table()[size_t(&e - kTable)];
+		if (k.empty() || k.rfind("Mouse", 0) == 0 || k.rfind("Wheel", 0) == 0) continue;
+		return k;
 	}
 	return {};
+}
+
+size_t count() { return kCount; }
+const Entry& entry(size_t i) { return kTable[i]; }
+std::string keys_of(size_t i) { return keys_table()[i]; }
+
+std::string signature(size_t i) {
+	const Entry& e = kTable[i];
+	return std::string(e.name) + "|" + std::to_string(e.mode) + "|" + std::to_string(e.ctx) + "|" + std::to_string(e.param);
+}
+
+void set_keys(size_t i, const std::string& keys) {
+	if (i < kCount) keys_table()[i] = keys;
+}
+
+void reset_keys() {
+	for (size_t i = 0; i < kCount; i++) keys_table()[i] = kTable[i].keys;
+}
+
+void apply_overrides(const std::map<std::string, std::string>& hotkeys) {
+	reset_keys();
+	for (size_t i = 0; i < kCount; i++) {
+		auto it = hotkeys.find(signature(i));
+		if (it != hotkeys.end()) keys_table()[i] = it->second;
+	}
+}
+
+std::map<std::string, std::string> overrides() {
+	std::map<std::string, std::string> out;
+	for (size_t i = 0; i < kCount; i++) {
+		if (keys_table()[i] != kTable[i].keys) out[signature(i)] = keys_table()[i];
+	}
+	return out;
+}
+
+std::vector<size_t> conflicts(size_t i, const std::string& keys) {
+	std::vector<size_t> out;
+	if (keys.empty() || i >= kCount) return out;
+	const Entry& a = kTable[i];
+	for (size_t j = 0; j < kCount; j++) {
+		if (j == i || keys_table()[j] != keys || kTable[j].mode != a.mode) continue;
+		const Entry& b = kTable[j];
+		// Two bindings clash when a selection can satisfy both: the same context, or either is "always" / a broad one.
+		const bool broad_a = a.ctx == -1, broad_b = b.ctx == -1;
+		if (a.ctx == b.ctx || broad_a || broad_b) out.push_back(j);
+	}
+	return out;
 }
 
 }  // namespace keymap

@@ -2,6 +2,8 @@
 
 #import <Foundation/Foundation.h>
 
+#include "prefs.hpp"
+
 #include <cstdlib>
 #include <unordered_map>
 
@@ -20,6 +22,7 @@ void choose(const std::string& cli) {
 	if (code.empty()) {
 		if (const char* e = std::getenv("RON_LANG")) code = e;
 	}
+	if (code.empty()) code = prefs::get().language;  // the Options page's Player pane (preferences.txt)
 	if (code.empty()) {
 		@autoreleasepool {
 			NSString* s = [[NSUserDefaults standardUserDefaults] stringForKey:@"Language"];

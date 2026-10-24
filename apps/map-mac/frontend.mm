@@ -41,7 +41,12 @@
 #include "assets/tga.hpp"
 #include "assets/xml.hpp"
 #include "audio.hpp"
+#include "keymap.hpp"
+#include "options_ui.hpp"
+#include "prefs.hpp"
 #include "renderer.hpp"
+#include "sim/rules.hpp"
+#include "uistr.hpp"
 #include "sim/save.hpp"
 #include "ui.hpp"
 #import "launcher.h"
@@ -66,24 +71,27 @@ struct MainItem {
 	const char* help;
 	bool enabled;
 };
-const MainItem kMainItems[6] = {
+constexpr int kMainCount = 7;
+const MainItem kMainItems[kMainCount] = {
     {"Tutorials", "Learn to play, step by step. Start with Tutorial 1.", true},
     {"Skirmish", "Battle computer opponents on a ready-made map, or set up a random map.", true},
     {"Scenarios", "Chess exercises and the battle maps of the Conquer the World campaigns.", true},
     {"Conquer the World", "Lead a nation through a campaign: move armies on the world map, make deals, play the battles.", true},
     {"Multiplayer", "Play with friends on a local network: one player hosts a room, the others join it by address.", true},
+    {"Options", "Game speed, scroll speed, sound volumes, the interface layout, the key map and the language.", true},
     {"Quit", "Leave Rise of Nations and return to the desktop.", true},
 };
 
-enum Screen { kMain = 0, kTutorials, kSkirmish, kScenarios, kSkirmishSetup, kCtw, kCtwMap, kMpConnect, kMpLobby };
-const char* const kScreenNames[9] = {"main", "tutorials", "skirmish", "scenarios", "skirmish-setup", "ctw", "ctw-map", "multiplayer", "mp-lobby"};
-const char* const kListTitles[9] = {"Main Menu", "Tutorials", "Skirmish", "Scenarios", "Skirmish Setup", "Conquer the World", "Conquer the World", "Multiplayer", "Multiplayer Lobby"};
-const char* const kListNotes[9] = {
+enum Screen { kMain = 0, kTutorials, kSkirmish, kScenarios, kSkirmishSetup, kCtw, kCtwMap, kMpConnect, kMpLobby, kOptions, kScreenCount };
+const char* const kScreenNames[kScreenCount] = {"main", "tutorials", "skirmish", "scenarios", "skirmish-setup", "ctw", "ctw-map", "multiplayer", "mp-lobby", "options"};
+const char* const kListTitles[kScreenCount] = {"Main Menu", "Tutorials", "Skirmish", "Scenarios", "Skirmish Setup", "Conquer the World", "Conquer the World", "Multiplayer", "Multiplayer Lobby", "Options"};
+const char* const kListNotes[kScreenCount] = {
     "",
     "Start with Tutorial 1. The tutorials guide you with voice-overs, arrows and objectives.",
     ("You play the map's human player against computer opponents. Press Random Map to choose a map style, its size, "
      "the nations and the teams, and play on a map made for you."),
     "Chess exercises and the battle maps of the Conquer the World campaigns.",
+    "",
     "",
     "",
     "",
@@ -361,6 +369,9 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	uint32_t _mpCtwSeen;                         // the last campaign result a guest took
 	BOOL _mpCtwOn;                               // the host is choosing a Conquer the World battle (the screens are the campaign's)
 	std::string _mpCtwText;
+	// The Options page (options_ui.hpp) and the rules it names the Hotkeys pane's commands from
+	std::unique_ptr<optui::Page> _opts;
+	std::unique_ptr<ron::sim::Rules> _optRules;
 	// Conquer the World (ctw_ui.h): the screens and their drawing bridge
 	std::unique_ptr<ctwui::Screen> _ctw;
 	ctwui::Bridge _ctwb;
@@ -391,6 +402,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		if (error) *error = @(err.c_str());
 		return nil;
 	}
+	_opts = std::make_unique<optui::Page>(*_files, *_iface);
 	// topmenu.xml's atlas ids (TEX_TOPMENU_0, TEX_WRAPPER_LOGO, ANIM_*, TEX_WRAPPER_4) next to interface.xml's.
 	std::map<std::string, int> sort_of;
 	ron::for_each_element(_top->root(), "IFACETEXLOAD", [&](const ron::XmlElement& e) {
@@ -628,15 +640,20 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		return;
 	}
 	Screen s = kMain;
-	for (int i = 0; i < 9; i++) {
+	for (int i = 0; i < kScreenCount; i++) {
 		if ([name isEqualToString:@(kScreenNames[i])]) s = Screen(i);
 	}
 	_screen = s;
+	if (s != kOptions && _opts) _opts->close();
 	if (s != kMpConnect) _lan.close();
 	_sel = 0, _top0 = 0, _focus = 0;
 	_entries.clear();
 	if (s == kCtw || s == kCtwMap) {
 		[self ctwOpen:s == kCtwMap];
+		return;
+	}
+	if (s == kOptions) {
+		[self openOptions];
 		return;
 	}
 	if (s == kSkirmishSetup) [self openSetup];
@@ -701,6 +718,10 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	_lastFrame = 0;
 	if (_audio) return;
 	_audio = std::make_unique<ron::audio::Audio>();
+	if (const prefs::Prefs& pp = prefs::get(); pp.has("fx_volume") || pp.has("music_volume")) {  // the Options page's sound pane
+		const float fx = float(pp.fx_volume) / 255.0f;
+		_audio->set_volumes(fx, fx, float(pp.music_volume) / 255.0f);
+	}
 	// The front end's music: Data/sound.xml TRACKS/INTROS, shuffled by the JukeBox like any mood.
 	try {
 		std::vector<std::string> intros;
@@ -712,7 +733,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 				if (!f.empty()) intros.push_back(f);
 			}
 		});
-		if (!intros.empty() && !getenv("RON_NO_MUSIC")) {
+		if (!intros.empty() && !getenv("RON_NO_MUSIC") && prefs::get().music_in_menu) {
 			_audio->set_music({{"economic", intros}}, "", "");
 			_audio->update(_timeMs);
 			_audio->music_start();
@@ -747,7 +768,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		L.title = _titleRect.offset(wx, wy);
 		L.title_text = _titleText.offset(wx, wy);
 		int bottom = 0;
-		for (int i = 0; i < 6; i++) {
+		for (int i = 0; i < kMainCount; i++) {
 			const IfaceRect r = _btnRect.offset(wx, wy + i * _btnInc);
 			L.buttons.push_back(r);
 			bottom = r.b;
@@ -849,7 +870,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 
 - (void)drawBackdrop {
 	_ui.next_window();
-	if (_screen != kMain || _anims.empty()) {
+	if ((_screen != kMain && _screen != kOptions) || _anims.empty()) {
 		// The setup screens' antique map (TEX_TOPMENU_0, iface_wrapper1.tga), TopMenu's static_bg_tex.
 		if (_staticBg.valid()) {
 			const IfaceRect c = [self coverFor:_staticBg.width height:_staticBg.height];
@@ -873,7 +894,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 }
 
 - (void)advanceAnimation:(double)dt {
-	if (_anims.empty() || _screen != kMain) return;
+	if (_anims.empty() || (_screen != kMain && _screen != kOptions)) return;
 	_animT += dt;
 	const Anim& a = _anims[size_t(_anim) % _anims.size()];
 	if (_animT > a.duration) {
@@ -939,7 +960,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	_ui.border(_border, L.frame.offset(_ox, _oy));
 	[self banner:L text:"Main Menu"];
 	_ui.next_layer();
-	for (int i = 0; i < 6; i++) {
+	for (int i = 0; i < kMainCount; i++) {
 		const bool hot = _hover == kMainBtn + i || _pressed == kMainBtn + i || (_hover == kNone && _focus == i && !_popup.open);
 		[self menuButton:L.buttons[size_t(i)] label:kMainItems[i].label hot:hot && kMainItems[i].enabled enabled:kMainItems[i].enabled];
 		_ui.next_layer();
@@ -1140,6 +1161,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	else if (_screen == kMpConnect) [self drawConnect:L];
 	else if (_screen == kMpLobby) [self drawLobby:L];
 	else if (_screen == kCtw || _screen == kCtwMap) [self ctwDraw];
+	else if (_screen == kOptions) [self drawOptions];
 	else [self drawList:L];
 	[self drawPopup];
 	_ui.encode(enc);
@@ -1165,8 +1187,9 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 }
 
 - (BOOL)snapshotTo:(NSString*)path width:(int)w height:(int)h scale:(float)scale {
-	id<MTLTexture> out = rm::make_readback_target(_device, w, h);
 	if (scale <= 0) scale = 1;
+	if (_screen == kOptions && _opts && _opts->is_open() && getenv("RON_OPT_SCRIPT")) [self runOptionsScript:@(getenv("RON_OPT_SCRIPT")) path:path width:w height:h scale:scale];
+	id<MTLTexture> out = rm::make_readback_target(_device, w, h);
 	id<MTLCommandBuffer> cb = [_queue commandBuffer];
 	[self renderInto:out commandBuffer:cb points:CGSizeMake(w / scale, h / scale)];
 	[cb commit];
@@ -1195,12 +1218,13 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		return kNone;
 	}
 	if (_screen == kMain) {
-		for (int i = 0; i < 6; i++) {
+		for (int i = 0; i < kMainCount; i++) {
 			if (L.buttons[size_t(i)].contains(x, y) && kMainItems[i].enabled) return kMainBtn + i;
 		}
 		if (L.change.contains(x, y)) return kChange;
 		return kNone;
 	}
+	if (_screen == kOptions) return kNone;  // the page does its own hit tests
 	if (_screen == kSkirmishSetup) return [self hitSetup:x y:y];
 	if (_screen == kMpLobby) return [self hitLobby:x y:y];
 	if (_screen == kMpConnect) return [self hitConnect:x y:y];
@@ -1243,7 +1267,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 
 - (void)setHover:(int)h {
 	_hover = h;
-	if (_screen == kMain && h >= kMainBtn && h < kMainBtn + 6) {
+	if (_screen == kMain && h >= kMainBtn && h < kMainBtn + kMainCount) {
 		_help = kMainItems[h - kMainBtn].help;
 		_focus = h - kMainBtn;
 	}
@@ -1257,6 +1281,10 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	}
 	_mouse = [self canvas:p];
 	_mouseKnown = YES;
+	if (_screen == kOptions && _opts) {
+		_opts->mouse_move(int(p.x / _fit), int(p.y / _fit));
+		return;
+	}
 	int h = [self hit:_mouse];
 	// The help box also explains the disabled Multiplayer button.
 	if (_screen == kMain && !_popup.open && h == kNone) {
@@ -1273,6 +1301,10 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		return;
 	}
 	_mouse = [self canvas:p];
+	if (_screen == kOptions && _opts && !_popup.open) {
+		_opts->mouse_down(int(p.x / _fit), int(p.y / _fit));
+		return;
+	}
 	const int h = [self hit:_mouse];
 	if ((_screen == kSkirmishSetup || _screen == kMpLobby) && !_popup.open) {
 		// An open list closes on a press outside it; the press itself then starts nothing.
@@ -1315,6 +1347,10 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		return;
 	}
 	_mouse = [self canvas:p];
+	if (_screen == kOptions && _opts) {
+		_opts->mouse_drag(int(p.x / _fit), int(p.y / _fit));
+		return;
+	}
 	if (_dragThumb) {
 		const Layout L = [self layout];
 		const int n = int(_entries.size()), maxTop = std::max(0, n - L.rows);
@@ -1334,6 +1370,10 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	}
 	_mouse = [self canvas:p];
 	_dragThumb = NO;
+	if (_screen == kOptions && _opts) {
+		_opts->mouse_up(int(p.x / _fit), int(p.y / _fit));
+		return;
+	}
 	const int h = [self hit:_mouse];
 	const int pressed = _pressed;
 	_pressed = kNone;
@@ -1346,6 +1386,10 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	if (_ctw && (_screen == kCtw || _screen == kCtwMap)) {
 		[self ctwBridge];
 		_ctw->scroll(_ctwb, float(dy), p.x / _fit, p.y / _fit);
+		return;
+	}
+	if (_screen == kOptions && _opts) {
+		_opts->wheel(double(dy), int(p.x / _fit), int(p.y / _fit));
 		return;
 	}
 	if (_screen == kMain || _popup.open) return;
@@ -1394,7 +1438,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		if (kind == 0 && b == 0) [self.host frontEndQuit];
 		return;
 	}
-	if (h >= kMainBtn && h < kMainBtn + 6) {
+	if (h >= kMainBtn && h < kMainBtn + kMainCount) {
 		[self click];
 		switch (h - kMainBtn) {
 			case 0: [self showScreen:@"tutorials"]; break;
@@ -1402,7 +1446,8 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 			case 2: [self showScreen:@"scenarios"]; break;
 			case 3: [self showScreen:@"ctw"]; break;
 			case 4: [self showScreen:@"multiplayer"]; break;
-			case 5: [self openQuitPopup]; break;
+			case 5: [self showScreen:@"options"]; break;
+			case 6: [self openQuitPopup]; break;
 			default: break;
 		}
 		return;
@@ -1523,6 +1568,12 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		[self ctwTakeAction];
 		return;
 	}
+	if (_screen == kOptions && _opts && !_popup.open) {
+		const NSEventModifierFlags m = e.modifierFlags;
+		_opts->key(e.keyCode, c, (m & (NSEventModifierFlagControl | NSEventModifierFlagCommand)) != 0, (m & NSEventModifierFlagOption) != 0,
+		           (m & NSEventModifierFlagShift) != 0);
+		return;
+	}
 	if (_screen == kSkirmishSetup && !_popup.open) {
 		[self setupKey:e];
 		return;
@@ -1555,8 +1606,8 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	}
 	if (_screen == kMain) {
 		auto step = [&](int d) {
-			for (int k = 0; k < 6; k++) {
-				_focus = (_focus + d + 6) % 6;
+			for (int k = 0; k < kMainCount; k++) {
+				_focus = (_focus + d + kMainCount) % kMainCount;
 				if (kMainItems[_focus].enabled) break;
 			}
 			_help = kMainItems[_focus].help;
@@ -2090,6 +2141,131 @@ static std::vector<std::string> numbered(int lo, int hi) {
 - (NSCursor*)cursor {
 	if (!_cursor) _cursor = ron_game_cursor(*_files, ron::kCursorMain);
 	return _cursor;
+}
+
+// ---------------------------------------------------------------- Options (options_ui.hpp)
+
+// Entering the screen: the page opens over the Main Menu's backdrop (OptionsWin is a window of the top menu). What it edits is
+// prefs::Prefs (preferences.txt under Application Support); applying sets the menu's own sound and difficulty and leaves the rest
+// to the game, which reads the same file when it starts.
+- (void)applyPrefsToMenu:(const prefs::Prefs&)p {
+	if (_audio) {
+		const float fx = float(p.fx_volume) / 255.0f;
+		_audio->set_volumes(fx, fx, p.music_in_menu ? float(p.music_volume) / 255.0f : 0.0f);
+	}
+	_difficulty = std::clamp(p.difficulty, 0, 5);
+	[NSUserDefaults.standardUserDefaults setInteger:_difficulty forKey:launcher::kDefDifficulty];
+	NSWindow* win = self.view.window;
+	if (win && ((win.styleMask & NSWindowStyleMaskFullScreen) != 0) != p.fullscreen) [win toggleFullScreen:nil];
+}
+
+- (void)openOptions {
+	if (!_opts || !_opts->ready()) {
+		[self showError:@"The game's options window (Data/optionswin.xml) could not be read."];
+		_screen = kMain;
+		return;
+	}
+	optui::Host h;
+	__unsafe_unretained FrontEnd* me = self;
+	h.live = [me](prefs::Prefs& p) { p.difficulty = std::clamp(me->_difficulty, 0, 5); };
+	h.apply = [me](const prefs::Prefs& p) { [me applyPrefsToMenu:p]; };
+	h.preview = [me](const prefs::Prefs& p) {
+		if (me->_audio) me->_audio->set_volumes(float(p.fx_volume) / 255.0f, float(p.fx_volume) / 255.0f, p.music_in_menu ? float(p.music_volume) / 255.0f : 0.0f);
+	};
+	h.type_name = [me](int type) -> std::string {
+		if (!me->_optRules) {
+			try {
+				ron::sim::LoadOptions lo;
+				lo.lang_suffix = uistr::suffix();
+				me->_optRules = std::make_unique<ron::sim::Rules>(ron::sim::load_rules(*me->_files, lo));
+			} catch (...) {
+				return {};
+			}
+		}
+		if (type < 0 || size_t(type) >= me->_optRules->types.size()) return {};
+		const ron::sim::Type& T = me->_optRules->types[size_t(type)];
+		std::string n = ron::sim::to_utf8(T.display_name);
+		return n.empty() ? ron::sim::to_utf8(T.name) : n;
+	};
+	h.resolution = [me]() -> std::string {
+		const CGSize sz = me.view ? me.view.bounds.size : CGSizeMake(kW, kH);
+		return std::to_string(int(sz.width)) + " x " + std::to_string(int(sz.height));
+	};
+	h.sound = [me](const char* key) {
+		if (!me->_audio) return;
+		const std::string f = [me soundFile:key];
+		if (!f.empty()) me->_audio->play_effect(f);
+	};
+	h.closed = [me]() { [me showScreen:@"main"]; me->_focus = 5; me->_help = kMainItems[5].help; };
+	int pane = 0;
+	if (const char* e = getenv("RON_OPT_PANE")) pane = std::atoi(e);  // snapshot checks: Game, Hotkeys, Mouse, Graphics, Sound, Player
+	_opts->open(h, pane);
+	if (const char* e = getenv("RON_OPT_HK")) _opts->test_select_hotkey(e);
+	if (const char* e = getenv("RON_OPT_COMBO")) _opts->test_open_combo(std::atoi(e));
+}
+
+// Headless test (RON_OPT_SCRIPT, used with --menu options --snapshot f.png): steps separated by ';' in the page's own pixels (880 x 600):
+// c:X,Y click, d:X,Y / m:X,Y / u:X,Y press, drag, release, k:CODE[:CHARS[:cas]] a key (Mac key code, first character, c / a / s modifiers),
+// w:DY@X,Y wheel, snap:NAME writes <f>_NAME.png, state prints the working copy.
+- (void)runOptionsScript:(NSString*)script path:(NSString*)path width:(int)w height:(int)h scale:(float)scale {
+	auto render = [&](NSString* file) {
+		id<MTLTexture> out = rm::make_readback_target(_device, w, h);
+		id<MTLCommandBuffer> cb = [_queue commandBuffer];
+		[self renderInto:out commandBuffer:cb points:CGSizeMake(w / scale, h / scale)];
+		[cb commit];
+		[cb waitUntilCompleted];
+		if (file) rm::write_png(out, file.UTF8String);
+	};
+	render(nil);  // a priming frame fixes the window mapping
+	for (NSString* raw in [script componentsSeparatedByString:@";"]) {
+		NSString* st = [raw stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+		if (!st.length || !_opts->is_open()) continue;
+		const int ox = _ox + (kW - optui::Page::kW) / 2, oy = _oy + (kH - optui::Page::kH) / 2;
+		int x = 0, y = 0, code = 0;
+		float dy = 0;
+		const char* c = st.UTF8String;
+		if (std::sscanf(c, "c:%d,%d", &x, &y) == 2) {
+			_opts->mouse_move(ox + x, oy + y);
+			_opts->mouse_down(ox + x, oy + y);
+			_opts->mouse_up(ox + x, oy + y);
+		} else if (std::sscanf(c, "d:%d,%d", &x, &y) == 2) {
+			_opts->mouse_move(ox + x, oy + y);
+			_opts->mouse_down(ox + x, oy + y);
+		} else if (std::sscanf(c, "m:%d,%d", &x, &y) == 2) {
+			_opts->mouse_drag(ox + x, oy + y);
+		} else if (std::sscanf(c, "u:%d,%d", &x, &y) == 2) {
+			_opts->mouse_up(ox + x, oy + y);
+		} else if (std::sscanf(c, "w:%f@%d,%d", &dy, &x, &y) == 3) {
+			_opts->wheel(dy, ox + x, oy + y);
+		} else if (std::sscanf(c, "k:%d", &code) == 1) {
+			unsigned ch = 0;
+			bool ctrl = false, alt = false, shift = false;
+			const char* a = std::strchr(c + 2, ':');
+			if (a) {
+				ch = unsigned(static_cast<unsigned char>(a[1]));
+				if (const char* m = std::strchr(a + 1, ':')) {
+					ctrl = std::strchr(m, 'c') != nullptr, alt = std::strchr(m, 'a') != nullptr, shift = std::strchr(m, 's') != nullptr;
+				}
+			}
+			_opts->key(static_cast<unsigned short>(code), ch, ctrl, alt, shift);
+		} else if (std::strncmp(c, "snap:", 5) == 0) {
+			NSString* base = [path stringByDeletingPathExtension];
+			NSString* f = [NSString stringWithFormat:@"%@_%s.png", base, c + 5];
+			render(f);
+			std::printf("wrote %s\n", f.UTF8String);
+		} else if (std::strcmp(c, "state") == 0) {
+			std::printf("[options] %s\n", _opts->state_text().c_str());
+		}
+		render(nil);
+	}
+}
+
+- (void)drawOptions {
+	if (!_opts || !_opts->is_open()) return;
+	_ui.next_window();
+	_ui.fill(0, 0, float(_uiW), float(_uiH), argb(90, 0, 0, 0), UiType::ColorBlend);
+	_ui.next_layer();
+	_opts->draw(_ui, _ox + (kW - optui::Page::kW) / 2, _oy + (kH - optui::Page::kH) / 2);
 }
 
 // ---------------------------------------------------------------- Multiplayer (lobby.h)

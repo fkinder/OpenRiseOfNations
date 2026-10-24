@@ -1,0 +1,8 @@
+re/decomp/ui_hud4
+OptionsWinHotkeys::on_redraw
+OptionsWinHotkeys::update_list
+OptionsWinHotkeys::update_assigned_list
+OptionsWinHotkeys::on_button_clicked
+OptionsWinHotkeys::setup_combos
+OptionsWinHotkeysEdit::on_key_down
+OptionsWinBase::draw_areas

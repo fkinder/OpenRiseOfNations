@@ -1,0 +1,10 @@
+re/decomp/ui_hud4
+OptionsWin::.*
+OptionsWinBase::.*
+OptionsWinGame::draw_game_speed
+OptionsWinGame::draw_message_duration
+OptionsWinGame::do_load
+OptionsWinGame::do_save
+OptionsWinGame::on_redraw
+OptionsWinControl::.*
+OptionsWinSlider::.*

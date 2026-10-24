@@ -376,7 +376,7 @@ private:
 	std::vector<MultiButton> multi_layout(const State& s, bool* small = nullptr) const;
 	void draw_chat(ron::metal::UiRenderer& ui, const State& s);
 	void draw_market_button(ron::metal::UiRenderer& ui, const Option& o, const ron::IfaceRect& r, int factor);
-	ron::IfaceRect garrison_rect() const;
+	ron::IfaceRect garrison_rect(bool air = false) const;
 	int garrison_index_at(int x, int y, const State& s, ron::IfaceRect* cell = nullptr) const;
 	int library_cell_at(int x, int y, const State& s, int* cat = nullptr, int* col = nullptr) const;
 	int progress_index_at(int x, int y, const State& s) const;

@@ -1,0 +1,3 @@
+re/decomp/ui_hud4
+IFaceOptions::on_redraw
+IFaceOptions::on_button_clicked

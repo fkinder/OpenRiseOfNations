@@ -219,6 +219,12 @@ bool all_air(const Ctx& c) {
 	return true;
 }
 
+bool lone_carrier(const Ctx& c) {
+	if (!c.game || c.units->size() != 1 || !c.builds->empty() || c.units->front().first != c.me) return false;
+	const Unit* u = unit_of(c, c.units->front());
+	return u && u->alive() && u->ptype && type_is(*u->ptype, airtype::kCarrier, true);
+}
+
 // UnitOut::make_options @00615fc0, the air branch (type domain 2, not a helicopter): AIRSTRIKE (or PATROL for planes that cannot
 // attack) at (0,0), TRANSFER at (2,0) for everything but the fighter-bomber, RETURN at (0,3) for a plane in the air; with the
 // advanced menu BOMBARD at (1,0). A plane inside a base keeps the first two.
@@ -283,13 +289,32 @@ Shown selection_form(const Ctx& c) {
 void unit_extra_options(const Ctx& c, std::vector<hud::Option>& out) {
 	if (!c.game || c.units->empty()) return;
 	if (c.units->size() == 1 && c.units->front().first == c.me) {
-		// A carrier: AIRSTRIKE (1,1) and RECALL (2,3) (UnitOut::make_options; its REPEAT is a unit mask the commands do not carry).
+		// A carrier: AIRSTRIKE (1,1), REPEAT (1,3, lit while the unit has the REPEAT_AIR mask 0x200000) and RECALL (2,3) (UnitOut::make_options).
 		const Unit* u = unit_of(c, c.units->front());
 		if (u && u->alive() && u->ptype && type_is(*u->ptype, airtype::kCarrier, true)) {
 			const bool planes = num_aircraft_here(*c.game, *u, 0) > 0;
 			const int pending = c.targeting ? *c.targeting : -1;
 			add(out, kOptAirstrike, 1, 1, planes, pending == kOptAirstrike);
+			add(out, kOptRepeat, 1, 3, true, has_repeat_air(*u));
 			add(out, kOptRecall, 2, 3, planes);
+		}
+	}
+	// AUTO_EXPLORE (0,2) (UnitOut::make_options @00616c5b): every unit that is not a fixed-wing plane (a helicopter is allowed), and
+	// that is not a caravan unless the Advanced Menu is on. Lit by GroupData::get_auto_explore: the leader's mask 0x100 for one unit,
+	// else the majority; ORANGE when the selection is mixed.
+	{
+		bool all_ok = true, own_all = true;
+		int on = 0, off = 0;
+		for (const auto& k : *c.units) {
+			const Unit* u = unit_of(c, k);
+			if (!u || !u->alive() || !u->ptype) continue;
+			own_all = own_all && k.first == c.me;
+			if (is_air(*u) && !is_heli(*u)) all_ok = false;
+			if (!c.advanced && (u->ptype->unit_flags2 & utflag2::kCaravan)) all_ok = false;
+			((u->unit_masks & 0x100u) ? on : off)++;
+		}
+		if (all_ok && own_all && on + off > 0) {
+			if (hud::Option* o = add(out, hud::kOptAutoExplore, 0, 2, true, on > 0 && off <= on)) o->orange = on > 0 && off > 0;
 		}
 	}
 	if (!c.advanced) return;
@@ -408,8 +433,16 @@ int run_option(Ctx& c, int option, int object, Mods m) {
 			if (!objs.empty()) issue(c, "recall", [&] { return c.cm->issue_recall(*c.game, objs); });
 			return 1;
 		case kOptRepeat: {
-			if (builds.empty()) return 1;  // a carrier's REPEAT is a unit mask (UNITMASK) the commands do not carry yet
+			// Options::set_air_repeat: buildings take BUILDMASK 0x80, a carrier (units) UNITMASK 0x200000.
+			if (builds.empty()) {
+				if (!units.empty()) issue(c, "unitmask", [&] { return c.cm->issue_unitmask(*c.game, units, 0x200000, 1); });
+				return 1;
+			}
 			issue(c, "buildmask", [&] { return c.cm->issue_buildmask(*c.game, builds, 0x80, true); });
+			return 1;
+		}
+		case hud::kOptAutoExplore: {  // Options::do_auto_explore: UNITMASK 0x100 (the sim skips planes and toggles)
+			if (!units.empty()) issue(c, "unitmask", [&] { return c.cm->issue_unitmask(*c.game, units, 0x100, 1); });
 			return 1;
 		}
 		case kOptInfinite: {
@@ -519,7 +552,8 @@ int key_option(Ctx& c, const std::string& o, int param, Mods m) {
 	if (o == "OPTION_RETURN") return units ? go(kOptReturn) : 1;
 	if (o == "OPTION_RECALL") return units || builds ? go(kOptRecall) : 1;
 	if (o == "OPTION_SCRAMBLE") return units || builds ? go(kOptScramble) : 1;
-	if (o == "OPTION_REPEAT") return builds ? go(kOptRepeat) : 1;
+	if (o == "OPTION_REPEAT") return units || builds ? go(kOptRepeat) : 1;
+	if (o == "OPTION_AUTO_EXPLORE") return units ? go(hud::kOptAutoExplore) : 1;
 	if (o == "OPTION_FIGHTERS") return go(kOptFighters);
 	if (o == "OPTION_BOMBERS") return go(kOptBombers);
 	if (o == "OPTION_HELIS") return go(kOptHelis);

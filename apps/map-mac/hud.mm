@@ -134,12 +134,12 @@ void Hud::layout(int w, int h) {
 	mid_ = rect_in(*base_el_, "IFACERECT", "mid_window", bw, bh).offset(base_.l, base_.t);
 	right_ = rect_in(*base_el_, "IFACERECT", "right_window", bw, bh).offset(base_.l, base_.t);
 	if (!opened_) {
-		// IFaceMainBase::update_visibility, streamlined: the minimap moves to the right end (against the display button), the
-		// right slot to x = 316 and 362 px wide.
+		// IFaceMainBase::update_visibility, streamlined: the minimap moves to the right end (against the display button) and the
+		// right slot runs from the left slot's right edge to the minimap (right_window_rect.r - left.r - mid width: 362 px at
+		// 1024, 618 at 1280; the selection window's `main_streamlined` rect is 626 wide).
 		const IfaceRect disp = rect_in(*base_el_, "BUTTON", "display", bw, bh).offset(base_.l, base_.t);
 		mid_ = mid_.offset(disp.l - mid_.r, 0);
-		const int rw = 362;
-		right_ = {left_.r, left_.r + rw, right_.t, right_.b};
+		right_ = {left_.r, std::max(left_.r + 1, mid_.l), right_.t, right_.b};
 	}
 	bar_buttons_.clear();
 	for (const char* n : {"pause", "advanced_options", "ping", "diplo", "chat", "stats"}) {
@@ -800,7 +800,7 @@ void Hud::draw_selected(UiRenderer& ui, const State& s) {
 				const IfaceRect inf = rect_in(e, "BUTTON", inf_name, pw, ph).offset(ox, oy);
 				ui.add(ron::iface_piece(*it), float(inf.l), float(inf.t));
 			}
-		} else {
+		} else if (!s.air.active && !s.garrison.active) {  // (the air / garrison panel takes the slot's left side: IFaceMain::position_windows)
 			const IfaceRect obj = rect_in(e, "BUTTON", "object", pw, ph).offset(ox, oy + 14);
 			ui.fill(float(obj.l), float(obj.t - 14), float(obj.w()), 14, team, UiType::Normal);
 			ui.next_layer();

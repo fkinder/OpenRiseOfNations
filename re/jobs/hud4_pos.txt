@@ -1,0 +1,6 @@
+re/decomp/ui_hud4
+IFaceMain::position_windows
+IFaceMain::update_visibility
+IFaceMain::add_windows
+IFaceMainBase::update_visibility
+IFaceMainBase::position.*

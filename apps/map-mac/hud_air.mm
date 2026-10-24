@@ -37,7 +37,7 @@ IfaceRect rect_in(const ron::XmlElement& win, const char* tag, const std::string
 // for the ready planes over a block for the fuelling ones, the families side by side; with helicopters inside a single block.
 Hud::AirLayout Hud::air_layout(const State& s) const {
 	AirLayout L;
-	const IfaceRect g = garrison_rect();
+	const IfaceRect g = garrison_rect(true);
 	L.win = IfaceRect{g.l + 4, g.r - 4, g.t + 1, g.b - 1};
 	L.small = L.win.w() < 126;
 	const int sp = 2;
@@ -72,7 +72,7 @@ Hud::AirLayout Hud::air_layout(const State& s) const {
 }
 
 int Hud::air_cell_at(int x, int y, const State& s, int* col) const {
-	if (!s.air.active || !opened_) return -1;
+	if (!s.air.active) return -1;
 	const AirLayout L = air_layout(s);
 	const int blocks = L.small && s.air.helis ? 1 : 2;
 	for (int r = 0; r < L.rows; r++) {
@@ -88,7 +88,7 @@ int Hud::air_cell_at(int x, int y, const State& s, int* col) const {
 }
 
 int Hud::air_header_at(int x, int y, const State& s) const {
-	if (!s.air.active || !opened_) return -1;
+	if (!s.air.active) return -1;
 	const AirLayout L = air_layout(s);
 	const int blocks = L.small && s.air.helis ? 1 : 2;
 	for (int c = 0; c < blocks; c++) {
@@ -98,11 +98,11 @@ int Hud::air_header_at(int x, int y, const State& s) const {
 }
 
 void Hud::draw_air_garrison(UiRenderer& ui, const State& s) {
-	if (!s.air.active || !opened_) return;
+	if (!s.air.active) return;
 	const ron::XmlElement* ae = layout_->find("IFACEAIRGARRISON");
 	const ron::XmlElement* ge = layout_->find("IFACEGARRISON");
 	if (!ae) return;
-	const IfaceRect g = garrison_rect();
+	const IfaceRect g = garrison_rect(true);
 	ui.next_window();
 	if (ge) {
 		ui.tile(ron::iface_find_piece(*sel_el_, "back"), g, kWhite, UiType::Normal);

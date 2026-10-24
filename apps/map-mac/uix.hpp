@@ -64,6 +64,9 @@ void library_final(const Ctx& c, int first_library, const std::vector<std::pair<
 // ---------------------------------------------------------------- the command card
 
 bool all_air(const Ctx& c);  // every selected unit is an aircraft (planes and helicopters), the viewer's own
+// A single selected carrier of the viewer: UnitOut::make_options gives it REPEAT at the slot (1,3) the other units use for GARRISON
+// (the garrison option is skipped for a unit that `is` a carrier, @0061675b).
+bool lone_carrier(const Ctx& c);
 // The whole card of an aircraft selection (UnitOut::make_options, the air rows) / the additions to a ground selection
 // (advanced rows: stance, formation, patrol, guard, disband, bombard) / to a single building (airbase, silo, queue).
 void air_unit_options(const Ctx& c, std::vector<hud::Option>& out);
