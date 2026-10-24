@@ -7,6 +7,8 @@
 #include "sim/animals.hpp"
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
+#include "sim/fog.hpp"
+#include "sim/transport.hpp"
 #include "sim/game.hpp"
 #include "sim/garrison.hpp"
 #include "sim/guys.hpp"
@@ -328,8 +330,20 @@ void unit_init(Game& g, Unit& u, int32_t who, int32_t type, int32_t o, int32_t x
 		default: u.stance = 0; break;
 		}
 	}
-	// TODO(frame-spec 8.1): UNIT_CAN_TRANSPORT from the leader's transport level, tribe bonuses 0x12 / 0x77,
-	// Supplies / Heroes / Caravans / Specials registration.
+	// Unit::init @612100: UNIT_CAN_TRANSPORT from the leader's transport level (transport_type <= level and can_ever_transport;
+	// a scout type (is 0x45) only with the options' auto-transport bit), the tribe-bonus-0x12 masks2 bits and the Marines bit.
+	{
+		const Leader& L = g.leaders[size_t(who)];
+		if (unit_transport_type(g, u) <= leader_can_transport(g, who) && unit_can_ever_transport(g, u)) {
+			if (!type_is(*u.ptype, 0x45, false) || (L.options_flags & 2)) u.unit_masks |= umask::kCanTransport;
+		}
+		if (has_tribe_bonus(g, who, 0x12)) {
+			if (u.ptype->domain == 0 && !(uint32_t(u.ptype->obj_masks) & objmask::kCivilian)) u.unit_masks2 |= 0x80;
+			if (type_is(*u.ptype, 0x45, false)) u.unit_masks2 |= 0x4080;
+		}
+		if (type_is(*u.ptype, 0x77, false)) u.unit_masks2 |= umask2::kMarines;
+	}
+	// TODO(frame-spec 8.1): Supplies / Heroes / Caravans / Specials registration.
 	if (u.ptype->unit_flags2 & 4) u.unit_masks |= umask::kPacked;  // packer types start packed
 	if (who < 9) g.total_units++;  // GameData.total_units (read by ObjectsData::find_unit_with_radius)
 

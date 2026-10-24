@@ -1,0 +1,2 @@
+re/decomp/fidelity6/plan_city.asm
+6bb3f0-6bb600

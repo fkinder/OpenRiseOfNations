@@ -1,0 +1,2 @@
+re/decomp/fidelity6/scout_region.asm
+5f6094-5f6200

@@ -1,0 +1,4 @@
+re/decomp/fidelity6
+Unit::repair_damage
+UnitOut::suffer_graphic_attrition
+Unit::close

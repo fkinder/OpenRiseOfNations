@@ -14,6 +14,7 @@
 #include "sim/heroes.hpp"
 #include "sim/orders.hpp"
 #include "sim/spells.hpp"
+#include "sim/transport.hpp"
 #include "sim/trig.hpp"
 
 namespace ron::sim {
@@ -209,6 +210,26 @@ void explore_goody(Game& g, Unit& u) {  // Unit::explore_goody @5f9780
 
 // ---------------------------------------------------------------- think_scout (T1-T6)
 
+// Unit::think_civilian_transport(flag) @5f40d0, the part every unit without a transport option reaches (the corpus: the start
+// scouts of a game before the Transport tech). A land unit whose leader cannot (yet) carry it, that is not flagged CAN_TRANSPORT or
+// is not cargo goes back to the explorer's random walk (think_scout(1): a random passable cell of its own region) when it is
+// auto-exploring, and does nothing otherwise. TODO(transports): the ferry search of the rest of the function (the coast scan with
+// its group_action_move_near) is not ported; the branch returns 0 as before.
+static int32_t think_civilian_transport(Game& g, Unit& u, int32_t flag);
+
+static int32_t think_civilian_transport(Game& g, Unit& u, int32_t flag) {
+	(void)flag;
+	const int32_t dom = u.ptype->domain;
+	if (dom == 1 && (u.ptype->unit_flags & 0x10) == 0) return 0;
+	if (dom != 2) {
+		if (leader_can_transport(g, u.who) < unit_transport_type(g, u) || !unit_can_transport(u) || !object_is_cargo(g, u)) {
+			if (!(u.unit_masks & umask::kAutoExplore)) return 0;
+			return think_scout(g, u, 1);
+		}
+	}
+	return 0;
+}
+
 int32_t think_scout(Game& g, Unit& u, int32_t region_mode) {  // Unit::think_scout @5f6010
 	const int32_t who = u.who;
 	Leader& L = LD(g, who);
@@ -363,7 +384,7 @@ int32_t think_scout(Game& g, Unit& u, int32_t region_mode) {  // Unit::think_sco
 		// Nothing to explore: the region counts as scouted (TODO(regions): the Region.scouted BitMask is not kept).
 		if (dom == 1) return unit_add_to_army(g, u) >= 0 ? 1 : 0;
 		if ((u.type == 50 || u.type == 51) && !auto_explore && L.reg_cities[size_t(R & 63)] == 0) return 0;
-		return 0;  // TODO(ai-spec 12.6.3): Unit::think_civilian_transport(0)
+		return think_civilian_transport(g, u, 0);  // @5f6c4c (the last statement of the function)
 	}
 	return issue(tx, ty);
 }

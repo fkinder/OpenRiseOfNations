@@ -1,0 +1,5 @@
+re/decomp/fidelity6
+Unit::add_gather_order.*
+Unit::add_trade_order
+Unit::add_build_order
+Unit::add_repair_order

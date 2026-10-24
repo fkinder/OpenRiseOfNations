@@ -1,0 +1,2 @@
+re/decomp/fidelity6/setanim_tail.asm
+5db52f-5db5a0

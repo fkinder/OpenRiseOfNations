@@ -1,0 +1,3 @@
+re/decomp/fidelity6
+Roads::scan_and_kill_bad_tcoord
+Roads::scan_and_kill_straggled_tcoord

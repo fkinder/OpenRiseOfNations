@@ -1,0 +1,3 @@
+re/decomp/fidelity6
+Roads::scan_and_kill_stray_roads
+Wall::kill_at_tile

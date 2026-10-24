@@ -1540,3 +1540,28 @@ at their first boundary). Not mapped: `Object +0x44 launching` (`launch_list`), 
 drift and the idle citizens of the engine's economy.
 **Checks** (scratch build with the build-mac.sh flags, zero warnings in a clean full build): `ron-check` 0 failures; `sim-all 600 --ai-every 8` 156/156 self-check OK, `--roundtrip 200` 156/156; `ron-sav --engine-roundtrip` 69/69 PASS;
 `ron-net selftest` 86/86 and `ron-net replay` on `21'57'16`: the two instances agree.
+
+### Fidelity log, sixth pass (2026-10-24, `cities` at 206, the transport masks, the scout fall-through; docs/original-save.md 6.6)
+
+25. **`Leader::plan_strategy` tile loop** (`ai_strategy.cpp`): the original reads `circle_x[k + 1]` / `circle_y[k + 1]` (`MOVSX EDI, byte ptr [ECX + 0xcb7e91]` @6bb6f7, `[ECX + 0xcbb0e1]` @6bb700; every other user indexes
+from `0xcb7e90`): tile index `i = 1 .. circle_radius[n + 1] - 1`, land test `i < circle_radius[n]` (@6bb86c). The centre entry is never visited; the engine counted the city building's own tile (+1 `City.land`,
++1 `City.filled`) and cut the land ring one tile early. `cities` first differs at 206 -> 422 (`21'23'34`), 18,381 -> 18,915 (`21'45'58`), 25,577 -> 25,601 (`21'57'16`); boundaries with all 15 parts equal on
+`21'23'34` 33 -> 50. **Digests**: 2 of 156 (two `conquest/Alexander` scenarios; the AI's `land - filled` drives its building choices).
+26. **`Unit::init` @612100 / `Unit::add_gather_order` @61a5c0 transport masks** (`objects.cpp` `unit_init`, `econ_gather.cpp`): UNIT_CAN_TRANSPORT (0x800000) when `UnitData::transport_type() <= LeaderData::can_transport()` and
+`can_ever_transport()` (a scout type `is(0x45)` only with the options' bit 1), plus the tribe-bonus-0x12 masks2 bits (0x80 non-civilian land, 0x4080 scouts) and the Marines bit (`is(0x77)`); `add_gather_order`
+used `level >= 1 && land` for its cross-region case. `21'49'39`: `units` first differs at 21,118 -> 21,154 (a citizen created in the first frame). **Digests**: 121 of 156 change (with 25: 121 in all, the two of 25
+are among them): `unit_masks` is hashed in the digest and every scenario that creates a unit for a leader with a CAN_TRANSPORT flag now sets the bit; the 35 unchanged are the Chess Exercise / Tutorial /
+Custom capture / missile scenarios and 18 conquest maps without such a flag.
+27. **`Unit::think_scout` @5f6010 tail -> `Unit::think_civilian_transport(0)` @5f40d0** (`ai_unit.cpp`): with nothing to explore, a land unit whose leader cannot carry it (`transport_type > can_transport`) or that
+is not cargo returns 0 unless it auto-explores, in which case `think_scout(1)` picks a random passable cell of its region (T1 draws, 16 re-draws at most). The ferry search of the rest of the function is not ported.
+No digest changes (the AI scouts never reach it in 600 frames).
+28. **Diagnostics** (`apps/sav`): `RON_DUMP_FARMS`, `RON_DUMP_GAIA` (+ `_WHO`, `_TURRET`), `RON_PERTURB_WDATA`, `RON_INSERT_N=F:n:k` (profile build); the scratch scripts of this pass are not kept.
+**Looked at, equal to the decompile / asm, no change**: `GameDaemon::calc_market(s)` (3 draws per redraw; +1 breaks `guys` at 104), `Farms::inc_time` (asm @8d8600 read line by line; no roll of frames 293 - 301 is within
+20 of its threshold), `Animal::think_farm_animal` schedule (`o` / `aid` / `frame` off by one break at 62 - 104), chicken and bird animation lengths (+-1 breaks at 74 - 236), `Guy::set_anim` bird / walk / idle
+draws and the `cur_time * T / T` of an animation change (asm @5db2b8..5db561), `Guy::inc_time`, `Unit::set_anim`, `Animal::think_bird` / `work` / `process` / `do_idle`, `Objects::process_all` / `inc_time`,
+`Unit::find_gather_spot` @5f5170, `Unit::think_peasant` @5f5760, `CommandPackage::process_leader_options` @9441d0, the unit census of `plan_strategy` (`City.free` / `busy` / `gatherers`), `Unit::do_gather`'s farm part,
+`Roads::scan_and_kill_stray_roads` (no `game_random`).
+**Open** (docs/original-save.md 6.6): the one `game_random` draw the original makes between frames 292 and 302 of `21'23'34` (then a second +1 in frames 306 - 320 and a -1 at 333 - 334: net zero), a mature economy that
+draws ~10 numbers per frame more than the engine from a true state, the road-art driven `world` differences of the mid-game replays, the `leaders` `explored` of the scouts at 566.
+**Checks** (scratch build with the build-mac.sh flags, zero warnings in a clean full build): `ron-check` 0 failures; `sim-all 600 --ai-every 8` 156/156 self-check OK, native `--roundtrip 200` 156/156;
+`ron-sav --engine-roundtrip` 69/69 PASS (45 replays + 24 saves).

@@ -392,7 +392,9 @@ void leader_plan_strategy(Game& g, int32_t who) {
 		}
 		const int32_t lim_land = CI.radius[size_t(std::min(n, 64))];
 		const int32_t lim = CI.radius[size_t(std::min(n + 1, 64))];
-		for (int32_t k = 0; k < lim; k++) {
+		// The tile loop reads circle_x[k + 1] / circle_y[k + 1] (@6bb6f7: [k + 0xcb7e91], the other users index from 0xcb7e90): the centre
+		// entry 0 is never visited, tile i = k + 1 runs 1 .. radius[n + 1] - 1, and the land test is `i < radius[n]` (@6bb86c).
+		for (int32_t k = 1; k < lim; k++) {
 			const int32_t x = cx + CI.x[size_t(k)], y = cy + CI.y[size_t(k)];
 			if (!g.world.in_w(x, y)) continue;
 			const WData& d = g.world.w(x, y);
@@ -405,7 +407,7 @@ void leader_plan_strategy(Game& g, int32_t who) {
 					C.dock_tile++;
 				continue;
 			}
-			if (!(k + 1 < lim_land)) continue;
+			if (!(k < lim_land)) continue;
 			if (d.region != C.reg) continue;
 			if ((d.flags & 0x70) == 0) {
 				C.land++;

@@ -1,0 +1,7 @@
+re/decomp/fidelity6
+Unit::find_gather_spot.*
+Leader::find_gather_building.*
+Unit::think_peasant.*
+Unit::think_economy.*
+Unit::think_civilian.*
+Unit::auto_gather.*

@@ -1,0 +1,3 @@
+re/decomp/fidelity6
+GameAccess::rnd
+GameAccess::rnd_int

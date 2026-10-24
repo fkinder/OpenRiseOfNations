@@ -1426,7 +1426,14 @@ std::map<int64_t, std::map<std::vector<uint32_t>, int>> all_check_sums(const std
 std::map<std::string, int64_t> g_rng_sites;
 sim::Game* g_trace_game = nullptr;
 int g_trace_until = -1;
+int g_ins_frame = -1, g_ins_n = -1, g_ins_k = 0, g_ins_count = 0, g_ins_last = -1;  // RON_INSERT_N="F:n:k": k extra draws just before the n-th (1-based) draw of frame F
 void rng_hook_fn() {
+	if (g_trace_game && g_ins_frame >= 0 && g_trace_game->frame != g_ins_last) { g_ins_last = g_trace_game->frame; g_ins_count = 0; }
+	if (g_trace_game && g_ins_frame >= 0 && g_trace_game->frame == g_ins_frame && ++g_ins_count == g_ins_n) {
+		uint32_t sd = g_trace_game->rng.seed();
+		for (int i = 0; i < g_ins_k; ++i) sd = sd * 0x19660Du + 0x3C6EF35Fu;
+		g_trace_game->rng.reseed(sd);
+	}
 	void* fr[10];
 	const int n = backtrace(fr, 10);
 	std::string key;
@@ -1742,6 +1749,7 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 #ifdef RON_RNG_PROFILE_HOOK
 	if (std::getenv("RON_RNG_PROFILE")) sim::g_rng_hook = rng_hook_fn;
 	if (const char* tr = std::getenv("RON_RNG_TRACE")) { g_trace_game = game.get(); g_trace_until = std::atoi(tr); }
+	if (const char* in = std::getenv("RON_INSERT_N")) { g_trace_game = game.get(); std::sscanf(in, "%d:%d:%d", &g_ins_frame, &g_ins_n, &g_ins_k); }
 #endif
 	// RON_FISH_TIMELINE=1 (with --compare-next): see fish_timeline() below
 	const bool fish_timeline = std::getenv("RON_FISH_TIMELINE") != nullptr;
@@ -2526,6 +2534,40 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 						uint32_t sd = game->rng.seed();
 						for (int i = 0; i < std::abs(k); ++i) sd = k > 0 ? sd * 0x19660Du + 0x3C6EF35Fu : (sd - 0x3C6EF35Fu) * ainv;
 						game->rng.reseed(sd);
+					}
+				}
+			}
+			if (const char* gd = std::getenv("RON_DUMP_GAIA")) {  // RON_DUMP_GAIA=F0:F1 (+ RON_DUMP_GAIA_WHO, default 9): the gaia list's units before frames F0..F1
+				int f0 = 0, f1 = 0;
+				if (std::sscanf(gd, "%d:%d", &f0, &f1) == 2 && f >= f0 && f <= f1) {
+					const int gw = std::getenv("RON_DUMP_GAIA_WHO") ? std::atoi(std::getenv("RON_DUMP_GAIA_WHO")) : 9;
+					for (int o = 0; o < game->objects[size_t(gw)].unit_mark; ++o) {
+						const sim::Unit* u = game->unit(gw, o);
+						if (!u || !u->alive()) continue;
+						std::printf("  GAIA f%d %d/%d type %d x %d y %d orders %zu path %zu aid %d spell_time %d cara %d", int(f), gw, o, u->type, u->x, u->y, u->orders.size(), u->path.size(), int(u->animal_aid), int(u->spell_time), int(u->cara));
+						for (const sim::Guy& gy : u->guys) { std::printf(" | anim %d cur %u end %u", int(gy.cur_anim), unsigned(gy.cur_time), unsigned(gy.end_time)); if (std::getenv("RON_DUMP_GAIA_TURRET")) std::printf(" turret %d,%d,%d,%d des %d,%d,%d,%d track %d,%d ang %x/%x last_ang %x", gy.turret_angles[0], gy.turret_angles[1], gy.turret_angles[2], gy.turret_angles[3], gy.des_turret_angles[0], gy.des_turret_angles[1], gy.des_turret_angles[2], gy.des_turret_angles[3], gy.track_dx, gy.track_dy, unsigned(gy.angle), unsigned(gy.des_angle), unsigned(gy.last_angle)); }
+						std::printf("\n");
+					}
+				}
+			}
+			if (const char* pw = std::getenv("RON_PERTURB_WDATA")) {  // experiment: RON_PERTURB_WDATA="F:x:y:field:delta" changes one WData byte-field before frame F (field: who, who2, flags, region, blocked, land)
+				int pf = 0, px = 0, py = 0, pd = 0; char fld[16] = {0};
+				if (std::sscanf(pw, "%d:%d:%d:%15[a-z0-9]:%d", &pf, &px, &py, fld, &pd) == 5 && f == pf) {
+					sim::WData& wd = game->world.w(px, py);
+					const std::string fs = fld;
+					if (fs == "who") wd.who = int8_t(wd.who + pd); else if (fs == "who2") wd.who2 = int8_t(wd.who2 + pd);
+					else if (fs == "flags") wd.flags = uint16_t(wd.flags ^ pd); else if (fs == "region") wd.region = int16_t(wd.region + pd);
+					else if (fs == "blocked") wd.blocked = uint8_t(wd.blocked + pd); else if (fs == "land") wd.land = int8_t(wd.land + pd);
+				}
+			}
+			if (const char* fd = std::getenv("RON_DUMP_FARMS")) {  // RON_DUMP_FARMS=F0:F1: per farm, before frames F0..F1: owner, gate, bare count, chance
+				int f0 = 0, f1 = 0;
+				if (std::sscanf(fd, "%d:%d", &f0, &f1) == 2 && f >= f0 && f <= f1) {
+					for (size_t i = 0; i < game->farms.size(); ++i) {
+						const sim::FarmRec& fr = game->farms[i];
+						const sim::Build* b = fr.who >= 0 && fr.o >= 0 ? game->build(fr.who, fr.o) : nullptr;
+						int bare = 0; for (auto& row : fr.percent) for (float p : row) bare += p <= 0.0f ? 1 : 0;
+						std::printf("  FARM f%d #%zu valid %d who %d o %d type %d bld %s flags %x bare %d\n", int(f), i, int(fr.valid), int(fr.who), int(fr.o), int(fr.farm_type), b ? (b->alive() ? "alive" : "dead") : "none", b ? unsigned(b->flags) : 0u, bare);
 					}
 				}
 			}

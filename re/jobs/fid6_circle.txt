@@ -1,0 +1,4 @@
+re/decomp/fidelity6/insn_circle.txt
+cb7e9[0-9a-f]
+cbb0e[0-9a-f]
+cbe33[0-9a-f]\]

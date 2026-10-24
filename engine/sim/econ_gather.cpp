@@ -8,6 +8,7 @@
 #include "sim/spells.hpp"
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
+#include "sim/transport.hpp"
 #include "sim/garrison.hpp"
 #include "sim/groups.hpp"
 #include "sim/guys.hpp"
@@ -254,12 +255,10 @@ void add_gather_order(Game& g, Unit& u, int32_t ox, QueuePos q, bool expl) {
 		const int32_t r1 = g.world.get_tregion(tcoord_of(b->x), tcoord_of(b->y));
 		const int32_t r2 = g.world.get_tregion(tcoord_of(u.x), tcoord_of(u.y));
 		if (r1 != r2) {
-			// The leader's transport level (CAN_TRANSPORT_CIV 3 / MIL 2 / SCT 1) against the unit's transport type.
-			// TODO(transports): UnitData::transport_type / can_ever_transport are not ported; land citizens count as
-			// civilians (1) that can be transported.
-			const uint32_t lf = LD(g, u.who).flags;
-			const int32_t lvl = (lf & 0x100) ? 3 : (lf & 0x200) ? 2 : int32_t((lf >> 10) & 1);
-			if (1 <= lvl && u.ptype->domain == 0) u.unit_masks |= umask::kCanTransport;
+			// The leader's transport level (CAN_TRANSPORT_CIV 3 / MIL 2 / SCT 1) against the unit's transport type (@61a5c0:
+			// UnitData::transport_type <= level and can_ever_transport).
+			if (unit_transport_type(g, u) <= leader_can_transport(g, u.who) && unit_can_ever_transport(g, u))
+				u.unit_masks |= umask::kCanTransport;
 		}
 	}
 	u.orders.push_back(o);

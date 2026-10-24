@@ -345,6 +345,59 @@ x/y/z and o_up/o_down.
   of city 0), the original has none (`RON_CITIZENS`, at 18,338: engine 34 idle of 50 citizens, original 0 of 55). The `cities` / `leaders` censuses that feed this (`City.free`, `gatherers`) are the engine's,
   so the divergence is upstream of it: the unit drift from 308 on (positions, who stands in which city) is the first suspect, then the idle-citizen counters.
 
+### 6.6 Sixth pass (2026-10-24): `cities` at 206, the transport masks, the scout fall-through, the draw drift narrowed
+
+First differing boundary, before -> after this pass (`ron-sav --replay`, the three replays of the chain; "ok" = equal through the end):
+
+| part | `21'23'34` | `21'45'58` | `21'57'16` |
+|---|---|---|---|
+| units / guys / world | 308 / 308 / 308 -> same | 18,351 -> same | 25,553 -> same |
+| builds | 338 -> same | 18,387 -> same | 25,601 -> same |
+| cities | 206 -> **422** | 18,381 -> **18,915** | 25,577 -> **25,601** |
+| groups / leaders | 422 / 566 -> same | 19,047 / 18,405 -> same | 25,595 / 25,553 -> same |
+| goods / items / ammo / deaths | 2,318 / 6,752 / 6,896 / 7,094 -> same | ok / ok / ok / 20,415 -> same | ok / ok / 25,559 / 25,559 -> same |
+
+Boundaries with all 15 parts equal on `21'23'34`: 33 -> 50. `21'49'39` (first row of a mid-game save): `units` 21,118 -> 21,154.
+
+1. **`cities` at 206 = the centre tile (found).** `Leader::plan_strategy` @6b9620 reads its tile table as `circle_x[k + 1]` / `circle_y[k + 1]` (`MOVSX EDI, byte ptr [ECX + 0xcb7e91]` @6bb6f7, `[ECX + 0xcbb0e1]` @6bb700; every
+   other user of the tables indexes from `0xcb7e90` / `0xcbb0e0`): the loop is `for (i = 1; i < circle_radius[n + 1]; i++)` and the land test is `i < circle_radius[n]` (`CMP ECX, [EBP - 0x30]` @6bb86c with
+   ECX = k + 1). The centre entry (the city building's own tile, flags 0x4080, `check_building_wcoord` 0) is never visited; the engine visited it (+1 `land`, +1 `filled`) and cut the land ring one
+   tile early (`k + 1 < radius[n]` on a 0-based k). City (0,0) of `21'23'34`: 93 land tiles in the engine, 92 in the original (the tile at index 104, the one the engine cut, is not a land tile). Player 1's city at frame
+   175 agreed before presumably because the two errors cancelled there. `ai_strategy.cpp`.
+2. **`Unit::init` @612100 sets UNIT_CAN_TRANSPORT** (0x800000) for every new unit whose `transport_type <= LeaderData::can_transport()` and that `can_ever_transport` (a scout type, `is(0x45)`, only with the
+   options' auto-transport bit), the tribe-bonus-0x12 masks2 bits (0x80 for non-civilian land units, 0x4080 for scouts) and the Marines bit (`is(0x77)`); the engine had a TODO. `Unit::add_gather_order`
+   @61a5c0 tests the same predicate when the building is in another region (the engine tested `level >= 1 && land`). `21'49'39` has a citizen created in its first frame whose mask byte was the whole
+   `units` delta (a = 128): `units` now matches 36 frames longer. `objects.cpp`, `econ_gather.cpp`.
+3. **`Unit::think_scout` falls through** @5f6c4c to `Unit::think_civilian_transport(0)` @5f40d0 when there is nothing left to explore: a land unit whose leader cannot carry it (`transport_type >
+   can_transport`) or that is not cargo goes back to the explorer's random walk when it auto-explores, `think_scout(1)` = a random passable cell of its own region (T1, up to 16 re-draws on blocked
+   cells; the engine's region mode was already exact against the asm @5f6094..5f61f9). The ferry search of the rest of `think_civilian_transport` is still not ported (returns 0). The corpus scouts
+   start idle with masks 0; player 1's UNITMASK at frame 416 (and player 0's at 11,522) turns auto-explore on, so this only matters from there (`leaders` `explored` +4 at 566 is the scout).
+4. **The draw drift of `21'23'34`, narrowed but not closed.** Measured with `RON_INSERT` (frame granularity) and the new `RON_INSERT_N=F:n:k` (profile build: k extra draws just before the n-th draw of
+   frame F): the original draws **exactly one number more** between the end of frame 292 and the 71-fish burst of frame 302 (k = 1 is the only shift that matches the burst; k = 2, 3, 4, 6, -8 fail at
+   302 through the picks of frames 296 - 301, k = -1..-4, 5, 8, 12 pass 302 and fail at the burst, 308). Every (frame, n) position in that window gives the same result (the picks there are blind to a
+   shift of 1), so the site cannot be told from the hashes. With it `units` / `guys` / `world` match through 326.
+   The next wall (332: the farmers' four target draws of frames 326 - 330) needs a second +1 between the pick of frame 306 and frame ~320, then a -1 at frame 333 / 334 (the chicken pick of 333 or the
+   scout pick of 334): net zero, i.e. a transient. With the three corrections (`RON_INSERT="293:1,307:1,333:-1"`) `units` / `guys` match through 398 (wall 404: a one-byte delta of -1 in `units` that no insertion of +-1 in the preceding 40 frames removes),
+   `builds` through 452, `groups` / `cities` through 416, `leaders` through 560 (`explored`, the scout), `items` / `goods` / `ammo` / `deaths` / `walls` through the end of the 700-frame run. The transients are
+   consistent with pen animals' hidden state (list 9 is in no hash: a chicken that picks another animation picks again 60 frames later) following a draw that is off by one, so the single missing draw is
+   the thing to find.
+   *Ruled out, each by a run*: the market redraw (`calc_market` is the decompile, 3 draws; +1 per redraw breaks at 104), farm sprouting (the 8 wheat farms roll every frame; no roll in 293 - 302 is within 20 of
+   its threshold, so no sprout can differ), the pen animals' wander schedule (`(o * (aid + 1) + frame) % 128`; o / aid / frame off by one breaks at 62 - 104), the chicken and bird animation lengths (+-1 breaks
+   at 74 - 236), the bird walk-animation draws (`Guy::set_anim` @5db2b8..5db361 and `Guy::inc_time` read against the asm, including the `cur_time * T / T` of an animation change), `Animal::think_bird`,
+   `Unit::do_air_physics` for type 0x192, `Objects::process_all` (flock top-up every 32 frames, none in the window), `Roads::scan_and_kill_stray_roads` / `Wall::kill_at_tile` (no `game_random`; sound / internal),
+   `Leaders::strategy_all` (the original calls `compute_score` every frame; no draw), the group idle branch (never taken in the window), `Unit::come_out`, `Unit::repair_damage` (internal_random).
+5. **A mature economy draws ~10 numbers per frame more in the original, and it is not the citizens.** From the true state of `21'45'58` the engine's census after 2,773 frames is nearly the original's
+   (player 0: 63 against 64 citizens, 5 against 9 idle; player 1: 43 / 43, identical distribution), yet it made 26,425 draws fewer (29,842 after item 2). In segment 1, between the last two fish bursts (frames
+   18,280 - 18,327) the original draws 27.7 per frame, the engine 15.9: events of several hundred draws, i.e. searches. The earlier "idle citizens" of the long run (engine 34 idle of 50) are therefore a
+   consequence of the early drift (the engine's players own 24 / 23 active buildings and an earlier age: the same QUEUE_UPs fail when the resources arrive later), not a `find_gather_spot` bug:
+   `find_gather_spot` @5f5170 and `think_peasant` @5f5760 were read against the decompile and are equal; at 9,002 the idle citizens find every gather building full (1 woodcutter camp, 7 farms).
+6. **First-row differences of the mid-game replays** (units / guys / world at the first or second boundary in most of the 45): a part of them is the road art: `Roads::scan_and_kill_stray_roads` @8956a0 runs every frame (`world.size / 500`
+   wcoords of 16 tcoords) and clears road bits of tcoords without a matching `RoadElementCandidate` (`TerrainOut` presentation data, `scan_and_kill_bad_tcoord` @88e100, `World::set_road_at`); the engine
+   keeps no road elements. Not ported. The `world` hash is sensitive to every WData field (`RON_PERTURB_WDATA`).
+
+*Diagnostics added* (`apps/sav`): `RON_DUMP_FARMS=F0:F1` (per farm: owner, gate, bare cells), `RON_DUMP_GAIA=F0:F1` (+ `RON_DUMP_GAIA_WHO`, `RON_DUMP_GAIA_TURRET`: a gaia list's units with anim / clock),
+`RON_PERTURB_WDATA=F:x:y:field:delta` (which parts a WData field feeds), `RON_INSERT_N=F:n:k` (profile build only, with `RON_RNG_PROFILE=1`).
+
 ## 7. What blocks exact checksums
 
 State of the fidelity work (2026-10-24; the log of each fix is in docs/sim-implementation.md "Fidelity log"). **Fixed** since the first table:
