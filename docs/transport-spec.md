@@ -202,8 +202,9 @@ empty cost and mana 0, so this is a no-op in practice; port it faithfully anyway
 
 ### 4.4 `SpellTypeData::get_job_time(o, who)` @675800
 
-`t = job_time` of the spell, then modifiers for 0x27d (entrench: `french_entrench`, Antipater
-`antipater_entrench_rate`), 0x275 / 0x27f (spies: SPIES_CRAFT_FASTER halves), 0x28b / 0x28c (pack: `turk_pack`,
+`t = job_time` of the spell, then modifiers for 0x27d (entrench: `french_entrench` with tribe bonus 10; then, for any
+unit caster, `t = (antipater_entrench_rate * t) / 256` — the asm calls `is(0x169 ANTIPATER)` and discards the result, so
+the term applies to every general), 0x275 / 0x27f (spies: SPIES_CRAFT_FASTER halves), 0x28b / 0x28c (pack: `turk_pack`,
 Napoleon `napoleon_pack`, light artillery /4, then /2), 0x28d / 0x28e (/2 for `is(0x7d)`), 0x280 / 0x281 (sabotage:
 tribe bonus 9 halves, `is(0x177,1)` → 10). None applies to 0x28a: **job time 0**.
 

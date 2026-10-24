@@ -135,6 +135,7 @@ All are cast through `Unit::do_cast` (transport-spec §4.5, untargeted branch: `
 Durations: `D = spell.duration (+0x1d4) + get_general_upgrade(who) * spell.duration_upgrade (+0x1d8)` frames.
 
 ### 4.1 `cast_supplies` @6714c0 (0x27e): `units[who][o].mana_burn = 0` — the caster's own mana refills. (Nothing else.)
+Dead in the shipped data: craft 0x27e has `FROM None`, so `is_castable`'s owner chain never passes (spells-spec §1-§2).
 
 ### 4.2 `cast_march` @671500 (0x27c)
 ```
@@ -157,7 +158,7 @@ for i = count − 1 down to 0:                                      // newest fi
     S = active_spells[i]
     if !force:
         if S.frame >= frame:                                      // not expired
-            if S.t == 0x283 && ((S.start − frame + 1) & 0x1f) == 0: (shockwave graphics)   // craft 0x283, presentation
+            if S.t == 0x283 && ((S.start − frame + 1) & 0x1f) == 0: (shockwave graphics)   // craft 0x283 JAM RADAR: never active in the shipped data (spells-spec)
             continue
     // expired (or forced):
     if S.t == 0x27b: U.unit_masks &= ~0x2800; (sound AMBUSH_OFF when console && !force); changed = true
