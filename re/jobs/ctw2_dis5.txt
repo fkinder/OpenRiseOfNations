@@ -1,0 +1,2 @@
+re/decomp/ctw2
+ConquestCountries::get_scenario_map_rect

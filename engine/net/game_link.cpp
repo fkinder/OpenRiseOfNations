@@ -36,9 +36,34 @@ ExecPolicy ExecPolicy::sav_compatible() {
 
 GameHooks::GameHooks(sim::Game& g, const std::array<int, 8>& seat_who, ChecksumMode mode, ExecPolicy policy,
                      const std::string& scenario_rel, uint32_t seed)
-	: g_(g), who_(seat_who), mode_(mode), policy_(policy), scenario_(scenario_rel), seed_(seed) {}
+	: g_(&g), who_(seat_who), mode_(mode), policy_(policy), scenario_(scenario_rel), seed_(seed) {}
 
 void GameHooks::begin_package(int, uint32_t) { package_.group = -1; }
+
+void GameHooks::step_frame() {
+	if (before_frame) before_frame();
+	g_->do_frame();
+	if (after_frame) after_frame();
+}
+
+bool GameHooks::snapshot(Bytes& out) {
+	try {
+		out = sim::save_game_bytes(*g_, scenario_, seed_);
+	} catch (const std::exception& e) {
+		last_error = e.what();
+		return false;
+	}
+	return true;
+}
+
+bool GameHooks::restore(const Bytes& snap, std::string& err) {
+	if (!on_restore) {
+		err = "no restore callback";
+		return false;
+	}
+	package_ = sim::CommandPackage();  // the group state of the old game means nothing in the new one
+	return on_restore(snap, err);
+}
 
 // Player::resign / quit / drop on the leader of a seat (multiplayer-spec section 3.7). Co-op seats that share a leader are not modelled.
 void GameHooks::player_exit(int op, const uint8_t* cmd, size_t len, int sender) {
@@ -56,10 +81,10 @@ void GameHooks::player_exit(int op, const uint8_t* cmd, size_t len, int sender) 
 	const int who = who_[size_t(seat & 7)];
 	if (who < 0 || who >= sim::kNumLeaders) return;
 	if (option == 3) {  // REPLACE_WITH_AI: the leader stays and the computer plays it
-		g_.leaders[size_t(who)].flags &= ~sim::leaderflag::kHuman;
+		g_->leaders[size_t(who)].flags &= ~sim::leaderflag::kHuman;
 		return;
 	}
-	sim::leader_defeat(g_, who, option >= 0 ? 7 : 6, -1, 0);  // reasons: 6 resigned, 7 disconnected
+	sim::leader_defeat(*g_, who, option >= 0 ? 7 : 6, -1, 0);  // reasons: 6 resigned, 7 disconnected
 }
 
 void GameHooks::execute(int slot, const uint8_t* cmd, size_t len) {
@@ -74,19 +99,19 @@ void GameHooks::execute(int slot, const uint8_t* cmd, size_t len) {
 	if (!policy_.execute || !policy_.allow[size_t(op & 127)] || !sim::replay_to_engine(cmd, len, c)) {
 		++unsupported[op];
 		if (first_unsupported_frame < 0) {
-			first_unsupported_frame = g_.frame;
+			first_unsupported_frame = g_->frame;
 			first_unsupported_op = op;
 		}
 		return;
 	}
-	package_.process(g_, c, slot, who_[size_t(slot & 7)]);
+	package_.process(*g_, c, slot, who_[size_t(slot & 7)]);
 	++commands_run;
 }
 
 bool GameHooks::checksums(uint32_t out[16]) {
 	uint32_t sum = 0;
 	if (mode_ == ChecksumMode::Original) {
-		sim::EngineProvider ep(g_);
+		sim::EngineProvider ep(*g_);
 		sim::datawalk::CheckSumParts parts = sim::datawalk::compute_check_sums(ep);
 		if (!parts.ok) {
 			last_error = parts.error;
@@ -102,7 +127,7 @@ bool GameHooks::checksums(uint32_t out[16]) {
 		// PATH COMB AIST SCEN SCRP).
 		std::vector<uint8_t> b;
 		try {
-			b = sim::save_game_bytes(g_, scenario_, seed_);
+			b = sim::save_game_bytes(*g_, scenario_, seed_);
 		} catch (const std::exception& e) {
 			last_error = e.what();
 			return false;
@@ -168,14 +193,14 @@ void setup_to_lobby(const sim::RandomGameSetup& s, Lobby& l) {
 }
 
 bool lobby_to_setup(const Lobby& l, sim::RandomGameSetup& s, std::string& error) {
-	if (!l.has("map_style") || !l.has("map_size") || !l.has("game_seed")) {
+	if (!l.has("map_style") || !l.has("map_size")) {  // game_seed arrives with START: a lobby screen reads the setup before it
 		error = "the lobby has no map settings";
 		return false;
 	}
 	s = sim::RandomGameSetup();
 	s.map_style = int(l.get_int("map_style"));
 	s.map_size = int(l.get_int("map_size"));
-	s.seed = uint32_t(l.get_int("game_seed"));
+	s.seed = uint32_t(l.get_int("game_seed", 0));
 	s.num_nations = int(l.get_int("num_nations", 2));
 	s.game_rules = int(l.get_int("gamerules"));
 	s.game_speed = int(l.get_int("gamespeed", 1));

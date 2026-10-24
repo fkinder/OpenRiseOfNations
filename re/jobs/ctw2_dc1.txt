@@ -1,0 +1,12 @@
+re/decomp/ctw2
+TypeData::get_cost
+ObjectData::train_time
+Unit::repair_damage
+Leader::calc_attrition
+LeaderData::calc_market_prices
+Leader::calc_gather
+LeaderData::has_conquest_bonus
+ConquestStyle::get_bonus_amt
+ReinforcementArmy::.*
+ConquestGame::find_reinforcement_loc
+ConquestGame::place_reinforcements

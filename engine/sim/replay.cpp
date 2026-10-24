@@ -84,7 +84,7 @@ size_t replay_command_length(const uint8_t* p, size_t avail) {
 bool replay_has_engine_verb(int opcode) {
 	switch (opcode) {
 	case 0: case 2: case 3: case 4: case 6: case 7: case 9: case 10: case 11: case 12: case 13: case 14: case 15: case 17: case 18:
-	case 19: case 20: case 21: case 22: case 23: case 24: case 25: case 26: case 28: case 33: case 35: case 36: case 39: case 41:
+	case 19: case 20: case 21: case 22: case 23: case 24: case 25: case 26: case 28: case 30: case 31: case 33: case 35: case 36: case 39: case 41:
 	case 42: case 43: case 44: case 46: case 47: case 48: case 73:
 		return true;
 	default:
@@ -508,6 +508,32 @@ bool read_replay_bytes(const std::vector<uint8_t>& file, Replay& out, std::strin
 			const std::u16string magic = sr.str();
 			for (char16_t c : magic) out.save_magic.push_back(char(c));
 			out.save_version = sr.u32();
+			if (out.save_magic == "RoNNativeSave") {
+				// the port's own save: length-prefixed, so the stream follows exactly
+				const uint32_t len = sr.u32();
+				out.native_save = true;
+				out.native_at = sr.pos();
+				out.native_size = len;
+				sr.bytes(len);
+				out.save_size = sr.pos() - out.save_at;
+				out.save_frame = h.frame;
+				Rd rr(b, n, sr.pos());
+				read_random_info(rr, out.random_info, expected_players(h));
+				out.stream_at = rr.pos();
+				StreamResult st;
+				std::string serr;
+				if (!read_stream(b, n, rr.pos(), h, true, h.frame, st, &serr)) {
+					error = serr;
+					return false;
+				}
+				out.packages = std::move(st.recs);
+				out.truncated = st.truncated;
+				out.truncated_at = st.t_at;
+				out.truncated_have = st.t_have;
+				out.truncated_need = st.t_need;
+				out.located = "exact";
+				return true;
+			}
 			int32_t sf = 0;
 			if (embedded_save_frame(b, n, sr.pos(), sf)) out.save_frame = sf;
 			try {
@@ -575,6 +601,11 @@ bool read_replay_bytes(const std::vector<uint8_t>& file, Replay& out, std::strin
 std::vector<uint8_t> Replay::save_bytes() const {
 	if (!has_save) return {};
 	return std::vector<uint8_t>(data.begin() + std::ptrdiff_t(save_at), data.begin() + std::ptrdiff_t(save_at + save_size));
+}
+
+std::vector<uint8_t> Replay::native_save_bytes() const {
+	if (!native_save) return {};
+	return std::vector<uint8_t>(data.begin() + std::ptrdiff_t(native_at), data.begin() + std::ptrdiff_t(native_at + native_size));
 }
 
 size_t Replay::command_count() const {
@@ -695,6 +726,8 @@ bool replay_to_engine(const uint8_t* cmd, size_t len, Command& out) {
 		m.verb = Verb::Flight;
 		m.ox = a.i32(); m.whom = a.i32(); m.shift = a.i32(); m.ctrl = a.i32(); m.alt = a.i32(); m.orders = int8_t(a.i32());
 		break;
+	case 30: m.verb = Verb::Follow; m.ox = a.i32(); m.whom = a.i32(); m.queued = int8_t(a.i32()); break;
+	case 31: m.verb = Verb::Guard; m.ox = a.i32(); m.whom = a.i32(); m.queued = int8_t(a.i32()); break;
 	case 33: m.verb = Verb::BuildMask; m.mask = a.i32(); m.set = a.i32(); break;
 	case 35: m.verb = Verb::Recall; break;
 	case 36: m.verb = Verb::Scramble; break;
@@ -758,6 +791,8 @@ bool engine_to_wire(const Command& c, std::vector<uint8_t>& out) {
 	case Verb::Build: out.push_back(25); i32(c.x); i32(c.y); i32(c.x2); i32(c.y2); i32(c.type); q32(c.queued); return true;
 	case Verb::EjectAll: out.push_back(26); i32(c.back_to_work); i32(c.who); i32(c.eject_o); i32(c.eject_who); return true;
 	case Verb::Flight: out.push_back(28); i32(c.ox); i32(c.whom); i32(c.shift); i32(c.ctrl); i32(c.alt); i32(c.orders); return true;
+	case Verb::Follow: out.push_back(30); i32(c.ox); i32(c.whom); q32(c.queued); return true;
+	case Verb::Guard: out.push_back(31); i32(c.ox); i32(c.whom); q32(c.queued); return true;
 	case Verb::BuildMask: out.push_back(33); i32(c.mask); i32(c.set); return true;
 	case Verb::Recall: out.push_back(35); return true;
 	case Verb::Scramble: out.push_back(36); return true;

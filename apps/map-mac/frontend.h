@@ -11,6 +11,7 @@
 
 #include "assets/files.hpp"
 #include "ctw_ui.h"
+#include "lobby.h"
 #include "sim/newgame.hpp"
 
 // What the menu asks of the app.
@@ -26,6 +27,9 @@
 // a game), and the request to play the battle the session prepared.
 - (std::shared_ptr<ctwui::Session>)frontEndCtwSession;
 - (void)frontEndPlayCtwBattle:(std::shared_ptr<ctwui::Session>)session;
+// Multiplayer (lobby.h): the room started the game; `setup` is the final one (the host's seed, human seats = connected players).
+// `save`: a saved multiplayer game the session continues (null for a new game).
+- (void)frontEndPlayMultiplayer:(std::shared_ptr<mp::Room>)room setup:(const ron::sim::RandomGameSetup&)setup save:(std::shared_ptr<std::vector<uint8_t>>)save;
 @end
 
 @interface FrontEnd : NSObject <MTKViewDelegate>
@@ -33,7 +37,7 @@
 @property(nonatomic, weak) MTKView* view;
 @property(nonatomic, readonly) NSString* gameDir;
 - (instancetype)initWithDevice:(id<MTLDevice>)device gameDir:(NSString*)dir error:(NSString* __autoreleasing*)error;
-// main, tutorials, skirmish, skirmish-setup, scenarios; "quit-popup" = the Main Menu with the Quit popup open.
+// main, tutorials, skirmish, skirmish-setup, scenarios, multiplayer, mp-lobby; "quit-popup" = the Main Menu with the Quit popup open.
 - (void)showScreen:(NSString*)screen;
 // A message box without buttons (e.g. "Loading…") until cleared with nil; an error box with an OK button.
 - (void)setBusy:(NSString*)text;
@@ -44,6 +48,11 @@
 // Offscreen render of the current screen (w x h drawable pixels, `scale` drawable pixels per point).
 - (BOOL)snapshotTo:(NSString*)path width:(int)w height:(int)h scale:(float)scale;
 // Headless (--ctw): opens the strategic map of `session` ("" / news / cards / diplomacy / attack / menu), `country` selected.
+// Headless (--menu mp-lobby): hosts a room on `port` and lets `guests` (names) join it from threads of this process, so the lobby screen can be
+// looked at; each guest says a line in the chat and gets ready. Returns once they are all in.
+- (BOOL)mpDemoPort:(int)port guests:(NSArray<NSString*>*)guests;
+// Headless test: the host presses Start on the lobby of the demo room (every guest is made ready first).
+- (void)mpDemoStart;
 - (void)ctwShowSession:(std::shared_ptr<ctwui::Session>)session sub:(NSString*)sub select:(NSString*)country;
 // Input in view points with a top-left origin.
 - (void)mouseMoved:(CGPoint)p;

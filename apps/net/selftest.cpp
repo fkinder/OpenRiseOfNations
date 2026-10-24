@@ -10,8 +10,16 @@
 #include <set>
 #include <string>
 
+#include <unistd.h>
+
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+
 #include "commands.hpp"
 #include "common.hpp"
+#include "loopback.hpp"
+#include "sim/replay.hpp"
 
 namespace ronnet {
 
@@ -62,9 +70,41 @@ public:
 		state = h;
 		++commands;
 	}
+	// OOS recovery: the whole state as bytes (plus `pad_bytes` of noise so that a snapshot needs many chunks)
+	bool snapshot(net::Bytes& out) override {
+		++snaps;
+		out.clear();
+		auto put = [&](uint64_t v) {
+			for (int i = 0; i < 8; ++i) out.push_back(uint8_t(v >> (8 * i)));
+		};
+		put(uint64_t(uint32_t(f)));
+		put(state);
+		put(commands);
+		Rng r(77);
+		for (size_t i = 0; i < pad_bytes; ++i) out.push_back(uint8_t(r.next()));
+		return true;
+	}
+	bool restore(const net::Bytes& b, std::string& err) override {
+		if (b.size() < 24 + pad_bytes) {
+			err = "short snapshot";
+			return false;
+		}
+		auto get = [&](size_t at) {
+			uint64_t v = 0;
+			for (int i = 0; i < 8; ++i) v |= uint64_t(b[at + size_t(i)]) << (8 * i);
+			return v;
+		};
+		f = int32_t(uint32_t(get(0)));
+		state = get(8);
+		commands = get(16);
+		++restores;
+		return true;
+	}
 	int32_t f = 0;
 	uint64_t state = 1;
 	uint64_t commands = 0;
+	size_t pad_bytes = 0;
+	int snaps = 0, restores = 0;
 };
 
 struct Node {
@@ -72,7 +112,7 @@ struct Node {
 	std::unique_ptr<net::Session> s;
 	std::vector<net::BoundaryInfo> bis;
 	net::StepResult last;
-	uint32_t fed = 0;
+	uint32_t fed = 0, epoch = 0;
 	std::vector<std::pair<int, uint32_t>> drops;  // (slot, boundary) of each applied drop
 	Rng rng{1};
 	int resigns = 0;
@@ -106,6 +146,7 @@ struct Cluster {
 	}
 	// random commands for the next stamp
 	void feed(Node& nd, bool random_cmds) {
+		if (nd.epoch != nd.s->epoch()) nd.epoch = nd.s->epoch(), nd.fed = 0;  // a recovery restarted the stamps
 		while (nd.fed < nd.s->local_stamp() + 1) {
 			++nd.fed;
 			if (!random_cmds) continue;
@@ -367,6 +408,206 @@ void test_desync(Tally& t, uint32_t seed) {
 	}
 }
 
+
+// ---- OOS recovery (multiplayer-spec 5.2, 8.2.4)
+
+struct RecoveryCase {
+	const char* name;
+	int peers;
+	int bad;          // the peer whose state is flipped
+	int authority;    // the authority the majority rule must pick
+	int observers;    // extra slots that only watch
+	size_t pad;       // snapshot noise, bytes
+	int dhi;          // delivery delay 0..dhi ms
+};
+
+void test_recovery(Tally& t, uint32_t seed) {
+	const RecoveryCase cases[] = {
+		{"2 peers, the guest diverges: the host is the authority", 2, 1, 0, 0, 0, 4},
+		{"2 peers, the host diverges: the host is still the authority (<= 2 peers)", 2, 0, 0, 0, 0, 4},
+		{"3 peers, peer 1 diverges: the majority (0, 2) wins, lowest slot is the authority", 3, 1, 0, 0, 0, 9},
+		{"3 peers, peer 0 diverges: slot 1 is the authority", 3, 0, 1, 0, 0, 9},
+		{"4 peers, peer 2 diverges, 300 KB snapshot in many chunks", 4, 2, 0, 0, 300000, 9},
+		{"4 peers, peer 0 diverges, 300 KB snapshot in many chunks", 4, 0, 1, 0, 300000, 5},
+		{"3 humans + 1 observer, peer 1 diverges: the observer loads the snapshot too", 3, 1, 0, 1, 20000, 5},
+	};
+	for (const RecoveryCase& rc : cases) {
+		const int total = rc.peers + rc.observers;
+		Cluster c(total, seed + uint32_t(rc.peers * 7 + rc.bad), 0, rc.dhi, [&](net::SessionConfig& cfg) {
+			cfg.recover = true;
+			cfg.recover_chunk = 4096;
+			for (int o = 0; o < rc.observers; ++o) cfg.slot_flags[size_t(rc.peers + o)] = net::kPlayerValid | net::kPlayerObserver;
+		}, rc.peers);
+		for (Node& nd : c.nodes) nd.sim->pad_bytes = rc.pad;
+		c.run_to(30);
+		c.nodes[size_t(rc.bad)].sim->state ^= 0x10;
+		bool recovered = false;
+		for (int r = 0; r < 200000 && !recovered; ++r) {
+			c.round();
+			recovered = true;
+			for (const Node& nd : c.nodes) recovered = recovered && nd.s->epoch() == 1 && !nd.s->recovering();
+		}
+		size_t from = SIZE_MAX;
+		for (const Node& nd : c.nodes) from = std::min(from, nd.bis.size());
+		const uint32_t b0 = c.nodes[0].s->boundaries();
+		const bool ran = recovered && c.run_to(b0 + 80);
+		std::string why;
+		bool ok = ran;
+		int snap_nodes = 0, auth = -1;
+		for (size_t i = 0; i < c.nodes.size(); ++i) {
+			const Node& nd = c.nodes[i];
+			if (nd.sim->snaps) ++snap_nodes, auth = int(i);
+			if (nd.sim->restores != 1) ok = false, why = "node " + std::to_string(i) + " loaded " + std::to_string(nd.sim->restores) + " snapshots";
+			if (nd.s->epoch() != 1) ok = false, why = "epoch " + std::to_string(nd.s->epoch());
+			if (nd.s->local_stamp() > 120) ok = false, why = "stamps did not restart: " + std::to_string(nd.s->local_stamp());
+		}
+		if (snap_nodes != 1 || auth != rc.authority) ok = false, why = "authority " + std::to_string(auth) + ", expected " + std::to_string(rc.authority);
+		// sums agree on every boundary after the recovery (boundaries[from..] of every node; they start at stamp 1 of the new epoch)
+		std::string ag;
+		if (!c.agree(ag, from)) ok = false, why = ag;
+		t.check(ok, std::string("recovery: ") + rc.name, ok ? "authority " + std::to_string(auth) + ", " + std::to_string(c.nodes[0].s->boundaries() - b0) + " turns after, stamp " + std::to_string(c.nodes[0].s->local_stamp()) + ", state equal" : why);
+	}
+	// two recoveries in a row, random delays
+	{
+		Cluster c(3, seed + 5, 0, 9, [](net::SessionConfig& cfg) { cfg.recover = true; });
+		c.run_to(25);
+		c.nodes[2].sim->state ^= 1;
+		for (int r = 0; r < 100000; ++r) {
+			c.round();
+			if (c.nodes[0].s->epoch() == 1 && c.nodes[1].s->epoch() == 1 && c.nodes[2].s->epoch() == 1) break;
+		}
+		c.run_to(c.nodes[0].s->boundaries() + 40);
+		c.nodes[1].sim->state ^= 2;
+		size_t from2 = SIZE_MAX;
+		bool again = false;
+		for (int r = 0; r < 100000 && !again; ++r) {
+			c.round();
+			again = c.nodes[0].s->epoch() == 2 && c.nodes[1].s->epoch() == 2 && c.nodes[2].s->epoch() == 2;
+		}
+		for (const Node& nd : c.nodes) from2 = std::min(from2, nd.bis.size());
+		const bool ran = again && c.run_to(c.nodes[0].s->boundaries() + 60);
+		std::string ag2;
+		const bool eq = ran && c.agree(ag2, from2);
+		t.check(eq, "recovery: twice in one game, the stamps restart each time", ran ? "epoch " + std::to_string(c.nodes[0].s->epoch()) : "did not recover again");
+	}
+	// the authority disappears while the snapshot is in transit: whoever loaded it serves the peer that lacks it
+	for (int variant = 0; variant < 2; ++variant) {
+		Cluster c(3, seed + 11 + uint32_t(variant), 0, 3, [](net::SessionConfig& cfg) {
+			cfg.recover = true;
+			cfg.recover_chunk = 2048;
+		});
+		for (Node& nd : c.nodes) nd.sim->pad_bytes = 60000;
+		c.run_to(30);
+		// variant 0: the authority (slot 0) dies after sending peer 1 the whole snapshot and peer 2 a part of it
+		// variant 1: it dies before a single byte of the snapshot left
+		c.hub.kill_after_sends(0, variant == 0 ? 40 : 0);
+		c.nodes[2].sim->state ^= 0x20;
+		bool done = false;
+		for (int r = 0; r < 300000 && !done; ++r) {
+			c.round();
+			if (!c.hub.alive(0)) c.nodes[0].dead = true;
+			done = c.nodes[1].s->epoch() == 1 && c.nodes[2].s->epoch() == 1;
+		}
+		if (!done && std::getenv("RON_NET_DEBUG"))
+			for (size_t i = 1; i < c.nodes.size(); ++i)
+				std::printf("    debug: node %zu epoch %u recovering %d authority %d bytes %zu last %d '%s' alive0 %d\n", i, c.nodes[i].s->epoch(), int(c.nodes[i].s->recovering()),
+				            c.nodes[i].s->recovery_authority(), c.nodes[i].s->recovery_bytes(), int(c.nodes[i].last.kind), c.nodes[i].last.text.c_str(), int(c.hub.alive(0)));
+		size_t from3 = SIZE_MAX;
+		for (size_t i = 1; i < c.nodes.size(); ++i) from3 = std::min(from3, c.nodes[i].bis.size());
+		const bool ran = done && c.run_to(c.nodes[1].s->boundaries() + 40);
+		std::string ag3;
+		if (done && !ran && std::getenv("RON_NET_DEBUG"))
+			for (size_t i = 1; i < c.nodes.size(); ++i)
+				std::printf("    debug: node %zu boundaries %u stamp %u epoch %u last %d '%s' slot %d drop0 %s\n", i, c.nodes[i].s->boundaries(), c.nodes[i].s->local_stamp(), c.nodes[i].s->epoch(),
+				            int(c.nodes[i].last.kind), c.nodes[i].last.text.c_str(), c.nodes[i].last.slot, c.nodes[i].s->describe_drop(0).c_str());
+		const bool eq = ran && c.agree(ag3, from3);
+		t.check(eq, std::string("recovery: the authority dies ") + (variant == 0 ? "mid-transfer: the peer that has the snapshot serves the one that lacks it" : "before sending anything: the next candidate takes a snapshot") + ", the survivors end equal",
+		        ran ? "ok" : ag3.empty() ? "no recovery" : ag3);
+	}
+}
+
+
+// ---- the engine over the loopback: recovery in a real game, recording, replay of the recording (needs the game install)
+
+std::vector<uint8_t> slurp(const std::string& p) {
+	std::ifstream f(p, std::ios::binary);
+	return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+
+void test_engine(Tally& t, const std::string& dir, uint32_t seed) {
+	namespace fs = std::filesystem;
+	std::error_code ec;
+	if (!fs::exists(dir + "/Data", ec)) {
+		std::printf("  SKIP engine tests: no game install at %s (--game DIR)\n", dir.c_str());
+		return;
+	}
+	const fs::path tmp = fs::temp_directory_path() / ("ron-net-selftest-" + std::to_string(getpid()));
+	fs::create_directories(tmp, ec);
+	// 1. two engine instances, a divergence injected into the guest, recovery, recording
+	{
+		LoopbackOptions o;
+		o.game_dir = dir;
+		o.random_spec = "18,0," + std::to_string(seed) + ",2";
+		o.humans = 2;
+		o.frames = 360;
+		o.recover = true;
+		o.diverge = {{150, 1}};
+		o.record_base = (tmp / "two").string();
+		o.save_out = (tmp / "two.sav").string();
+		o.dhi = 3;
+		const LoopbackResult r = run_loopback(o);
+		t.check(r.ok && r.identical && r.epoch == 1 && r.recoveries == 2, "engine, 2 instances: a divergence injected at frame 150 is repaired from the authority's snapshot, final native saves identical",
+		        r.ok ? "frame " + std::to_string(r.frame) + ", 2 snapshot loads, fnv64 " + std::to_string(r.final_fnv) : r.text);
+		bool two_segments = r.segments.size() == 2;
+		for (const auto& kv : r.segments) two_segments = two_segments && kv.second.size() == 2;
+		t.check(two_segments, "recording: every instance wrote a segment chain (the first from the start, the second from the recovery snapshot)");
+		// the reader and the replayer: each segment of each instance
+		const std::vector<uint8_t> live = slurp((tmp / "two.sav").string());
+		int replayed = 0, matched = 0;
+		for (const auto& kv : r.segments) {
+			const std::string& last = kv.second.back();
+			sim::Replay rp;
+			std::string err;
+			const bool read = sim::read_replay(last, rp, err) && rp.native_save && rp.header.multiplayer && rp.packages.size() > 10;
+			const std::string out = (tmp / ("replay" + std::to_string(kv.first) + ".sav")).string();
+			const int rc = read ? replay_native(rp, last, dir, 0, 4, out, false) : 1;
+			++replayed;
+			matched += rc == 0 && slurp(out) == live;
+			if (!read) t.check(false, "recording: " + last + " cannot be read back", err);
+		}
+		t.check(replayed == 2 && matched == 2, "replay: the last segment of each instance's recording replays to the live game's final native save, byte for byte", std::to_string(matched) + "/" + std::to_string(replayed));
+		// the first segment ends at the freeze: replayed, it must reach the state the recovery's snapshot was taken from, one frame step later
+		sim::Replay first, second;
+		std::string err;
+		const bool ok = r.segments.count(0) && sim::read_replay(r.segments.at(0)[0], first, err) && sim::read_replay(r.segments.at(0)[1], second, err);
+		t.check(ok && !first.native_save && second.native_save && second.header.frame == first.packages.back().frame, "recording: the second segment starts at the frame where the first one stopped",
+		        ok ? "frames " + std::to_string(first.header.frame) + ".." + std::to_string(first.packages.back().frame) + " | " + std::to_string(second.header.frame) + ".." + std::to_string(second.packages.back().frame) : err);
+	}
+	// 2. three instances, no divergence: the recording of the third replays to the final state; the lockstep layer without recovery in the way
+	{
+		LoopbackOptions o;
+		o.game_dir = dir;
+		o.random_spec = "16,0," + std::to_string(seed + 1) + ",3";
+		o.humans = 3;
+		o.frames = 300;
+		o.recover = true;
+		o.record_base = (tmp / "three").string();
+		o.save_out = (tmp / "three.sav").string();
+		o.dhi = 5;
+		const LoopbackResult r = run_loopback(o);
+		bool replay_ok = false;
+		if (r.ok && r.segments.count(2)) {
+			sim::Replay rp;
+			std::string err;
+			const std::string out = (tmp / "three_replay.sav").string();
+			replay_ok = sim::read_replay(r.segments.at(2)[0], rp, err) && !rp.native_save && replay_native(rp, r.segments.at(2)[0], dir, 0, 3, out, false) == 0 &&
+			            slurp(out) == slurp((tmp / "three.sav").string());
+		}
+		t.check(r.ok && r.recoveries == 0 && r.epoch == 0 && replay_ok, "engine, 3 instances, no divergence: no recovery, and the recording of one instance (random game from the header) replays to the final native save", r.ok ? "frame " + std::to_string(r.frame) : r.text);
+	}
+	fs::remove_all(tmp, ec);
+}
+
 void test_no_wallclock(Tally& t, uint32_t seed) {
 	// the same inputs under two different delivery schedules give the same states (the clock only decides when a tick happens)
 	std::vector<uint64_t> states;
@@ -384,9 +625,14 @@ void test_no_wallclock(Tally& t, uint32_t seed) {
 int cmd_selftest(int argc, char** argv) {
 	uint32_t seed = 1;
 	int trials = 12;
-	for (int i = 2; i + 1 < argc; ++i) {
+	std::string game = game_dir_default();
+	bool engine = true;
+	for (int i = 2; i < argc; ++i) {
+		if (!std::strcmp(argv[i], "--no-engine")) engine = false;
+		if (i + 1 >= argc) continue;
 		if (!std::strcmp(argv[i], "--seed")) seed = uint32_t(std::atoll(argv[i + 1]));
 		if (!std::strcmp(argv[i], "--trials")) trials = std::atoi(argv[i + 1]);
+		if (!std::strcmp(argv[i], "--game")) game = argv[i + 1];
 	}
 	Tally t;
 	std::printf("ron-net selftest (seed %u)\n", seed);
@@ -397,7 +643,9 @@ int cmd_selftest(int argc, char** argv) {
 	test_resign(t, seed);
 	test_drops(t, seed, trials);
 	test_desync(t, seed);
+	test_recovery(t, seed);
 	test_no_wallclock(t, seed);
+	if (engine) test_engine(t, game, seed);
 	std::printf("selftest: %d passed, %d failed\n", t.pass, t.fail);
 	return t.fail ? 1 : 0;
 }

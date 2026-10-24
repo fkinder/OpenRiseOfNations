@@ -1,0 +1,6 @@
+re/decomp/ctw2
+ScenarioFuncSet::ctw_ai_launch_nukes
+ScenarioFuncSet::ctw_build_nuke
+ScenarioFuncSet::ctw_get_nuke_cost
+ConquestGame::get_nuke_tribes
+ConquestWin::on_button_clicked

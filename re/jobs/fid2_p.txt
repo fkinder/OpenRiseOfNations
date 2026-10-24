@@ -1,0 +1,3 @@
+re/decomp/fidelity2/ge
+GraphicEvents::execute_game_events
+GraphicEvents::verify_load

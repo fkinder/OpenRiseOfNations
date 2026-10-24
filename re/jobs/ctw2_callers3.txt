@@ -1,0 +1,13 @@
+re/decomp/ctw2/propose_callers.txt
+1
+ConquestLeader::propose_buy_vassal
+ConquestLeader::propose_buy_territory
+ConquestLeader::propose_peace
+ConquestLeader::do_diplomacy
+ConquestLeader::run_strategy_script
+ConquestLeader::plan_strategy
+ConquestLeader::play_strategic_cards
+ConquestLeader::declare_war
+ConquestLeader::demand_tribute
+ConquestLeader::buy_build
+ConquestLeader::find_best_army_loc

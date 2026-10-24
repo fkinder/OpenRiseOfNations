@@ -16,9 +16,12 @@
 
 #include "commands.hpp"
 #include "common.hpp"
+#include "demobot.hpp"
 #include "net/lobby.hpp"
 #include "net/tcp.hpp"
+#include "node.hpp"
 #include "sim/anim_assets.hpp"
+#include "net/record.hpp"
 #include "sim/newgame.hpp"
 #include "sim/replay.hpp"
 #include "sim/rules.hpp"
@@ -41,106 +44,6 @@ bool has_flag(int argc, char** argv, const char* name) {
 	return false;
 }
 
-int32_t find_type_by_name(const sim::Game& g, const std::string& want) {
-	auto low = [](std::string v) {
-		for (char& c : v) c = char(std::tolower(static_cast<unsigned char>(c)));
-		return v;
-	};
-	const std::string w = low(want);
-	for (size_t i = 0; i < g.rules->types.size(); ++i) {
-		const sim::Type& t = g.rules->types[i];
-		if (!t.loaded) continue;
-		if (low(sim::to_utf8(t.type_name.empty() ? t.name : t.type_name)) == w) return int32_t(i);
-	}
-	return -1;
-}
-
-// A deterministic player: every few turns it trains a citizen at one of its buildings and sends its citizens walking. Local to the
-// process that plays the seat; what it does reaches the others only through the packages.
-class DemoBot {
-public:
-	DemoBot(const sim::Game& g, int seat) : g_(g), seat_(seat), rng_(0x9e3779b9u * uint32_t(seat + 1)) { citizen_ = find_type_by_name(g, "Citizen"); }
-
-	net::Bytes next(uint32_t stamp) {
-		net::Bytes out;
-		if (stamp < 3) return out;
-		const sim::ObjectList& ol = g_.objects[size_t(seat_)];
-		if (stamp % 7 == 0) {  // train a citizen
-			std::vector<uint16_t> bld;
-			for (size_t i = 0; i < ol.builds.size() && bld.empty(); ++i) {
-				const sim::Build* b = ol.builds[i].get();
-				if (b && b->alive() && b->type == city_type()) bld.push_back(uint16_t(sim::kBuildBase + int(i)));
-			}
-			if (!bld.empty()) {
-				sim::Command gr;
-				gr.verb = sim::Verb::Group;
-				gr.who = seat_;
-				gr.objects = bld;
-				sim::engine_to_wire(gr, out);
-				sim::Command q;
-				q.verb = sim::Verb::QueueUp;
-				q.type = citizen_;
-				q.num = 1;
-				sim::engine_to_wire(q, out);
-			}
-		}
-		if (stamp % 5 == 0) {  // walk
-			std::vector<uint16_t> units;
-			int32_t cx = 0, cy = 0;
-			for (int pass = 0; pass < 2 && units.empty(); ++pass) {  // citizens first, else whatever the seat has
-				for (int o = 0; o < ol.unit_mark && units.size() < 40; ++o) {
-					const sim::Unit* u = o < int(ol.units.size()) ? ol.units[size_t(o)].get() : nullptr;
-					if (!u || !u->alive() || u->o_up >= 0 || (pass == 0 && u->type != citizen_)) continue;
-					units.push_back(uint16_t(o));
-					cx = u->x;
-					cy = u->y;
-				}
-			}
-			if (!units.empty()) {
-				const int32_t span = 768 * 12;
-				sim::Command gr;
-				gr.verb = sim::Verb::Group;
-				gr.who = seat_;
-				gr.objects = units;
-				sim::engine_to_wire(gr, out);
-				sim::Command m;
-				m.verb = sim::Verb::MoveTo;
-				m.x = std::max<int32_t>(768, std::min<int32_t>(g_.world.xs * 768 - 768, cx + int32_t(rng_.below(2 * span)) - span));
-				m.y = std::max<int32_t>(768, std::min<int32_t>(g_.world.ys * 768 - 768, cy + int32_t(rng_.below(2 * span)) - span));
-				m.orders = 1;
-				m.queued = sim::kQueueNew;
-				m.form = -1;
-				m.width = -1;
-				sim::engine_to_wire(m, out);
-			}
-		}
-		return out;
-	}
-
-private:
-	struct Lcg {
-		uint32_t s;
-		explicit Lcg(uint32_t seed) : s(seed) {}
-		uint32_t below(uint32_t n) {
-			s = s * 1664525u + 1013904223u;
-			return n ? (s >> 8) % n : 0;
-		}
-	};
-	int32_t city_type() {
-		if (city_ < 0) city_ = find_type_by_name(g_, "City Center");
-		return city_;
-	}
-	const sim::Game& g_;
-	int seat_;
-	Lcg rng_;
-	int32_t citizen_ = -1, city_ = -1;
-};
-
-uint64_t fnv64(const std::vector<uint8_t>& b) {
-	uint64_t h = 1469598103934665603ull;
-	for (uint8_t c : b) h = (h ^ c) * 1099511628211ull;
-	return h;
-}
 
 }  // namespace
 
@@ -286,23 +189,47 @@ int cmd_netgame(int argc, char** argv) {
 
 		std::array<int, 8> who{};
 		for (int i = 0; i < 8; ++i) who[size_t(i)] = i;
-		net::GameHooks hooks(*game, who, net::ChecksumMode::Native, net::ExecPolicy::all_engine(), scenario, seed);
+		EngineNode node(files, rules, art.get(), std::move(game), scenario, seed, who);
+		net::GameHooks& hooks = node.hooks();
+		const bool recover = has_flag(argc, argv, "--recover");
 		net::SessionConfig cfg;
 		cfg.local_slot = me;
 		cfg.seed = seed;
 		cfg.speed = 2;
+		cfg.recover = recover;
 		cfg.timeout_ms = 20000;
 		for (int i = 0; i < std::min(nseats, 8); ++i) cfg.slot_flags[size_t(i)] = net::kPlayerValid | (i < nhumans ? net::kPlayerHuman : 0u);
 		net::Session session(t, hooks, cfg);
+		node.attach(session);
+		if (const char* rec = arg_value(argc, argv, "--record")) {
+			if (sim::is_random_scenario(scenario)) {
+				sim::RandomGameSetup rs;
+				sim::parse_random_setup(scenario, rs);
+				std::string rerr;
+				if (!node.record(rec, net::record_info_for_random(rs, seed, me, who, node.game(), scenario), rerr)) {
+					std::fprintf(stderr, "[%s] cannot record: %s\n", tag, rerr.c_str());
+					return 2;
+				}
+				std::printf("[%s] recording to %s\n", tag, rec);
+			} else {
+				std::fprintf(stderr, "[%s] --record covers random games only\n", tag);
+			}
+		}
+		const int diverge_at = arg_value(argc, argv, "--diverge-at") ? std::atoi(arg_value(argc, argv, "--diverge-at")) : -1;
+		bool diverged = false;
 		uint32_t boundaries = 0;
 		session.on_boundary = [&](const net::BoundaryInfo&) { ++boundaries; };
 		session.on_drop = [&](int slot, int option, uint32_t boundary) {
-			std::printf("[%s] player %d dropped (option %d) at turn %u, frame %d\n", tag, slot, option, boundary, game->frame);
+			std::printf("[%s] player %d dropped (option %d) at turn %u, frame %d\n", tag, slot, option, boundary, node.game().frame);
 		};
-		session.on_resign = [&](int slot) { std::printf("[%s] player %d resigned at frame %d\n", tag, slot, game->frame); };
-		DemoBot bot(*game, me);
-		uint32_t fed = 0;
+		session.on_resign = [&](int slot) { std::printf("[%s] player %d resigned at frame %d\n", tag, slot, node.game().frame); };
+		session.on_desync = [&](const net::DesyncReport& rep, int authority) {
+			std::printf("[%s] OUT OF SYNC: %s; slot %d is the authority\n", tag, rep.text().c_str(), authority);
+		};
+		DemoBot bot([&node]() -> const sim::Game& { return node.game(); }, me);
+		uint32_t fed = 0, fed_epoch = 0;
 		auto feed = [&]() {
+			if (fed_epoch != session.epoch()) fed_epoch = session.epoch(), fed = 0;
 			while (fed < session.local_stamp() + 1) {
 				++fed;
 				if (bot_on) session.submit(bot.next(fed));
@@ -314,25 +241,39 @@ int cmd_netgame(int argc, char** argv) {
 		// ---- play
 		uint64_t stalls = 0;
 		int rc = 0;
-		while (game->frame < frames) {
+		for (;;) {
+			if (!diverged && diverge_at >= 0 && node.game().frame >= diverge_at) {
+				diverged = true;
+				node.game().leaders[size_t(me)].units_built += 12345;
+				std::printf("[%s] divergence injected at frame %d\n", tag, node.game().frame);
+			}
 			feed();
 			const net::StepResult r = session.step();
-			if (r.kind == net::StepKind::Advanced) continue;
-			if (r.kind == net::StepKind::Stalled) {
+			if (r.kind == net::StepKind::Advanced) {
+				if (r.turn && node.game().frame >= frames) break;  // stop right after a turn boundary: the recording replays to this very state
+				continue;
+			}
+			if (r.kind == net::StepKind::Stalled || r.kind == net::StepKind::Recovering) {
 				++stalls;
 				t.idle(1);
 				continue;
 			}
-			std::fprintf(stderr, "[%s] stopped at frame %d: %s%s\n", tag, game->frame, r.kind == net::StepKind::Desync ? "DESYNC " : "", r.text.c_str());
+			if (r.kind == net::StepKind::Recovered) {
+				std::printf("[%s] recovered from the authority's snapshot (%zu bytes) at frame %d; stamps restart at 1\n", tag, session.recovery_bytes(), node.game().frame);
+				continue;
+			}
+			std::fprintf(stderr, "[%s] stopped at frame %d: %s%s\n", tag, node.game().frame, r.kind == net::StepKind::Desync ? "DESYNC " : "", r.text.c_str());
 			rc = 3;
 			break;
 		}
-		std::printf("[%s] frame %d after %u turns (%llu waits), turn length %d, stamp %u\n", tag, game->frame, boundaries, (unsigned long long)stalls, session.turn_length(),
-		            session.local_stamp());
+		std::printf("[%s] frame %d after %u turns (%llu waits), turn length %d, stamp %u, %u recovery(ies)\n", tag, node.game().frame, boundaries, (unsigned long long)stalls, session.turn_length(),
+		            session.local_stamp(), session.epoch());
+		node.finish_recording();
+		for (const std::string& sg : node.segments()) std::printf("[%s] recording: %s\n", tag, sg.c_str());
 
 		// ---- the end state
 		if (rc == 0) {
-			const std::vector<uint8_t> bytes = sim::save_game_bytes(*game, scenario, seed);
+			const std::vector<uint8_t> bytes = node.save_bytes();
 			uint32_t sums[16];
 			hooks.checksums(sums);
 			std::printf("[%s] native save: %zu bytes, fnv64 %016llx, state sum %u, commands run %llu\n", tag, bytes.size(), (unsigned long long)fnv64(bytes), sums[15],

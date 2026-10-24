@@ -1123,6 +1123,15 @@ the DataWalk check sums.
   `SimHooks` is the whole contract with the simulation: `frame`, `step_frame`, `checksums` (15 + `all`), `begin_package` / `execute(slot, cmd, len)` / `end_package`.
 - **Transports**. `LoopbackHub` (N endpoints in one process, deterministic delay and jitter, `hold` / `kill` / `kill_after_sends` for stall and drop tests), `TcpTransport` (sockets only, host = slot 0 relays),
   both reliable and ordered per sender; `Lobby` is the host's key/value table, ready flags, START with the host's seed, a barrier.
+- **OOS recovery** (`net/recovery.cpp`, `SessionConfig::recover`; multiplayer-spec §8.5.1). A desync freezes every peer on the same row of sums; the authority (the host for two peers, else the peer agreeing with
+  the most others) sends its `save_game_bytes` snapshot in zlib chunks, every peer (the authority too) restores it (`GameHooks::restore` -> `load_game_bytes`, the application swaps its `Game`), a `RecReady`
+  barrier separates the epochs, stamps restart at 1, `step()` returns `Recovering` then `Recovered`. An authority that dies in transit is replaced (`RecNeed`: whoever loaded the snapshot serves it).
+- **Recording** (`net/record.hpp`, §8.5.2). `Recorder` writes the original's `.rcx` layout from `Session::on_package`: header, random-game info, the exact rules image (or an embedded native save,
+  `String "RoNNativeSave"` + length, for a segment that starts from a save), records with the MP XOR and padding, gzip on close; a recovery starts the next segment. `read_replay` reads them (embedded native save
+  located exactly), `rcxdump.mjs` reads them too (identical numbers), `ron-net replay` replays them (`apps/net/native_replay.cpp`).
+- **Lobby and session in `ronmap`** (`apps/map-mac/lobby.{h,mm}`, `frontend.mm`; ui-port.md §10.3). `mp::Room` (TCP lobby mode, names, ready flags, chat, table for late joiners), `mp::Runtime` (`Session` +
+  `GameHooks` over the renderer's `Game`), `mp::CommandSink` (the local `CommandManager` hands its queue to the session through an explicit instantiation of its private member instead of executing it), pause / speed /
+  resign / save as lockstep commands, a synchronized save (`Session::request_save`, `kSaveAt`) and a saved game continued by re-joining peers (`Lobby::send_file`).
 - **Engine binding** (`net/game_link.hpp`). `GameHooks(Game&, seat_who, ChecksumMode, ExecPolicy)`: commands run through `CommandPackage::process(g, cmd, play, who)` (the group state resets per package); `ChecksumMode::Original`
   = the 15 DataWalk parts of a game loaded from an original save (`EngineProvider`), `Native` = the CRC-32s of the sections of the engine's own save (any game, e.g. a random game); `ExecPolicy::sav_compatible()` leaves out the
   aircraft verbs `ron-sav` does not feed, `all_engine()` also runs RESIGN / QUIT / drops on the leaders (`leader_defeat`, `kHuman` cleared for an AI takeover).
@@ -1136,16 +1145,23 @@ ron-net replay <file.rcx> [--game DIR] [--frames N] [--delay a,b] [--observers K
                                                       engine instances in lockstep, one per human, each fed its own player's packages; prints the lines of ron-sav --replay and
                                                       "lockstep: ... the instances agree on all 15 parts at every turn" + "final state ... identical" (exit 1 if not)
 ron-net selftest [--seed N] [--trials K]              toy simulation: agreement, stall, duplicate / gap, pause, speed, resign, drops x 4 options, desync + threshold, delay independence
-ron-net host <port> --random STYLE,SIZE,SEED,NATIONS | --scenario FILE [--seed S]  [--humans N] [--frames N] [--save F]
-ron-net join <port> [--address A] [--frames N] [--save F]       a LAN game of N processes (127.0.0.1 by default); a bot plays each seat; the saves must be byte-identical
+ron-net host <port> --random STYLE,SIZE,SEED,NATIONS | --scenario FILE [--seed S]  [--humans N] [--frames N] [--save F] [--recover] [--record F] [--diverge-at FRAME]
+ron-net join <port> [--address A] [--frames N] [--save F] [--recover] [--record F] [--diverge-at FRAME]
+                                                      a LAN game of N processes (127.0.0.1 by default); a bot plays each seat; the saves must be byte-identical
+ron-net loopback --random STYLE,SIZE,SEED,NATIONS [--humans N] [--frames F] [--recover] [--diverge FRAME:PEER]... [--record BASE] [--save F] [--delay a,b]
+                                                      N engine instances of one game in this process (loopback transport); the recovery and the recording without sockets
+ron-net replay <file.rcx> [--save F]                  also replays recordings of this port (embedded native save, or the random game of the header) and writes the final native save
+ronmap --host PORT --humans N --random ... [--frames N --snapshot f --save-game f] | --join HOST:PORT [...]     (also --mp-bot --mp-record F --mp-diverge FRAME --mp-act what@TURN --mp-save F --mp-load F)
 ```
 
 Results (this session): `ron-net timing` on the 59 multiplayer replays: 172,276 packages, 86,144 turns, 0 frame differences. `ron-net replay` on the 45 replays with an embedded save: instances agree 45 / 45 (15,334
 turns, delivery delays 0..3 and 0..25 ms), final states identical 45 / 45, the fidelity lines `diff`-equal to `ron-sav --replay` for 45 / 45 (still 0 turns with all 15 parts equal: the engine's fidelity work is the other task).
-`ron-net selftest` 23 / 23 (seeds 1..10, 30 drop trials per option). LAN: 2 processes 600 frames, 3 processes 1500 frames, scenario, and a `kill -9` of one of three processes (20,000 frames): saves identical.
+`ron-net selftest` 38 / 38 (seeds 1..12, 30 drop trials per option; recovery: 7 cases, repeated, authority deaths; the engine part: a divergence repaired in two instances, recording chain, replay of the recordings
+byte for byte). LAN: 2 processes 600 frames, 3 processes 1500 frames, scenario, and a `kill -9` of one of three processes (20,000 frames): saves identical; 3 processes with one corrupted at frame 150: majority vote,
+recovered, identical saves; `ronmap` 2 and 3 processes (`--host` / `--join`): identical saves, recordings replay to them, recovery, synchronized save and continuation of a saved game.
 
-Not done: OOS recovery from the authority's snapshot, writing `.rcx` segments of a live session (the `on_package` callback is the hook), the x86-64 / arm64 soak, the 14 replays that start without an embedded save
-(only the turn clock covers them), diplomacy / team reset of the DIPLOMACY and SURVIVAL drops in the engine. Build note: `build-mac.sh` has no `-ffp-contract=off` (multiplayer-spec §8.3).
+Not done: the x86-64 / arm64 soak, the 14 corpus replays that start without an embedded save (only the turn clock covers them; recordings *of this port* without a save replay: the random setup is in the header),
+diplomacy / team reset of the DIPLOMACY and SURVIVAL drops in the engine, chat in a running game, saved games other than random maps. Build note: `build-mac.sh` has no `-ffp-contract=off` (multiplayer-spec §8.3).
 
 
 ## Conquer the World (docs/ctw-spec.md; engine/sim/ctw*.cpp, script_funcs_ctw.cpp; 2026-10-24)
@@ -1289,6 +1305,18 @@ for lookup. (6) a country's `rare="random"` range 6..50: goods end at 49, so 6..
 conquestrules.xml defaults are used (the spec's "styles 0"). (8) the `diplo_offer` default script is `return false`; only
 Napoleon / New World / Cold War scripts make offers.
 
+### Conquer the World, second pass (2026-10-24)
+
+New files: `ctw_reinf.cpp` (reinforcement geometry, schedule, arrival), `ctw_tactical.cpp` (AI card picks, `apply_battle_cards`, `run_bonus_script`),
+`ctw_cold.cpp` (nukes, DEFCON strikes, espionage). Rewritten: `ctw_ai.cpp` (`plan_strategy`, overruns), `ctw_diplo.cpp` (`set_war` / `set_peace` /
+`set_ally`, costs, AI diplomacy, `propose_peace`). The campaign save is version 0x11 (reinforcements, nuke state, deals tri-state, saved names).
+Hooks in core files are minimal: `costs.cpp`, `attrition.cpp`, `build.cpp`, `script_host.cpp`, `script_funcs_order.cpp` (`group_guard_order`).
+
+Deviations: `group_guard_order` approximates Group::action_guard; the Dissidents card's `lose_tech` is reduced; a player retaliation uses the AI's
+target heuristic; the original's popups are dropped; `set_plunder_scale` and `rename_city` are still unported. Debug hooks (environment): `CTW_STYLE`,
+`CTW_FORCE_WIN`, `CTW_VARY_SEED`, `CTW_CARDS` in `apps/map-mac/ctw_cli.mm`. Campaign state is non-lockstep; only the battle is bit-exact, and
+`sim-all` digests are unchanged. Checks: `ronmap --ctw-selftest` (46 checks), `--ctw-sim` Cold War over 14 rounds (the AI launches nukes).
+
 ## Fidelity log (Phase 0: the engine against the original's frames; docs/original-save.md sections 6 - 7; 2026-10-24)
 
 Method: `ron-sav <rcx> --replay` steps a save-based multiplayer replay from the embedded save and compares the 15 CHECK_SUMS parts at every turn
@@ -1345,3 +1373,36 @@ explanation; `guys` / `world` match at 8 and differ at 14), and the other two re
 under-draws by 1 - 2 random draws per 10 frames in quiet segments (not-yet-ported call sites, e.g. `Unit::think_scout`, `Objects::add_flock`); `GUARD` / `FOLLOW` have no verb
 (`commands.*` belongs to another owner); the leader statistics, command counters and Guy pitch / bank are still frozen (no first mismatch points at them: the first
 MOVE_TO of `21'23'34` is at frame 3,320, the first fight later than the first mismatch of `leaders`); the capacity rules of the containers are in docs/original-save.md section 7.
+
+### Fidelity log, second pass (2026-10-24, movement / `units` at the first boundary)
+
+Target: `Multi/Playback - 2026.08.30 21'23'34 (Sun).rcx`, `units` differs at 8, `guys` / `world` at 14. Decompiled into `re/decomp/fidelity2/` (jobs `re/jobs/fid2_*.txt`; disassembly where
+the decompiler lost `sinx` / `cosx` / `vector_dist` / `project` / `find_nearby_spot` arguments). **No first mismatch moved** (docs/original-save.md section 6); what the round produced:
+
+9. **GUARD and FOLLOW** (`engine/sim/orders_guard.cpp`, `groups.cpp`, `commands.*`, `replay.cpp`, `orders.cpp` `do_job`, `original_map_objects.cpp`, `apps/sav`). `Unit::add_follow_order` @5e3f60
+   (the object really followed: the first unit riding in the target, else the target; `oxx / whose / uid2`), `Unit::add_guard_order` @5e3e40 (`dx, dy`, the guard point = the target's position, `idle`, `retry`),
+   `Unit::update_guard_order` @5e3220, `Unit::do_follow` @5e65d0 (the container fallback, the follow distance `clamp(los*0x180 - (los*0x60 | los*0x300/5, doubled when the target moves), 0x180, 0x600) + 0xc0`,
+   a spot on the line to the target / behind it / on a ring, then `add_move_facing_order(MOVE_TO)` + `do_move`) and `Unit::do_guard` @5e5c70 (retry countdown, a `find_melee_target` scan every 16 frames
+   while the target stands, a building: walk within 0x600 as a one-unit group `action_move_near`; a unit: stand at `T + rot(angle, dx, dy)` (`sinx / cosx` order read from the asm), the
+   `find_nearby_spot` fallbacks, `ATTACK_TO` move with `timer = max(1, W-cell distance) * 30`, `retry = rnd % 3 + 6`, packers unpack after 0x46 / 0x1e idle frames);
+   `Group::action_follow` @6fd510 and `Group::action_guard` @6fcd30 (the QUEUE_FIRST insert pattern, `is_ally`, a building target: every member guards; a unit target: the target's captain, a human
+   player's other units already guarding it join, a target guarding one of ours stops, `compute_form(guarding = 1)` lays out the slots); `CommandPackage::process_follow` @9479c0 / `process_guard`
+   @9478a0 (opcodes 30 / 31: `i32 ox, i32 whom, queued`). The GuardOrder members live in unused `Order` fields (`dx / dy` = `def_x / def_y`, guard point = `x / y`, `idle` = `timer`, `retry` =
+   `pause`) so `sizeof(Order)` and the native save do not change; `original_map_objects.cpp` maps the original's GuardOrder / FollowOrder bodies onto them (round trip 69 / 69).
+   Not ported: the `ScenarioData::ignore_orders` prelude; `Game::get_patch_version() > 3` is taken as true. **Unverified**: no hash in the corpus depends on a guard yet; the draw distance of
+   the 15 pairs that contain a GUARD / FOLLOW moved both ways (docs/original-save.md section 6). The ground-truth the corpus has for them is the order bodies of later saves (`Unit` with a flag-12 order):
+   compare `dx / dy / guard_x / guard_y` once a segment with a guard reproduces its start.
+10. **`ron-sav --astar-check`** (the path-finder oracle, docs/original-save.md 6.1): 8 of the 10 distinct fresh U-level paths of the 105 saves reproduced exactly by `find_upath` (A* loop, start direction,
+    tie-breaking, cost, closed / open rules, the limit / `fast` cut-off, the straightening), so those parts of `pathfinder.cpp` are right; each variant of neighbour order, start direction, tie order,
+    goal halving, strict / non-strict open replacement, closed-before-open, goal tolerance and heuristic made it worse or changed nothing. The two misses are state (a unit created later in the frame blocks
+    the engine's route) and a flag-4 transport node.
+11. **Diagnostics** (`apps/sav`, docs/original-save.md 6.1): `RON_DUMP_MOVERS`, `RON_TAIL`, `RON_OBJ_LAYOUT`, `RON_TRY_PATH`, `RON_PAIR_SEARCH`, `RON_BIT_SEARCH`, `RON_GUY_TRY`, `RON_RNG_TRY`,
+    `RON_COLL_MAP`, `RON_FOG_DIFF`, `RON_LIST_UNIT_DIFF`, `RON_NO_GUARD`, `--astar-check`. They turned the ranges of the `units` hash into labelled bytes and made it possible to test a hypothesis against the full hash
+    in about 10 ms (the Adler stream of `units` is 1.5 MB).
+12. **Looked at, no change**: `Objects::add_flock` (stub, never called in the sampled segments of the chain: 0 - 3 calls each, not the draw deficit); `Unit::think` (economy / AI half already ported); the
+    sites of `Random::get` in the binary against the engine (combat, ammo, farms, markets, birds, flocks, `do_move`, `resolve_unit_collision` all present; GuyOut / Particle / Surf / RiverDoobers use a separate `internal_random`).
+    The engine draws half of what the original does over the 18,337 frames of the first segment (230,745 against 458,578, no fights), which is the largest single discrepancy left.
+
+**Checks** (scratch build of the working tree with the build-mac.sh flags, zero warnings in the files of this round): `ron-check` 0 failures; `ron-sim ... --frames 600 --ai-every 8` on the 156 stock scenarios
+156/156 self-check OK; `--roundtrip 200` 156/156 OK; `ron-sav --engine-roundtrip` 69/69 PASS (10 SVX + 59 embedded). **Digests**: none of the 156 final digests changed against a build of the same tree without the
+GUARD / FOLLOW execution and the Guard / Follow order mapping (the only sim-side change: nothing in the stock scenarios issues a guard or follow).

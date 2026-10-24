@@ -1,0 +1,2 @@
+re/decomp/fidelity2/grep_unit_fields.txt
+(MOV|ADD|SUB|INC|DEC|AND|OR|XOR) (dword|word|byte) ptr \[E(SI|DI|BX|CX|AX|DX|BP) \+ 0x(af|ac|ad|b2|64|60|4c|ab|3b|3d|9a|9c|a0|b0)\]

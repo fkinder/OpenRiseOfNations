@@ -1,0 +1,3 @@
+re/decomp/ctw2
+Unit::process_attrition
+Wall::update_hits

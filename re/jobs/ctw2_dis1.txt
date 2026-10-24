@@ -1,0 +1,8 @@
+re/decomp/ctw2
+ConquestGame::build_units
+ConquestGame::build_conquest_game
+ConquestGame::setup_reinforcements
+ReinforcementArmy::place_army
+ReinforcementArmy::check_edge
+ConquestGame::find_reinforcement_loc
+ConquestGame::place_reinforcements

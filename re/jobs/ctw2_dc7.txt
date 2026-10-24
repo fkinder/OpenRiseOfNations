@@ -1,0 +1,4 @@
+re/decomp/ctw2
+Group::action_guard
+Unit::add_guard_order
+Unit::do_guard

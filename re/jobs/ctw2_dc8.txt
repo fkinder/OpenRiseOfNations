@@ -1,0 +1,4 @@
+re/decomp/ctw2
+ConquestMap::init
+ConquestMap::init_land
+ConquestMap::init_camera

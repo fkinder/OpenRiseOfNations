@@ -5,6 +5,7 @@
 #include "sim/economy.hpp"
 #include "sim/game.hpp"
 #include "sim/garrison.hpp"
+#include "sim/groups.hpp"
 #include "sim/spells.hpp"
 #include "sim/transport.hpp"
 #include "sim/production.hpp"
@@ -76,6 +77,12 @@ void CommandPackage::process(Game& g, const Command& c, int32_t play, int32_t pl
 	case Verb::Attack:
 		// process_attack -> Group::action_attack(ox, whom, mandatory 1, queued, ignore) (combat-spec 3.3.1)
 		if (group >= 0) group_action_attack(g, g.groups.g[size_t(group)], c.ox, c.whom, 1, QueuePos(c.queued), c.ignore);
+		return;
+	case Verb::Follow:  // process_follow @9479c0 -> Group::action_follow(ox, whom, queued)
+		if (group >= 0) group_action_follow(g, g.groups.g[size_t(group)], c.ox, c.whom, QueuePos(c.queued));
+		return;
+	case Verb::Guard:  // process_guard @9478a0 -> Group::action_guard(ox, whom, queued, 0)
+		if (group >= 0) group_action_guard(g, g.groups.g[size_t(group)], c.ox, c.whom, QueuePos(c.queued), 0);
 		return;
 	case Verb::AttackGround:  // process_attack_ground @9494a0 -> Group::action_attack_ground(x, y, queued)
 		if (group >= 0) group_action_attack_ground(g, g.groups.g[size_t(group)], c.x, c.y, QueuePos(c.queued));
@@ -279,6 +286,28 @@ bool CommandManager::issue_attack(const Game& g, const std::vector<int32_t>& obj
 	c.ox = ox;
 	c.whom = whom;
 	c.ignore = ignore;
+	c.queued = int8_t(q);
+	local_.push_back(c);
+	return true;
+}
+
+bool CommandManager::issue_follow(const Game& g, const std::vector<int32_t>& objs, int32_t ox, int32_t whom, QueuePos q) {
+	if (!issue_group(g, objs)) return false;
+	Command c;
+	c.verb = Verb::Follow;
+	c.ox = ox;
+	c.whom = whom;
+	c.queued = int8_t(q);
+	local_.push_back(c);
+	return true;
+}
+
+bool CommandManager::issue_guard(const Game& g, const std::vector<int32_t>& objs, int32_t ox, int32_t whom, QueuePos q) {
+	if (!issue_group(g, objs)) return false;
+	Command c;
+	c.verb = Verb::Guard;
+	c.ox = ox;
+	c.whom = whom;
 	c.queued = int8_t(q);
 	local_.push_back(c);
 	return true;

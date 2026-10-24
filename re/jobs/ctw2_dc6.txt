@@ -1,0 +1,7 @@
+re/decomp/ctw2
+ScenarioFuncSet::group_guard_order
+ScenarioFuncSet::set_difficulty
+ScenarioFuncSet::num_good_collected
+ScenarioFuncSet::resource_cap_warning
+ScenarioFuncSet::citizen_to_militia
+WorldData::is_enemy_territory

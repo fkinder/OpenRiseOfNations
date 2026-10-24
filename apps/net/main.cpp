@@ -9,6 +9,8 @@
 //                                                        with an embedded save; checks (a) the instances agree at every turn and (b) reports the
 //                                                        first turn each of the 15 parts differs from the replay's own CHECK_SUMS (as ron-sav --replay)
 //   ron-net selftest [--seed N]                          stall, pause, speed, resign, drop (4 options, random kill points), desync: toy simulation
+//   ron-net loopback --random STYLE,SIZE,SEED,NATIONS [--humans N] [--frames F] [--recover] [--diverge FRAME:PEER] [--record BASE] [--save F]
+//                                                        N engine instances of one random game in this process; the OOS recovery and the .rcx recording
 //   ron-net host <port> --random STYLE,SIZE,SEED,NATIONS[,TRIBES..] [--humans N] [--frames N] [--save F] [--game DIR]
 //   ron-net join <port> [--address A] [--frames N] [--save F] [--game DIR]
 //                                                        a real LAN game of two (or more) processes; both end with identical native saves
@@ -255,6 +257,7 @@ int main(int argc, char** argv) {
 	if (cmd == "replay") return cmd_replay(argc, argv);
 	if (cmd == "selftest") return cmd_selftest(argc, argv);
 	if (cmd == "host" || cmd == "join") return cmd_netgame(argc, argv);
+	if (cmd == "loopback") return cmd_loopback(argc, argv);
 	std::fprintf(stderr, "unknown command %s\n", cmd.c_str());
 	return 64;
 }

@@ -102,6 +102,9 @@ FormData* group_compute_form(Game& g, Group& gr, int32_t x, int32_t y, int32_t f
 // ---- actions (process_<verb> -> Group::action_<verb>)
 void group_action_halt(Game& g, Group& gr, int32_t p);  // @70d0c0
 void group_action_stance(Game& g, Group& gr, int32_t s);  // @70d440
+// Group::action_follow @6fd510 and action_guard @6fcd30 (`p4`: 1 skips siege members; the verbs pass 0).
+void group_action_follow(Game& g, Group& gr, int32_t ox, int32_t whom, QueuePos q);
+void group_action_guard(Game& g, Group& gr, int32_t ox, int32_t whom, QueuePos q, int32_t p4);
 // Group::action_move_to @70fba0 -> action_move_near(tolerance 0) @704990.
 void group_action_move_to(Game& g, Group& gr, int32_t x, int32_t y, QueuePos q, bool set_angle, uint32_t angle,
                           int32_t orders, int32_t p7, int32_t form, int32_t width, int32_t disembark);

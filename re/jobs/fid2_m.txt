@@ -1,0 +1,2 @@
+re/decomp/fidelity2/grep_desx.txt
+(MOV|ADD|SUB|AND|OR) (dword|word|byte) ptr \[E[A-Z]{2} \+ 0x(5c|60)\],

@@ -1,0 +1,7 @@
+re/decomp/ui_panels
+IFaceMarket::.*
+IFaceGarrison::.*
+IFaceLibrary::.*
+IFaceMainBase::draw_special_resources
+IFaceMainBase::setup_progress_buttons
+IFaceMainBase::update_progress.*

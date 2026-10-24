@@ -477,6 +477,12 @@ int32_t do_job(Game& g, Unit& u, OrderType t, Order* o) {
 		return do_await_board(g, u, *o);  // Unit::do_await_board @5ed040
 	case kCastSpell:
 		return do_cast(g, u, *o);  // Unit::do_cast @5ebfe0 (transport-spec 4)
+	case kFollow:
+		do_follow(g, u, *o);  // Unit::do_follow @5e65d0 (orders_guard.cpp)
+		return 0;
+	case kGuard:
+		do_guard(g, u, *o);  // Unit::do_guard @5e5c70 (orders_guard.cpp)
+		return 0;
 	case kSpecialAnim:
 		do_spec_anim(g, u, *o);  // Unit::do_spec_anim @5e5880 (aircraft-spec 6): landing, take-off, the walk-out
 		return 0;
@@ -495,8 +501,7 @@ int32_t do_job(Game& g, Unit& u, OrderType t, Order* o) {
 		kill_current_order(g, u, false);
 		return 0;
 	default:
-		// TODO(orders-spec 6): follow, guard, strafe, patrol, ... are not simulated yet; such
-		// orders are never created by the implemented commands.
+		// TODO(orders-spec 6): patrol, ... are not simulated yet; such orders are never created by the implemented commands.
 		return 0;
 	}
 }

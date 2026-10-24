@@ -38,6 +38,14 @@ OrderType action_type(const Unit& u);  // UnitData::action_type
 // Unit::update_order @6179d0: the current (front) order, or null.
 Order* update_order(Unit& u);
 
+// FOLLOW and GUARD (orders_guard.cpp). A GuardOrder keeps dx / dy in def_x / def_y, the guard point in x / y, idle in timer and
+// retry in pause (no new Order members: the save layout is unchanged); a FollowOrder uses oxx / whose / uid2.
+Order* add_follow_order(Game& g, Unit& u, int32_t ox, int32_t whom, QueuePos q);                        // Unit::add_follow_order @5e3f60
+Order* add_guard_order(Game& g, Unit& u, int32_t ox, int32_t whom, int32_t dx, int32_t dy, QueuePos q);  // Unit::add_guard_order @5e3e40
+Order* update_guard_order(Game& g, Unit& u, int32_t ox, int32_t whom);                                  // Unit::update_guard_order @5e3220
+void do_follow(Game& g, Unit& u, Order& f);                                                             // Unit::do_follow @5e65d0
+void do_guard(Game& g, Unit& u, Order& gd);                                                             // Unit::do_guard @5e5c70
+
 void work(Game& g, Unit& u);                           // Unit::work @60d180
 int32_t do_job(Game& g, Unit& u, OrderType t, Order* o);  // Unit::do_job @617a10
 void do_idle(Game& g, Unit& u);                        // Unit::do_idle @60dcd0

@@ -1,0 +1,3 @@
+re/decomp/fidelity2/grep_blockneg.txt
+MOV dword ptr \[E[A-Z]{2} \+ (0x18|E[A-Z]{2}\*0x[0-9a-f]+ \+ 0x18)\],(-0x1|0xffffffff)
+MOV dword ptr \[E[A-Z]{2} \+ E[A-Z]{2}\*0x1 \+ 0x18\],(-0x1|0xffffffff)

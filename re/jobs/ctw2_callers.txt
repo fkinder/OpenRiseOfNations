@@ -1,0 +1,3 @@
+re/decomp/ctw2/has_conquest_bonus_callers.txt
+1
+LeaderData::has_conquest_bonus

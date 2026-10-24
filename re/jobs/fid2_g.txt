@@ -1,0 +1,2 @@
+re/decomp/fidelity2/grep_los.txt
+MOV (dword|word|byte) ptr \[E[A-Z]{2} \+ 0x7[8c]\],

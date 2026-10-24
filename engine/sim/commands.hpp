@@ -19,6 +19,7 @@ class Game;
 // Opcodes (replay-spec.md section 9).
 enum class Verb : uint8_t {
 	Group = 0, Stance = 2, Form = 3, Attack = 4, SwarmAround = 6, MoveTo = 7, Halt = 12, Transport = 13, SetTransport = 14,
+	Follow = 30, Guard = 31,
 	BoardShip = 15, Disband = 21, GatherPoint = 22, Spell = 23,
 	// aircraft (docs/aircraft-spec.md section 8)
 	AttackGround = 9, Patrol = 10, LaunchPatrol = 11, Flight = 28, Recall = 35, Scramble = 36,
@@ -99,6 +100,10 @@ public:
 	// with mandatory 1). `ignore` bits skip siege (4), special (2) and spy-class (1) members.
 	bool issue_attack(const Game& g, const std::vector<int32_t>& objs, int32_t ox, int32_t whom, QueuePos q = kQueueNew,
 	                  int32_t ignore = 0);
+	// FOLLOW / GUARD (13 bytes: i32 ox, i32 whom, queued): the current group follows / guards objects[whom][ox]
+	// (Group::action_follow @6fd510 / action_guard @6fcd30).
+	bool issue_follow(const Game& g, const std::vector<int32_t>& objs, int32_t ox, int32_t whom, QueuePos q = kQueueNew);
+	bool issue_guard(const Game& g, const std::vector<int32_t>& objs, int32_t ox, int32_t whom, QueuePos q = kQueueNew);
 	bool issue_form(const Game& g, const std::vector<int32_t>& objs, int32_t form, int32_t rotate = 0,
 	                QueuePos q = kQueueNew);
 	bool issue_stance(const Game& g, const std::vector<int32_t>& objs, int32_t stance);

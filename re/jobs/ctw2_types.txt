@@ -1,0 +1,8 @@
+re/decomp/ctw2/types_ctw.txt
+^ConquestLeader$
+^ConquestGame$
+^ConquestNode$
+^ConquestLink$
+^ConquestPiece$
+^ReinforcementArmy$
+^ConquestStyle$

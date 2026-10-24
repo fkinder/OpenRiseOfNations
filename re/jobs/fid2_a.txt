@@ -1,0 +1,17 @@
+re/decomp/fidelity2
+Unit::process
+Unit::move_step
+Unit::resolve_unit_collision
+Unit::set_new_location
+Guy::process
+Unit::inc_time
+Unit::do_idle
+Unit::find_path
+Unit::repath
+Unit::update_order
+Object::add_to_world
+Object::remove_from_world
+CollCheck::move_unit
+Unit::is_here
+Unit::will_be_corner
+Unit::is_corner

@@ -54,6 +54,9 @@
 #include "sim/combat.hpp"
 #include "sim/orders.hpp"
 #include "sim/original_save.hpp"
+#include "sim/guys.hpp"
+#include "sim/movement.hpp"
+#include "sim/pathfinder.hpp"
 #include "sim/rules.hpp"
 #include "sim/rules_xml.hpp"
 
@@ -402,6 +405,154 @@ struct RulesCache {
 		return *by_setup.emplace(key, std::move(r)).first->second;
 	}
 };
+
+// --astar-check: re-runs PathFinder::find_upath for the units of a save whose path stack ends in a fresh U-level path (entries with the
+// "fine" flag 2 on top of a coarser goal entry) while the unit stands on a cell centre (the snap of a repath), and compares the result
+// with the stack the original left. A repath snaps the unit to the centre of its UCoord and then waits `pause` frames, so for those
+// units the surroundings are still the ones the original searched in. The truth for the A* port: no other source of U-level paths.
+int astar_check(const std::string& path, const std::vector<uint8_t>& save, const std::string& game_dir, bool verbose) {
+	dw::Tree peek(dw::Description::get());
+	dw::SaveDecode psd = dw::decode_save(peek, save.data(), save.size(), 0);
+	if (!psd.result.ok) { std::printf("%s: decode failed: %s\n", basename_of(path).c_str(), psd.result.error.c_str()); return 1; }
+	sim::GameSetup setup;
+	setup.starting_technology = int32_t(field_int(peek, "game.info.starting_technology"));
+	setup.starting_technology2 = int32_t(field_int(peek, "game.info.starting_technology2"));
+	setup.ending_technology = int32_t(field_int(peek, "game.info.ending_technology"));
+	setup.game_rules = int32_t(field_int(peek, "game.info.game_rules"));
+	setup.flag8 = (field_int(peek, "game.info.flags") & 8) != 0;
+	static std::unique_ptr<RulesCache> cache;
+	if (!cache) cache = std::make_unique<RulesCache>(game_dir);
+	const sim::Rules& rules = cache->get(setup);
+	sim::OriginalLoadReport rep;
+	std::unique_ptr<sim::Game> g0 = sim::load_original_save(cache->files, rules, nullptr, save, &rep);
+	if (!g0) { std::printf("%s: LOAD FAILED: %s\n", basename_of(path).c_str(), rep.error.c_str()); return 1; }
+	struct Cand { int who, o, k; };
+	std::vector<Cand> cands;
+	for (int who = 0; who < 8; ++who)
+		for (int o = 0; o < g0->objects[size_t(who)].unit_mark; ++o) {
+			const sim::Unit* u = g0->unit(who, o);
+			if (!u || !u->alive() || !u->on_map() || u->path.size() < 3) continue;
+			if (u->x % 48 != 24 || u->y % 48 != 24) continue;
+			if (!std::getenv("RON_ASTAR_ANY") && u->collide_frame != g0->frame - 1) continue;  // repathed in the frame just before the save: no step taken since
+			int k = int(u->path.size()) - 1;
+			while (k >= 0 && (u->path[size_t(k)].flags & 2)) --k;
+			const int fine = int(u->path.size()) - 1 - k;
+			if (k < 0 || fine < 2) continue;
+			cands.push_back({who, o, k});
+		}
+	int match = 0, differ = 0, fail = 0;
+	const int rps[] = {-1, 1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24};  // -1: the value in the save
+	for (const Cand& c : cands) {
+		bool done = false;
+		std::vector<sim::PathData> last_st, last_want;
+		int last_r = 0, near = 0, movers_near = 0;
+		for (int fast = 0; fast < 2 && !done; ++fast)
+			for (int rp : rps) {
+				std::unique_ptr<sim::Game> g = sim::load_original_save(cache->files, rules, nullptr, save, &rep);
+				if (!g) { ++fail; done = true; break; }
+				const sim::Unit* u = g->unit(c.who, c.o);
+				if (std::getenv("RON_ASTAR_REWIND")) {
+					// The search ran inside frame F-1 (F = the save's frame): units processed after the searcher in that frame (player rotation
+					// (F-1+k)%10, then index) had not moved yet; put them back at the position they started the frame from (guy 0's last_x/last_y).
+					const int F1 = g->frame - 1;
+					auto key = [&](int w2, int o2) { return ((w2 - F1) % 10 + 10) % 10 * 100000 + o2; };
+					const int ukey = key(c.who, c.o);
+					for (int w2 = 0; w2 < 10; ++w2)
+						for (int o2 = 0; o2 < g->objects[size_t(w2)].unit_mark; ++o2) {
+							sim::Unit* v = g->unit(w2, o2);
+							if (!v || !v->alive() || !v->on_map() || v->guys.empty() || key(w2, o2) <= ukey) continue;
+							const sim::Guy& g0 = v->guys[0];
+							if (g0.last_x == g0.x && g0.last_y == g0.y) continue;
+							sim::unit_set_new_location(*g, *v, g0.last_x, g0.last_y, true, false);
+						}
+				}
+				const std::vector<sim::PathData> want = u->path;
+				// (the search limit is 500 / repaths^2 and the save holds the counter at the end of the frame, after later repaths and the next
+				// halving: try the saved value and a range of smaller ones)
+				if (rp >= 0) g->daemon.repaths[size_t(c.who)] = rp;
+				std::vector<sim::PathData> st(want.begin(), want.begin() + std::ptrdiff_t(c.k) + 1);
+				const int32_t r = sim::find_upath(*g, st, c.who, c.o, fast != 0);
+				bool same = r > 0 && st.size() == want.size();
+				for (size_t i = 0; same && i < st.size(); ++i) same = st[i].x == want[i].x && st[i].y == want[i].y && st[i].tol == want[i].tol && st[i].flags == want[i].flags;
+				if (std::getenv("RON_ASTAR_DETAIL") && std::getenv("RON_ASTAR_DETAIL")[0] == '3' && rp == 2 && fast == 0) {
+					// the validity of the cells around the unit as the A* sees them: collision (pathing) and invalid_loc
+					const sim::Unit& uu = *u;
+					const int cx = sim::ucoord_of(uu.x), cy = sim::ucoord_of(uu.y), rr = uu.ptype->new_block_radius;
+					std::printf("      unit cell (%d,%d) radius %d\n", cx, cy, rr);
+					for (int k = 1; k <= 3; ++k) {
+						int hx = -1, hy = -1;
+						const int hit = sim::collide_here(*g, uu, cx + k, cy + k, rr, &hx, &hy, true);
+						std::printf("      probe (%d,%d): hit %d at (%d,%d)\n", cx + k, cy + k, hit, hx, hy);
+					}
+					for (int w2 = 0; w2 < 9; ++w2)
+						for (int o2 = 0; o2 < g->objects[size_t(w2)].unit_mark; ++o2) {
+							const sim::Unit* v = g->unit(w2, o2);
+							if (!v || !v->alive() || !v->on_map() || (w2 == c.who && o2 == c.o)) continue;
+							if (std::abs(sim::ucoord_of(v->x) - cx) > 8 || std::abs(sim::ucoord_of(v->y) - cy) > 8) continue;
+							std::printf("      nearby unit %d/%d type %d radius %d at (%d,%d) cell, guy0 last (%d,%d), orders %zu front %d, avg_speed %d, flags %x masks %x\n", w2, o2, v->type, v->ptype->new_block_radius,
+								sim::ucoord_of(v->x), sim::ucoord_of(v->y), v->guys.empty() ? -1 : sim::ucoord_of(v->guys[0].last_x), v->guys.empty() ? -1 : sim::ucoord_of(v->guys[0].last_y), v->orders.size(), v->orders.empty() ? -1 : int(v->orders.front().type), v->guys.empty() ? -1 : v->guys[0].avg_speed, v->flags, v->unit_masks);
+						}
+					std::printf("      set collision bits around (x %d..%d, y %d..%d):\n", cx - 4, cx + 8, cy - 3, cy + 6);
+					for (int yy = cy - 3; yy <= cy + 6; ++yy) {
+						std::printf("        %4d ", yy);
+						for (int xx = cx - 4; xx <= cx + 8; ++xx) std::printf("%c", g->world.coll_get(xx, yy) ? '#' : '.');
+						std::printf("\n");
+					}
+					for (int dy = -1; dy <= 6; ++dy) {
+						std::printf("      row %d:", cy + dy);
+						for (int dx = -1; dx <= 8; ++dx) {
+							int hx = 0, hy = 0;
+							const int hit = sim::collide_here(*g, uu, cx + dx, cy + dy, rr, &hx, &hy, true);
+							const int inv = sim::unit_invalid_loc(*g, uu, (cx + dx) >> 2, (cy + dy) >> 2, false, true, false, true, false);
+							std::printf(" %c", inv ? 'T' : hit ? 'X' : '.');
+						}
+						std::printf("\n");
+					}
+				}
+				if (std::getenv("RON_ASTAR_DETAIL")) {
+					size_t fd = 0;
+					while (fd < st.size() && fd < want.size() && st[fd].x == want[fd].x && st[fd].y == want[fd].y && st[fd].flags == want[fd].flags) ++fd;
+					std::printf("    attempt unit %d/%d fast %d repaths %d: result %d, %zu entries (original %zu), first difference at entry %zu (k = %d)\n", c.who, c.o, fast, rp, r, st.size(), want.size(), fd, c.k);
+					if (std::getenv("RON_ASTAR_DETAIL")[0] == '2' && rp == 2 && fast == 0) {
+						std::printf("      original:");
+						for (size_t i = c.k; i < want.size(); ++i) std::printf(" (%d,%d)", want[i].x / 48, want[i].y / 48);
+						std::printf("\n      engine:  ");
+						for (size_t i = c.k; i < st.size(); ++i) std::printf(" (%d,%d)", st[i].x / 48, st[i].y / 48);
+						std::printf("\n      unit at (%d,%d)\n", u->x / 48, u->y / 48);
+					}
+				}
+				near = movers_near = 0;
+				for (int w2 = 0; w2 < 9; ++w2)
+					for (int o2 = 0; o2 < g->objects[size_t(w2)].unit_mark; ++o2) {
+						const sim::Unit* v = g->unit(w2, o2);
+						if (!v || !v->alive() || !v->on_map() || (w2 == c.who && o2 == c.o)) continue;
+						if (std::abs(v->x - u->x) > 576 || std::abs(v->y - u->y) > 576) continue;
+						++near;
+						if (!v->guys.empty() && v->guys[0].avg_speed != 0) ++movers_near;
+					}
+				if (same) {
+					++match;
+					if (verbose) std::printf("  unit %d/%d: path of %zu entries reproduced (fast %d, repaths %d); type %d radius %d; %d units within 12 cells, %d of them moving\n", c.who, c.o, want.size(), fast, rp, u->type, u->ptype->new_block_radius, near, movers_near);
+					done = true;
+					break;
+				}
+				last_st = st;
+				last_want = want;
+				last_r = r;
+			}
+		if (!done) {
+			++differ;
+			const sim::Unit* u = g0->unit(c.who, c.o);
+			std::printf("  unit %d/%d at %d,%d (type %d): path DIFFERS (original %zu entries, engine %zu, result %d); radius %d; %d units within 12 cells, %d of them moving\n    original:", c.who, c.o, u->x, u->y, u->type, last_want.size(), last_st.size(), last_r, u->ptype->new_block_radius, near, movers_near);
+			for (size_t i = c.k; i < last_want.size(); ++i) std::printf(" (%d,%d t%d f%x)", last_want[i].x, last_want[i].y, last_want[i].tol, last_want[i].flags);
+			std::printf("\n    engine:  ");
+			for (size_t i = c.k; i < last_st.size(); ++i) std::printf(" (%d,%d t%d f%x)", last_st[i].x, last_st[i].y, last_st[i].tol, last_st[i].flags);
+			std::printf("\n");
+		}
+	}
+	std::printf("%s: astar check at frame %d: %zu candidate units, %d reproduced, %d differ%s\n", basename_of(path).c_str(), g0->frame, cands.size(), match, differ, fail ? " (load failures)" : "");
+	return 0;
+}
 
 int engine_roundtrip(const std::string& path, const std::vector<uint8_t>& save, const std::string& game_dir, bool quiet, bool diag, int mutate) {
 	// The game setup the rules depend on, read from the save's GameInfo.
@@ -1163,6 +1314,11 @@ ReplayCommand to_command(const Json& c) {
 		m.ox = int32_t(a.num("ox")); m.whom = int32_t(a.num("whom")); m.ignore = int32_t(a.num("ignore"));
 		m.queued = int8_t(json_enum(a, "queued", queue, sim::kQueueNew));
 		r.supported = true;
+	} else if (n == "FOLLOW" || n == "GUARD") {
+		m.verb = n == "FOLLOW" ? sim::Verb::Follow : sim::Verb::Guard;
+		m.ox = int32_t(a.num("ox")); m.whom = int32_t(a.num("whom"));
+		m.queued = int8_t(json_enum(a, "queued", queue, sim::kQueueNew));
+		r.supported = std::getenv("RON_NO_GUARD") == nullptr;  // (RON_NO_GUARD=1: the behaviour before FOLLOW / GUARD were executed)
 	} else if (n == "STANCE") {
 		m.verb = sim::Verb::Stance;
 		m.stance = int32_t(a.num("stance"));
@@ -1410,7 +1566,7 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 	int64_t cmds_run = 0;
 	std::unique_ptr<sim::Game> baseline;
 	std::unique_ptr<sim::Game> baseline_search;
-	if (std::getenv("RON_REVERT_SEARCH")) baseline_search = sim::load_original_save(cache->files, rules, nullptr, save, &rep);
+	if (std::getenv("RON_REVERT_SEARCH") || std::getenv("RON_BIT_SEARCH") || std::getenv("RON_FOG_DIFF")) baseline_search = sim::load_original_save(cache->files, rules, nullptr, save, &rep);
 	sim::Game* baseline_for_search = baseline_search.get();
 	if (!revert.empty()) {
 		baseline = sim::load_original_save(cache->files, rules, nullptr, save, &rep);
@@ -1460,6 +1616,224 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 								sim::apply_member_bytes(*game, mc, nb);
 								std::printf("  patched %s of (%d,%d,%d) by %+lld\n", key, a, b, c, dl);
 							}
+					}
+				}
+				if (const char* rt = std::getenv("RON_RNG_TRY")) {
+					// experiment: does the `world` / `units` / `guys` hash match when the generator is k draws ahead of / behind the engine's, at boundary RON_RNG_TRY?
+					if (f == std::atoll(rt)) {
+						const uint32_t a = 0x19660Du, c = 0x3C6EF35Fu, ainv = [] { uint32_t x = 0x19660Du; for (int i = 0; i < 5; ++i) x *= 2 - 0x19660Du * x; return x; }();
+						const uint32_t s0 = game->rng.seed();
+						for (int k = -300; k <= 300; ++k) {
+							uint32_t sd = s0;
+							for (int i = 0; i < std::abs(k); ++i) sd = k > 0 ? sd * a + c : (sd - c) * ainv;
+							game->rng.reseed(sd);
+							sim::EngineProvider er(*game);
+							dw::CheckSumParts gr = dw::compute_check_sums(er);
+							for (int pk : {0, 6, 11}) if (gr.ok && gr.v[pk] == it->second[size_t(pk)]) std::printf("  RNG HIT: part %s matches with the generator %d draws %s\n", dw::kCheckPartNames[pk], std::abs(k), k >= 0 ? "ahead" : "behind");
+						}
+						game->rng.reseed(s0 + 1);
+						{ sim::EngineProvider er(*game); dw::CheckSumParts gr = dw::compute_check_sums(er); sim::EngineProvider e0(*game); (void)e0;
+						  game->rng.reseed(s0); sim::EngineProvider er0(*game); dw::CheckSumParts g0 = dw::compute_check_sums(er0);
+						  std::printf("  parts that include the generator state:"); for (int pk = 0; pk < dw::kCheckPartCount; ++pk) if (gr.v[pk] != g0.v[pk]) std::printf(" %s", dw::kCheckPartNames[pk]); std::printf("\n"); }
+					}
+				}
+				if (const char* ga = std::getenv("RON_GUY_TRY")) {
+					// experiment: one guy at a time, a group of members moved together by d in [-D, D] (angles / positions / speeds): does the part `guys` (or units) match at boundary RON_GUY_TRY?
+					if (f == std::atoll(ga)) {
+						const int D = std::getenv("RON_GUY_D") ? std::atoi(std::getenv("RON_GUY_D")) : 400;
+						struct Grp { const char* name; std::vector<const char*> keys; int shift; };
+						const std::vector<Grp> groups = {{"angles", {"Guy.angle", "Guy.des_angle", "Guy.last_angle"}, 16}, {"x", {"Guy.x", "Guy.des_x", "Guy.last_x"}, 0}, {"y", {"Guy.y", "Guy.des_y", "Guy.last_y"}, 0},
+						                                 {"z", {"Guy.z", "Guy.last_z"}, 0}, {"speed", {"Guy.avg_speed", "Guy.last_speed"}, 0}, {"time", {"Guy.cur_time", "Guy.last_time"}, 0}, {"end", {"Guy.end_time"}, 0}};
+						std::set<std::tuple<int, int, int>> movers;
+						if (baseline_for_search) for (const auto& c : sim::changed_members(*game, *baseline_for_search)) if (c.key.rfind("Guy.", 0) == 0 && c.key != "Guy.cur_time" && c.key != "Guy.last_time") movers.insert({c.id.a, c.id.b, c.id.c});
+						std::printf("  guy try: %zu guys moved\n", movers.size());
+						int hits = 0;
+						for (const auto& gr : groups) {
+							std::vector<sim::MemberChange> mem;
+							for (const char* k : gr.keys) for (auto& mc : sim::members_of(*game, {k})) if (movers.count({mc.id.a, mc.id.b, mc.id.c})) mem.push_back(mc);
+							std::map<std::tuple<int, int, int>, std::vector<const sim::MemberChange*>> by;
+							for (const auto& mc : mem) by[{mc.id.a, mc.id.b, mc.id.c}].push_back(&mc);
+							for (auto& kv : by) for (int d = -D; d <= D; ++d) {
+								if (d == 0) continue;
+								for (const auto* mc : kv.second) {
+									uint32_t v = 0;
+									for (size_t k = 0; k < mc->now.size() && k < 4; ++k) v |= uint32_t(mc->now[k]) << (8 * k);
+									v += uint32_t(int64_t(d) << gr.shift);
+									std::vector<uint8_t> nb(mc->now.size());
+									for (size_t k = 0; k < nb.size() && k < 4; ++k) nb[k] = uint8_t(v >> (8 * k));
+									sim::apply_member_bytes(*game, *mc, nb);
+								}
+								sim::EngineProvider eg(*game);
+								dw::CheckSumParts gg = dw::compute_check_sums(eg);
+								for (int pk : {0, 6, 11}) if (gg.ok && gg.v[pk] == it->second[size_t(pk)]) { std::printf("  GUY HIT: part %s, group %s of guy (%d,%d,%d) by %+d\n", dw::kCheckPartNames[pk], gr.name, std::get<0>(kv.first), std::get<1>(kv.first), std::get<2>(kv.first), d); ++hits; }
+								for (const auto* mc : kv.second) sim::apply_member_bytes(*game, *mc, mc->now);
+							}
+						}
+						std::printf("  guy try: %d hits\n", hits);
+					}
+				}
+				if (const char* ps = std::getenv("RON_PAIR_SEARCH")) {
+					// experiment: every small-integer member (<= 4 bytes) of the listed units (Unit.*, their order bodies, path entries) off by a delta in [-W, W] (RON_PAIR_W, default 70);
+					// one or two of them together must give the target delta of part RON_PAIR_PART (default units) at boundary RON_SEARCH_AT
+					if (f == (std::getenv("RON_SEARCH_AT") ? std::atoll(std::getenv("RON_SEARCH_AT")) : start + 1)) {
+						const int W = std::getenv("RON_PAIR_W") ? std::atoi(std::getenv("RON_PAIR_W")) : 70;
+						const int part = std::getenv("RON_PAIR_PART") ? std::atoi(std::getenv("RON_PAIR_PART")) : 0;
+						std::set<std::pair<int, int>> objs;
+						{ std::stringstream ss(ps); std::string t; while (std::getline(ss, t, ',')) { int a = 0, b = 0; if (std::sscanf(t.c_str(), "%d/%d", &a, &b) == 2) objs.insert({a, b}); } }
+						const int64_t M = 65521;
+						PartTrace t0;
+						{ sim::EngineProvider ep0(*game); trace_part(ep0, part, t0); }
+						const int64_t N = int64_t(t0.bytes.size());
+						const uint32_t h0 = adler_of(t0.bytes), want = it->second[size_t(part)];
+						auto subm = [&](uint32_t x, uint32_t y) { return std::pair<int64_t, int64_t>{(int64_t(x & 0xffff) - int64_t(y & 0xffff) + M) % M, (int64_t(x >> 16) - int64_t(y >> 16) + M) % M}; };
+						const auto target = subm(want, h0);
+						std::vector<sim::MemberChange> all = sim::members_of(*game, {"Unit.*", "MoveOrder.*", "AttackOrder.*", "GatherOrder.*", "TargetOrder.*", "GroupOrder.*", "PathData.*"});
+						struct Eff { size_t mi; int dl; int64_t a, b; };
+						std::vector<Eff> effs;
+						size_t tried = 0;
+						for (size_t i = 0; i < all.size(); ++i) {
+							const auto& c = all[i];
+							if (!objs.count({c.id.a, c.id.b}) || c.now.empty() || c.now.size() > 4) continue;
+							++tried;
+							const size_t n = c.now.size();
+							std::vector<uint8_t> inv(n);
+							for (size_t k = 0; k < n; ++k) inv[k] = uint8_t(~c.now[k]);
+							sim::apply_member_bytes(*game, c, inv);
+							sim::EngineProvider ep3(*game);
+							PartTrace t1;
+							const bool ok = trace_part(ep3, part, t1) && t1.bytes.size() == t0.bytes.size();
+							sim::apply_member_bytes(*game, c, c.now);
+							if (!ok) continue;
+							std::vector<int64_t> pos(n, -1);
+							int cnt = 0;
+							for (size_t q = 0; q < t0.bytes.size(); ++q) if (t0.bytes[q] != t1.bytes[q])
+								for (size_t k = 0; k < n; ++k) if (t0.bytes[q] == c.now[k] && t1.bytes[q] == inv[k] && !(cnt & (1 << k))) { pos[k] = int64_t(q); cnt |= 1 << k; break; }
+							if (cnt != (1 << n) - 1) continue;
+							uint64_t v = 0;
+							for (size_t k = 0; k < n; ++k) v |= uint64_t(c.now[k]) << (8 * k);
+							const uint64_t mod = uint64_t(1) << (8 * n);
+							for (int dl = -W; dl <= W; ++dl) {
+								if (dl == 0) continue;
+								const uint64_t nv = (v + mod + uint64_t(int64_t(dl) % int64_t(mod) + int64_t(mod))) % mod;
+								int64_t sa = 0, sb = 0;
+								for (size_t k = 0; k < n; ++k) { const int e = int((nv >> (8 * k)) & 0xff) - int(c.now[k]); sa += e; sb += int64_t(e) * (N - pos[k]); }
+								effs.push_back({i, dl, ((sa % M) + M) % M, ((sb % M) + M) % M});
+							}
+						}
+						std::printf("  pair search: %zu members tried, %zu (member, delta) effects; target (a=%lld b=%lld)\n", tried, effs.size(), (long long)target.first, (long long)target.second);
+						auto k2 = [](int64_t a, int64_t b) { return uint64_t(a) << 32 | uint64_t(b); };
+						std::unordered_map<uint64_t, std::vector<size_t>> by;
+						for (size_t i = 0; i < effs.size(); ++i) by[k2(effs[i].a, effs[i].b)].push_back(i);
+						int shown = 0;
+						for (size_t i = 0; i < effs.size(); ++i) {
+							if (effs[i].a == target.first && effs[i].b == target.second && shown++ < 20) std::printf("    PAIR HIT (1): %s (%d,%d,%d) %+d\n", all[effs[i].mi].key.c_str(), all[effs[i].mi].id.a, all[effs[i].mi].id.b, all[effs[i].mi].id.c, effs[i].dl);
+							auto fnd = by.find(k2(((target.first - effs[i].a) % M + M) % M, ((target.second - effs[i].b) % M + M) % M));
+							if (fnd == by.end()) continue;
+							for (size_t j : fnd->second) if (j > i && effs[j].mi != effs[i].mi && shown++ < 40)
+								std::printf("    PAIR HIT (2): %s (%d,%d,%d) %+d  and  %s (%d,%d,%d) %+d\n", all[effs[i].mi].key.c_str(), all[effs[i].mi].id.a, all[effs[i].mi].id.b, all[effs[i].mi].id.c, effs[i].dl,
+									all[effs[j].mi].key.c_str(), all[effs[j].mi].id.a, all[effs[j].mi].id.b, all[effs[j].mi].id.c, effs[j].dl);
+						}
+					}
+				}
+				if (const char* fg = std::getenv("RON_FOG_DIFF")) {
+					// diagnostic: how many fog bytes (seen / seen2 / seen3 / wcoord_seen) the engine changed since the loaded save, by bit pattern, at boundary RON_FOG_DIFF
+					if (baseline_for_search && f == std::atoll(fg)) {
+						const sim::World& a = baseline_for_search->world;
+						const sim::World& b = game->world;
+						auto cmp = [&](const char* name, const std::vector<uint8_t>& x, const std::vector<uint8_t>& y) {
+							std::map<std::pair<int, int>, int> h;
+							int n = 0;
+							for (size_t i = 0; i < x.size() && i < y.size(); ++i) if (x[i] != y[i]) { ++n; h[{x[i], y[i]}]++; }
+							std::printf("  fog %s: %d bytes changed since the save:", name, n);
+							int shown = 0;
+							for (const auto& kv : h) if (shown++ < 12) std::printf(" %02x->%02x x%d", kv.first.first, kv.first.second, kv.second);
+							std::printf("\n");
+						};
+						cmp("seen", a.seen, b.seen);
+						cmp("seen2", a.seen2, b.seen2);
+						cmp("seen3", a.seen3, b.seen3);
+						cmp("wcoord_seen", a.wcoord_seen, b.wcoord_seen);
+						int nw = 0;
+						for (size_t i = 0; i < a.wdata.size() && i < b.wdata.size(); ++i) if (a.wdata[i].was_seen != b.wdata[i].was_seen) ++nw;
+						std::printf("  WData.was_seen changed in %d wcoords\n", nw);
+					}
+				}
+				if (const char* cm = std::getenv("RON_COLL_MAP")) {
+					// diagnostic: engine collision bits against the union of the squad guys' footprints, around ucoord x0,y0 (+-12); '.' clear, '#' set and ideal, 'S' stale (set, not ideal), 'M' missing (ideal, clear)
+					int cx = 0, cy = 0, at = 0;
+					if (std::sscanf(cm, "%d,%d@%d", &cx, &cy, &at) == 3 && f == at) {
+						std::set<std::pair<int, int>> ideal;
+						for (int who = 0; who < sim::kNumLeaders; ++who)
+							for (int o = 0; o < game->objects[size_t(who)].unit_mark; ++o) {
+								sim::Unit* u = game->unit(who, o);
+								if (!u || !u->alive() || !u->on_map()) continue;
+								const int r = u->ptype->new_block_radius;
+								if (r == 0) continue;
+								for (int i = 0; i < u->guy_mark && size_t(i) < u->guys.size(); ++i)
+									for (int dx = -r; dx <= r; ++dx) for (int dy = -r; dy <= r; ++dy) ideal.insert({sim::ucoord_of(u->guys[size_t(i)].x) + dx, sim::ucoord_of(u->guys[size_t(i)].y) + dy});
+							}
+						int stale = 0, missing = 0;
+						for (int y = cy - 12; y <= cy + 12; ++y) {
+							std::printf("   %5d ", y);
+							for (int x = cx - 12; x <= cx + 12; ++x) {
+								const bool sset = game->world.coll_get(x, y), id = ideal.count({x, y}) != 0;
+								std::printf("%c", sset && id ? '#' : sset ? 'S' : id ? 'M' : '.');
+								stale += sset && !id;
+								missing += !sset && id;
+							}
+							std::printf("\n");
+						}
+						std::printf("  coll map around %d,%d at frame %lld: %d stale, %d missing (this window)\n", cx, cy, (long long)f, stale, missing);
+					}
+				}
+				if (const char* bs = std::getenv("RON_BIT_SEARCH")) {
+					// experiment: single collision-bit flips (within R ucoords of every unit that moved since the save) as the explanation of a `world` mismatch:
+					// 1 to 3 flips whose Adler effect equals the target delta
+					if (baseline_for_search && f == (std::getenv("RON_SEARCH_AT") ? std::atoll(std::getenv("RON_SEARCH_AT")) : start + 1)) {
+						const int R = std::atoi(bs);
+						const int part = 11;
+						const int64_t M = 65521;
+						std::set<std::pair<int, int>> pool;
+						for (int who = 0; who < sim::kNumLeaders; ++who)
+							for (int o = 0; o < game->objects[size_t(who)].unit_mark; ++o) {
+								sim::Unit* a = game->unit(who, o);
+								sim::Unit* b0 = baseline_for_search->unit(who, o);
+								if (!a || !b0 || !a->alive() || (a->x == b0->x && a->y == b0->y)) continue;
+								for (const sim::Unit* uu : {a, b0}) for (int dx = -R; dx <= R; ++dx) for (int dy = -R; dy <= R; ++dy) pool.insert({sim::ucoord_of(uu->x) + dx, sim::ucoord_of(uu->y) + dy});
+							}
+						PartTrace t0;
+						{ sim::EngineProvider ep0(*game); trace_part(ep0, part, t0); }
+						const uint32_t h0 = adler_of(t0.bytes), want = it->second[size_t(part)];
+						auto sub = [&](uint32_t x, uint32_t y) { return std::pair<int64_t, int64_t>{(int64_t(x & 0xffff) - int64_t(y & 0xffff) + M) % M, (int64_t(x >> 16) - int64_t(y >> 16) + M) % M}; };
+						const auto target = sub(want, h0);
+						struct Eff { int ux, uy; int64_t a, b; };
+						std::vector<Eff> effs;
+						for (const auto& q : pool) {
+							if (!game->world.in_u(q.first, q.second)) continue;
+							const bool was = game->world.coll_get(q.first, q.second);
+							if (!was && !game->world.coll_block(q.first >> 4, q.second >> 4)) continue;
+							game->world.coll_set(q.first, q.second, !was);
+							sim::EngineProvider ep1(*game);
+							PartTrace t1;
+							const bool ok = trace_part(ep1, part, t1) && t1.bytes.size() == t0.bytes.size();
+							game->world.coll_set(q.first, q.second, was);
+							if (!ok) continue;
+							const auto e = sub(adler_of(t1.bytes), h0);
+							effs.push_back({q.first, q.second, e.first, e.second});
+						}
+						std::printf("  bit search: %zu flips in a pool of %zu ucoords; target (a=%lld b=%lld)\n", effs.size(), pool.size(), (long long)target.first, (long long)target.second);
+						for (const auto& e : effs) if (e.a == target.first && e.b == target.second) std::printf("    BIT HIT (1): %d,%d\n", e.ux, e.uy);
+						std::unordered_map<uint64_t, std::vector<std::pair<size_t, size_t>>> pr;
+						auto k2 = [](int64_t a, int64_t b) { return uint64_t(a) << 32 | uint64_t(b); };
+						for (size_t i = 0; i < effs.size(); ++i) for (size_t j = i + 1; j < effs.size(); ++j) pr[k2((effs[i].a + effs[j].a) % M, (effs[i].b + effs[j].b) % M)].push_back({i, j});
+						int shown = 0;
+						auto it2 = pr.find(k2(target.first, target.second));
+						if (it2 != pr.end()) for (auto& pq : it2->second) if (shown++ < 10) std::printf("    BIT HIT (2): %d,%d + %d,%d\n", effs[pq.first].ux, effs[pq.first].uy, effs[pq.second].ux, effs[pq.second].uy);
+						for (size_t k = 0; k < effs.size() && shown < 30; ++k) {
+							auto f3 = pr.find(k2(((target.first - effs[k].a) % M + M) % M, ((target.second - effs[k].b) % M + M) % M));
+							if (f3 == pr.end()) continue;
+							for (auto& pq : f3->second) if (pq.first > k && shown++ < 30) std::printf("    BIT HIT (3): %d,%d + %d,%d + %d,%d\n", effs[k].ux, effs[k].uy, effs[pq.first].ux, effs[pq.first].uy, effs[pq.second].ux, effs[pq.second].uy);
+						}
 					}
 				}
 				if (std::getenv("RON_REVERT_SEARCH") && baseline_for_search && f == (std::getenv("RON_SEARCH_AT") ? std::atoll(std::getenv("RON_SEARCH_AT")) : start + 1)) {
@@ -1793,6 +2167,35 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 							std::printf("    HIT (4): %s(%d,%d,%d) %s(%d,%d,%d) %s(%d,%d,%d) %s(%d,%d,%d)\n", ch[a.first].key.c_str(), ch[a.first].id.a, ch[a.first].id.b, ch[a.first].id.c, ch[a.second].key.c_str(), ch[a.second].id.a, ch[a.second].id.b, ch[a.second].id.c, ch[b.first].key.c_str(), ch[b.first].id.a, ch[b.first].id.b, ch[b.first].id.c, ch[b.second].key.c_str(), ch[b.second].id.a, ch[b.second].id.b, ch[b.second].id.c);
 					}
 				}
+				if (const char* tp = std::getenv("RON_TRY_PATH")) {
+					// experiment: variants of one unit's path stack (every subset of its entries x flags 0 / 2 / as is) against the expected `units` hash at boundary RON_SEARCH_AT (default: the first)
+					int tw = 0, to = 0;
+					std::sscanf(tp, "%d,%d", &tw, &to);
+					if (f == (std::getenv("RON_SEARCH_AT") ? std::atoll(std::getenv("RON_SEARCH_AT")) : start + 1)) {
+						sim::Unit* tu = game->unit(tw, to);
+						if (tu) {
+							const std::vector<sim::PathData> orig = tu->path;
+							const size_t n = orig.size();
+							int hits = 0;
+							for (uint32_t mask = 0; mask < (1u << n); ++mask)
+								for (int fv = 0; fv < 3; ++fv) {
+									std::vector<sim::PathData> v;
+									for (size_t i = 0; i < n; ++i) if (mask >> i & 1) {
+										sim::PathData pd = orig[i];
+										if (fv == 1 && i > 0) pd.flags = 0;
+										if (fv == 2 && i > 0) pd.flags = 2;
+										v.push_back(pd);
+									}
+									tu->path = v;
+									sim::EngineProvider ept(*game);
+									dw::CheckSumParts gt = dw::compute_check_sums(ept);
+									if (gt.ok && gt.v[0] == it->second[0]) { std::printf("  PATH HIT: mask %x flags-variant %d\n", mask, fv); ++hits; }
+								}
+							tu->path = orig;
+							std::printf("  path variants of %d/%d tried (%zu entries): %d hits\n", tw, to, n, hits);
+						}
+					}
+				}
 				sim::EngineProvider ep(*game);
 				dw::CheckSumParts got = dw::compute_check_sums(ep);
 				if (!got.ok) { step_error = "check sums: " + got.error; break; }
@@ -1811,6 +2214,26 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 						if (got.v[k] == it->second[size_t(k)]) continue;
 						PartTrace tr;
 						if (trace_part(ep, k, tr)) solve_single_byte(tr, it->second[size_t(k)], dw::kCheckPartNames[k]);
+						if (const char* ol = std::getenv("RON_OBJ_LAYOUT")) {  // the hashed ranges of one object: step kind, constants (offset / size), bytes
+							int lw = 0, lo = 0;
+							std::sscanf(ol, "%d,%d", &lw, &lo);
+							const dw::Description& dd = dw::Description::get();
+							for (const auto& r : tr.ranges) if (r.who == lw && r.o == lo) {
+								const int fnc = dd.step_function(r.step);
+								std::printf("      layout %s step %d (%s) kind %d a %lld b %lld len %zu:", fnc >= 0 ? dd.function_name(fnc) : "?", r.step, dd.step_kind(r.step) == dw::StepKind::Local ? dd.local_name(r.step) : "", int(dd.step_kind(r.step)),
+									(long long)dd.step_const(r.step, 0), (long long)dd.step_const(r.step, 1), r.len);
+								for (size_t q = 0; q < r.len && q < 40; ++q) std::printf(" %02x", tr.bytes[r.begin + q]);
+								std::printf("\n");
+							}
+						}
+						if (const char* tl = std::getenv("RON_TAIL")) {  // the labelled ranges within the last N bytes of the part's stream
+							const size_t n = tr.bytes.size(), lim = size_t(std::atoi(tl));
+							const dw::Description& dd = dw::Description::get();
+							for (const auto& r : tr.ranges) if (n - r.begin <= lim) {
+								const int fnc = dd.step_function(r.step);
+								std::printf("      tail %s: N-i %zu len %zu who %d o %d fn %s\n", dw::kCheckPartNames[k], n - r.begin, r.len, r.who, r.o, fnc >= 0 ? dd.function_name(fnc) : "?");
+							}
+						}
 					}
 				}
 			}
@@ -1917,6 +2340,34 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 			if (!l.mismatches) continue;
 			if (shown++ < 60) std::printf("    differs: %-34s %6lld of %-7lld %s\n", l.member.c_str(), (long long)l.mismatches, (long long)l.objects, l.example.c_str());
 		}
+		if (const char* lm = std::getenv("RON_LIST_UNIT_DIFF")) {  // every unit whose member `lm` (los_x los_y idle tolerance group uid collide unit_masks ...) differs: engine -> original
+			const std::string mname = lm;
+			auto val = [&](const sim::Unit& u) -> int64_t {
+				if (mname == "los_x") return u.los_x;
+				if (mname == "los_y") return u.los_y;
+				if (mname == "idle") return u.idle;
+				if (mname == "tolerance") return u.tolerance;
+				if (mname == "group") return u.group;
+				if (mname == "uid") return u.uid;
+				if (mname == "collide") return u.collide;
+				if (mname == "unit_masks") return int64_t(u.unit_masks);
+				if (mname == "recharging") return u.recharging;
+				if (mname == "damage_frame") return u.damage_frame;
+				if (mname == "flags") return u.flags;
+				if (mname == "stance") return u.stance;
+				return 0;
+			};
+			int n = 0;
+			for (int who = 0; who < sim::kNumLeaders; ++who)
+				for (int o = 0; o < game->objects[size_t(who)].unit_mark && o < truth->objects[size_t(who)].unit_mark; ++o) {
+					sim::Unit* a = game->unit(who, o);
+					sim::Unit* b = truth->unit(who, o);
+					if (!a || !b || !a->alive() || !b->alive() || val(*a) == val(*b)) continue;
+					if (n++ < 60) std::printf("    unit %d/%d type %s pos %d,%d (orig %d,%d) %s: engine %lld original %lld; order %d, los %d,%d / %d,%d\n", who, o, sim::to_utf8(a->ptype->type_name).c_str(), a->x, a->y, b->x, b->y, lm, (long long)val(*a), (long long)val(*b),
+						a->orders.empty() ? -1 : int(a->orders.front().type), a->los_x, a->los_y, b->los_x, b->los_y);
+				}
+			std::printf("  %d units differ in %s\n", n, lm);
+		}
 		std::printf("  %d mapped members differ between the engine and the next save\n", shown);
 	}
 	return 0;
@@ -1945,7 +2396,7 @@ int main(int argc, char** argv) {
 		return 64;
 	}
 	const std::string path = argv[1];
-	bool summary = false, verify = false, checksums = false, quiet = false, engine_rt = false, diag = true;
+	bool summary = false, verify = false, checksums = false, quiet = false, engine_rt = false, diag = true, astar_chk = false;
 	int mutate = 0;
 	bool replay = false, use_commands = true, verbose = false, no_art = false, field_report = false;
 	int64_t frames = 0, step_diff = 0;
@@ -1961,6 +2412,7 @@ int main(int argc, char** argv) {
 		else if (a == "--checksums") checksums = true;
 		else if (a == "--quiet") quiet = true;
 		else if (a == "--engine-roundtrip") engine_rt = true;
+		else if (a == "--astar-check") astar_chk = true;
 		else if (a == "--no-diag") diag = false;
 		else if (a == "--replay") replay = true;
 		else if (a == "--frames" && i + 1 < argc) frames = std::atoll(argv[++i]);
@@ -2169,6 +2621,24 @@ int main(int argc, char** argv) {
 				}
 			std::printf("guys with a nonzero offset: %d\n", offn);
 		}
+		if (std::getenv("RON_DUMP_MOVERS")) {
+			// every unit whose position, path, orders or collision bookkeeping changed: before -> after
+			for (int who = 0; who < sim::kNumLeaders; ++who)
+				for (int o = 0; o < ga->objects[size_t(who)].unit_mark; ++o) {
+					sim::Unit* a = ga->unit(who, o);
+					sim::Unit* b = gb->unit(who, o);
+					if (!a || !b || !a->alive()) continue;
+					if (a->x == b->x && a->y == b->y && a->path.size() == b->path.size() && a->collide == b->collide && a->collide_frame == b->collide_frame && a->orders.size() == b->orders.size()) continue;
+					std::printf("mover %d/%d %s: pos %d,%d -> %d,%d angle %08x -> %08x flags %02x -> %02x idle %d -> %d masks %08x -> %08x path %zu -> %zu orders %zu -> %zu collide %d/%d/%d fr %d -> %d/%d/%d fr %d\n", who, o,
+						sim::to_utf8(a->ptype->type_name).c_str(), a->x, a->y, b->x, b->y, a->angle, b->angle, a->flags, b->flags, a->idle, b->idle, a->unit_masks, b->unit_masks, a->path.size(), b->path.size(), a->orders.size(), b->orders.size(),
+						a->collide, a->collide_o, a->collide_who, a->collide_frame, b->collide, b->collide_o, b->collide_who, b->collide_frame);
+					for (const sim::Unit* uu : {a, b}) {
+						std::printf("      path of %s (bottom first):", uu == a ? "before" : "after ");
+						for (const sim::PathData& pd : uu->path) std::printf(" (%d,%d t%d f%x)", pd.x, pd.y, pd.tol, pd.flags);
+						std::printf("\n");
+					}
+				}
+		}
 		if (const char* du = std::getenv("RON_DUMP_UNIT")) {
 			int who = 0, o = 0;
 			std::sscanf(du, "%d,%d", &who, &o);
@@ -2212,6 +2682,10 @@ int main(int argc, char** argv) {
 	if (engine_rt) {
 		std::vector<uint8_t> save(buf.begin() + std::ptrdiff_t(save_pos), buf.begin() + std::ptrdiff_t(sd.end));
 		return engine_roundtrip(path, save, game_dir, quiet, diag, mutate);
+	}
+	if (astar_chk) {
+		std::vector<uint8_t> save(buf.begin() + std::ptrdiff_t(save_pos), buf.begin() + std::ptrdiff_t(sd.end));
+		return astar_check(path, save, game_dir, verbose);
 	}
 
 	if (summary) print_summary(tree);

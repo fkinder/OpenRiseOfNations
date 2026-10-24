@@ -1,0 +1,2 @@
+re/decomp/ctw2/ctwconst_readers.txt
+\+ 0x(9f[89a-f]|a[0-9a-f]{2}|b[0-3][0-9a-f]|b40)\]

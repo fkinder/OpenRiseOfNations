@@ -1,0 +1,6 @@
+re/decomp/fidelity2
+PathFinder::find_upath
+PathFinder::find_upath_restore
+PathFinder::astar_path
+PathFinder::kill_lists
+Unit::find_upath

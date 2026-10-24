@@ -10,6 +10,7 @@
 #include "sim/anim_assets.hpp"
 #include "sim/datawalk.hpp"
 #include "sim/datawalk_engine.hpp"
+#include "sim/newgame.hpp"
 #include "sim/original_save.hpp"
 #include "sim/rules.hpp"
 
@@ -87,6 +88,9 @@ int cmd_replay(int argc, char** argv) {
 	if (!rp.header.multiplayer) {
 		std::printf("%s: single-player replay (no CHECK_SUMS, one player): nothing to run in lockstep\n", basename_of(path).c_str());
 		return 0;
+	}
+	if (rp.native_save || (!rp.has_save && sim::is_random_scenario(sim::to_utf8(rp.header.scenario_path)))) {  // a recording of this port
+		return replay_native(rp, path, game_dir, dlo, dhi, arg_value(argc, argv, "--save") ? arg_value(argc, argv, "--save") : "", verbose);
 	}
 	if (!rp.has_save) {
 		std::printf("%s: no embedded save: the game starts from the setup (random map, rules block in the stream); not supported here "

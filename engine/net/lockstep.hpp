@@ -20,6 +20,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -45,6 +46,10 @@ enum DropOption : int { kDropPlayer = 0, kDropDiplomacy = 1, kDropSurvival = 2, 
 // port's DROP_STATE (the final-stamp agreement of multiplayer-spec 8.2.2) and DROP_NEED (a peer asks for a package of a given-up player). 0xA0.. belong to the lobby (net/lobby.hpp).
 namespace msg {
 constexpr uint8_t kPackage = 7, kDropVote = 13, kDropDecision = 14, kDropFlag = 29, kDsync = 0x87, kDropState = 0x91, kDropNeed = 0x92;
+// OOS recovery (multiplayer-spec 5.2, the port's SyncFile): the authority's snapshot, chunked, then a ready barrier. 0xB0..0xB2.
+constexpr uint8_t kRecBegin = 0xB0, kRecData = 0xB1, kRecReady = 0xB2, kRecNeed = 0xB3;
+// A synchronized save (multiplayer-spec 6, the port's addition): `u32 boundary` = the turn boundary every peer snapshots its state at.
+constexpr uint8_t kSaveAt = 0x93;
 }
 
 // ---------------------------------------------------------------- transport
@@ -162,6 +167,10 @@ public:
 	virtual void camera(uint8_t& zoom, int32_t& x, int32_t& y) { zoom = 0, x = 0, y = 0; }
 	// True once the game is over (TURN_DATA then carries bit 7).
 	virtual bool game_over() const { return false; }
+	// OOS recovery (SessionConfig::recover): the state as bytes (the authority), and the state replaced by such bytes (every peer,
+	// the authority included: all instances restart from the same loaded snapshot). `restore` returns false with `err` on failure.
+	virtual bool snapshot(Bytes& out) { out.clear(); return false; }
+	virtual bool restore(const Bytes& snap, std::string& err) { (void)snap; err = "this simulation cannot restore a snapshot"; return false; }
 };
 
 // ---------------------------------------------------------------- session
@@ -176,6 +185,10 @@ struct SessionConfig {
 	int drop_default = kDropReplaceWithAi;            // this peer's vote when a player is dropped
 	uint64_t timeout_ms = 0;                          // stall time after which the awaited peer is given up on (0 = only transport notices)
 	int ping_time = 72;                               // TURN_DATA ping_time: the original's constant 200 stored as 200 & 0xff7f (section 1.4)
+	// OOS recovery (multiplayer-spec 5.2 / 8.2.4): on a desync the authority's snapshot replaces every peer's state and the stamps restart at 1
+	// (step() returns Recovering, then Recovered once, then plays on). Off: a desync freezes the session (StepKind::Desync).
+	bool recover = false;
+	size_t recover_chunk = 16000;                     // bytes of snapshot per RecData message
 };
 
 struct DesyncReport {
@@ -189,7 +202,9 @@ struct DesyncReport {
 	std::string text() const;
 };
 
-enum class StepKind { Advanced, Stalled, Desync, Ended, Error };
+// Recovering: a desync is being repaired (the snapshot is in transit, or peers still load it); Recovered: the repair finished at this step
+// (stamps restart at 1: the caller drops what it counted per stamp), the next step() plays on.
+enum class StepKind { Advanced, Stalled, Desync, Ended, Error, Recovering, Recovered };
 struct StepResult {
 	StepKind kind = StepKind::Advanced;
 	int slot = -1;          // Stalled: the slot whose package is awaited
@@ -227,6 +242,10 @@ public:
 	// This peer's vote for the next drop (DropOption).
 	void set_drop_preference(int option) { cfg_.drop_default = option; }
 	void request_end() { ended_ = true; }
+	// A synchronized save: asks every peer (this one too) to take a snapshot at the start of the turn boundary that is `ahead` boundaries away.
+	// All peers are at the same state there, so the files are byte-identical. Returns the boundary number. Peers that already passed it
+	// (a slow link) report `on_save_missed`.
+	uint32_t request_save(uint32_t ahead = 4);
 
 	// ---- observers of the state
 	const SessionConfig& config() const { return cfg_; }
@@ -246,6 +265,14 @@ public:
 	bool in_turn() const { return phase_ != 0; }
 	bool ended() const { return ended_; }
 	const DesyncReport& desync() const { return desync_; }
+	// ---- OOS recovery
+	uint32_t epoch() const { return epoch_; }            // recoveries completed so far (stamps restarted this many times)
+	bool recovering() const { return recovering_; }
+	int recovery_authority() const { return rec_.authority; }
+	size_t recovery_bytes() const { return rec_.raw_size ? rec_.raw_size : last_rec_bytes_; }   // size of the snapshot in transit / last received
+	// The authority the majority rule picks for a report (multiplayer-spec 5.2: the host when two peers took part, else the peer whose
+	// check sum agrees with the most others, lowest slot on a tie). `alive` limits the candidates (empty: all senders of the report).
+	static int pick_authority(const DesyncReport& r, const std::array<bool, kMaxSlots>& alive);
 	const std::string& error() const { return error_; }
 	uint64_t duplicates() const { return duplicates_; }   // packages ignored because their stamp was already accepted
 	size_t fifo_size(int slot) const { return slot_[size_t(slot)].fifo.size(); }
@@ -257,6 +284,15 @@ public:
 	std::function<void(int slot, uint64_t waited_ms)> on_waiting;                                  // each step spent waiting on a slot
 	std::function<void(int slot, int option, uint32_t boundary)> on_drop;                          // a drop was applied
 	std::function<void(int slot)> on_resign;
+	std::function<void(int slot, bool paused)> on_pause;   // a PAUSE command changed the pause state
+	std::function<void(int slot, int speed)> on_speed;     // a SPEED_* command changed the game speed
+	// The agreed boundary of a synchronized save was reached: the snapshot (SimHooks::snapshot) of the state before the boundary's packages.
+	std::function<void(const Bytes& snapshot, int32_t frame, uint32_t boundary)> on_save;
+	std::function<void(uint32_t boundary)> on_save_missed;
+	// A snapshot was loaded (every peer, the authority too): the raw snapshot bytes and the frame after the load. A recorder starts a new
+	// segment here, as the original does (the recovery chain of docs/oracle-corpus.md).
+	std::function<void(const Bytes& snapshot, int32_t frame, uint32_t epoch)> on_recover;
+	std::function<void(const DesyncReport&, int authority)> on_desync;   // the OOS flow started
 
 private:
 	struct Pkt {
@@ -309,7 +345,7 @@ private:
 	void apply_drop(int slot, int option);
 	void clear_slot_queue(int slot);
 	void process_pause(int slot, int state);
-	void set_speed(int s);
+	void set_speed(int s, int slot = -1);
 	void start_cannon_time(int slot, int state);
 	void check_cannon_time();
 	bool valid_sender(int slot) const;
@@ -323,6 +359,38 @@ private:
 	void on_drop_need(int from, int p, uint32_t stamp);
 	int arbiter(int p) const;
 	void send_to_all(const Bytes& m, bool include_self) { t_.broadcast(m, include_self); }
+
+	// ---- OOS recovery (recovery.cpp)
+	struct Recovery {
+		uint32_t epoch = 0;          // the recovery number being made (epoch_ + 1)
+		int authority = -1;
+		bool begun = false;          // this peer's own freeze was seen (recovery_begin ran)
+		uint32_t chunk_size = 0;
+		bool snapshot_taken = false; // this peer took (authority) or received the whole snapshot
+		bool loaded = false, ready_sent = false;
+		uint32_t raw_size = 0, comp_size = 0, crc = 0, chunks = 0, got = 0;
+		int32_t frame = 0;
+		Bytes comp;
+		std::vector<bool> have;
+		uint32_t ready_mask = 0;     // slots whose RecReady of this epoch arrived (self included)
+		bool failed = false;
+		std::string error;
+		Bytes raw;                   // the snapshot once loaded: any loaded peer can serve a peer that lacks it (the authority died)
+		Bytes out_comp;              // its compressed form and CRC, as sent
+		uint32_t out_crc = 0, out_chunks = 0, out_chunk = 0;
+		uint32_t need_mask = 0;      // peers that asked for the snapshot before this peer had loaded it
+		uint64_t need_at = 0;        // when this peer first asked for the snapshot after the authority's death (0 = not yet)
+	};
+	StepResult recovery_step();
+	void recovery_message(int from, const Bytes& m);
+	void recovery_begin();
+	void recovery_send_snapshot();
+	bool recovery_pack(const Bytes& raw);
+	void recovery_send_to(int peer);
+	void recovery_try_assemble();
+	void recovery_apply(const Bytes& raw);
+	void recovery_finish();
+	void recovery_reset_epoch_state();
 
 	Transport& t_;
 	SimHooks& h_;
@@ -349,6 +417,11 @@ private:
 	int stall_slot_ = -1;
 	uint64_t stall_since_ = 0, need_sent_ = 0;
 	BoundaryInfo last_boundary_;
+	std::set<uint32_t> save_at_;
+	bool recovering_ = false;
+	uint32_t epoch_ = 0;
+	size_t last_rec_bytes_ = 0;
+	Recovery rec_;
 };
 
 // Builds and splits the COMMANDPACKAGEDATA message: u8 7, u32 stamp, i8 play, i16 size, data.

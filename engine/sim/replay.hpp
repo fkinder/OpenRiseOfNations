@@ -128,6 +128,11 @@ struct Replay {
 	std::string save_magic;
 	uint32_t save_version = 0;
 	int32_t save_frame = -1;
+	// A port recording (net/record.hpp) embeds the engine's own save: String "RoNNativeSave", u32 version, u32 length, bytes. `native_at` /
+	// `native_size` locate those bytes; the stream follows the random-game info exactly (no scan).
+	bool native_save = false;
+	size_t native_at = 0, native_size = 0;
+	std::vector<uint8_t> native_save_bytes() const;
 	ReplayHeader save_info;  // the GameInfo at the start of the embedded save (setup, seed, players; frame / semaphore are not filled)
 	bool has_save_info = false;
 	ReplayRandomInfo random_info;

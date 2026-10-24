@@ -40,6 +40,7 @@
 #include "assets/xml.hpp"
 #include "audio.hpp"
 #include "renderer.hpp"
+#include "sim/save.hpp"
 #include "ui.hpp"
 #import "launcher.h"
 #import "ctw_ui.h"
@@ -68,19 +69,21 @@ const MainItem kMainItems[6] = {
     {"Skirmish", "Battle computer opponents on a ready-made map, or set up a random map.", true},
     {"Scenarios", "Chess exercises and the battle maps of the Conquer the World campaigns.", true},
     {"Conquer the World", "Lead a nation through a campaign: move armies on the world map, make deals, play the battles.", true},
-    {"Multiplayer", "Not available yet.", false},
+    {"Multiplayer", "Play with friends on a local network: one player hosts a room, the others join it by address.", true},
     {"Quit", "Leave Rise of Nations and return to the desktop.", true},
 };
 
-enum Screen { kMain = 0, kTutorials, kSkirmish, kScenarios, kSkirmishSetup, kCtw, kCtwMap };
-const char* const kScreenNames[7] = {"main", "tutorials", "skirmish", "scenarios", "skirmish-setup", "ctw", "ctw-map"};
-const char* const kListTitles[7] = {"Main Menu", "Tutorials", "Skirmish", "Scenarios", "Skirmish Setup", "Conquer the World", "Conquer the World"};
-const char* const kListNotes[7] = {
+enum Screen { kMain = 0, kTutorials, kSkirmish, kScenarios, kSkirmishSetup, kCtw, kCtwMap, kMpConnect, kMpLobby };
+const char* const kScreenNames[9] = {"main", "tutorials", "skirmish", "scenarios", "skirmish-setup", "ctw", "ctw-map", "multiplayer", "mp-lobby"};
+const char* const kListTitles[9] = {"Main Menu", "Tutorials", "Skirmish", "Scenarios", "Skirmish Setup", "Conquer the World", "Conquer the World", "Multiplayer", "Multiplayer Lobby"};
+const char* const kListNotes[9] = {
     "",
     "Start with Tutorial 1. The tutorials guide you with voice-overs, arrows and objectives.",
     ("You play the map's human player against computer opponents. Press Random Map to choose a map style, its size, "
      "the nations and the teams, and play on a map made for you."),
     "Chess exercises and the battle maps of the Conquer the World campaigns.",
+    "",
+    "",
     "",
     "",
     "",
@@ -106,6 +109,13 @@ enum : int {
 	kSeedRandom = 16,
 	kSetupCombo = 1000,  // + combo of the setup screen
 	kSetupItem = 2000,   // + visible item of its open list
+	kMpName = 2100,      // the Multiplayer screens
+	kMpPort = 2101,
+	kMpAddr = 2102,
+	kMpHost = 2103,
+	kMpJoin = 2104,
+	kMpChat = 2105,
+	kMpLoad = 2106,
 };
 
 struct AnimLayer {
@@ -307,6 +317,18 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	BOOL _seedRandom, _seedFocus;
 	std::string _seedText;
 	std::string _ctwSub;  // headless: the sub-screen to open
+	// Multiplayer (lobby.h): the connect screen's fields and the room
+	std::shared_ptr<mp::Room> _room;
+	std::string _mpName, _mpPort, _mpAddr, _mpChat, _mpMessage;
+	int _mpField;          // focused field: 0 name, 1 port, 2 address, 3 chat, -1 none
+	std::string _mpPublished;
+	IfaceRect _mpRect[3], _mpChatRect, _mpLogRect;
+	size_t _mpChatSeen;
+	BOOL _mpStarting;
+	std::shared_ptr<std::vector<uint8_t>> _mpSave;  // the host's chosen saved game (the session continues it)
+	std::string _mpSaveText;
+	IfaceRect _mpLoadRect;
+	std::vector<std::pair<int, std::string>> _mpLines;  // the lobby's log: (0 chat | 1 system, text)
 	// Conquer the World (ctw_ui.h): the screens and their drawing bridge
 	std::unique_ptr<ctwui::Screen> _ctw;
 	ctwui::Bridge _ctwb;
@@ -574,7 +596,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		return;
 	}
 	Screen s = kMain;
-	for (int i = 0; i < 7; i++) {
+	for (int i = 0; i < 9; i++) {
 		if ([name isEqualToString:@(kScreenNames[i])]) s = Screen(i);
 	}
 	_screen = s;
@@ -585,6 +607,10 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		return;
 	}
 	if (s == kSkirmishSetup) [self openSetup];
+	if (s == kMpConnect || s == kMpLobby) {
+		[self mpOpen];
+		return;
+	}
 	if (s != kMain && s != kSkirmishSetup) {
 		_entries = launcher::entries_for(s == kTutorials ? launcher::Mode::Tutorials : s == kSkirmish ? launcher::Mode::Skirmish
 		                                                                                              : launcher::Mode::Scenarios,
@@ -595,7 +621,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		[self scrollToSelection];
 		_dropOpen = getenv("RON_MENU_DROP") && s != kTutorials;  // snapshot check of the open drop-down
 	}
-	if (_interactive) [NSUserDefaults.standardUserDefaults setObject:@(kScreenNames[s]) forKey:launcher::kDefScreen];
+	if (_interactive && s < kMpConnect) [NSUserDefaults.standardUserDefaults setObject:@(kScreenNames[s]) forKey:launcher::kDefScreen];
 }
 
 - (void)openQuitPopup {
@@ -1075,8 +1101,11 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	if (_screen == kMain) [self encodeLogo:enc];
 	_ui.begin(_uiW, _uiH, scale, kW);
 	const Layout L = [self layout];
+	if (_screen == kMpLobby) [self mpPump];
 	if (_screen == kMain) [self drawMain:L];
 	else if (_screen == kSkirmishSetup) [self drawSetup:L];
+	else if (_screen == kMpConnect) [self drawConnect:L];
+	else if (_screen == kMpLobby) [self drawLobby:L];
 	else if (_screen == kCtw || _screen == kCtwMap) [self ctwDraw];
 	else [self drawList:L];
 	[self drawPopup];
@@ -1140,6 +1169,8 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		return kNone;
 	}
 	if (_screen == kSkirmishSetup) return [self hitSetup:x y:y];
+	if (_screen == kMpLobby) return [self hitLobby:x y:y];
+	if (_screen == kMpConnect) return [self hitConnect:x y:y];
 	if (L.back.contains(x, y)) return kBack;
 	if (L.play.contains(x, y)) return kPlay;
 	if (_screen == kSkirmish && L.rand.contains(x, y)) return kRandomMap;
@@ -1210,13 +1241,14 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	}
 	_mouse = [self canvas:p];
 	const int h = [self hit:_mouse];
-	if (_screen == kSkirmishSetup && !_popup.open) {
+	if ((_screen == kSkirmishSetup || _screen == kMpLobby) && !_popup.open) {
 		// An open list closes on a press outside it; the press itself then starts nothing.
 		if (_openCombo >= 0 && !(h >= kSetupItem && h < kSetupItem + 100) && h != kSetupCombo + _openCombo) {
 			_openCombo = -1;
 			return;
 		}
 		if (_seedFocus && h != kSeedField) _seedFocus = NO;
+		if (_screen == kMpLobby && h != kMpChat) _mpField = -1;
 		_pressed = h;
 		return;
 	}
@@ -1284,7 +1316,8 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		return;
 	}
 	if (_screen == kMain || _popup.open) return;
-	if (_screen == kSkirmishSetup) {
+	if (_screen == kMpConnect) return;
+	if (_screen == kSkirmishSetup || _screen == kMpLobby) {
 		if (_openCombo >= 0 && size_t(_openCombo) < _sc.size()) {
 			static CGFloat sacc = 0;
 			sacc += dy;
@@ -1335,6 +1368,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 			case 1: [self showScreen:@"skirmish"]; break;
 			case 2: [self showScreen:@"scenarios"]; break;
 			case 3: [self showScreen:@"ctw"]; break;
+			case 4: [self showScreen:@"multiplayer"]; break;
 			case 5: [self openQuitPopup]; break;
 			default: break;
 		}
@@ -1343,6 +1377,26 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	if (h == kChange) {
 		[self click];
 		[self.host frontEndChangeFolder];
+	} else if (h == kBack && _screen == kMpConnect) {
+		[self click];
+		[self showScreen:@"main"];
+		_focus = 4;
+	} else if (h == kBack && _screen == kMpLobby) {
+		[self click];
+		[self mpLeave:nil];
+	} else if (h == kPlay && _screen == kMpLobby) {
+		[self mpPlay];
+	} else if (h == kMpHost) {
+		[self mpHost];
+	} else if (h == kMpJoin) {
+		[self mpJoin];
+	} else if (h >= kMpName && h <= kMpAddr) {
+		_mpField = h - kMpName;
+	} else if (h == kMpChat) {
+		_mpField = 3;
+	} else if (h == kMpLoad) {
+		[self click];
+		[self mpLoadFile];
 	} else if (h == kBack && _screen == kSkirmishSetup) {
 		[self click];
 		[self showScreen:@"skirmish"];
@@ -1399,6 +1453,14 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	}
 	if (_screen == kSkirmishSetup && !_popup.open) {
 		[self setupKey:e];
+		return;
+	}
+	if (_screen == kMpConnect && !_popup.open) {
+		[self connectKey:e];
+		return;
+	}
+	if (_screen == kMpLobby && !_popup.open) {
+		[self lobbyKey:e];
 		return;
 	}
 	if (_popup.open) {
@@ -1576,6 +1638,8 @@ static std::vector<std::string> numbered(int lo, int hi) {
 	[self loadSetupLists];
 	_sc.clear();
 	_st.clear();
+	const BOOL lobby = _screen == kMpLobby;                              // the Multiplayer lobby shares these controls
+	const BOOL editable = !lobby || (_room && _room->is_host() && !_mpSave);  // only the host changes the setup, and not of a saved game
 	ron::sim::RandomGameSetup* sp = &_setup;  // the closures outlive this call: capture the ivar's address, not self
 	// ---- RULESWIN: the rules, label at the left, combo at the right
 	{
@@ -1587,6 +1651,7 @@ static std::vector<std::string> numbered(int lo, int hi) {
 			c.items = items;
 			c.sel = std::clamp(sel, 0, std::max(0, int(items.size()) - 1));
 			c.set = std::move(set);
+			c.enabled = editable;
 			c.label = label;
 			c.lx = 592, c.ly = y;
 			_sc.push_back(std::move(c));
@@ -1606,9 +1671,13 @@ static std::vector<std::string> numbered(int lo, int hi) {
 		add("Population:", _lists.pop, _setup.pop_limit, [sp](int v) { sp->pop_limit = v; });
 		add("Reveal Map:", _lists.reveal, _setup.reveal_map, [sp](int v) { sp->reveal_map = v; });
 		add("Random Starts:", {"No", "Yes"}, _setup.randomize_starts ? 1 : 0, [sp](int v) { sp->randomize_starts = v == 1; });
-		_seedRect = {cx, cx + cw - 84, y, y + 21};
-		_seedBtn = {cx + cw - 78, cx + cw, y - 3, y + 25};
-		_st.push_back({592, y, "Seed:", 0});
+		if (lobby) {
+			_seedRect = _seedBtn = IfaceRect{0, 0, 0, 0};  // the host draws the seed when the game starts
+		} else {
+			_seedRect = {cx, cx + cw - 84, y, y + 21};
+			_seedBtn = {cx + cw - 78, cx + cw, y - 3, y + 25};
+			_st.push_back({592, y, "Seed:", 0});
+		}
 		_rulesBottom = y + dy;
 	}
 	// ---- PLAYERSWINSOLO: one row per seat
@@ -1625,20 +1694,29 @@ static std::vector<std::string> numbered(int lo, int hi) {
 				continue;
 			}
 			ron::sim::NationSetup& ns = _setup.nation[size_t(i)];
-			_st.push_back({36, y + 3, ns.human ? "Player" : "Computer " + std::to_string(i + 1), 2});
+			const BOOL taken = lobby && _room && ((_room->present_mask() >> i) & 1);  // a player of the room sits here
+			std::string who = ns.human ? "Player" : "Computer " + std::to_string(i + 1);
+			if (lobby) who = taken ? _room->name_of(i) : "Computer " + std::to_string(i + 1);
+			while (lobby && _ui.text_width(_ui.font(14, -1), who) > 84 && who.size() > 3) who.pop_back();
+			_st.push_back({36, y + 3, who, taken || !lobby ? 2 : 1});
 			auto seat = [&](int x, int w, const std::vector<std::string>& items, int sel, bool enabled, std::function<void(int)> set) {
 				SetupCombo c;
 				c.r = {x, x + w, y, y + 21};
 				c.items = items;
 				c.sel = std::clamp(sel, 0, std::max(0, int(items.size()) - 1));
 				c.set = std::move(set);
-				c.enabled = enabled;
+				c.enabled = enabled && editable;
 				c.seat = i;
 				_sc.push_back(std::move(c));
 			};
 			seat(xn, wn, nations, ns.tribe + 1, true, [sp, i](int v) { sp->nation[size_t(i)].tribe = v - 1; });
-			seat(xw, ww, {"Human", "Computer"}, ns.human ? 0 : 1, true, [sp, i](int v) { sp->nation[size_t(i)].human = v == 0; });
-			seat(xd, wd, _lists.diff, ns.difficulty, !ns.human, [sp, i](int v) { sp->nation[size_t(i)].difficulty = v; });
+			if (lobby) {  // the status of the seat instead of the Human / Computer choice
+				const BOOL ready = taken && _room->ready_of(i);
+				_st.push_back({xw, y + 3, taken ? (i == 0 ? "Host" : ready ? "Ready" : "Not ready") : "Computer", taken ? (i == 0 || ready ? 3 : 4) : 1});
+			} else {
+				seat(xw, ww, {"Human", "Computer"}, ns.human ? 0 : 1, true, [sp, i](int v) { sp->nation[size_t(i)].human = v == 0; });
+			}
+			seat(xd, wd, _lists.diff, ns.difficulty, !ns.human && !taken, [sp, i](int v) { sp->nation[size_t(i)].difficulty = v; });
 			seat(xt, wt, teams, ns.team + 1, true, [sp, i](int v) { sp->nation[size_t(i)].team = v - 1; });
 		}
 	}
@@ -1731,40 +1809,42 @@ static std::vector<std::string> numbered(int lo, int hi) {
 		[self drawCombo:_sc[i] index:int(i)];
 		_ui.next_layer();
 	}
-	if (_openCombo >= 0 && size_t(_openCombo) < _sc.size()) {
-		const SetupCombo& c = _sc[size_t(_openCombo)];
-		const int ih = 20, n = int(c.items.size()), vis = std::min(n, 12);
-		IfaceRect list{c.r.l, c.r.r - _combo[3].width, c.r.b + 1, c.r.b + 1 + vis * ih + 6};
-		if (list.b > kH - 8) {
-			const int h = list.b - list.t;
-			list.b = c.r.t - 1;
-			list.t = list.b - h;
-		}
-		_ui.next_window();
-		[self thinBox:list fill:rgb(244, 244, 240)];
-		_ui.next_layer();
-		const int fo = _ui.font(12, 1);
-		const ron::FontMetrics* om = _ui.font_metrics(fo);
-		const int oh = om ? om->font_height : 14;
-		for (int k = 0; k < vis; k++) {
-			const int item = _openTop + k;
-			if (item >= n) break;
-			const IfaceRect it{list.l + 3, list.r - 3, list.t + 3 + k * ih, list.t + 3 + (k + 1) * ih};
-			const IfaceRect I = it.offset(_ox, _oy);
-			const bool hot = _hover == kSetupItem + k || (_hover < kSetupItem && item == c.sel);
-			if (hot) _ui.fill(float(I.l), float(I.t), float(I.w()), float(I.h()), rgb(53, 47, 132), UiType::ColorBlend);
-			_ui.next_layer();
-			_ui.text(fo, c.items[size_t(item)], float(I.l + 5), float(I.t + (ih - oh) / 2), hot ? kWhite : kBlack);
-		}
-		_setupListRect = list;
-		_setupListVis = vis;
-	} else {
-		_setupListVis = 0;
-	}
+	if (_openCombo >= 0 && size_t(_openCombo) < _sc.size()) [self drawOpenList];
+	else _setupListVis = 0;
 	_ui.next_window();
 	const int fb = _ui.font(14, -1);
 	[self popupButton:L.back label:"Back" state:(_pressed == kBack ? 2 : _hover == kBack ? 1 : 0) font:fb];
 	[self popupButton:L.play label:"Play" state:(_pressed == kPlay ? 2 : _hover == kPlay ? 1 : 0) font:fb];
+}
+
+- (void)drawOpenList {
+	const SetupCombo& c = _sc[size_t(_openCombo)];
+	const int ih = 20, n = int(c.items.size()), vis = std::min(n, 12);
+	IfaceRect list{c.r.l, c.r.r - _combo[3].width, c.r.b + 1, c.r.b + 1 + vis * ih + 6};
+	if (list.b > kH - 8) {
+		const int h = list.b - list.t;
+		list.b = c.r.t - 1;
+		list.t = list.b - h;
+	}
+	_ui.next_window();
+	[self thinBox:list fill:rgb(244, 244, 240)];
+	_ui.next_layer();
+	const int fo = _ui.font(12, 1);
+	const ron::FontMetrics* om = _ui.font_metrics(fo);
+	const int oh = om ? om->font_height : 14;
+	for (int k = 0; k < vis; k++) {
+		const int item = _openTop + k;
+		if (item >= n) break;
+		const IfaceRect it{list.l + 3, list.r - 3, list.t + 3 + k * ih, list.t + 3 + (k + 1) * ih};
+		const IfaceRect I = it.offset(_ox, _oy);
+		const bool hot = _hover == kSetupItem + k || (_hover < kSetupItem && item == c.sel);
+		if (hot) _ui.fill(float(I.l), float(I.t), float(I.w()), float(I.h()), rgb(53, 47, 132), UiType::ColorBlend);
+		_ui.next_layer();
+		_ui.text(fo, c.items[size_t(item)], float(I.l + 5), float(I.t + (ih - oh) / 2), hot ? kWhite : kBlack);
+	}
+	_setupListRect = list;
+	_setupListVis = vis;
+
 }
 
 - (int)hitSetup:(int)x y:(int)y {
@@ -1857,6 +1937,564 @@ static std::vector<std::string> numbered(int lo, int hi) {
 - (NSCursor*)cursor {
 	if (!_cursor) _cursor = ron_game_cursor(*_files, ron::kCursorMain);
 	return _cursor;
+}
+
+// ---------------------------------------------------------------- Multiplayer (lobby.h)
+
+// The two Multiplayer screens. Connect: your name, a port to host on, an address to join. Lobby: the Skirmish setup screen's controls
+// (the host's) with the seats filled by the players of the room, ready flags and a chat. Play starts the lockstep session (main.mm).
+
+static std::string clean_name(std::string s) {
+	while (!s.empty() && s.back() == ' ') s.pop_back();
+	return s.empty() ? std::string("Player") : s;
+}
+
+- (void)mpOpen {
+	NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
+	if (_mpName.empty()) {
+		NSString* n = [d stringForKey:@"MpName"];
+		_mpName = n.length ? n.UTF8String : "Player";
+		NSString* p = [d stringForKey:@"MpPort"];
+		_mpPort = p.length ? p.UTF8String : "7777";
+		NSString* a = [d stringForKey:@"MpAddress"];
+		_mpAddr = a.length ? a.UTF8String : "";
+	}
+	_mpMessage.clear();
+	_mpStarting = NO;
+	if (_screen == kMpConnect) {
+		_room.reset();
+		_mpField = 0;
+		return;
+	}
+	// the lobby: the host edits the Skirmish setup, a guest sees the host's
+	_mpField = -1;
+	_mpChat.clear();
+	_mpChatSeen = 0;
+	_mpPublished.clear();
+	_mpLines.clear();
+	_mpSave.reset();
+	_mpSaveText.clear();
+	[self openSetup];
+	_setup.game_speed = 2;
+	_seedRandom = YES;
+	if (_room && _room->is_host()) {
+		_mpLines.push_back({1, "You are the host. Players join with your address and port " + std::to_string(_room->port()) + "."});
+	} else if (_room) {
+		_mpLines.push_back({1, "Connected. The host sets the game up; press Ready when you are."});
+	}
+}
+
+- (void)mpLeave:(NSString*)message {
+	_room.reset();
+	_mpStarting = NO;
+	[self showScreen:@"multiplayer"];
+	_mpMessage = message ? message.UTF8String : "";
+}
+
+static bool parse_port(const std::string& s, int& out) {
+	if (s.empty() || s.size() > 5) return false;
+	for (char c : s)
+		if (c < '0' || c > '9') return false;
+	out = std::atoi(s.c_str());
+	return out >= 1024 && out <= 65535;
+}
+
+- (void)mpSaveFields {
+	NSUserDefaults* d = NSUserDefaults.standardUserDefaults;
+	[d setObject:@(_mpName.c_str()) forKey:@"MpName"];
+	[d setObject:@(_mpPort.c_str()) forKey:@"MpPort"];
+	[d setObject:@(_mpAddr.c_str()) forKey:@"MpAddress"];
+}
+
+- (void)mpHost {
+	int port = 0;
+	if (!parse_port(_mpPort, port)) {
+		_mpMessage = "The port must be a number between 1024 and 65535.";
+		return;
+	}
+	[self mpSaveFields];
+	auto room = std::make_shared<mp::Room>();
+	std::string err;
+	if (!room->host(uint16_t(port), clean_name(_mpName), err)) {
+		_mpMessage = err;
+		return;
+	}
+	_room = room;
+	[self click];
+	[self showScreen:@"mp-lobby"];
+}
+
+- (void)mpJoin {
+	std::string host = _mpAddr;
+	int port = 7777;
+	const size_t colon = host.rfind(':');
+	if (colon != std::string::npos) {
+		if (!parse_port(host.substr(colon + 1), port)) {
+			_mpMessage = "The port after the colon must be a number between 1024 and 65535.";
+			return;
+		}
+		host = host.substr(0, colon);
+	}
+	while (!host.empty() && host.back() == ' ') host.pop_back();
+	if (host.empty()) {
+		_mpMessage = "Type the host's address, for example 192.168.0.12:7777.";
+		return;
+	}
+	[self mpSaveFields];
+	[self click];
+	[self setBusy:@"Connecting…"];
+	const std::string name = clean_name(_mpName);
+	__unsafe_unretained FrontEnd* me = self;
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.15 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+		auto room = std::make_shared<mp::Room>();
+		std::string err;
+		const bool ok = room->join(host, uint16_t(port), name, 4000, err);
+		[me setBusy:nil];
+		if (!ok) {
+			me->_mpMessage = err;
+			return;
+		}
+		me->_room = room;
+		[me showScreen:@"mp-lobby"];
+	});
+}
+
+// The room's traffic every frame the lobby is up: new players, departures, chat, the setup changes of the host, the START.
+- (void)mpPump {
+	if (!_room || _mpStarting) return;
+	_room->pump();
+	for (std::string n; !(n = _room->take_notice()).empty();) _mpLines.push_back({1, n});
+	ron::net::Lobby::ChatLine line;
+	while (_room->lobby().take_chat(line)) {
+		std::string who = _room->name_of(line.from);
+		if (who.empty()) who = "Player " + std::to_string(line.from + 1);
+		_mpLines.push_back({0, who + ": " + line.text});
+	}
+	if (_room->host_lost()) {
+		[self mpLeave:@"The host closed the room."];
+		return;
+	}
+	if (_room->is_host()) {
+		// the seats of connected players are human, the rest computer; changes go to the guests (a saved game keeps its own seats)
+		if (!_mpSave) {
+			for (int i = 0; i < 8; i++) _setup.nation[size_t(i)].human = (_room->present_mask() >> i) & 1;
+			_setup.nation[0].human = true;
+			int top = 0;
+			for (int i = 0; i < 8; i++)
+				if ((_room->present_mask() >> i) & 1) top = i;
+			_setup.num_nations = std::clamp(std::max(_setup.num_nations, top + 1), 2, 8);
+		}
+		ron::sim::RandomGameSetup s = _setup;
+		s.seed = 0;
+		const std::string cur = ron::sim::random_setup_string(s);
+		if (cur != _mpPublished) {
+			_room->publish(s);
+			_mpPublished = cur;
+		}
+	} else {
+		ron::sim::RandomGameSetup s;
+		if (_room->read_setup(s)) {
+			_setup = s;
+			const BOOL fromSave = _room->lobby().has("from_save");
+			if (_room->started() && (!fromSave || _room->lobby().file_complete() || _room->lobby().file_failed())) {
+				_mpStarting = YES;
+				if (fromSave && !_room->lobby().file_complete()) {
+					[self mpLeave:@"The saved game did not arrive intact."];
+					return;
+				}
+				std::shared_ptr<std::vector<uint8_t>> save;
+				if (fromSave) save = std::make_shared<std::vector<uint8_t>>(_room->lobby().file());
+				[self.host frontEndPlayMultiplayer:_room setup:s save:save];
+			}
+		}
+	}
+}
+
+- (void)mpSend {
+	if (!_room || _mpChat.empty()) return;
+	_room->say(_mpChat);
+	_mpLines.push_back({0, clean_name(_mpName) + ": " + _mpChat});
+	_mpChat.clear();
+}
+
+// Play: the host starts the game (when every guest is ready and a second player is in), a guest toggles Ready.
+- (void)mpPlay {
+	if (!_room) return;
+	if (!_room->is_host()) {
+		[self click];
+		_room->set_ready(!_room->ready_of(_room->slot()));
+		return;
+	}
+	ron::sim::RandomGameSetup s = _setup;
+	if (_mpSave) {  // continue a saved game: the connected players must sit in the seats that were human
+		uint32_t need = 0;
+		for (int i = 0; i < s.num_nations && i < 8; i++)
+			if (s.nation[size_t(i)].human) need |= 1u << i;
+		if (_room->present_mask() != need) {
+			_mpLines.push_back({1, "The saved game needs players in exactly its human seats; the players in the room do not match them."});
+			return;
+		}
+		if (!_room->guests_ready()) {
+			_mpLines.push_back({1, "Every player must be ready before the game can start."});
+			return;
+		}
+		[self click];
+		_room->publish(s);
+		_room->lobby().set("from_save", "1");
+		_room->lobby().send_file(*_mpSave);
+		_room->start(s.seed);
+		_mpStarting = YES;
+		[self.host frontEndPlayMultiplayer:_room setup:s save:_mpSave];
+		return;
+	}
+	if (!_room->seat_humans(s)) {
+		_mpLines.push_back({1, "Nobody has joined yet: a multiplayer game needs at least two players."});
+		return;
+	}
+	if (!_room->guests_ready()) {
+		_mpLines.push_back({1, "Every player must be ready before the game can start."});
+		return;
+	}
+	[self click];
+	s.game_speed = 2;
+	s.seed = arc4random();
+	if (s.seed == 0) s.seed = 1;
+	[self saveSetup];
+	_room->publish(s);
+	_room->start(s.seed);
+	_mpStarting = YES;
+	[self.host frontEndPlayMultiplayer:_room setup:s save:nullptr];
+}
+
+// The host picks a saved multiplayer game (written by the in-game Save Game): the session continues it. The setup of the save fills the rules;
+// the players must take the seats that were human.
+- (void)mpLoadFile {
+	if (_mpSave) {  // a second click forgets it
+		_mpSave.reset();
+		_mpSaveText.clear();
+		_mpLines.push_back({1, "The saved game was forgotten; the setup is yours again."});
+		return;
+	}
+	NSOpenPanel* panel = [NSOpenPanel openPanel];
+	panel.title = @"Load a saved multiplayer game";
+	panel.directoryURL = [NSURL fileURLWithPath:@(mp::default_mp_save_dir().c_str())];
+	if ([panel runModal] != NSModalResponseOK || !panel.URL) return;
+	NSData* data = [NSData dataWithContentsOfURL:panel.URL];
+	if (!data.length) {
+		_mpLines.push_back({1, "That file could not be read."});
+		return;
+	}
+	auto bytes = std::make_shared<std::vector<uint8_t>>(static_cast<const uint8_t*>(data.bytes), static_cast<const uint8_t*>(data.bytes) + data.length);
+	try {
+		const ron::sim::SaveInfo info = ron::sim::read_save_info(*bytes);
+		ron::sim::RandomGameSetup s;
+		if (!ron::sim::parse_random_setup(info.scenario, s)) {
+			_mpLines.push_back({1, "Only saved random-map games can be continued in multiplayer."});
+			return;
+		}
+		s.seed = info.seed;
+		_setup = s;
+		_mpSave = bytes;
+		int humans = 0;
+		for (int i = 0; i < s.num_nations && i < 8; i++) humans += s.nation[size_t(i)].human;
+		_mpSaveText = std::string(panel.URL.lastPathComponent.UTF8String) + ", frame " + std::to_string(info.frame);
+		_mpLines.push_back({1, "Saved game " + _mpSaveText + ": it needs " + std::to_string(humans) + " players in its human seats."});
+		_mpPublished.clear();
+	} catch (const std::exception& e) {
+		_mpLines.push_back({1, std::string("That is not a saved game of this version: ") + e.what()});
+	}
+}
+
+// ---- the connect screen
+
+- (void)drawField:(const IfaceRect&)r text:(const std::string&)text hint:(const char*)hint focused:(BOOL)focused {
+	const IfaceRect D = r.offset(_ox, _oy);
+	if (_combo[0].valid()) _ui.expander(_combo[0], _combo[1], _combo[2], D);
+	else [self thinBox:r fill:rgb(240, 240, 240)];
+	_ui.next_layer();
+	const int fo = _ui.font(12, 1);
+	const ron::FontMetrics* om = _ui.font_metrics(fo);
+	const int oh = om ? om->font_height : 14;
+	std::string shown = text;
+	const int room = r.w() - 14;
+	while (shown.size() > 1 && _ui.text_width(fo, shown) > room) shown.erase(0, 1);  // the end of a long text stays visible
+	if (focused && ((int)(_timeMs / 500) & 1) == 0) shown += "|";
+	const bool empty = text.empty() && !focused;
+	_ui.text(fo, empty ? std::string(hint) : shown, float(D.l + 7), float(D.t + (D.h() - oh) / 2), empty ? rgb(130, 130, 130) : kBlack);
+}
+
+- (void)drawConnect:(const Layout&)L {
+	[self banner:L text:kListTitles[kMpConnect]];
+	_ui.next_window();
+	const int f14 = _ui.font(14, -1), f12 = _ui.font(12, -1), f16 = _ui.font(16, -1);
+	const ron::FontMetrics* m12 = _ui.font_metrics(f12);
+	const int lh12 = m12 ? m12->line_height : 14;
+	[self thinBox:{200, 824, 104, 622} fill:argb(120, 0, 0, 0)];
+	_ui.next_layer();
+	[self textAt:f14 text:"Your name" x:232 y:152 color:kLabel];
+	_mpRect[0] = {400, 780, 148, 172};
+	[self drawField:_mpRect[0] text:_mpName hint:"Player" focused:_mpField == 0];
+	_ui.next_layer();
+	[self textAt:f16 text:"Host a game" x:232 y:208 color:kWhite];
+	[self textAt:f14 text:"Port" x:232 y:252 color:kLabel];
+	_mpRect[1] = {400, 520, 248, 272};
+	[self drawField:_mpRect[1] text:_mpPort hint:"7777" focused:_mpField == 1];
+	_ui.next_layer();
+	const IfaceRect hostBtn{592, 780, 244, 276}, joinBtn{652, 780, 382, 414};
+	[self popupButton:hostBtn label:"Host" state:(_pressed == kMpHost ? 2 : _hover == kMpHost ? 1 : 0) font:f14];
+	int y = 290;
+	for (const std::string& line : wrap_text(_ui, f12, "You become the host and open a room on this port. Players on your network join it with your address and the same port.", 560)) {
+		[self textAt:f12 text:line x:232 y:float(y) color:kSecondary];
+		y += lh12;
+	}
+	_ui.next_layer();
+	[self textAt:f16 text:"Join a game" x:232 y:350 color:kWhite];
+	[self textAt:f14 text:"Host address" x:232 y:390 color:kLabel];
+	_mpRect[2] = {400, 640, 386, 410};
+	[self drawField:_mpRect[2] text:_mpAddr hint:"192.168.0.12:7777" focused:_mpField == 2];
+	_ui.next_layer();
+	[self popupButton:joinBtn label:"Join" state:(_pressed == kMpJoin ? 2 : _hover == kMpJoin ? 1 : 0) font:f14];
+	y = 428;
+	for (const std::string& line : wrap_text(_ui, f12, "Type the host's address and port, for example 192.168.0.12:7777. If you leave the port out, 7777 is used.", 560)) {
+		[self textAt:f12 text:line x:232 y:float(y) color:kSecondary];
+		y += lh12;
+	}
+	if (!_mpMessage.empty()) {
+		y = 484;
+		for (const std::string& line : wrap_text(_ui, f14, _mpMessage, 560)) {
+			[self textAt:f14 text:line x:232 y:float(y) color:rgb(255, 170, 120)];
+			y += lh12 + 2;
+		}
+	}
+	y = 548;
+	for (const std::string& line : wrap_text(_ui, f12, "Everyone needs the same version of the game and the same game files. The game runs in lockstep: all commands reach every machine and the "
+	                                               "game waits for the slowest connection.", 560)) {
+		[self textAt:f12 text:line x:232 y:float(y) color:kSecondary];
+		y += lh12;
+	}
+	_ui.next_window();
+	[self popupButton:L.back label:"Back" state:(_pressed == kBack ? 2 : _hover == kBack ? 1 : 0) font:_ui.font(14, -1)];
+}
+
+- (int)hitConnect:(int)x y:(int)y {
+	const Layout L = [self layout];
+	if (L.back.contains(x, y)) return kBack;
+	if (IfaceRect{592, 780, 244, 276}.contains(x, y)) return kMpHost;
+	if (IfaceRect{652, 780, 382, 414}.contains(x, y)) return kMpJoin;
+	for (int i = 0; i < 3; i++)
+		if (_mpRect[i].contains(x, y)) return kMpName + i;
+	return kNone;
+}
+
+// Text keys on the connect screen and in the chat field: returns YES when `e` was a text edit.
+- (BOOL)editText:(std::string&)text event:(NSEvent*)e limit:(size_t)limit {
+	NSString* chars = e.characters;
+	if (e.keyCode == 51) {  // Delete
+		while (!text.empty() && (static_cast<unsigned char>(text.back()) & 0xC0) == 0x80) text.pop_back();
+		if (!text.empty()) text.pop_back();
+		return YES;
+	}
+	if ((e.modifierFlags & NSEventModifierFlagCommand) && chars.length && [chars.lowercaseString isEqualToString:@"v"]) {
+		NSString* clip = [NSPasteboard.generalPasteboard stringForType:NSPasteboardTypeString];
+		for (NSUInteger i = 0; i < clip.length && text.size() < limit; i++) {
+			const unichar c = [clip characterAtIndex:i];
+			if (c >= 32 && c < 127) text += char(c);
+		}
+		return YES;
+	}
+	if (e.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl)) return NO;
+	const std::string add = chars.UTF8String ? chars.UTF8String : "";
+	if (add.empty() || static_cast<unsigned char>(add[0]) < 32 || add[0] == 127 || (e.keyCode >= 123 && e.keyCode <= 126)) return NO;
+	if (text.size() + add.size() <= limit) text += add;
+	return YES;
+}
+
+- (void)connectKey:(NSEvent*)e {
+	NSString* chars = e.charactersIgnoringModifiers;
+	const unichar c = chars.length ? [chars characterAtIndex:0] : 0;
+	const bool ret = c == '\r' || c == 3, esc = e.keyCode == 53, tab = e.keyCode == 48;
+	if (esc) {
+		[self click];
+		[self showScreen:@"main"];
+		_focus = 4;
+		return;
+	}
+	if (tab) {
+		_mpField = (_mpField + 1) % 3;
+		return;
+	}
+	if (ret) {
+		if (_mpField == 2) [self mpJoin];
+		else [self mpHost];
+		return;
+	}
+	std::string* target = _mpField == 0 ? &_mpName : _mpField == 1 ? &_mpPort : &_mpAddr;
+	if (_mpField < 0) return;
+	if ([self editText:*target event:e limit:_mpField == 0 ? 24 : _mpField == 1 ? 5 : 64]) _mpMessage.clear();
+}
+
+// ---- the lobby screen
+
+- (int)hitLobby:(int)x y:(int)y {
+	if (_openCombo < 0 && _mpChatRect.contains(x, y)) return kMpChat;
+	if (_openCombo < 0 && _mpLoadRect.contains(x, y)) return kMpLoad;
+	return [self hitSetup:x y:y];
+}
+
+- (void)drawLobby:(const Layout&)L {
+	[self banner:L text:kListTitles[kMpLobby]];
+	[self layoutSetup];
+	const int f14 = _ui.font(14, -1), f12 = _ui.font(12, -1);
+	const ron::FontMetrics* m14 = _ui.font_metrics(f14);
+	const int lh = m14 ? m14->line_height : 16;
+	const BOOL host = _room && _room->is_host();
+	_ui.next_window();
+	const IfaceRect players{20, 566, 88, 628}, rules{578, 1004, 88, 628};
+	[self thinBox:players fill:argb(120, 0, 0, 0)];
+	[self thinBox:rules fill:argb(120, 0, 0, 0)];
+	_ui.next_layer();
+	const struct {
+		int x;
+		const char* t;
+	} cols[5] = {{36, "Player"}, {126, "Nation"}, {264, "Status"}, {370, "Difficulty"}, {470, "Team"}};
+	for (const auto& c : cols) [self textAt:f14 text:c.t x:float(c.x) y:104 color:kSecondary];
+	_ui.next_layer();
+	for (const SetupText& t : _st) {
+		const uint32_t col = t.kind == 1 ? rgb(130, 130, 130) : t.kind == 2 ? kWhite : t.kind == 3 ? rgb(150, 255, 150) : t.kind == 4 ? rgb(190, 190, 190) : kLabel;
+		[self textAt:f14 text:t.text x:float(t.x) y:float(t.y) color:col];
+	}
+	for (const SetupCombo& c : _sc)
+		if (!c.label.empty()) [self textAt:f14 text:c.label x:float(c.lx) y:float(c.ly + 2) color:kLabel];
+	// The chat: the log above the input line
+	{
+		_ui.next_layer();
+		const IfaceRect chat{28, 558, 446, 622};
+		[self thinBox:chat fill:argb(110, 0, 0, 0)];
+		_ui.next_layer();
+		_mpLogRect = {36, 550, 450, 592};
+		_mpChatRect = {36, 550, 596, 618};
+		std::vector<std::pair<int, std::string>> shown;
+		for (const auto& ln : _mpLines)
+			for (const std::string& part : wrap_text(_ui, f12, ln.second, _mpLogRect.w())) shown.push_back({ln.first, part});
+		const int lh12 = _ui.font_metrics(f12) ? _ui.font_metrics(f12)->line_height : 14;
+		const int fit = std::max(1, _mpLogRect.h() / lh12);
+		int y = _mpLogRect.t;
+		for (size_t i = shown.size() > size_t(fit) ? shown.size() - size_t(fit) : 0; i < shown.size(); i++) {
+			[self textAt:f12 text:shown[i].second x:float(_mpLogRect.l) y:float(y) color:shown[i].first == 1 ? rgb(255, 224, 140) : kWhite];
+			y += lh12;
+		}
+		_ui.next_layer();
+		[self drawField:_mpChatRect text:_mpChat hint:"Press Tab or start typing to chat" focused:_mpField == 3];
+	}
+	// The room, on the rules panel under the combos
+	{
+		_ui.next_layer();
+		int y = _rulesBottom - 18;
+		const std::string line1 = host ? "Hosting on port " + std::to_string(_room ? _room->port() : 0) : "Joined " + (_room ? _room->address() : std::string());
+		[self textAt:f14 text:line1 x:592 y:float(y) color:kWhite];
+		y += lh;
+		if (host && _room) {
+			std::string addr;
+			for (const std::string& a : _room->lan_addresses()) addr += (addr.empty() ? "" : ", ") + a;
+			for (const std::string& part : wrap_text(_ui, f12, addr.empty() ? "No network address found." : "Others type: " + addr + ":" + std::to_string(_room->port()), 395)) {
+				[self textAt:f12 text:part x:592 y:float(y) color:kSecondary];
+				y += lh;
+			}
+		}
+		const int n = _room ? _room->humans() : 0;
+		[self textAt:f12 text:std::to_string(n) + (n == 1 ? " player in the room." : " players in the room.") x:592 y:float(y) color:kSecondary];
+		y += lh;
+		const BOOL fromSave = _mpSave || (_room && _room->lobby().has("from_save"));
+		if (fromSave) {
+			for (const std::string& part : wrap_text(_ui, f12, "Continuing a saved game" + (_mpSaveText.empty() ? std::string() : ": " + _mpSaveText) + ". The rules come from the save.", 395)) {
+				[self textAt:f12 text:part x:592 y:float(y) color:rgb(255, 224, 140)];
+				y += lh;
+			}
+		}
+		if (host) {
+			_mpLoadRect = {592, 808, 588, 620};
+			[self popupButton:_mpLoadRect label:_mpSave ? "Forget Saved Game" : "Load Saved Game..." state:(_pressed == kMpLoad ? 2 : _hover == kMpLoad ? 1 : 0) font:f12];
+		} else {
+			_mpLoadRect = {0, 0, 0, 0};
+		}
+	}
+	// Combos (closed state), then the open list on top
+	_ui.next_layer();
+	for (size_t i = 0; i < _sc.size(); i++) {
+		[self drawCombo:_sc[i] index:int(i)];
+		_ui.next_layer();
+	}
+	if (_openCombo >= 0 && size_t(_openCombo) < _sc.size()) [self drawOpenList];
+	else _setupListVis = 0;
+	_ui.next_window();
+	const int fb = _ui.font(14, -1);
+	[self popupButton:L.back label:"Leave" state:(_pressed == kBack ? 2 : _hover == kBack ? 1 : 0) font:fb];
+	const bool ready = _room && _room->ready_of(_room->slot());
+	const bool can = _room && _room->seat_humans(*std::make_unique<ron::sim::RandomGameSetup>(_setup)) && _room->guests_ready();
+	const char* label = host ? (can ? "Start Game" : (_room && _room->humans() < 2 ? "Waiting for players" : "Waiting for ready")) : (ready ? "Not Ready" : "Ready");
+	[self popupButton:L.play label:label state:(_pressed == kPlay ? 2 : _hover == kPlay ? 1 : 0) font:fb];
+}
+
+// The key handling of the lobby (the setup screen's keys for the open list, text for the chat).
+- (void)lobbyKey:(NSEvent*)e {
+	NSString* chars = e.charactersIgnoringModifiers;
+	const unichar c = chars.length ? [chars characterAtIndex:0] : 0;
+	const bool ret = c == '\r' || c == 3, esc = e.keyCode == 53, tab = e.keyCode == 48;
+	if (_openCombo >= 0) {
+		[self setupKey:e];
+		return;
+	}
+	if (_mpField == 3) {
+		if (ret) [self mpSend];
+		else if (esc) _mpField = -1;
+		else if (tab) _mpField = -1;
+		else [self editText:_mpChat event:e limit:200];
+		return;
+	}
+	if (esc) {
+		[self click];
+		[self mpLeave:nil];
+	} else if (ret) {
+		[self mpPlay];
+	} else if (tab) {
+		_mpField = 3;
+	} else {
+		std::string probe = _mpChat;
+		if ([self editText:probe event:e limit:200]) _mpChat = probe, _mpField = 3;  // typing opens the chat
+	}
+}
+
+- (void)mpDemoStart {
+	if (!_room) return;
+	for (int i = 0; i < 50 && !_room->guests_ready(); i++) {  // the demo guests ready up one by one
+		[self mpPump];
+		[NSThread sleepForTimeInterval:0.05];
+	}
+	[self mpPlay];
+	[NSThread sleepForTimeInterval:0.5];  // the guests' threads read START
+}
+
+- (BOOL)mpDemoPort:(int)port guests:(NSArray<NSString*>*)guests {
+	auto room = std::make_shared<mp::Room>();
+	std::string err;
+	if (!room->host(uint16_t(port), "Host", err)) {
+		std::fprintf(stderr, "demo room: %s\n", err.c_str());
+		return NO;
+	}
+	_room = room;
+	std::vector<std::string> names, lines;
+	for (NSString* g in guests) names.push_back(g.UTF8String);
+	lines = {"Hi all, ready when you are.", "Is the map big enough for four?", "Give me the Nile map."};
+	mp::spawn_demo_guests(uint16_t(port), names, lines, getenv("RON_MP_DEMO_START") ? 0b111 : 0b101);
+	[self showScreen:@"mp-lobby"];
+	for (int i = 0; i < 80; i++) {  // up to 4 s for the guests to come in and talk
+		[self mpPump];
+		if (_room->humans() > int(names.size()) && _mpLines.size() >= names.size() + 1) break;
+		[NSThread sleepForTimeInterval:0.05];
+	}
+	[NSThread sleepForTimeInterval:0.3];
+	[self mpPump];
+	return _room->humans() > 1;
 }
 
 // ---------------------------------------------------------------- Conquer the World (ctw_ui.h)

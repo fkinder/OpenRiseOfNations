@@ -1,0 +1,11 @@
+re/decomp/ctw2/misc_callers.txt
+1
+ConquestGame::clear_round_data
+ConquestGame::post_adjust_attitudes
+ConquestGame::assign_bonuses
+ConquestGame::attacked_player
+ConquestLeaders::adjust_attitudes
+ConquestLeaders::set_attitudes
+ConquestLeaders::set_stances
+ConquestGame::adjust_stances
+ConquestLeader::play_strategic_cards

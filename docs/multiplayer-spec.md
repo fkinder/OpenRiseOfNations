@@ -248,6 +248,7 @@ logging) and continue; else the OOS flow. With threshold 0 the first mismatch is
    `Game::run_oos_recovery` @5869e0: tear down the whole game (renderer, objects, leaders, script state), keep `save_name`,
    `TimeSync::sync`, `Game::run` again (loads the save, new `CommandManager::init`: **stamps restart at 1, frame continues**).
    The recorder opens a new `.rcx` that embeds the save (header.frame = frame of the save).
+4. **Port:** built, see §8.5.1 (authority vote, chunked snapshot, ready barrier, stamps from 1, new recording segment).
 
 ### 5.3 What the first mismatching sum means
 `check_strings[15]` (units, builds, walls, ammo, deaths, groups, guys, leaders, cities, items, goods, world, rules,
@@ -282,6 +283,8 @@ Logged per package: stamp, play, each CHECK_SUMS component, TURN_DATA fields, pa
   in slot order, `'P'` packages in clear. Differences from SP: no SP-style "empty turns skipped"; `play`/LOCAL flag identify
   the recorder (so two peers' files differ only in header player flags and name fields); stamps restart at 1 in each segment;
   the embedded save is present when the segment starts mid-game (45/59 corpus files); a crashed game leaves an uncompressed tail.
+- **Port:** the native-save variants of all four are built (§8.5): the OOS recovery chain with one recording segment per recovery, a live-session
+  recorder in the original's layout, a synchronized save at an agreed turn and a loaded game that the host hands to the re-joining peers.
 - **MP playback** (`use_mp_playback`, `check_mp_playback`/`set_mp_playback`, pref key): a recorded MP file can be fed to a live
   session: `send_local_package` reads each human's package from the record and broadcasts it as that player (`valid`
   semantics differ: expected senders are tested with HUMAN). Used for shared replay viewing 🟡; ❓ not traced further.
@@ -298,7 +301,8 @@ NETMSG_SPLINE (30); receivers show out-of-band chat only if they are not active 
 
 ## 8. The port: what was built (roadmap phase 8)
 
-✅ built and checked against the corpus as stated in §8.4. Files: `engine/sim/replay.{hpp,cpp}` (the `.rcx` reader and the package codec),
+✅ built and checked against the corpus as stated in §8.4. **Second pass (2026-10-24, §8.5): OOS recovery from the authority's snapshot, `.rcx` recording
+of a live session, the Multiplayer lobby and in-game session in `ronmap`, synchronized saves with re-joining.** Files: `engine/sim/replay.{hpp,cpp}` (the `.rcx` reader and the package codec),
 `engine/net/` (the lockstep layer and its transports), `apps/net/` (`ron-net`, the tests; `rcxcompare.mjs` checks the reader against
 `rcxdump.mjs`). The layer has no dependency on the engine's `Game`: it knows the verb table (`sim/replay.hpp`) and talks to the simulation
 through `SimHooks`.
@@ -312,7 +316,11 @@ through `SimHooks`.
 | `engine/net/tcp.{hpp,cpp}` | `TcpTransport`: plain sockets, a star (host = slot 0, clients get 1..n, the host relays client-to-client traffic; per-sender order is kept). Connection loss -> `take_timeout` (the host also tells the other clients) |
 | `engine/net/lobby.{hpp,cpp}` | `Lobby`: the host's key/value store mirrored to the peers (SET), ready flags, START (the whole table + the seed the host picked, key `game_seed`), a rendezvous barrier (`SyncPoint`). Game messages that arrive early are given back to the transport (`push_front`) |
 | `engine/net/game_link.{hpp,cpp}` | `GameHooks` (`SimHooks` over `sim::Game`: runs `CommandPackage::process`, `do_frame`, the 15 sums), `ExecPolicy`, `setup_to_lobby` / `lobby_to_setup` (the keys of §2.1 for `RandomGameSetup`) |
-| `apps/net/main.cpp` ... | `ron-net survey | timing | replay | selftest | host | join` |
+| `apps/net/main.cpp` ... | `ron-net survey | timing | replay | selftest | host | join | loopback` |
+| `engine/net/recovery.cpp` | the OOS recovery of `Session` (§8.5.1): authority vote, snapshot transfer, epoch gate, restart |
+| `engine/net/record.{hpp,cpp}` | `Recorder` / `RecordInfo`: the live-session `.rcx` writer (§8.5.2) |
+| `apps/net/{node,loopback_cmd,native_replay}.*` | `ron-net loopback`, `replay` of recordings of this port, `host` / `join --recover --record` |
+| `apps/map-mac/lobby.{h,mm}` | `mp::Room`, `mp::Runtime`, `mp::CommandSink`: the lobby network side and the in-game session of `ronmap` (§8.5.3) |
 
 `Session` (one per peer): `submit(cmds)` queues verbs into the local package (<= 512 bytes, room kept for the automatic ones), `start()` sends stamp 1,
 `step()` runs **at most one simulation tick** and returns `Advanced | Stalled(slot) | Desync | Ended | Error`; `pump()` is part of it.
@@ -360,8 +368,9 @@ them), 29 DROP_FLAG, 13 DROP_VOTE, 14 DROP_DECISION, 0x87 DSYNC (`i32 stamp`), a
    REPLACE_WITH_AI breaking ties; there is no 90 s timer because every peer votes automatically. Engine side (`GameHooks`, `ExecPolicy::player_exit`): REPLACE_WITH_AI clears
    `leaderflag::kHuman`; the other options and RESIGN / QUIT call `leader_defeat(who, 7 or 6)`. 🟡 DIPLOMACY / SURVIVAL do not reset teams and diplomacy yet; co-op seats sharing a leader are not modelled.
 3. ✅ A stamp gap is `Error`; duplicates are ignored (resends rely on it).
-4. 🟡 OOS: detection and the per-component report are built (`DesyncReport`: the 16 sums of every sender, the first of the 15 parts that differs; DSYNC broadcast; frozen
-   afterwards). **Recovery from the authority's snapshot is not built** (the native save could carry it: `save_game_bytes` / `load_game_bytes`; stamps would restart at 1).
+4. ✅ OOS: detection and the per-component report (`DesyncReport`: the 16 sums of every sender, the first of the 15 parts that differs; DSYNC broadcast) and, with
+   `SessionConfig::recover`, the recovery of §8.5.1 (authority snapshot through the transport, every peer reloads, stamps restart at 1). Without `recover` a desync still freezes
+   the session (`StepKind::Desync`), which is what `ron-net replay` and the old tests use.
 5. ✅ Observers: they send nothing, nobody waits for them, they execute every package; a FIFO never fills for them (packages of non-expected slots are not queued).
 6. ✅ Lobby = port-defined key/value set mirroring §2.1 (`map_style map_size game_seed gamerules gamespeed pop_limit tech_cost rush_rules reveal_map victory elimination
    score_goal time_limit wonderwin popwin econwin starting_town starting_resources starting_technology ending_technology randomize_starts no_tribe_powers num_nations`, per slot
@@ -396,12 +405,102 @@ delivery delays up to 25 ms; two processes over TCP end 600 / 1500 / 6000 frames
 4. ✅ **Resign**: the 6 RESIGN endings of the corpus run through criterion 1 (the leaver leaves the expected set); `selftest` keeps playing with the survivors: equal sums, nothing queues up for the leaver.
 5. ✅ **Drop**: for each of the 4 options, random victim, random turn and a broadcast cut at a random link (`kill_after_sends`), 3-4 peers: the survivors apply the same drop at the same boundary and keep equal sums
    (30/30 per option in 10 seeds). On real sockets: three `ron-net` processes, one killed with `kill -9`: the two survivors apply REPLACE_WITH_AI at the same turn and end 20,000 frames with identical saves.
-6. 🟡 **OOS**: flipping one bit of one instance makes every peer report within 2 turns (threshold 0) / `threshold + 2` (tested with 3); the simulation stays frozen. Recovery (reload from the authority) not built.
+6. ✅ **OOS**: flipping one bit of one instance makes every peer report within 2 turns (threshold 0) / `threshold + 2` (tested with 3); the simulation stays frozen without `recover`.
+   With `recover`: 7 toy cases (2-4 peers, divergent peer = guest / host / the majority's minority, 300 KB snapshots, an observer), two recoveries in a row and two authority deaths
+   (mid-transfer, before sending) all end with equal sums; two engine instances repair a divergence injected at frame 150 and end with identical native saves (§8.5.1).
 7. ❓ **Cross-platform soak** (x86-64 against arm64): not run.
 
 `ron-net host <port> --random STYLE,SIZE,SEED,NATIONS [--humans N] [--frames N] [--save F]` / `ron-net join <port>`: the host's lobby fixes the setup and the seed, every process builds the same
 `new_random_game`, a small bot plays each seat (so there are commands), the game stops at frame N and the processes write their native save: two processes, 600 frames, 100 turns, 80 commands:
 about 1.8 MB each, byte-identical. `--scenario FILE --seed S` starts the same scenario instead (tested with the first tutorial).
+
+### 8.5 Second pass: recovery, recording, lobby and in-game session, saves (2026-10-24)
+
+Files added: `engine/net/recovery.cpp` (the recovery half of `Session`), `engine/net/record.{hpp,cpp}` (the `.rcx` writer), `apps/net/{node,loopback_cmd,native_replay}.*` and
+`apps/net/demobot.hpp` (test harness), `apps/map-mac/lobby.{h,mm}` (the room and the runtime of `ronmap`), the lobby screens of `frontend.mm`. Changed: `lockstep.*` (recovery, epoch
+gate, synchronized save, pause / speed callbacks, DSYNC no longer freezes at once), `game_link.*` (restore, frame wrapper, `game_over`), `tcp.*` (lobby mode, host names), `lobby.*`
+(names, ready flags in the table, chat, snapshot for late joiners, file transfer), `sim/replay.*` (the native embedded save). `engine/sim` otherwise untouched.
+
+#### 8.5.1 OOS recovery (`SessionConfig::recover`)
+
+1. **Freeze on the same row.** A peer acts on another peer's DSYNC only at the end of the boundary that reaches its stamp (`end_turn`, as the original's `end_process`), not
+   at once. Every peer therefore freezes on the *same* row of check sums (the packages it executed carry all of them), after the packages and before the frame step.
+2. **Authority** (`Session::pick_authority`, a pure function of that row): the lowest slot when at most two senders took part (the host), else the sender whose `all` sum agrees with
+   the most others, lowest slot on a tie. No message is needed to agree on it.
+3. **Transfer** (`SyncFile`-like): the authority takes `SimHooks::snapshot` (the native save of the game: `GameHooks::snapshot` = `save_game_bytes`), zlib-compresses it and sends
+   `RecBegin` (epoch, raw / compressed size, CRC-32 of the raw bytes, chunk count and size, frame) and `RecData` chunks (16,000 bytes) to every other peer, observers included.
+   A peer assembles, inflates, verifies the CRC and calls `SimHooks::restore` (`load_game_bytes`; the application swaps its `Game`). **The authority reloads its own snapshot too**,
+   so all instances restart from the same bytes (the live state of a game is not guaranteed to equal what its save rebuilds).
+4. **Epoch gate.** After its restore a peer broadcasts `RecReady(epoch)` (also to itself). Everything a peer sent before its RecReady belongs to the old epoch (per-sender order):
+   packages, DSYNC and the drop agreement are dropped while this peer recovers and has not seen that sender's RecReady. When every peer's RecReady is in, `Session` restarts:
+   stamps from 1 (`local_stamp`, `last_accepted`, FIFOs, `hist`), `turn_length` from its initial value, `fail_count` 0, drop controls reset (a peer that died meanwhile is given up on
+   again), `step()` returns `Recovered` once (callers reset what they count per stamp: `Session::epoch()` changes), the frame goes on. Pause state, speed, flags and `boundaries()` are kept.
+5. **The authority dies in transit.** A peer that lacks the snapshot broadcasts `RecNeed`; any peer that already loaded it answers (answered as soon as it has loaded it when it asks early).
+   Only if nobody answers within 300 ms of the transport clock does the next candidate of the same report take a fresh snapshot (nobody holds the old one then).
+6. **Messages** 0xB0 `RecBegin`, 0xB1 `RecData`, 0xB2 `RecReady`, 0xB3 `RecNeed`; callbacks `on_desync(report, authority)`, `on_recover(snapshot, frame, epoch)`.
+
+Differences from the original: the snapshot is the authority's state at the freeze row (the original saves its game when `process_turn` reaches `recover_from_oos`, same place), a CRC-checked
+chunk stream instead of NETMSG 17-21, no popup (`StepKind::Recovering` / `Recovered` and the callbacks let the front end say what is happening), and branch B of the popup ("continue
+alone") is not offered. The original diverges again soon after loading its own saves (§5.4); the port's loop round-trips bit for bit (`ron-net selftest`: the instances agree after 80+ turns).
+
+#### 8.5.2 Recording a live session (`net::Recorder`)
+
+`Session::on_package` (frame, slot, stamp, wire commands) feeds `Recorder::package`. The file is the original's layout (`replay-spec.md` §1-§8): the header written by `RecordGame`
+(`Game` 0x16, `GameInfo` 0x42 with the version string `(Version: 00.2024.06.2000)`, seed, checksum window 256, flags 0x121, the 30 setup bytes from the `RandomGameSetup`, 8 `Player` records
+with the 0x39-byte raw part, `Game[0x550,0x6e4)` with frame / tick / player count, semaphore `0x0c` = multiplayer + recording, `save_name`), then the embedded save when the segment starts from one,
+the random-game info (`team`, tribe per seat, `world+30` = map style) and, without a save, the exact rules block (`sim::write_image` of the game's rules, 1,024,221 bytes), then one record per
+package: `i32 frame, i32 play, i32 valid (1), u32 stamp, i16 size`, the payload with the MP XOR and the 0-1 padding bytes per command from the seed (`replay_obfuscate`); the clear-text `'P'` drop
+package (stamp 0) is written in the clear as `DropControl::process_drops` does. The file is plain while the game runs and gzipped when it closes (a crash leaves the plain file with a short
+last record, which both readers report as truncated).
+
+Port extensions inside that layout: (a) the embedded save of a native game is `String "RoNNativeSave"`, `u32` save version, `u32` length, the native save bytes (the original's saves carry no
+length; `read_replay` takes the exact end, `rcxdump.mjs` scans for it as for any save and finds the same stream: `rcxcompare.mjs` reports identical packages, commands, fingerprints on the
+recordings); (b) the header's `scenario_path` of a random game holds the setup text (`random_setup_string`), the slot a native save uses, so `ron-net replay` rebuilds the game without lobby
+data. A recovery closes the segment and opens `<name>_2.rcx` with the snapshot embedded (`header.frame` = the frame of the snapshot), the chain of `docs/oracle-corpus.md` (each segment
+starts at stamp 1). Segment 1 ends at the freeze row, exactly as 45 of the corpus' 46 segments end at their first mismatching turn.
+
+`ron-net replay <file.rcx>` recognises these files (embedded `RoNNativeSave`, or a random setup in the header): one engine instance per human, each fed only its own player's packages, the instances must
+agree at every turn, and `--save F` writes the final native save. Test: record a loopback game, replay each recording, compare final native saves byte for byte (§8.5.5).
+
+#### 8.5.3 The Multiplayer lobby and the in-game session of `ronmap`
+
+`mp::Room` (a `TcpTransport` in lobby mode: the host listens, guests are accepted whenever the transport is pumped and take the lowest free slot; `Lobby` mirrors names, ready flags and the
+setup to every peer and sends the whole table to a peer that arrives late; chat). The Multiplayer screens (`ui-port.md` §10.3) set the game up; `Lobby::start(seed)` carries the host's seed; each
+machine builds the same random game (`new_random_game`), joins a barrier (`SyncPoint`), and `mp::Runtime` builds `GameHooks` + `Session` (recovery on, 20 s silence = a drop).
+`mp::CommandSink` replaces the local `CommandManager`: `process_turn` hands what `issue_*` queued to the session as one batch (GROUP + verb stay together) instead of executing it; commands run
+one turn later, on every machine, in slot order. Pause (`P`, the bar button), speed (`-` / `=`: SPEED_DOWN / UP) and Resign (game menu) are lockstep commands; the HUD's pause and speed words follow the
+session. Pause / resume / speed / resign / drop / out-of-sync / recovered / save messages come from the session callbacks and show as game messages; a late peer shows "Waiting for X..." and a recovery
+"repairing it from another player's game...". A game that ends on a connection error returns to the menu after 5 s. Every game is recorded to `~/Library/Application Support/OpenRiseOfNations/
+Recorded Games/Multi/<date>.rcx`.
+
+Headless (`ronmap`): `--host PORT --humans N --random STYLE,SIZE,SEED,NATIONS [...]` and `--join HOST:PORT`, with `--frames N --snapshot f.png --save-game f`; the game runs to the first turn
+boundary at or after frame N (or the end of the game). Test hooks: `--mp-bot` (a demo player), `--mp-record FILE`, `--mp-diverge FRAME` (corrupt this machine's state), `--mp-act pause|resume|faster|slower|resign|save@TURN,...`,
+`--mp-save FILE` (where the synchronized save goes), `--mp-load FILE` (host: continue a saved game).
+
+#### 8.5.4 Synchronized save and re-joining (spec §6, "if time allows")
+
+`Session::request_save()` broadcasts `kSaveAt (0x93, boundary)`; every peer snapshots its state at the *start* of that boundary (identical on all peers) and `on_save` writes its own file: the copies are
+byte-identical (tested). A saved game of a random map continues from the lobby: the host picks the file (**Load Saved Game...**, or `--mp-load`), the table carries `from_save`, the host sends the file
+through `Lobby::send_file` (zlib chunks, CRC) before START, every machine builds the saved game's map from its setup text and loads the save (`load_game_bytes`), stamps start at 1 and the recording begins with the save
+embedded. The connected peers must sit in exactly the seats that were human in the save (slots are assigned lowest-free, so rejoining in the same order gives the same seats); the lobby says so when they do not.
+
+#### 8.5.5 Results (scratch build with the `build-mac.sh` flags, zero warnings)
+
+- `ron-net selftest`: **38 / 38** (23 old + 7 recovery cases, two recoveries in one game, 2 authority deaths, the engine part: 2 instances with a divergence injected at frame 150 repaired and identical,
+  segment chain written by both, last segment of each replays to the live final native save byte for byte, the second segment starts where the first stopped; 3 instances without recovery, the
+  recording of one replays to the final state); seeds 1..12 pass the toy part. `ron-net replay` on the 45 save-based corpus replays: **45 / 45** instances agree at every turn and end identical (the
+  other 14 have no embedded save, `ron-net timing` covers them). `ron-check` 0 failures; `sim-all` unchanged.
+- Real sockets (`ron-net host / join --recover --record`): three processes, one corrupted at frame 150: majority vote picks slot 0 (slots 0 and 2 agree), all three end with identical native saves.
+- `ronmap` LAN, two processes: `--host` / `--join` 300 frames with demo players: identical saves, the host's recording replays to the same save; with a divergence at frame 150: recovered at frame 157, identical
+  saves, both segments replay; three processes with pause / resume / faster / resign: identical saves; a synchronized save at turn 29: identical files; the host's file continued by two processes to frame 405:
+  identical saves and the recording (embedded save) replays to the same save.
+- Snapshots read: `re/previews/mp_connect.png`, `mp_lobby.png`, `mp_game_3p_messages.png`, `mp_game_recovered.png`.
+
+#### 8.5.6 Left
+
+Chat during a game (the CHAT verb executes; nothing sends it), a lobby choice of colours / handicaps / observers, a join by browsing the LAN (addresses are typed), NAT traversal, saved scenario games and
+Conquer the World battles (random maps only), per-peer `Player` colours, the x86-64 / arm64 soak (§8.4.7), the original-client interoperability (none by design), a recording of a game that *joined* a running one
+(none: the room closes at START), and the diplomacy / team reset of the DIPLOMACY and SURVIVAL drops.
 
 ## Evidence
 
@@ -438,4 +537,5 @@ about 1.8 MB each, byte-identical. `--scenario FILE --seed S` starts the same sc
 11. MP playback feature (live replay sharing) not traced beyond `send_local_package`.
 12. The 15 per-component sums as a function of the engine state: see state-spec §6 / oracle-corpus (not multiplayer-specific).
 13. (port) The pause quota: whether `Player.pauses` counts used or remaining pauses, and whether a second PAUSE(1) while paused counts. The layer accepts every recorded pause (`max_pauses` 0 = unlimited) and sets the flag from `state`.
-14. (port) The OOS recovery path (§8.2.4) and `.rcx` recording of a live session (the `on_package` callback is the hook) are not built.
+14. (port, answered 2026-10-24) The OOS recovery path and `.rcx` recording of a live session are built (§8.5). Still open: whether the original's recovery save is the
+    authority's state at the freeze row (the port's) or one frame later; the per-peer chat in a running game (CHAT verb 68 executes, nothing in `ronmap` sends it).

@@ -1,0 +1,8 @@
+re/decomp/fidelity2
+Unit::think
+Unit::check_idle
+Unit::think_spellcaster
+Unit::think_fish
+Unit::think_farm
+Unit::think_combat
+Unit::think_peasant

@@ -1,0 +1,7 @@
+re/decomp/ctw2/numcards_readers.txt
+0x68f[6-9a-f]\]
+0x690[0-9a-f]\]
+0x691[0-9a-b]\]
+0xe40c(8[6-9a-f]|9[0-9a-f]|a[0-9a-f])
+0xe40cb
+0xe40cc

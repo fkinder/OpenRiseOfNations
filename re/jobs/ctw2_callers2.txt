@@ -1,0 +1,7 @@
+re/decomp/ctw2/nuke_callers.txt
+2
+ConquestGame::shall_we_play_a_game
+ConquestGame::the_only_move_is_not_to_play
+ConquestGame::can_target_nuke
+ConquestLeader::buy_nuke
+ConquestLeader::can_buy_nuke

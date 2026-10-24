@@ -2,6 +2,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <netdb.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -90,6 +91,87 @@ std::unique_ptr<TcpTransport> TcpTransport::host(uint16_t port, int clients, int
 	return t;
 }
 
+std::unique_ptr<TcpTransport> TcpTransport::host_open(uint16_t port, std::string& error) {
+	std::unique_ptr<TcpTransport> t(new TcpTransport());
+	t->me_ = 0;
+	t->open_ = true;
+	t->total_ = kMaxSlots;
+	t->gone_.assign(size_t(kMaxSlots), true);
+	t->gone_[0] = false;
+	t->listen_fd_ = socket(AF_INET, SOCK_STREAM, 0);
+	if (t->listen_fd_ < 0) {
+		error = "socket failed";
+		return nullptr;
+	}
+	int one = 1;
+	setsockopt(t->listen_fd_, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+	sockaddr_in a{};
+	a.sin_family = AF_INET;
+	a.sin_addr.s_addr = htonl(INADDR_ANY);
+	a.sin_port = htons(port);
+	if (bind(t->listen_fd_, reinterpret_cast<sockaddr*>(&a), sizeof a) != 0 || listen(t->listen_fd_, 8) != 0) {
+		error = std::string("cannot listen on port ") + std::to_string(port) + ": " + std::strerror(errno);
+		return nullptr;
+	}
+	set_nonblocking(t->listen_fd_);
+	return t;
+}
+
+uint32_t TcpTransport::present_mask() const {
+	uint32_t m = 1u << me_;
+	if (me_ == 0) {
+		for (const Conn& c : conns_)
+			if (c.alive) m |= 1u << c.slot;
+	} else {
+		for (int i = 0; i < total_ && i < kMaxSlots; ++i)
+			if (!(size_t(i) < gone_.size() && gone_[size_t(i)])) m |= 1u << i;
+	}
+	return m;
+}
+
+void TcpTransport::close_door() {
+	open_ = false;
+	if (listen_fd_ >= 0) close(listen_fd_);
+	listen_fd_ = -1;
+}
+
+void TcpTransport::accept_new() {
+	if (!open_ || listen_fd_ < 0) return;
+	for (;;) {
+		const int fd = accept(listen_fd_, nullptr, nullptr);
+		if (fd < 0) return;
+		int slot = -1;
+		for (int s = 1; s < kMaxSlots && slot < 0; ++s) {
+			bool used = false;
+			for (const Conn& c : conns_) used = used || (c.alive && c.slot == s);
+			if (!used) slot = s;
+		}
+		if (slot < 0) {  // full
+			close(fd);
+			continue;
+		}
+		tune(fd);
+		set_nonblocking(fd);
+		Conn* mine = nullptr;
+		for (Conn& c : conns_)
+			if (!c.alive && c.slot == slot) mine = &c;
+		if (!mine) {
+			conns_.emplace_back();
+			mine = &conns_.back();
+		}
+		*mine = Conn();
+		mine->fd = fd;
+		mine->slot = slot;
+		mine->alive = true;
+		gone_[size_t(slot)] = false;
+		const uint8_t s8 = uint8_t(slot);
+		for (Conn& o : conns_)
+			if (o.alive && &o != mine) write_frame(o, 3, 0, uint8_t(o.slot), &s8, 1);
+		const uint8_t w[3] = {uint8_t(slot), uint8_t(total_), uint8_t(present_mask())};
+		write_frame(*mine, 1, 0, uint8_t(slot), w, 3);
+	}
+}
+
 std::unique_ptr<TcpTransport> TcpTransport::join(const std::string& address, uint16_t port, int timeout_ms, std::string& error) {
 	std::unique_ptr<TcpTransport> t(new TcpTransport());
 	const uint64_t deadline = steady_ms() + uint64_t(timeout_ms);
@@ -100,9 +182,17 @@ std::unique_ptr<TcpTransport> TcpTransport::join(const std::string& address, uin
 		a.sin_family = AF_INET;
 		a.sin_port = htons(port);
 		if (inet_pton(AF_INET, address.c_str(), &a.sin_addr) != 1) {
-			error = "bad address " + address + " (an IPv4 address is expected)";
-			close(fd);
-			return nullptr;
+			// a host name ("localhost", "my-mac.local"): the first IPv4 address it resolves to
+			addrinfo hints{}, *res = nullptr;
+			hints.ai_family = AF_INET;
+			hints.ai_socktype = SOCK_STREAM;
+			if (getaddrinfo(address.c_str(), nullptr, &hints, &res) != 0 || !res) {
+				error = "cannot find the host \"" + address + "\"";
+				close(fd);
+				return nullptr;
+			}
+			a.sin_addr = reinterpret_cast<sockaddr_in*>(res->ai_addr)->sin_addr;
+			freeaddrinfo(res);
 		}
 		if (connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0) break;
 		close(fd);
@@ -225,7 +315,7 @@ bool TcpTransport::read_conn(Conn& c) {
 	while (c.in.size() - p >= 4) {
 		uint32_t len;
 		std::memcpy(&len, c.in.data() + p, 4);
-		if (len < 3 || len > 4096) {
+		if (len < 3 || len > (1u << 17)) {
 			lost(c);
 			break;
 		}
@@ -239,10 +329,16 @@ bool TcpTransport::read_conn(Conn& c) {
 }
 
 void TcpTransport::handle_frame(Conn& from, uint8_t kind, uint8_t src, uint8_t dst, const uint8_t* p, size_t n) {
-	if (kind == 1 && me_ < 0 && n == 2) {  // welcome
+	if (kind == 1 && me_ < 0 && (n == 2 || n == 3)) {  // welcome
 		me_ = p[0];
 		total_ = p[1];
 		gone_.assign(size_t(total_), false);
+		if (n == 3)
+			for (int i = 0; i < total_; ++i) gone_[size_t(i)] = i < 8 && !((p[2] >> i) & 1);
+		return;
+	}
+	if (kind == 3 && n == 1) {  // peer joined (lobby)
+		if (p[0] < total_ && p[0] < int(gone_.size())) gone_[p[0]] = false;
 		return;
 	}
 	if (kind == 2 && n == 1) {  // peer gone
@@ -267,7 +363,9 @@ void TcpTransport::handle_frame(Conn& from, uint8_t kind, uint8_t src, uint8_t d
 }
 
 void TcpTransport::pump_io() {
-	for (Conn& c : conns_) {
+	accept_new();
+	for (size_t i = 0; i < conns_.size(); ++i) {
+		Conn& c = conns_[i];
 		if (!c.alive) continue;
 		flush_conn(c);
 		read_conn(c);
@@ -276,6 +374,7 @@ void TcpTransport::pump_io() {
 
 void TcpTransport::idle(int ms) {
 	std::vector<pollfd> fds;
+	if (open_ && listen_fd_ >= 0) fds.push_back({listen_fd_, POLLIN, 0});
 	for (const Conn& c : conns_)
 		if (c.alive) fds.push_back({c.fd, short(POLLIN | (c.out.empty() ? 0 : POLLOUT)), 0});
 	if (fds.empty()) {

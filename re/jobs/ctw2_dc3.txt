@@ -1,0 +1,6 @@
+re/decomp/ctw2
+ScenarioFuncSet::get_conquest_invasion_dir
+ScenarioFuncSet::ctw_reinforcements_arrived
+ConquestGame::map_to_wcoord
+find_angle
+angle_to_degrees

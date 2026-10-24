@@ -89,6 +89,8 @@
 #include "render/lighting.hpp"
 #include "render/renderstate.hpp"
 #include "render/terrain_mesh.hpp"
+#include "sim/ai.hpp"
+#include "sim/combat.hpp"
 #include "sim/anim_assets.hpp"
 #include "sim/commands.hpp"
 #include "sim/game.hpp"
@@ -100,6 +102,7 @@
 #include "sim/rules_xml.hpp"
 #include "sim/save.hpp"
 #include "sim/script_host.hpp"
+#include "sim/trig.hpp"
 #include "sim/view.hpp"
 #include "assets/cursors.hpp"
 #include "assets/iface_layout.hpp"
@@ -109,6 +112,8 @@
 #include "notices.hpp"
 #include "script_view.hpp"
 #include "tips.hpp"
+#include "hotkeys.hpp"
+#include "uistr.hpp"
 #include "assets/strings.hpp"
 #include "sim/capture.hpp"
 #include "audio.hpp"
@@ -356,8 +361,10 @@ static const char* const kCharNames[] = {
 	"CHAR_SOW", "CHAR_REAP", "CHAR_FARM"};
 constexpr int kNumCharNames = int(sizeof kCharNames / sizeof kCharNames[0]);
 
-// Wall-clock length of one simulation frame at the normal game speed (timings[2], docs/frame-spec.md section 1).
-constexpr double kSimFrameMs = 67.0;
+// Wall-clock length of one simulation frame per game speed (TurnControl timings[speed] @afc4a4, docs/frame-spec.md section 1):
+// Very Slow, Slow, Normal, Fast, Hyper Fast. The speed is presentation (the simulation does not read it).
+constexpr double kTimings[5] = {200.0, 125.0, 67.0, 50.0, 1.0};
+constexpr double kSimFrameMs = 67.0;  // the normal speed
 
 // One simulated figure as drawn this display frame (interpolated between the last two simulation frames).
 struct SimFigure {
@@ -468,6 +475,9 @@ static bool debug_skip(const char* pass) {
 // Harness: the mouse at UI pixel (x, y) with the mouse-over help shown at once; the resource panel flags; the streamlined
 // interface; the help detail; a key by its KeyMap string ("Ctrl+Shift+F").
 - (void)setHoverX:(float)x y:(float)y;
+- (void)setGameSpeed:(int)speed;
+- (void)setProgressButtons:(BOOL)on;
+- (void)mouseEvent:(const std::string&)kind x:(float)x y:(float)y;
 - (void)setPanels:(int)flags streamlined:(BOOL)streamlined help:(int)level;
 - (void)runKeyString:(const std::string&)keys;
 // Leaving the game from the game menu or the game-over screen: quit = NO returns to the Main Menu. Nil: Quit only.
@@ -485,6 +495,11 @@ static bool debug_skip(const char* pass) {
 - (BOOL)loadGameFrom:(NSString*)path;
 - (BOOL)quickSave;
 - (BOOL)quickLoad;
+// Multiplayer (lobby.h): this game is one machine of a lockstep session. Headless: runs it to a turn boundary at or after `frames`.
+- (void)attachMultiplayer:(std::shared_ptr<mp::Runtime>)rt loaded:(std::shared_ptr<std::vector<uint8_t>>)save;  // `save`: the game continues a saved one
+@property(nonatomic, readonly) BOOL multiplayer;
+- (BOOL)mpRunHeadless:(int)frames;
+- (void)mpClose;  // headless: waits for the other machines, then ends the session (closes the recording)
 @end
 
 // ---- HUD data adapter: the console player's numbers for the resource panel and the top strip, from the production view
@@ -620,7 +635,10 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	                                              ron::sim::RandomExtras*, std::string*)> _ctwBuild;  // a Conquer the World battle
 	int _ctwOutcome, _ctwEndFrames;
 	std::unordered_map<int32_t, int> _pieceGraphic;    // gpiece -> unit graphic (-1: unknown)
-	ron::sim::CommandManager _cm;
+	mp::CommandSink _cm;                 // the local player's commands: executed here, or sent through the multiplayer session (lobby.h)
+	std::shared_ptr<mp::Runtime> _mp;    // a multiplayer game's lockstep session (null in a single-player game)
+	BOOL _mpEnded;
+	int32_t _mpFrame;
 	ron::sim::GameView _prevView, _curView;
 	std::unordered_map<int64_t, size_t> _prevIndex;  // sim_key(who, o) -> index in _prevView.units
 	std::map<std::pair<int, int>, int> _scenarioGraphic;  // (who, o) -> unit graphic from the scenario resolution
@@ -671,14 +689,8 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	BOOL _ghostValid;
 	float _ghostX, _ghostY;
 	int32_t _ghostBlocked;
-	// Control groups: seat-local until the simulation has the HOTKEY command (TODO(hotkey): replay-spec #34).
-	struct ControlGroup {
-		std::vector<std::pair<int32_t, int32_t>> units, builds;
-		bool bookmark = false;
-		simd_float3 at{};
-		int zoom = 5;
-	};
-	ControlGroup _groups[10];
+	// Control groups through the command layer (hotkeys.hpp: the HOTKEY record of replay-spec verb 34).
+	hotkeys::Groups _hotkeys;
 	int _lastGroupKey;
 	double _lastGroupMs;
 	float _magnify;
@@ -724,6 +736,16 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	int _verbosity;       // player_profile.prefs.verbosity: help detail 1..3 (default 2)
 	id<MTLTexture> _miniTerr;
 	int _terrFrame;       // game frame of the last territory texture update
+	int _profile[5];             // the preferences last written (panel flags, mini library, help detail, progress buttons, speed)
+	std::string _cardMessage;    // IFaceMarket's text over the card (a Market without the right to trade)
+	int _flashMask, _flashTick;  // Console::flash_resource_flags / _stamp (graphic ticks): the rows that turn red
+	int _speed;                  // TurnControl speed: 0 Very Slow .. 4 Hyper Fast (default 2 Normal)
+	BOOL _progressButtons;       // pref 0x40: one button per production in progress
+	// Formation drag (Console::on_right_up, ui-spec 4.1): a right drag with own units selected moves them to the press point
+	// facing the drag direction in the chosen formation and spacing; a left press cycles the formation, the wheel the spacing.
+	BOOL _formDrag;
+	simd_float2 _formStart, _formEnd;  // world points: the press and the cursor
+	int _formForm, _formWidth;
 	std::vector<ron::ColorVertex> _miniRiverTris, _miniMountainTris;  // the minimap background's feature overlays
 }
 
@@ -775,7 +797,9 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		std::unique_ptr<ron::sim::Game> randomGame;
 		if (_randomActive) {
 			// Setup::build_game for a random map: the game first, then the scenario-shaped records the renderer draws from.
-			_simRules = std::make_unique<ron::sim::Rules>(ron::sim::load_rules(files));
+			ron::sim::LoadOptions lopts;
+			lopts.lang_suffix = uistr::suffix();
+			_simRules = std::make_unique<ron::sim::Rules>(ron::sim::load_rules(files, lopts));
 			ron::sim::start_game(*_simRules, ron::sim::GameSetup());
 			_art = ron::sim::load_anim_source(files, *_simRules);
 			if (!_randomSpec.empty()) {
@@ -912,7 +936,9 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 				if (randomGame) {
 					_game = std::move(randomGame);  // built above, scripts included
 				} else {
-					_simRules = std::make_unique<ron::sim::Rules>(ron::sim::load_rules(files));
+					ron::sim::LoadOptions lopts;
+					lopts.lang_suffix = uistr::suffix();
+					_simRules = std::make_unique<ron::sim::Rules>(ron::sim::load_rules(files, lopts));
 					ron::sim::start_game(*_simRules, ron::sim::GameSetup());
 					_art = ron::sim::load_anim_source(files, *_simRules);
 					_game = std::make_unique<ron::sim::Game>();
@@ -1035,7 +1061,8 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		if (!_hudOn) std::fprintf(stderr, "interface unavailable: %s\n", uerr.c_str());
 		_sviewOn = _hudOn && _sview.init(*_files, *_layout, uerr);
 		_uiReady = _hudOn;
-		_tables = std::make_unique<ron::StringTables>(*_files, ron::Language::English);
+		_tables = std::make_unique<ron::StringTables>(*_files, uistr::language());
+		uistr::use(_tables.get());
 		_notifier.init(_tables.get());
 		std::string herr;
 		_helpOn = _hudOn && _help.init(*_files, herr);
@@ -1048,6 +1075,8 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	[self syncSimBuildings];
 	_headless = YES;
 	_hiliteOverride = -1;
+	_speed = 2;
+	_flashTick = -1000;
 	_keys.fill(0);
 	if (_game) {
 		if (ron::sim::ScriptInput* in = ron::sim::script_input(*_game)) {
@@ -1350,12 +1379,17 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 // (docs/frame-spec.md section 2). The renderer only reads the views.
 - (void)stepSimulation:(int)frames {
 	if (!_game) return;
+	if (_mp) {  // a multiplayer game: the session decides when a frame runs
+		[self mpStep:frames];
+		return;
+	}
 	for (int i = 0; i < frames; i++) {
 		if (_headless) {
-			_timeMs += kSimFrameMs;  // the virtual clock: graphic ticks advance with the frames
+			_timeMs += kSimFrameMs;  // the virtual clock: graphic ticks advance with the frames (66 ms, whatever the speed)
 			[self cameraStep:kSimFrameMs];
 		}
 		_cm.process_turn(*_game);
+		_hotkeys.process();
 		[self fillScriptInput];
 		_game->do_frame();
 		[self consumeScript];
@@ -1365,6 +1399,174 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		[self notifyFrame];
 	}
 	if (frames > 0) [self syncSimBuildings];
+}
+
+// ---------------------------------------------------------------- multiplayer (lobby.h)
+
+- (BOOL)multiplayer {
+	return _mp != nullptr;
+}
+
+// The pause key: alone it flips the flag; in a multiplayer game it is a PAUSE command every machine runs at the same turn.
+- (void)togglePause {
+	if (_mp) _mp->toggle_pause();
+	else _paused = !_paused;
+}
+
+// This game is one machine of a lockstep session: the local seat, the session's frame wrapper and its answer to an out-of-sync repair.
+- (void)attachMultiplayer:(std::shared_ptr<mp::Runtime>)rt loaded:(std::shared_ptr<std::vector<uint8_t>>)save {
+	_mp = rt;
+	_mpEnded = NO;
+	if (!_game) return;
+	const int slot = rt->slot();
+	_game->local_play = slot;
+	_cm.net = rt.get();
+	_cm.play = slot, _cm.play_who = slot;
+	if (save) {  // a continued game: the saved state replaces the fresh one (same scenario: the terrain the renderer built stays)
+		std::string err;
+		if (![self mpRestore:*save error:err]) {
+			std::fprintf(stderr, "multiplayer: cannot continue the saved game: %s\n", err.c_str());
+			_mpEnded = YES;
+			return;
+		}
+	}
+	// the camera starts on this player's own seat
+	const ron::sim::ObjectList& ol = _game->objects[size_t(slot & 7)];
+	for (int o = 0; o < ol.unit_mark && o < int(ol.units.size()); o++) {
+		const ron::sim::Unit* u = ol.units[size_t(o)].get();
+		if (u && u->alive()) {
+			_lookAt = simd_make_float3(float(u->x), float(u->y), 0);
+			break;
+		}
+	}
+	_mpFrame = _game->frame;
+	__unsafe_unretained MapRenderer* me = self;
+	rt->before_frame = [me]() { [me fillScriptInput]; };
+	rt->after_frame = [me]() { [me consumeScript]; };
+	rt->log = [me](const std::string& text) { [me say:text]; };
+	rt->restore = [me](const ron::net::Bytes& snap, std::string& err) { return [me mpRestore:snap error:err] == YES; };
+	rt->attach([me]() -> ron::sim::Game& { return *me->_game; }, ron::sim::scenario_rel_path(*_files, _scenarioPath), _simSeed, _randomSetup, _speed, save.get());
+}
+
+// An out-of-sync repair: the authority's snapshot becomes this machine's game.
+- (BOOL)mpRestore:(const std::vector<uint8_t>&)snap error:(std::string&)err {
+	if (!_simRules || !_mp) return NO;
+	try {
+		ron::sim::SaveInfo info;
+		std::unique_ptr<ron::sim::Game> g = ron::sim::load_game_bytes(*_files, *_simRules, _art.get(), snap, &info);
+		if (!g) return NO;
+		_game = std::move(g);
+		_game->local_play = _mp->slot();
+		_cm.play = _mp->slot(), _cm.play_who = _mp->slot();
+		if (ron::net::GameHooks* h = _mp->hooks()) h->rebind(*_game);
+		[self afterGameReplaced];
+		_mpFrame = _game->frame;
+		return YES;
+	} catch (const std::exception& e) {
+		err = e.what();
+		return NO;
+	}
+}
+
+// One session step: 1 a tick ran, 0 nothing to do yet (the game waits), 2 recovered, -1 the session ended.
+- (int)mpStepOnce:(bool*)turn {
+	*turn = false;
+	if (!_game || !_mp || _mpEnded) return -1;
+	const mp::Runtime::Tick t = _mp->step(*turn);
+	_speed = _mp->speed();
+	_paused = _mp->paused();
+	switch (t) {
+		case mp::Runtime::Tick::Advanced:
+			if (_game->frame != _mpFrame) {
+				_mpFrame = _game->frame;
+				if (_headless) {
+					_timeMs += kSimFrameMs;  // the virtual clock, as stepSimulation keeps it
+					[self cameraStep:kSimFrameMs];
+				}
+				_prevView = std::move(_curView);
+				[self indexPrevView];
+				_curView = ron::sim::make_view(*_game);
+				[self notifyFrame];
+			}
+			return 1;
+		case mp::Runtime::Tick::Recovered: return 2;
+		case mp::Runtime::Tick::Ended:
+			[self mpEnd:"The multiplayer game has ended."];
+			return -1;
+		case mp::Runtime::Tick::Error:
+			[self mpEnd:_mp->error()];
+			return -1;
+		default: return 0;
+	}
+}
+
+- (void)mpStep:(int)frames {
+	bool turn = false;
+	for (int i = 0; i < frames; i++) {
+		const int r = [self mpStepOnce:&turn];
+		if (r == 0 || r == -1) break;
+	}
+	if (frames > 0) [self syncSimBuildings];
+}
+
+- (void)mpEnd:(const std::string&)text {
+	if (_mpEnded) return;
+	_mpEnded = YES;
+	[self say:text];
+	std::fprintf(stderr, "multiplayer: %s\n", text.c_str());
+	if (!_headless && self.onExit) {  // back to the menu after the player has read it
+		__weak MapRenderer* weak = self;
+		dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+			MapRenderer* me = weak;
+			if (me && me.onExit) me.onExit(NO);
+		});
+	}
+}
+
+// Headless (--host / --join with --frames): the session runs until a turn boundary at or after `frames`.
+- (BOOL)mpRunHeadless:(int)frames {
+	if (!_mp) return NO;
+	const double t0 = CACurrentMediaTime();
+	bool turn = false;
+	while (!_mpEnded) {
+		const int r = [self mpStepOnce:&turn];
+		if (r == -1) return NO;
+		if (r == 1 && turn && (_game->frame >= frames || _game->game_over)) break;  // the game ended: the frames stop there
+		if (r == 0) {
+			[NSThread sleepForTimeInterval:0.0005];
+			_mp->room().transport().idle(1);
+			if (CACurrentMediaTime() - t0 > 600) {
+				std::fprintf(stderr, "multiplayer: gave up after 10 minutes\n");
+				return NO;
+			}
+		}
+	}
+	[self syncSimBuildings];
+	std::printf("multiplayer: frame %d, %u recovery(ies), %d player(s)\n", _game->frame, _mp->epoch(), _mp->humans());
+	return !_mpEnded;
+}
+
+- (void)mpClose {
+	if (!_mp) return;
+	_mp->finish();
+	_cm.net = nullptr;
+	_mp.reset();
+}
+
+// A status line near the top: what the lockstep session is waiting for.
+- (void)drawMpStatus {
+	if (!_mp) return;
+	std::string text;
+	if (!_mp->started()) text = "Waiting for the other players to finish loading...";
+	else if (_mp->recovering()) text = "The game was out of sync: repairing it from another player's game...";
+	else text = _mp->stall_text();
+	if (text.empty() && _mpEnded) text = _mp->error();
+	if (text.empty()) return;
+	const int f = _ui.font(16, -1);
+	const ron::IfaceRect r{0, _uiW, 70, 94};
+	_ui.fill(float(_uiW / 2 - 260), 70.0f, 520.0f, 24.0f, 0xA0000000u, ron::metal::UiType::ColorBlend);
+	_ui.next_layer();
+	_ui.text_centered(f, text, r, 0xFFFFE070u, 0xFF000000u);
 }
 
 // The messages, banners and pings the simulation's frame caused (notices.hpp), for the local seat.
@@ -1388,6 +1590,10 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	const scriptview::Env senv = [self scriptEnv];
 	const scriptview::Callbacks cb = [self scriptCallbacks];
 	for (const notices::Note& n : notes) {
+		if (n.kind == notices::Note::Flash) {  // Console::flash_resource_flags / _stamp: the panel rows turn red for 8 ticks
+			_flashMask = n.goods, _flashTick = int(_timeMs / 66.0);
+			continue;
+		}
 		if (_scriptLog) std::printf("  f%-5d NOTE %s \"%s\"%s\n", _game->frame, n.kind == notices::Note::Notice ? "notice" : "message", n.text.c_str(), n.located ? " (located)" : "");
 		_sview.post(n, senv, cb);
 	}
@@ -1430,6 +1636,32 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	for (const auto& [who, o] : _selected) by_owner[who].push_back(o);
 	for (const auto& [who, objs] : by_owner) [self issueMoveWho:who objects:objs x:x y:y];
 	std::printf("move %zu unit(s) to (%d, %d) at frame %d\n", _selected.size(), x, y, _game->frame);
+}
+
+// OPTION_GARRISON's target: the own or allied building under the cursor takes the selected units that fit (GARRISON).
+- (BOOL)commandGarrisonAt:(CGPoint)p {
+	if (!_game || _selected.empty()) return NO;
+	const simd_float2 g = [self groundAt:p];
+	float bestw = 450;
+	int32_t tw = -1, to = -1;
+	for (const PlacedBuilding& b : _placed) {
+		if (b.who < 0 || (_fogOn && !ron::sim::build_seen_by(*_game, _game->local_play, b.who, b.o))) continue;
+		const float dist = simd_distance(g, simd_make_float2(b.x, b.y));
+		if (dist < bestw) bestw = dist, tw = b.who, to = b.o;
+	}
+	if (tw < 0 || to < ron::sim::kBuildBase) return NO;
+	std::map<int32_t, std::vector<int32_t>> garrison;
+	for (const auto& [who, o] : _selected) {
+		const ron::sim::Unit* u = _game->unit(who, o);
+		if (u && u->alive() && ron::sim::is_ally(*_game, who, tw) && ron::sim::unit_can_garrison(*_game, *u, to, tw)) garrison[who].push_back(o);
+	}
+	for (const auto& [who, objs] : garrison) {
+		_cm.play = who;
+		_cm.play_who = who;
+		if (_cm.issue_garrison(*_game, objs, to, tw)) _cm.process_turn(*_game);
+	}
+	std::printf("garrison into %d:%d with %zu owner group(s) at frame %d\n", tw, to, garrison.size(), _game->frame);
+	return !garrison.empty();
 }
 
 // Right-click on a drawn unit or building of another player: ATTACK for each owner's selected units that are at war
@@ -1650,7 +1882,7 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	_figures.clear();
 	_drawnUnits.clear();
 	if (!_game) return;
-	const float t = float(std::clamp(_simMs / kSimFrameMs, 0.0, 1.0));
+	const float t = float(std::clamp(_simMs / kTimings[std::clamp(_speed, 0, 4)], 0.0, 1.0));
 	auto mix = [t](int32_t a, int32_t b) { return float(a) + float(b - a) * t; };
 	auto angle = [t](uint32_t a, uint32_t b) {
 		const double v = double(a) + double(int32_t(b - a)) * double(t);  // the short way round
@@ -2308,7 +2540,7 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 			break;
 		case 'h': case 'H': _hudOn = !_hudOn; break;
 		case 'p': case 'P':
-			if (!(sp && sp->pause_disabled)) _paused = !_paused;  // pause_disable
+			if (!(sp && sp->pause_disabled)) [self togglePause];  // pause_disable
 			break;
 		case 'f': case 'F': _fogOn = !_fogOn; break;
 		default: break;
@@ -2489,14 +2721,16 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 			[self openGameMenu:2];
 		}
 	}
-	if (_game && !_paused && !modal) {
+	if (_game && ((!_paused && !modal) || _mp)) {
 		_simMs += _timeMs - before;
-		int steps = int(_simMs / kSimFrameMs);
-		if (steps > 4) {  // fell behind (a stall): drop the backlog rather than fast-forwarding
-			_simMs = std::fmod(_simMs, kSimFrameMs);
-			steps = 4;
+		const double frame_ms = kTimings[std::clamp(_speed, 0, 4)];
+		int steps = int(_simMs / frame_ms);
+		const int max_steps = _speed >= 4 ? 40 : 4;  // Hyper Fast runs as many frames as fit in a display frame
+		if (steps > max_steps) {  // fell behind (a stall): drop the backlog rather than fast-forwarding
+			_simMs = std::fmod(_simMs, frame_ms);
+			steps = max_steps;
 		} else {
-			_simMs -= steps * kSimFrameMs;
+			_simMs -= steps * frame_ms;
 		}
 		[self stepSimulation:steps];
 		if (steps && (_game->frame % 15) == 0) [self updateTitle];
@@ -2764,6 +2998,7 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 // upgrades one row down, techs and building upgrades at their own slots).
 - (std::vector<hud::Option>)hudOptions {
 	std::vector<hud::Option> out;
+	_cardMessage.clear();
 	if (!_game) return out;
 	const int me = [self localPlayer];
 	auto opt = [&](int option, int gx, int gy, bool enabled) {
@@ -2809,7 +3044,7 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 			opt(hud::kOptAlarmPeasant, 4, 0, false);
 		}
 		opt(hud::kOptHalt, 0, 3, own);
-		opt(hud::kOptGarrison, 1, 3, false);
+		opt(hud::kOptGarrison, 1, 3, own);
 		return out;
 	}
 	if (!_selectedBuilds.empty()) {
@@ -2833,34 +3068,74 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 				op->tex_x = T.tex.x > 0 ? T.tex.x : -1, op->tex_y = T.tex.y > 0 ? T.tex.y : -1;
 			}
 		}
+		// Which grid cell is free (Options::grid pass 2: the first free slot in the row or below).
+		auto free_slot = [&](int row, int* gx, int* gy) {
+			for (int y = row; y < 4; y++) {
+				for (int x = 0; x < 5; x++) {
+					bool taken = false;
+					for (const hud::Option& o2 : out) taken = taken || (o2.grid_x == x && o2.grid_y == y);
+					if (!taken) return *gx = x, *gy = y, true;
+				}
+			}
+			return false;
+		};
+		const ron::sim::BuildView* bv = [self buildView:who o:o];
+		const bool active = bv && bv->active;
+		// A Market (BuildOut::make_options @00629ed0): SELL on row 2 and BUY on row 3 for food, timber, metal and oil, when the
+		// leader may trade (the Bartering tech / the Nubians); IFaceMarket otherwise writes what is needed.
+		if (own && active && ron::sim::type_is(*b->ptype, ron::sim::ptype::kMarket)) {
+			const ron::sim::LeaderView lv = ron::sim::leader_view(*_game, me);
+			if (lv.can_trade) {
+				static const int goods[4] = {0, 1, 4, 5};
+				bool first_sell = true, first_buy = true;
+				for (int gi = 0; gi < 4; gi++) {
+					const int gd = goods[gi];
+					if (!ron::sim::type_avail(*_game, me, gd, 1)) continue;
+					int gx, gy;
+					if (free_slot(2, &gx, &gy)) {
+						hud::Option* op = opt(60, gx, gy, lv.stockpile[gd] >= 100);
+						op->object = gd, op->good = gd, op->price = lv.sell[gd], op->trend = _game->market.delta_flux[size_t(gd)] < 0 ? -1 : _game->market.delta_flux[size_t(gd)] > 0 ? 1 : 0;
+						if (first_sell) op->label = [self locString:2049 fallback:"Sell:"], first_sell = false;
+					}
+				}
+				for (int gi = 0; gi < 4; gi++) {
+					const int gd = goods[gi];
+					if (!ron::sim::type_avail(*_game, me, gd, 1)) continue;
+					int gx, gy;
+					if (free_slot(3, &gx, &gy)) {
+						hud::Option* op = opt(57, gx, gy, lv.stockpile[2] >= lv.buy[gd]);
+						op->object = gd, op->good = gd, op->price = lv.buy[gd], op->trend = _game->market.delta_flux[size_t(gd)] < 0 ? -1 : _game->market.delta_flux[size_t(gd)] > 0 ? 1 : 0;
+						if (first_buy) op->label = [self locString:2050 fallback:"Buy:"], first_buy = false;
+					}
+				}
+			} else {
+				const ron::sim::Type& bs = _game->type(ron::sim::ptype::kBuySell);
+				const int need = bs.preq[0];
+				if (need >= 0) {
+					static const char* cats[4] = {"Military", "Civic", "Commerce", "Science"};
+					const ron::sim::Type& NT = _game->type(need);
+					_cardMessage = notices::fill([self locString:2046 fallback:"Need $TECHNAME0 To Buy/Sell Resources"], {[self typeName:need]}) + "\n" +
+					               notices::fill([self locString:2047 fallback:"$TECHCATEGORY0 Level $NUMBER0"],
+					                             {uistr::tr(cats[NT.cat & 3]), std::to_string(NT.age + 1)});
+				}
+			}
+		}
+		// EJECT_ALL (2,3): a building with units inside.
+		if (own && active && ron::sim::num_inside(*_game, *b, 1) > 0 && !ron::sim::can_carry_domain(*_game, *b, ron::sim::kDomainAir)) {
+			int gx, gy;
+			if (!free_slot(3, &gx, &gy)) gx = 2, gy = 3;
+			opt(hud::kOptEjectAll, std::min(gx, 2), 3, true);
+		}
 	}
 	return out;
 }
 
-// IFaceResources::draw_infra's counts from the own gather buildings: workers (the gatherers registered at them) and slots,
-// by good: food farms, timber woodcutters, metal mines, knowledge universities, oil wells and platforms; wealth is the
-// caravans over get_caravan_limit.
+// IFaceResources::draw_infra's counts (LeaderView::infra_workers / infra_limit): the citizens working at each kind of gather
+// building and the leader's slot limits; wealth is the caravans over get_caravan_limit.
 - (void)fillInfra:(hud::Resources&)r who:(int)me {
-	if (!_game) return;
-	for (const ron::sim::BuildView& b : _curView.builds) {
-		if (!b.alive || !b.active || b.who != me) continue;
-		int good = -1;
-		switch (b.type) {
-			case 417: good = 0; break;
-			case 418: good = 1; break;
-			case 419: good = 4; break;
-			case 420: good = 3; break;
-			case 421: case 422: good = 5; break;
-			default: break;
-		}
-		if (good < 0) continue;
-		r.workers[size_t(good)] += b.gatherers;
-		r.limit[size_t(good)] += b.gatherers_max;
-	}
-	if (me >= 0 && me < 8) {
-		r.workers[2] = _game->leaders[size_t(me)].caras;
-		r.limit[2] = ron::sim::get_caravan_limit(*_game, me, 1);
-	}
+	if (!_game || me < 0 || me >= 8) return;
+	const ron::sim::LeaderView lv = ron::sim::leader_view(*_game, me);
+	for (int k = 0; k < 6; k++) r.workers[size_t(k)] = lv.infra_workers[k], r.limit[size_t(k)] = lv.infra_limit[k];
 }
 
 // IFaceMainBase::draw_timers (docs/ui-spec.md 6.1): the victory and elimination clocks that run. The wonder and territory
@@ -2899,6 +3174,8 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		}
 		out.push_back({5, (lim * 60 - g.tick) * 15, -1, -1});  // Game::tick counts game seconds; 15 frames each
 	}
+	// The armageddon clock: the nukes left before Armageddon (Game::get_armageddon - armageddon) once one has been launched.
+	if (g.armageddon > 0) out.push_back({2, 0, -1, std::max(0, ron::sim::get_armageddon(g) - g.armageddon)});
 	for (hud::Timer& t : out) t.frames = std::max(0, t.frames);
 	return out;
 }
@@ -2985,6 +3262,148 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	[_miniTerr replaceRegion:MTLRegionMake2D(0, 0, NSUInteger(fx), NSUInteger(fy)) mipmapLevel:0 withBytes:rgba.data() bytesPerRow:NSUInteger(fx) * 4];
 }
 
+// An order failed for lack of goods (GroupOut::issue_queue_up / validate_build -> LeaderOut::warn_resources): the rows of the
+// goods the item's price needs more of than the leader has turn red for 8 ticks.
+- (void)flashLacking:(int)type who:(int)who {
+	if (!_game || who < 0 || who >= 8) return;
+	int mask = 0;
+	for (int k = 0; k < 6; k++) {
+		if (!ron::sim::type_avail(*_game, who, k, 1)) continue;
+		const int32_t c = ron::sim::get_cost(*_game, type, k, who, -1, -1, 0, 1, -1);
+		if (c > _game->leaders[size_t(who)].bucket[size_t(k)]) mask |= 1 << k;
+	}
+	if (mask) _flashMask = mask, _flashTick = int(_timeMs / 66.0);
+}
+
+// IFaceLibrary: shown for a single selected, finished Library of the viewer (or an ally); the cells are the seven ages and the
+// seven levels of the four lines (military 572.., civic 565.., commerce 558.., science 551..), enabled as the Library's own
+// card would offer them (BuildData::can_make against the first Library, affordable), owned when researched, with the progress of
+// the one in production.
+- (hud::Library)libraryState:(int)me {
+	hud::Library lib;
+	if (!_game || me < 0 || me >= 8 || _selectedBuilds.size() != 1 || !_selected.empty()) return lib;
+	const int32_t who = _selectedBuilds.front().first, o = _selectedBuilds.front().second;
+	const ron::sim::BuildView* bv = [self buildView:who o:o];
+	if (!bv || !bv->active || bv->type != 435) return lib;
+	if (who != me && !ron::sim::is_ally(*_game, who, me)) return lib;
+	const ron::sim::Build* b = _game->build(who, o);
+	if (!b) return lib;
+	lib.active = true;
+	const ron::sim::Leader& L = _game->leaders[size_t(me)];
+	std::vector<std::pair<int, int>> inprod;
+	for (const ron::sim::BuildView& v : _curView.builds) {
+		if (!v.alive || v.who != me || v.type != 435) continue;
+		for (const auto& q : v.queue) inprod.push_back({q.type, q.time > 0 ? int(int64_t(q.job_counter) * 100 / q.time) : 0});
+	}
+	const int first = ron::sim::get_first_library(*_game, me);
+	const ron::sim::Build* fb = first >= 0 ? _game->build(me, first) : b;
+	auto fill = [&](hud::LibCell& c, int type) {
+		if (type < 0 || !_game->type(type).loaded) return;
+		const ron::sim::Type& T = _game->type(type);
+		c.type = type;
+		c.owned = ron::sim::has_tech(*_game, me, type);
+		c.enabled = who == me && !c.owned && fb && ron::sim::build_can_make(*_game, *fb, type, 1) != 0 && ron::sim::can_pay_cost(*_game, type, me, -1, first, 1) > 0;
+		c.tex_id = ron::sim::to_utf8(T.tex.id), c.tex_col = T.tex.col, c.tex_row = T.tex.row;
+		c.tex_x = T.tex.x > 0 ? T.tex.x : -1, c.tex_y = T.tex.y > 0 ? T.tex.y : -1;
+		for (const auto& [qt, pct] : inprod) {
+			if (qt == type) c.percent = pct;
+		}
+	};
+	static const int base[4] = {572, 565, 558, 551};
+	for (int i = 0; i < 7; i++) {
+		fill(lib.age[i], 544 + i);
+		for (int k = 0; k < 4; k++) fill(lib.tech[k][i], base[k] + i);
+	}
+	(void)L;
+	return lib;
+}
+
+// IFaceGarrison: the units inside the selected building / carrier, grouped by owner and type.
+- (hud::Garrison)garrisonState:(int)me {
+	hud::Garrison gar;
+	if (!_game || (_selected.size() + _selectedBuilds.size()) != 1) return gar;
+	int32_t who, o;
+	if (!_selectedBuilds.empty()) who = _selectedBuilds.front().first, o = _selectedBuilds.front().second;
+	else who = _selected.front().first, o = _selected.front().second;
+	const ron::sim::Object* ob = _game->object(who, o);
+	if (!ob || !ob->alive() || ron::sim::num_inside(*_game, *ob, 1) == 0) return gar;
+	if (who != me && !ron::sim::is_ally(*_game, who, me)) return gar;
+	// Air garrisons (airbases, carriers: IFaceAirGarrison) are not drawn.
+	if (ron::sim::can_carry_domain(*_game, *ob, ron::sim::kDomainAir)) return gar;
+	gar.active = true;
+	gar.building = o, gar.owner = who;
+	std::map<std::pair<int32_t, int32_t>, size_t> index;
+	int32_t cw = ob->inside_down_who, co = ob->inside_down;
+	for (int guard = 0; co >= 0 && guard < 4096; guard++) {
+		const ron::sim::Unit* u = _game->unit(cw, co);
+		if (!u) break;
+		if (u->alive()) {
+			auto [it, fresh] = index.try_emplace({u->who, u->type}, gar.units.size());
+			if (fresh) {
+				hud::GarrisonUnit g;
+				g.who = u->who, g.type = u->type;
+				g.own = u->who == me;
+				const int color = _game->leaders[size_t(u->who & 7)].color;
+				const uint8_t* tc = kUnitTeamColors[std::clamp(color, 0, 8)];
+				g.rgb[0] = tc[0], g.rgb[1] = tc[1], g.rgb[2] = tc[2];
+				[self unitIcon:u->type who:u->who o:u->o into:g.tex_id col:g.tex_col row:g.tex_row x:g.tex_x y:g.tex_y];
+				gar.units.push_back(g);
+			} else {
+				gar.units[it->second].count++;
+			}
+			gar.units[it->second].objects.push_back(u->o);
+			if (u->who != who) gar.mixed_owners = true;
+		}
+		cw = u->inside_down_who, co = u->inside_down;
+	}
+	if (gar.units.empty()) gar.active = false;
+	return gar;
+}
+
+// IFaceMainBase::setup_progress_buttons: every queued unit or tech of the viewer's active buildings (and the wonders under
+// construction), with the progress of the item and the producer's position.
+- (std::vector<hud::ProgressItem>)progressItems:(int)me {
+	std::vector<hud::ProgressItem> out;
+	if (!_game || me < 0 || me >= 8) return out;
+	const uint8_t* tc = kUnitTeamColors[std::clamp(_game->leaders[size_t(me)].color, 0, 8)];
+	for (const ron::sim::BuildView& b : _curView.builds) {
+		if (!b.alive || b.who != me) continue;
+		if (!b.active) {
+			if (_game->type(b.type).cat == 2 && b.started && b.construct_time > 0) {  // an unbuilt wonder
+				hud::ProgressItem p;
+				const ron::sim::Type& T = _game->type(b.type);
+				p.tex_id = ron::sim::to_utf8(T.tex.id), p.tex_col = T.tex.col, p.tex_row = T.tex.row;
+				p.tex_x = T.tex.x > 0 ? T.tex.x : -1, p.tex_y = T.tex.y > 0 ? T.tex.y : -1;
+				p.percent = std::clamp(b.job_counter * 100 / b.construct_time, 0, 100);
+				p.who = b.who, p.o = b.o, p.wx = float(b.x), p.wy = float(b.y);
+				p.rgb[0] = tc[0], p.rgb[1] = tc[1], p.rgb[2] = tc[2];
+				p.name = [self typeName:b.type];
+				out.push_back(p);
+			}
+			continue;
+		}
+		for (const auto& q : b.queue) {
+			if (q.type < 0) continue;
+			if (!ron::sim::is_unit_type(q.type) && ron::sim::has_tech(*_game, me, q.type)) continue;
+			hud::ProgressItem p;
+			if (ron::sim::is_unit_type(q.type)) {
+				[self unitIcon:q.type who:me o:-1 into:p.tex_id col:p.tex_col row:p.tex_row x:p.tex_x y:p.tex_y];
+			} else {
+				const ron::sim::Type& Q = _game->type(q.type);
+				p.tex_id = ron::sim::to_utf8(Q.tex.id), p.tex_col = Q.tex.col, p.tex_row = Q.tex.row;
+				p.tex_x = Q.tex.x > 0 ? Q.tex.x : -1, p.tex_y = Q.tex.y > 0 ? Q.tex.y : -1;
+			}
+			p.percent = q.time > 0 ? std::clamp(int(int64_t(q.job_counter) * 100 / q.time), 0, 100) : 0;
+			p.who = b.who, p.o = b.o, p.wx = float(b.x), p.wy = float(b.y);
+			p.rgb[0] = tc[0], p.rgb[1] = tc[1], p.rgb[2] = tc[2];
+			p.name = [self typeName:q.type];
+			out.push_back(p);
+			if (out.size() >= 70) return out;
+		}
+	}
+	return out;
+}
+
 - (hud::State)makeHudState {
 	hud::State s;
 	s.world_w = std::max(1.0f, _mesh.width);
@@ -2999,6 +3418,7 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		for (const ron::sim::UnitView& u : _curView.units) {
 			if (!u.alive || !u.on_map) continue;
 			if (_fogOn && !(u.seen_by & (1u << (me & 7)))) continue;
+			if (u.attacking && ((int(_timeMs / 66.0)) & 8)) continue;  // units attacking blink on the minimap (WorldMap::add_blip batch 3)
 			hud::Blip b;
 			b.x = float(u.x), b.y = float(u.y);
 			const uint8_t* tc = kUnitTeamColors[std::clamp(u.color, 0, 8)];
@@ -3009,6 +3429,7 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		for (const ron::sim::BuildView& v : _curView.builds) {
 			if (!v.alive) continue;
 			if (_fogOn && !(v.seen_by & (1u << (me & 7)))) continue;
+			if (v.under_attack && v.who == me && ((int(_timeMs / 66.0)) & 8)) continue;  // an own building under attack blinks (BuildView::under_attack)
 			hud::Blip b;
 			b.x = float(v.x), b.y = float(v.y), b.building = true;
 			const uint8_t* tc = kUnitTeamColors[std::clamp(v.color, 0, 8)];
@@ -3077,6 +3498,27 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		}
 	}
 	s.minilib = [self miniLibState:me];
+	s.card_message = _cardMessage;
+	s.library = [self libraryState:me];
+	s.garrison = [self garrisonState:me];
+	if (_progressButtons) s.progress = [self progressItems:me];
+	s.flash_mask = _flashMask, s.flash_tick = _flashTick;
+	if (const char* ft = getenv("RON_FLASH_TEST")) s.flash_mask = std::atoi(ft), s.flash_tick = int(_timeMs / 66.0);  // a bit mask of goods, for snapshots
+	s.speed_name = [self speedName];
+	s.paused_name = uistr::tr("Paused");
+	if (_game && me >= 0 && me < 8) {
+		const ron::sim::LeaderView lv = ron::sim::leader_view(*_game, me);
+		for (const ron::sim::LeaderView::Rare& r : lv.rares) s.rares.push_back({r.good, r.count});
+	}
+	if (const char* rt = getenv("RON_RARE_TEST")) {  // "good:count,..." for snapshots
+		for (const char* q = rt; q && *q;) {
+			int good = 0, count = 1;
+			std::sscanf(q, "%d:%d", &good, &count);
+			s.rares.push_back({good, count});
+			q = std::strchr(q, ',');
+			if (q) q++;
+		}
+	}
 	[self updateTerritory];
 	s.has_territory = _miniTerr != nil;
 	if (_game && me >= 0 && me < int(_game->leaders.size())) {
@@ -3213,7 +3655,16 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	std::map<std::string, std::string> vars;
 	switch (h.kind) {
 		case hud::HoverKind::Option: {
-			if (h.b >= 0) {
+			if ((h.a == 57 || h.a == 60) && h.b >= 0 && h.b < 6) {
+				// The Market's own BUY / SELL buttons (IFaceMarket): as the resource panel's.
+				const bool buy = h.a == 57;
+				tip.first = (_hud.option_name(h.a).empty() ? uistr::tr(buy ? "Buy" : "Sell") : _hud.option_name(h.a)) + " " + good_name(h.b);
+				const int price = buy ? lv.buy[h.b] : lv.sell[h.b];
+				if (buy) tip.cost.push_back({2, price, lv.stockpile[2] >= price});
+				else tip.info.push_back("{*1" + std::string("#ICON3 ") + std::to_string(price) + "} per 100");
+				tip.hotkey = [self hotkeyFor:(buy ? "OPTION_BUY" : "OPTION_SELL") param:h.b];
+				lines(buy ? "BUY" : "SELL", {"SPELLS"});
+			} else if (h.b >= 0) {
 				// Train / research / build buttons: the type's name, its price, the hotkey, the help.xml text for its graphic.
 				const ron::sim::Type& T = _game->type(h.b);
 				tip.first = [self typeName:h.b];
@@ -3304,7 +3755,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		case hud::HoverKind::MarketBuy: case hud::HoverKind::MarketSell: {
 			const bool buy = h.kind == hud::HoverKind::MarketBuy;
 			const int g = std::clamp(h.a, 0, 5);
-			tip.first = std::string(buy ? "Buy " : "Sell ") + good_name(g);
+			tip.first = (_hud.option_name(buy ? 57 : 60).empty() ? uistr::tr(buy ? "Buy" : "Sell") : _hud.option_name(buy ? 57 : 60)) + " " + good_name(g);
 			const int price = buy ? s.res.buy[size_t(g)] : s.res.sell[size_t(g)];
 			if (buy) tip.cost.push_back({2, price, lv.stockpile[2] >= price});
 			else tip.info.push_back("{*1" + std::string("#ICON3 ") + std::to_string(price) + "} per 100");
@@ -3319,7 +3770,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 			static const char* keys[6] = {"FOODCAP", "WOODCAP", "WEALTHCAP", "KNOWLEDGECAP", "METALCAP", "OILCAP"};
 			static const char* heads[6] = {"FARMHEADS", "WOODCUTTERHEADS", "CARAVANCAP", "UNIVERSITYHEADS", "MINEHEADS", "OILHEADS"};
 			const int g = std::clamp(h.a, 0, 5);
-			tip.first = good_name(g) + " Infrastructure";
+			tip.first = good_name(g) + " " + uistr::tr("Infrastructure");
 			lines(g == 2 ? heads[g] : keys[g], {"CAPS", "STATS"});
 			if (g != 2) lines(heads[g], {"STATS"});
 			break;
@@ -3386,7 +3837,46 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 			tip.first = "Game Clock";
 			lines("PAUSE", {"MAIN_IFACE_BUTTONS"});
 			break;
+		case hud::HoverKind::Rare: {
+			// A rare good of the column (spot id good | 0x80000000): its name and rules description.
+			const ron::sim::Type& T = _game->type(h.a);
+			tip.first = [self typeName:h.a];
+			if (!T.desc.empty()) tip.info.push_back(ron::sim::to_utf8(T.desc));
+			break;
+		}
+		case hud::HoverKind::LibraryCell: {
+			// A library cell: the tech or age with its price and the help.xml text, as the card's research button.
+			const ron::sim::Type& T = _game->type(h.a);
+			tip.first = [self typeName:h.a];
+			for (int g = 0; g < 6; g++) {
+				const int c = ron::sim::get_cost(*_game, h.a, g, me, -1, -1, 0, 0, -1);
+				if (c > 0) tip.cost.push_back({g, c, lv.stockpile[g] >= c});
+			}
+			const std::string key = up_str(ron::sim::to_utf8(T.help_name.empty() ? T.name : T.help_name));
+			lines(key, {"LIBRARY", "SPELLS", "BUILDINGS", "UNITS"});
+			if (tip.info.empty() && !T.desc.empty()) tip.info.push_back(ron::sim::to_utf8(T.desc));
+			break;
+		}
+		case hud::HoverKind::Garrison: {
+			if (size_t(h.a) >= s.garrison.units.size()) break;
+			const hud::GarrisonUnit& gu = s.garrison.units[size_t(h.a)];
+			tip.first = [self typeName:gu.type] + (gu.count > 1 ? " x" + std::to_string(gu.count) : std::string());
+			tip.info.push_back(uistr::tr("Click to eject."));
+			lines("EJECT", {"EJECTS", "ORDERS"});
+			break;
+		}
+		case hud::HoverKind::Progress: {
+			if (size_t(h.a) >= s.progress.size()) break;
+			const hud::ProgressItem& p = s.progress[size_t(h.a)];
+			tip.first = p.name + " " + std::to_string(p.percent) + "%";
+			tip.info.push_back(uistr::tr("Click to centre on the producer."));
+			break;
+		}
 		default: break;
+	}
+	tip.first = uistr::tr(tip.first);
+	for (std::string& l : tip.info) {
+		if (l.find("{*") == std::string::npos && l.find('#') == std::string::npos) l = uistr::tr(l);
 	}
 	return tip;
 }
@@ -3413,6 +3903,29 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		_ui.encode(enc);
 		return;
 	}
+	if (_formDrag) {
+		// The formation preview: a ring in the owner's colour at every slot, and a line from the press point along the facing.
+		const uint8_t* tc = kUnitTeamColors[std::clamp(_game ? _game->leaders[size_t([self localPlayer] & 7)].color : 0, 0, 8)];
+		const uint32_t col = 0xFF000000u | uint32_t(tc[0]) << 16 | uint32_t(tc[1]) << 8 | uint32_t(tc[2]);
+		auto at = [&](simd_float2 w) {
+			return [self screenOf:simd_make_float3(w.x, w.y, std::max(0.0f, _terrain.sample_height(w.x, w.y)))] / _uiScale;
+		};
+		for (const simd_float2& slot : [self formationSlots]) {
+			// A circle on the ground: a 2:1 ellipse of eight short strokes.
+			const simd_float2 u = at(slot);
+			_ui.fill(u.x - 3, u.y - 4, 6, 1, col, ron::metal::UiType::Normal), _ui.fill(u.x - 3, u.y + 3, 6, 1, col, ron::metal::UiType::Normal);
+			_ui.fill(u.x - 6, u.y - 2, 1, 4, col, ron::metal::UiType::Normal), _ui.fill(u.x + 5, u.y - 2, 1, 4, col, ron::metal::UiType::Normal);
+			_ui.fill(u.x - 5, u.y - 3, 2, 1, col, ron::metal::UiType::Normal), _ui.fill(u.x + 3, u.y - 3, 2, 1, col, ron::metal::UiType::Normal);
+			_ui.fill(u.x - 5, u.y + 2, 2, 1, col, ron::metal::UiType::Normal), _ui.fill(u.x + 3, u.y + 2, 2, 1, col, ron::metal::UiType::Normal);
+		}
+		const simd_float2 a = at(_formStart), b = at(_formEnd);
+		const float seg = std::max(1.0f, simd_length(b - a));
+		for (float t = 0; t < seg; t += 6) {  // the drag: a dotted line from the press point, ending in a larger dot
+			const simd_float2 q = a + (b - a) * (t / seg);
+			_ui.fill(q.x - 1, q.y - 1, 2, 2, 0xFFFFFFFF, ron::metal::UiType::Normal);
+		}
+		_ui.fill(b.x - 2, b.y - 2, 4, 4, 0xFFFFFFFF, ron::metal::UiType::Normal);
+	}
 	if (_boxing) {
 		// The drag box (post-tonemap, Scene::render step 10): a white frame.
 		const CGFloat x0 = std::min(_press.x, _mouse.x), y0 = std::min(_press.y, _mouse.y);
@@ -3432,8 +3945,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	}
 	// MessageWin, AnimNotice, ScreenArrowSpline, the modal windows (docs/ui-port.md "Script UI").
 	if (_sviewOn) _sview.draw(_ui, [self pres], [self scriptEnv]);
+	[self drawMpStatus];
 	[self drawGameMenu];
 	_ui.encode(enc);
+	[self syncProfile];
 }
 
 // ---------------------------------------------------------------- save / load (engine/sim/save.hpp, docs/save-format.md)
@@ -3446,6 +3961,23 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	NSString* dir = [base stringByAppendingPathComponent:@"OpenRiseOfNations/Saves"];
 	[[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
 	return [dir stringByAppendingPathComponent:@"quicksave.ronsave"];
+}
+
+// A translated_strings.xml entry by index (the decompiled call sites address them by offset / 20), English text as the fallback
+// only when the table is missing.
+- (std::string)locString:(int)i fallback:(const char*)fallback {
+	if (_tables && i >= 0 && size_t(i) < _tables->translated().size() && !_tables->translated()[size_t(i)].empty()) return _tables->translated()[size_t(i)];
+	return fallback;
+}
+
+// The game speed word of the clock ("Normal"): rules.xml `gamespeeds`, localised through string_lookup.
+- (std::string)speedName {
+	std::string n = "Normal";
+	if (_game && _game->rules) {
+		if (const ron::sim::CategoryList* cl = _game->rules->category_list("game_speeds"); cl && size_t(_speed) < cl->items.size())
+			n = ron::sim::to_utf8(cl->items[size_t(_speed)].name);
+	}
+	return uistr::tr(n);
 }
 
 - (void)say:(const std::string&)text {
@@ -3484,35 +4016,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		std::unique_ptr<ron::sim::Game> g = ron::sim::load_game(*_files, *_simRules, _art.get(), path.UTF8String, &info);
 		for (const std::string& e : info.script_errors) std::fprintf(stderr, "script: %s\n", e.c_str());
 		_game = std::move(g);
-		_cm = ron::sim::CommandManager();
-		_selected.clear(), _selectedBuilds.clear();
-		_targeting = -1, _placeType = -1, _buildPage = -1;
-		_ghostValid = NO;
-		_clipClocks.clear();
-		_curView = ron::sim::make_view(*_game);
-		_prevView = _curView;
-		[self indexPrevView];
-		[self syncSimBuildings];
-		_fogUploaded = NO;
-		_gameEventsSeen = _game->events.size();
-		_notifier.reset(*_game);
-		_terrFrame = -100000;
-		const ron::sim::ScriptPresentation* p = [self pres];
-		_logSeq = p && p->next_seq > 0 ? p->next_seq - 1 : 0;
-		_logObjectives = p ? p->objectives.size() : 0;
-		_logDone.clear();
-		if (p) {
-			for (const ron::sim::ScriptObjective& o : p->objectives) {
-				if (o.completed) _logDone.push_back({o.id, o.frame});
-			}
-		}
-		if (_sviewOn) _sview.reset(p);
-		if (_audio) _audio->stop_voice();
-		_hiliteOverride = -1;
-		_pan = CameraPan();
-		_overMs = -1, _overOffered = NO;
-		_simMs = 0;
-		_lastFrame = 0;
+		[self afterGameReplaced];
 		[self say:"Game loaded"];
 		return YES;
 	} catch (const std::exception& e) {
@@ -3520,6 +4024,40 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		[self say:"Could not load the game"];
 		return NO;
 	}
+}
+
+// Everything the renderer derived from the simulation that a replaced Game (a loaded save, an out-of-sync recovery) invalidates.
+- (void)afterGameReplaced {
+	_cm.reset();
+	_hotkeys.clear();
+	_selected.clear(), _selectedBuilds.clear();
+	_targeting = -1, _placeType = -1, _buildPage = -1, _formDrag = NO;
+	_ghostValid = NO;
+	_clipClocks.clear();
+	_curView = ron::sim::make_view(*_game);
+	_prevView = _curView;
+	[self indexPrevView];
+	[self syncSimBuildings];
+	_fogUploaded = NO;
+	_gameEventsSeen = _game->events.size();
+	_notifier.reset(*_game);
+	_terrFrame = -100000;
+	const ron::sim::ScriptPresentation* p = [self pres];
+	_logSeq = p && p->next_seq > 0 ? p->next_seq - 1 : 0;
+	_logObjectives = p ? p->objectives.size() : 0;
+	_logDone.clear();
+	if (p) {
+		for (const ron::sim::ScriptObjective& o : p->objectives) {
+			if (o.completed) _logDone.push_back({o.id, o.frame});
+		}
+	}
+	if (_sviewOn) _sview.reset(p);
+	if (_audio) _audio->stop_voice();
+	_hiliteOverride = -1;
+	_pan = CameraPan();
+	_overMs = -1, _overOffered = NO;
+	_simMs = 0;
+	_lastFrame = 0;
 }
 
 - (BOOL)quickSave {
@@ -3539,6 +4077,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 
 - (std::vector<std::string>)gameMenuItems {
 	if (_gameMenu == 2) return {"Return to Main Menu", "Keep Watching", "Quit"};
+	if (_mp) return {"Resume Game", "Save Game", "Resign", "Return to Main Menu", "Quit"};  // a multiplayer save is synchronized (no loading mid-game)
 	return {"Resume Game", "Save Game", "Load Game", "Return to Main Menu", "Quit"};
 }
 
@@ -3612,6 +4151,14 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	const std::string& it = items[size_t(i)];
 	_gameMenu = 0;
 	_lastFrame = 0;  // no catch-up after the pause
+	if (it == "Resign") {
+		if (_mp) _mp->resign();
+		return;
+	}
+	if (it == "Save Game" && _mp) {
+		_mp->request_save();
+		return;
+	}
 	if (it == "Save Game") [self quickSave];
 	else if (it == "Load Game") [self quickLoad];
 	else if (it == "Return to Main Menu" && _ctwBuild && self.onCtwEnd) {  // leaving a campaign battle: it is lost
@@ -3749,7 +4296,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	if (!_game) return;
 	const int me = [self localPlayer];
 	switch (option) {
-		case hud::kOptMoveTo: _targeting = option; break;
+		case hud::kOptMoveTo: case hud::kOptGarrison: _targeting = option; break;
 		case hud::kOptHalt: {
 			const std::vector<int32_t> objs = [self ownSelectedUnits];
 			[self issueAs:me block:^bool { return _cm.issue_halt(*_game, objs); }];
@@ -3758,18 +4305,31 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		case hud::kOptBuild: case hud::kOptBuildMilitary: case hud::kOptBuildWonder: _buildPage = option; break;
 		case 1000:
 			// validate_build: a building the player cannot pay for raises ScenarioData::user_warnings bit 0.
-			if (ron::sim::can_pay_cost(*_game, object, me, -1, -1, 1) <= 0) _pendingWarnings |= 1;
+			if (ron::sim::can_pay_cost(*_game, object, me, -1, -1, 1) <= 0) _pendingWarnings |= 1, [self flashLacking:object who:me];
 			[self startPlacement:object];
 			break;
 		case 65: _buildPage = (_buildPage + 1) % 3; break;  // NEXT
 		case 66: _buildPage = -1; break;                     // BACK
 		case hud::kOptCancel: _buildPage = -1, _placeType = -1, _targeting = -1; break;
+		case 57: case 60: {
+			// OPTION_BUY / OPTION_SELL of the Market's card: the good in `object`; Shift = x5 (500), Alt = everything.
+			const int flags = (m & NSEventModifierFlagOption) ? 2 : (m & NSEventModifierFlagShift) ? 1 : 0;
+			const bool buy = option == 57;
+			[self issueAs:me block:^bool { return buy ? _cm.issue_buy(object, flags) : _cm.issue_sell(object, flags); }];
+			break;
+		}
+		case hud::kOptEjectAll: {
+			// OPTION_EJECT_ALL: EJECTALL for the selected buildings (their garrison comes out).
+			const std::vector<int32_t> objs = [self ownSelectedBuilds];
+			[self issueAs:me block:^bool { return _cm.issue_eject_all(*_game, objs); }];
+			break;
+		}
 		case hud::kOptTrain: case hud::kOptResearch: {
 			// Options::exec: QUEUE_UP (Shift x5 on TRAIN).
 			const std::vector<int32_t> objs = [self ownSelectedBuilds];
 			const int n = option == hud::kOptTrain && (m & NSEventModifierFlagShift) ? 5 : 1;
 			// GroupOut::issue_queue_up: an unaffordable item raises ScenarioData::user_warnings bit 0 (resource_warning).
-			if (!objs.empty() && ron::sim::can_pay_cost(*_game, object, me, -1, objs.front(), 1) <= 0) _pendingWarnings |= 1;
+			if (!objs.empty() && ron::sim::can_pay_cost(*_game, object, me, -1, objs.front(), 1) <= 0) _pendingWarnings |= 1, [self flashLacking:object who:me];
 			[self issueAs:me block:^bool { return _cm.issue_queue(*_game, objs, object, n); }];
 			break;
 		}
@@ -3849,13 +4409,25 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	const BOOL shift = (m & NSEventModifierFlagShift) != 0;
 	auto own_units = [&] { return !_selected.empty() && _selected.front().first == me; };
 	auto own_builds = [&] { return !_selectedBuilds.empty() && _selectedBuilds.front().first == me; };
-	if (o == "OPTION_SLOWER" || o == "OPTION_FASTER") return -1;  // ronmap has no speed control: +/- keep zooming
+	if (_mp && (o == "OPTION_SLOWER" || o == "OPTION_FASTER")) {  // SPEED_UP / SPEED_DOWN through the session: every machine changes together
+		_mp->speed_step(o == "OPTION_FASTER" ? 1 : -1);
+		return 1;
+	}
+	if (o == "OPTION_SLOWER" || o == "OPTION_FASTER") {
+		// TurnControl::issue_speed_down / _up (SPEED_DOWN 54 / SPEED_UP 53): one step of game_speed, 0 Very Slow .. 4 Hyper Fast.
+		const int to = std::clamp(_speed + (o == "OPTION_FASTER" ? 1 : -1), 0, 4);
+		if (to != _speed) {
+			_speed = to;
+			[self say:uistr::tr("Game Speed:") + " " + [self speedName]];
+		}
+		return 1;
+	}
 	if (o == "OPTION_MENU") {
 		if (!_inPopup) [self openGameMenu:1];
 		return 1;
 	}
 	if (o == "OPTION_PAUSE") {
-		if (!(sp && sp->pause_disabled)) _paused = !_paused;
+		if (!(sp && sp->pause_disabled)) [self togglePause];
 		return 1;
 	}
 	if (o == "OPTION_ZOOM_IN" || o == "OPTION_ZOOM_OUT") {
@@ -3890,6 +4462,14 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	}
 	if (o == "OPTION_HALT") {
 		if (own_units()) [self runOption:hud::kOptHalt object:-1 modifiers:m];
+		return 1;
+	}
+	if (o == "OPTION_GARRISON") {  // G with units: the next click names the building
+		if (own_units()) _targeting = hud::kOptGarrison;
+		return 1;
+	}
+	if (o == "OPTION_EJECT_ALL") {  // J: the selected buildings (or carriers) let their garrison out
+		if (own_builds()) [self runOption:hud::kOptEjectAll object:-1 modifiers:m];
 		return 1;
 	}
 	if (o == "OPTION_DISBAND") {
@@ -4005,6 +4585,45 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		case hud::ActionKind::MinimapButton: {
 			static const char* opts[4] = {"OPTION_CYCLE_MILITARY", "OPTION_CYCLE_GENERAL", "OPTION_OBJECTIVES", "OPTION_CYCLE_PEASANT"};
 			[self execKeyOption:opts[std::clamp(a.index, 0, 3)] param:-1 modifiers:m];
+			break;
+		}
+		case hud::ActionKind::Library: {
+			// IFaceLibrary::on_button_clicked @00807930: OPTION_RESEARCH of the cell's type at the first Library.
+			const int me = [self localPlayer];
+			if (me < 0 || me >= 8 || a.object < 0) break;
+			const int first = ron::sim::get_first_library(*_game, me);
+			if (first < 0) break;
+			const std::vector<int32_t> objs = {first};
+			const int type = a.object;
+			if (ron::sim::can_pay_cost(*_game, type, me, -1, first, 1) <= 0) {
+				_pendingWarnings |= 1;
+				[self flashLacking:type who:me];
+			}
+			[self issueAs:me block:^bool { return _cm.issue_queue(*_game, objs, type, 1); }];
+			break;
+		}
+		case hud::ActionKind::GarrisonEject: {
+			// IFaceGarrison::on_button_clicked / _right_clicked: OPTION_EJECT for the clicked group (a right click: every unit of
+			// the type). EJECTALL names the container and the owner; a single unit (COME_OUT, verb 49) has no command yet, so
+			// both clicks send out the owner's garrison.
+			const hud::Garrison& gar = _hudState.garrison;
+			if (!gar.active || a.index < 0 || a.index >= int(gar.units.size())) break;
+			const hud::GarrisonUnit& gu = gar.units[size_t(a.index)];
+			if (!gu.own) break;
+			const std::vector<int32_t> objs = {gar.building};
+			const int me = [self localPlayer];
+			const int32_t owner = gu.who, container = gar.building, cwho = gar.owner;
+			[self issueAs:me block:^bool { return _cm.issue_eject_all(*_game, objs, false, owner, container, cwho); }];
+			break;
+		}
+		case hud::ActionKind::Progress: {
+			// A progress button: select the producer and centre the camera on it (negative id: select + OPTION_CENTER).
+			if (a.index < 0 || a.index >= int(_hudState.progress.size())) break;
+			const hud::ProgressItem& p = _hudState.progress[size_t(a.index)];
+			_selected.clear(), _selectedBuilds.clear();
+			_selectedBuilds.push_back({p.who, p.o});
+			[self lookAtX:p.wx y:p.wy];
+			[self selectionChanged];
 			break;
 		}
 		case hud::ActionKind::QueueItem: {
@@ -4192,6 +4811,62 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 
 // ---------------------------------------------------------------- mouse
 
+// The formation drag starts from the selection's own formation and spacing (the members' common Unit::form, the average
+// form_mod; default 50).
+- (void)beginFormationDrag {
+	_formDrag = YES;
+	_formEnd = _formStart;
+	int form = -1, n = 0, sum = 0;
+	bool common = true;
+	for (const auto& [who, o] : _selected) {
+		const ron::sim::Unit* u = _game->unit(who, o);
+		if (!u || u->type < 50 || (u->type >= 50 && u->type <= 53)) continue;  // citizens carry no formation
+		if (form < 0) form = u->form;
+		else if (form != u->form) common = false;
+		sum += u->form_mod, n++;
+	}
+	_formForm = common && form >= 0 && form < 5 ? form : 0;
+	_formWidth = n > 0 && sum / n > 0 ? std::clamp(sum / n, 0, 100) : 50;
+}
+
+// The slots of the drag preview (Scene::draw_drag_formations): the front rank at the press point, ranks behind it, the width
+// of the formation set by the spacing. Group::compute_form lays out the real one when the command runs.
+- (std::vector<simd_float2>)formationSlots {
+	std::vector<simd_float2> out;
+	const int n = int(_selected.size());
+	if (n <= 0) return out;
+	simd_float2 fwd = _formEnd - _formStart;
+	const float len = simd_length(fwd);
+	fwd = len > 1 ? fwd / len : simd_make_float2(0, 1);
+	const simd_float2 side = simd_make_float2(-fwd.y, fwd.x);
+	const int cols = std::clamp(int(std::ceil(n * (0.1 + _formWidth / 100.0 * 0.9))), 1, n);
+	const float gap = 190.0f;
+	for (int i = 0; i < n; i++) {
+		const int r = i / cols, c = i % cols;
+		const int in_row = std::min(cols, n - r * cols);
+		const float lateral = (float(c) - float(in_row - 1) / 2) * gap;
+		out.push_back(_formStart + side * lateral - fwd * (float(r) * gap));
+	}
+	return out;
+}
+
+- (void)endFormationDrag:(NSEventModifierFlags)m {
+	_formDrag = NO;
+	if (!_game || _selected.empty()) return;
+	const int me = [self localPlayer];
+	const std::vector<int32_t> objs = [self ownSelectedUnits];
+	if (objs.empty()) return;
+	const ron::sim::QueuePos q = (m & NSEventModifierFlagShift) ? ron::sim::kQueueLast : (m & NSEventModifierFlagOption) ? ron::sim::kQueueFirst
+	                                                                                                                     : ron::sim::kQueueNew;
+	const int32_t ix = int32_t(std::lround(std::clamp(_formStart.x, 0.0f, _mesh.width - 1))), iy = int32_t(std::lround(std::clamp(_formStart.y, 0.0f, _mesh.height - 1)));
+	const simd_float2 d = _formEnd - _formStart;
+	const bool facing = simd_length(d) > 96;  // a drag too short to name a direction keeps the units' own
+	const uint32_t angle = facing ? ron::sim::find_angle(int32_t(std::lround(d.x)), int32_t(std::lround(d.y))) : 0;
+	const int form = _formForm, width = _formWidth;
+	[self issueAs:me block:^bool { return _cm.issue_move_to(*_game, objs, ix, iy, q, form, facing, angle, 1, width); }];
+	std::printf("formation move %zu unit(s) to (%d, %d), form %d spacing %d%s at frame %d\n", objs.size(), ix, iy, form, width, facing ? ", facing set" : "", _game->frame);
+}
+
 - (void)uiMouseDown:(CGPoint)p right:(BOOL)right modifiers:(NSEventModifierFlags)m clicks:(NSInteger)clicks {
 	_mouse = p;
 	_mouseInside = YES;
@@ -4206,9 +4881,15 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		return;
 	}
 	_hudPress = NO;
+	if (_formDrag && !right) {  // a left press during a right formation drag cycles the formation
+		_formForm = (_formForm + 1) % 5;
+		return;
+	}
 	_press = p;
 	if (right) {
 		_rightPress = YES, _rightDragged = NO;
+		_formDrag = NO;
+		_formStart = [self groundAt:[self toDrawable:p]];
 		return;
 	}
 	_pressing = YES, _boxing = NO, _pressMs = _timeMs, _pressMods = m;
@@ -4227,9 +4908,17 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	}
 	const float dist = float(std::hypot(p.x - _press.x, p.y - _press.y));
 	if (right) {
-		// Click vs drag: 6 px for the right button. A right drag scrolls the map (the formation drag is not ported).
+		// Click vs drag: 6 px for the right button. With own units selected a right drag is a formation move; otherwise it
+		// scrolls the map.
 		if (_rightPress && dist > 6) _rightDragged = YES;
-		if (_rightDragged) [self scrollByPixelsX:float(-d.x * _uiScale) y:float(d.y * _uiScale)];
+		if (_rightDragged && !_formDrag && _game && !_selected.empty() && _selected.front().first == [self localPlayer] && _placeType < 0 && _targeting < 0) {
+			[self beginFormationDrag];
+		}
+		if (_formDrag) {
+			_formEnd = [self groundAt:[self toDrawable:p]];
+		} else if (_rightDragged) {
+			[self scrollByPixelsX:float(-d.x * _uiScale) y:float(d.y * _uiScale)];
+		}
 		return;
 	}
 	// Left: 20 px once held more than 7 graphic ticks (462 ms), else 64 px (Console::init / on_mouse_move).
@@ -4253,6 +4942,12 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		return;
 	}
 	if (right) {
+		if (_formDrag) {
+			_formEnd = [self groundAt:[self toDrawable:p]];
+			[self endFormationDrag:m];
+			_rightPress = NO;
+			return;
+		}
 		if (_rightPress && !_rightDragged) {
 			if (_placeType >= 0 || _targeting >= 0) {
 				_placeType = -1, _targeting = -1;  // a right click cancels a pending placement or target
@@ -4273,6 +4968,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	} else if (_targeting >= 0) {
 		const simd_float2 g = [self groundAt:[self toDrawable:p]];
 		if (_targeting == hud::kOptMoveTo) [self orderAtWorldX:g.x y:g.y modifiers:m];
+		else if (_targeting == hud::kOptGarrison) [self commandGarrisonAt:[self toDrawable:p]];
 		_targeting = -1;
 	} else if ([self pres] && [self pres]->mouse_selection_disabled) {
 		_boxing = NO;  // mouse_selection_disable: clicks and boxes select nothing
@@ -4322,6 +5018,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 // A mouse wheel notch zooms (ZOOM_IN3 / ZOOM_OUT3); trackpad scrolling pans the map.
 - (void)uiScrollWheel:(NSEvent*)e at:(CGPoint)p {
 	if (_gameMenu) return;
+	if (_formDrag && e.scrollingDeltaY != 0) {  // the wheel changes the formation's spacing by 5 (0..100)
+		_formWidth = std::clamp(_formWidth + (e.scrollingDeltaY > 0 ? 5 : -5), 0, 100);
+		return;
+	}
 	if (!e.hasPreciseScrollingDeltas) {
 		if (e.scrollingDeltaY != 0) [self zoomBy:(e.scrollingDeltaY > 0 ? 1 : -1) toward:p];
 		return;
@@ -4378,47 +5078,66 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	}
 	if (n < 0) return NO;
 	const NSEventModifierFlags m = e.modifierFlags;
-	const bool ctrl = (m & (NSEventModifierFlagControl | NSEventModifierFlagCommand)) != 0, shift = (m & NSEventModifierFlagShift) != 0;
-	ControlGroup& g = _groups[n];
+	return [self controlGroup:n ctrl:(m & (NSEventModifierFlagControl | NSEventModifierFlagCommand)) != 0 shift:(m & NSEventModifierFlagShift) != 0];
+}
+
+// Ctrl+n assigns (an empty selection bookmarks the camera), Ctrl+Shift+n erases, n recalls (twice quickly: centre), Shift+n adds
+// the group to the selection.
+- (BOOL)controlGroup:(int)n ctrl:(bool)ctrl shift:(bool)shift {
+	if (!_game) return YES;
+	const int play = _cm.play;
+	hotkeys::Command cmd;
+	cmd.play = play, cmd.group = n;
 	if (ctrl && shift) {
-		g = ControlGroup{};
+		cmd.clear = 1;  // HOTKEY with clear: Ctrl+Shift erases the group
+		_hotkeys.issue(_cm, *_game, cmd, {}, {});
+		_hotkeys.process();
+		std::printf("HOTKEY group %d cleared\n", n);
 	} else if (ctrl) {
-		g = ControlGroup{};
-		if (_selected.empty() && _selectedBuilds.empty()) g.bookmark = true, g.at = _lookAt, g.zoom = _zoom;
-		else g.units = _selected, g.builds = _selectedBuilds;
+		if (_selected.empty() && _selectedBuilds.empty()) {
+			cmd.x = _lookAt.x, cmd.y = _lookAt.y, cmd.zoom = _zoom;  // an empty selection bookmarks the camera
+			_hotkeys.issue(_cm, *_game, cmd, {}, {});
+		} else {
+			cmd.valid = 1;
+			_hotkeys.issue(_cm, *_game, cmd, _selected, _selectedBuilds);
+		}
+		_hotkeys.process();
+		std::printf("HOTKEY group %d %s (%zu units, %zu buildings)\n", n, cmd.valid ? "assigned" : "bookmarked", _selected.size(), _selectedBuilds.size());
 	} else if ([self pres] && [self pres]->hotkey_selection_disabled) {
 		// hotkey_selection_disable: control groups do not recall
-	} else if (g.bookmark) {
-		_lookAt = g.at, _zoom = g.zoom;
-	} else if (!g.units.empty() || !g.builds.empty()) {
-		auto alive_units = [&] {
-			std::vector<std::pair<int32_t, int32_t>> v;
+	} else {
+		hotkeys::Slot g = _hotkeys.slot(play, n);
+		if (g.bookmark) {
+			_lookAt = simd_make_float3(g.x, g.y, _lookAt.z), _zoom = g.zoom;
+		} else if (!g.units.empty() || !g.builds.empty()) {
+			hotkeys::ObjectList alive;
 			for (const auto& k : g.units) {
 				const ron::sim::UnitView* u = [self unitView:k.first o:k.second];
-				if (u && u->alive) v.push_back(k);
+				if (u && u->alive) alive.push_back(k);
 			}
-			return v;
-		};
-		g.units = alive_units();
-		if (shift) {
-			for (const auto& k : g.units) {
-				if (std::find(_selected.begin(), _selected.end(), k) == _selected.end()) _selected.push_back(k);
-			}
-		} else {
-			if (_lastGroupKey == n && _timeMs - _lastGroupMs < 500) {
-				float sx = 0, sy = 0, c = 0;
+			g.units = alive;
+			_hotkeys.mut_slot(play, n).units = alive;
+			if (shift) {
 				for (const auto& k : g.units) {
-					if (const ron::sim::UnitView* u = [self unitView:k.first o:k.second]) sx += float(u->x), sy += float(u->y), c++;
+					if (std::find(_selected.begin(), _selected.end(), k) == _selected.end()) _selected.push_back(k);
 				}
-				for (const auto& k : g.builds) {
-					if (const ron::sim::BuildView* b = [self buildView:k.first o:k.second]) sx += float(b->x), sy += float(b->y), c++;
+			} else {
+				if (_lastGroupKey == n && _timeMs - _lastGroupMs < 500) {
+					float sx = 0, sy = 0, c = 0;
+					for (const auto& k : g.units) {
+						if (const ron::sim::UnitView* u = [self unitView:k.first o:k.second]) sx += float(u->x), sy += float(u->y), c++;
+					}
+					for (const auto& k : g.builds) {
+						if (const ron::sim::BuildView* b = [self buildView:k.first o:k.second]) sx += float(b->x), sy += float(b->y), c++;
+					}
+					if (c > 0) [self lookAtX:sx / c y:sy / c];
 				}
-				if (c > 0) [self lookAtX:sx / c y:sy / c];
+				_selected = g.units, _selectedBuilds = g.builds;
+				[self syncSimBuildings];
+				std::printf("HOTKEY group %d recalled (%zu units, %zu buildings)\n", n, g.units.size(), g.builds.size());
 			}
-			_selected = g.units, _selectedBuilds = g.builds;
-			[self syncSimBuildings];
+			[self selectionChanged];
 		}
-		[self selectionChanged];
 	}
 	_lastGroupKey = n, _lastGroupMs = _timeMs;
 	return YES;
@@ -4467,6 +5186,32 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	_hud.mouse_move(int(x), int(y));
 }
 
+- (void)setGameSpeed:(int)speed {
+	_speed = std::clamp(speed, 0, 4);
+}
+
+- (void)setProgressButtons:(BOOL)on {
+	_progressButtons = on;
+	_hud.set_progress_buttons(on);
+}
+
+// The harness' mouse: the events a person would make (docs/ui-port.md section 7).
+- (void)mouseEvent:(const std::string&)kind x:(float)x y:(float)y {
+	const CGPoint p = CGPointMake(x, y);
+	if (_hudOn && _uiW > 0) {  // no frame has been drawn: the HUD's hit tests need this frame's layout and state
+		_hud.layout(_uiW, _uiH);
+		_hudState = [self makeHudState];
+	}
+	if (kind == "move") [self uiMouseMoved:p];
+	else if (kind == "down") [self uiMouseDown:p right:NO modifiers:0 clicks:1];
+	else if (kind == "rdown") [self uiMouseDown:p right:YES modifiers:0 clicks:1];
+	else if (kind == "drag") [self uiMouseDragged:p right:NO delta:CGPointMake(x - _mouse.x, y - _mouse.y)];
+	else if (kind == "rdrag") [self uiMouseDragged:p right:YES delta:CGPointMake(x - _mouse.x, y - _mouse.y)];
+	else if (kind == "up") [self uiMouseUp:p right:NO modifiers:0];
+	else if (kind == "rup") [self uiMouseUp:p right:YES modifiers:0];
+	else if (kind == "wheel") [self zoomBy:y > 0 ? 1 : -1 toward:p];
+}
+
 - (void)setPanels:(int)flags streamlined:(BOOL)streamlined help:(int)level {
 	if (flags >= 0) _hud.set_panel_flags(flags);
 	if (streamlined) _hud.set_opened(false);
@@ -4475,6 +5220,20 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 
 - (void)runKeyString:(const std::string&)keys {
 	if (!_game) return;
+	{
+		// Control groups ("Ctrl+3", "Ctrl+Shift+3", "Shift+3", "3") are not key map entries.
+		std::string k = keys;
+		bool ctrl = false, shift = false;
+		for (bool again = true; again;) {
+			again = false;
+			if (k.rfind("Ctrl+", 0) == 0) ctrl = again = true, k = k.substr(5);
+			else if (k.rfind("Shift+", 0) == 0) shift = again = true, k = k.substr(6);
+		}
+		if (k.size() == 1 && k[0] >= '0' && k[0] <= '9') {
+			[self controlGroup:k[0] - '0' ctrl:ctrl shift:shift];
+			return;
+		}
+	}
 	if (const keymap::Entry* e = keymap::lookup(keys, _buildPage >= 0 ? 1 : 0, [self](int ctx) { return [self selectionContext:ctx] == YES; }))
 		[self execKeyOption:e->option param:e->param modifiers:keys.find("Shift+") != std::string::npos ? NSEventModifierFlagShift : 0];
 	else std::fprintf(stderr, "no binding for %s\n", keys.c_str());
@@ -4492,8 +5251,35 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 }
 
 // The window is up: real time drives the graphic clock, sounds and music play (Data/sound.xml TRACKS).
+// The profile's interface preferences (player_profile: market_open / resource_open / infra_open, mini_lib_open, verbosity, the
+// progress-button pref bit) in NSUserDefaults: read when the window opens, written when one changes. Headless runs neither
+// read nor write them.
+- (void)loadProfile {
+	NSUserDefaults* d = [NSUserDefaults standardUserDefaults];
+	if ([d objectForKey:@"PanelFlags"]) _hud.set_panel_flags(int([d integerForKey:@"PanelFlags"]));
+	if ([d objectForKey:@"MiniLibOpen"] && [d boolForKey:@"MiniLibOpen"] != _hud.minilib_open()) _hud.toggle_minilib();
+	if ([d objectForKey:@"HelpVerbosity"]) _verbosity = std::clamp(int([d integerForKey:@"HelpVerbosity"]), 1, 3);
+	if ([d objectForKey:@"ProgressButtons"]) [self setProgressButtons:[d boolForKey:@"ProgressButtons"]];
+	if ([d objectForKey:@"GameSpeed"]) _speed = std::clamp(int([d integerForKey:@"GameSpeed"]), 0, 4);
+	_profile[0] = _hud.panel_flags(), _profile[1] = _hud.minilib_open(), _profile[2] = _verbosity, _profile[3] = _progressButtons, _profile[4] = _speed;
+}
+
+- (void)syncProfile {
+	if (_headless) return;
+	const int now[5] = {_hud.panel_flags(), _hud.minilib_open() ? 1 : 0, _verbosity, _progressButtons ? 1 : 0, _speed};
+	if (std::equal(now, now + 5, _profile)) return;
+	NSUserDefaults* d = [NSUserDefaults standardUserDefaults];
+	[d setInteger:now[0] forKey:@"PanelFlags"];
+	[d setBool:now[1] != 0 forKey:@"MiniLibOpen"];
+	[d setInteger:now[2] forKey:@"HelpVerbosity"];
+	[d setBool:now[3] != 0 forKey:@"ProgressButtons"];
+	[d setInteger:now[4] forKey:@"GameSpeed"];
+	std::copy(now, now + 5, _profile);
+}
+
 - (void)startInteractive {
 	_headless = NO;
+	[self loadProfile];
 	_drawW = _drawH = 0;
 	_audio = std::make_unique<ron::audio::Audio>();
 	try {
@@ -4686,7 +5472,7 @@ static int vk_of(NSEvent* e) {
 	};
 	cb.pause = [weakSelf](bool on) {
 		MapRenderer* me = weakSelf;
-		if (me && !me->_headless) me->_paused = on;
+		if (me && !me->_headless && !me->_mp) me->_paused = on;
 	};
 	cb.highlight_option = [weakSelf](int option) {
 		MapRenderer* me = weakSelf;
@@ -5278,6 +6064,31 @@ static int vk_of(NSEvent* e) {
 	});
 }
 
+// A multiplayer game from the lobby (lobby.h): the same map on every machine (the host's seed), played through the lockstep session.
+- (void)frontEndPlayMultiplayer:(std::shared_ptr<mp::Room>)room setup:(const ron::sim::RandomGameSetup&)setup save:(std::shared_ptr<std::vector<uint8_t>>)save {
+	const ron::sim::RandomGameSetup copy = setup;
+	[self.menu setBusy:@"Generating the map…"];
+	[self.view draw];
+	dispatch_async(dispatch_get_main_queue(), ^{
+		NSString* err = nil;
+		MapRenderer* r = [MapRenderer randomGameWithDevice:self.device gameDir:self.gameDir setup:&copy spec:nil error:&err];
+		if (!r) {
+			[self.menu setBusy:nil];
+			[self.menu showError:[NSString stringWithFormat:@"Could not create the map: %@", err ?: @"unknown error"]];
+			[self.menu showScreen:@"multiplayer"];
+			return;
+		}
+		[r attachMultiplayer:std::make_shared<mp::Runtime>(room) loaded:save];
+		const CGSize ds = self.view.drawableSize;
+		const float scale = float(self.window.backingScaleFactor > 0 ? self.window.backingScaleFactor : 1);
+		[r setUiWidth:int(ds.width) height:int(ds.height) scale:scale];
+		[self.menu stopAudio];
+		self.view.frontEnd = nil;
+		self.menu = nil;
+		[self attachGame:r];
+	});
+}
+
 // ---- Conquer the World (ctw_ui.h): the campaign's own battles run in the game window like any other game; its end brings
 // the front end back to the strategic map with the outcome applied.
 - (std::shared_ptr<ctwui::Session>)frontEndCtwSession {
@@ -5361,6 +6172,26 @@ static void run_app(MapAppDelegate* d) {
 	[app run];
 }
 
+// A stand-in for the app delegate in the lobby test (RON_MP_DEMO_START): records the multiplayer start the front end asks for.
+@interface MpTestHost : NSObject <FrontEndHost>
+@property(nonatomic, copy) NSString* log;
+@end
+@implementation MpTestHost
+- (void)frontEndPlay:(NSString*)scenario difficulty:(int)difficulty {
+}
+- (void)frontEndPlayRandom:(const ron::sim::RandomGameSetup&)setup {
+}
+- (void)frontEndChangeFolder {
+}
+- (void)frontEndQuit {
+}
+- (void)frontEndPlayMultiplayer:(std::shared_ptr<mp::Room>)room setup:(const ron::sim::RandomGameSetup&)setup save:(std::shared_ptr<std::vector<uint8_t>>)save {
+	std::string humans;
+	for (int i = 0; i < setup.num_nations; i++) humans += " " + std::to_string(int(setup.nation[size_t(i)].human));
+	self.log = [NSString stringWithFormat:@"frontEndPlayMultiplayer: slot %d, seed %u, %d nations, humans:%s, %s", room->slot(), setup.seed, setup.num_nations, humans.c_str(), save ? "from a save" : "new game"];
+}
+@end
+
 int main(int argc, const char* argv[]) {
 	@autoreleasepool {
 		NSString* gameDir = [NSHomeDirectory() stringByAppendingPathComponent:@"Games/RiseOfNations"];
@@ -5388,6 +6219,10 @@ int main(int argc, const char* argv[]) {
 		};
 		std::vector<TimedCursor> timed_cursors, timed_looks;
 		float hover_x = NAN, hover_y = NAN;
+		std::string lang_arg;
+		int speed_arg = -1;
+		bool progress_arg = false;
+		std::vector<std::string> mouse_script;  // --mouse "down|rdown|drag|up|rup:X,Y@FRAME"
 		int panel_flags = -1, help_level = 0;
 		bool streamlined = false;
 		std::vector<std::string> timed_keys;
@@ -5402,6 +6237,10 @@ int main(int argc, const char* argv[]) {
 		bool sel_builds = false;
 		NSString *load_game = nil, *save_game = nil, *random_spec = nil;
 		bool census = false;
+		int mpHostPort = 0, mpHumans = 2, mpDiverge = -1;  // --host PORT / --join HOST:PORT: one machine of a lockstep game (lobby.h), headless
+		std::string mpJoin, mpRecord, mpLoad, mpSave;
+		std::vector<std::pair<std::string, uint32_t>> mpActs;  // --mp-act what@turn,...
+		bool mpBot = false;
 		std::vector<int32_t> sel_objs;
 		float place_x = 0, place_y = 0;
 		uint32_t seed = 12345;
@@ -5448,6 +6287,31 @@ int main(int argc, const char* argv[]) {
 				save_game = @(argv[++i]);
 			} else if (a == "--random" && more) {
 				random_spec = @(argv[++i]);  // STYLE,SIZE,SEED,NATIONS[,TRIBES...]: a random-map skirmish (sim/newgame.hpp)
+			} else if (a == "--host" && more) {
+				mpHostPort = std::atoi(argv[++i]);
+			} else if (a == "--join" && more) {
+				mpJoin = argv[++i];
+			} else if (a == "--humans" && more) {
+				mpHumans = std::atoi(argv[++i]);
+			} else if (a == "--mp-bot") {
+				mpBot = true;  // a demo player gives this machine's seat something to do
+			} else if (a == "--mp-record" && more) {
+				mpRecord = argv[++i];  // the .rcx of this machine's game (default for the app: the Recorded Games folder; headless: none)
+			} else if (a == "--mp-load" && more) {
+				mpLoad = argv[++i];  // host: continue this saved multiplayer game (the guests receive the file from the host)
+			} else if (a == "--mp-save" && more) {
+				mpSave = argv[++i];  // where this machine writes the synchronized save ("save@TURN" acts, the game menu)
+			} else if (a == "--mp-act" && more) {
+				// pause|resume|faster|slower|resign @ TURN (session turn boundaries), comma separated: this machine issues them (test hook)
+				std::string list = argv[++i];
+				for (size_t q = 0; q < list.size();) {
+					const size_t comma = list.find(',', q), at = list.find('@', q);
+					const size_t end = comma == std::string::npos ? list.size() : comma;
+					if (at != std::string::npos && at < end) mpActs.push_back({list.substr(q, at - q), uint32_t(std::atoi(list.c_str() + at + 1))});
+					q = end + 1;
+				}
+			} else if (a == "--mp-diverge" && more) {
+				mpDiverge = std::atoi(argv[++i]);  // test: this machine's state is corrupted at that frame, the session must repair it
 			} else if (a == "--all-ai") {
 				g_randomAllAi = true;  // every seat of the --random game is a computer player
 			} else if (a == "--census") {
@@ -5559,6 +6423,14 @@ int main(int argc, const char* argv[]) {
 				panel_flags = std::atoi(argv[++i]);
 			} else if (a == "--streamlined") {
 				streamlined = true;
+			} else if (a == "--lang" && more) {  // en, de, es, fr, it (or .7 .10 .12 .16): the language of the interface
+				lang_arg = argv[++i];
+			} else if (a == "--speed" && more) {  // 0 Very Slow .. 4 Hyper Fast (default 2 Normal)
+				speed_arg = std::atoi(argv[++i]);
+			} else if (a == "--progress-buttons") {
+				progress_arg = true;
+			} else if (a == "--mouse" && more) {  // ACTION:X,Y[@FRAME]: a mouse event (down, drag, up; rdown, rdrag, rup) in UI pixels
+				mouse_script.push_back(argv[++i]);
 			} else if (a == "--help-level" && more) {
 				help_level = std::atoi(argv[++i]);
 			} else if (a == "--key" && more) {  // "KEYS@FRAME" (e.g. "Alt+M@10"): a hotkey as the key map resolves it
@@ -5630,7 +6502,7 @@ int main(int argc, const char* argv[]) {
 				ctwVerbose = true;
 			} else if (a == "--menu") {
 				menu = true;
-				static const char* const screens[] = {"main", "tutorials", "skirmish", "skirmish-setup", "scenarios", "quit-popup", "ctw", "ctw-map"};
+				static const char* const screens[] = {"main", "tutorials", "skirmish", "skirmish-setup", "scenarios", "quit-popup", "ctw", "ctw-map", "multiplayer", "mp-lobby"};
 				for (const char* sname : screens) {
 					if (more && std::strcmp(argv[i + 1], sname) == 0) menuScreen = @(argv[++i]);
 				}
@@ -5651,12 +6523,13 @@ int main(int argc, const char* argv[]) {
 			if (launcher::looks_like_install(positional[0])) explicitDir = gameDir = positional[0];
 			else scenario = positional[0];
 		}
+		uistr::choose(lang_arg);
 		if (ctwCheck) return ctwcli::check(gameDir.UTF8String);
 		if (ctwSelftest) return ctwcli::selftest(gameDir.UTF8String);
 		if (ctwSim) return ctwcli::simulate(gameDir.UTF8String, ctwCampaign.UTF8String, seed, ctwRounds, g_difficulty >= 0 ? g_difficulty : 2,
 		                                    ctwOut ? ctwOut.UTF8String : "", ctwVerbose);
 		if (ctwSaveLoad) return ctwcli::save_roundtrip(gameDir.UTF8String, ctwCampaign.UTF8String, seed);
-		if (!scenario && !random_spec && !ctwBattle) menu = true;
+		if (!scenario && !random_spec && !ctwBattle && mpJoin.empty()) menu = true;
 		if (menu) {
 			// The front end: headless with --snapshot, else the app opens its window on the Main Menu.
 			id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -5702,7 +6575,18 @@ int main(int argc, const char* argv[]) {
 						}
 					}
 				} else {
-					[fe showScreen:menuScreen ?: @"main"];
+					if ([menuScreen isEqualToString:@"mp-lobby"]) {  // a room with two guests (threads of this process) for the lobby snapshots
+						const char* port = getenv("RON_MP_DEMO_PORT");
+						if (![fe mpDemoPort:port ? std::atoi(port) : 17777 guests:@[@"Ayla", @"Marcus"]]) std::fprintf(stderr, "the demo room could not be set up\n");
+						if (getenv("RON_MP_DEMO_START")) {  // the host presses Start: a test host receives the call the app delegate would get
+							MpTestHost* th = [MpTestHost new];
+							fe.host = th;
+							[fe mpDemoStart];
+							std::printf("[demo host] Start pressed: %s\n", th.log.UTF8String ?: "nothing happened");
+						}
+					} else {
+						[fe showScreen:menuScreen ?: @"main"];
+					}
 				}
 				return [fe snapshotTo:snapshot width:w height:h scale:ui_scale] ? 0 : 1;
 			}
@@ -5781,6 +6665,104 @@ int main(int argc, const char* argv[]) {
 				return sess->game.build_battle(f, rr, sess->battle, a, x, e2);
 			};
 			r = [MapRenderer ctwBattleWithDevice:device gameDir:gameDir build:build error:&error];
+		} else if (mpHostPort > 0 || !mpJoin.empty()) {
+			// One machine of a LAN game without the lobby screens: the host fixes the setup (--random) once --humans players are in, the guests take it
+			auto room = std::make_shared<mp::Room>();
+			std::string merr;
+			ron::sim::RandomGameSetup mpSetup;
+			std::shared_ptr<std::vector<uint8_t>> mpLoaded;
+			if (mpHostPort > 0) {
+				if (!random_spec || !mp::parse_spec(gameDir.UTF8String, random_spec.UTF8String, mpSetup, merr)) {
+					std::fprintf(stderr, "--host needs --random STYLE,SIZE,SEED,NATIONS: %s\n", merr.c_str());
+					return 2;
+				}
+				if (!room->host(uint16_t(mpHostPort), "Host", merr)) {
+					std::fprintf(stderr, "%s\n", merr.c_str());
+					return 2;
+				}
+				std::printf("[host] listening on port %d for %d player(s)\n", mpHostPort, mpHumans - 1);
+				const double t0 = CACurrentMediaTime();
+				while (room->humans() < mpHumans) {
+					room->pump();
+					room->transport().idle(20);
+					if (CACurrentMediaTime() - t0 > 120) {
+						std::fprintf(stderr, "[host] nobody joined\n");
+						return 2;
+					}
+				}
+				mpSetup.game_speed = 2;
+				if (!mpLoad.empty()) {  // continue a saved game: its setup and seed, the file goes to the guests before START
+					NSData* data = [NSData dataWithContentsOfFile:@(mpLoad.c_str())];
+					if (!data.length) {
+						std::fprintf(stderr, "[host] cannot read %s\n", mpLoad.c_str());
+						return 2;
+					}
+					mpLoaded = std::make_shared<std::vector<uint8_t>>(static_cast<const uint8_t*>(data.bytes), static_cast<const uint8_t*>(data.bytes) + data.length);
+					try {
+						const ron::sim::SaveInfo info = ron::sim::read_save_info(*mpLoaded);
+						if (!ron::sim::parse_random_setup(info.scenario, mpSetup)) {
+							std::fprintf(stderr, "[host] only saved random-map games can be continued\n");
+							return 2;
+						}
+						mpSetup.seed = info.seed;
+						std::printf("[host] continuing %s (frame %d)\n", mpLoad.c_str(), info.frame);
+					} catch (const std::exception& e) {
+						std::fprintf(stderr, "[host] %s\n", e.what());
+						return 2;
+					}
+					room->publish(mpSetup);
+					room->lobby().set("from_save", "1");
+					room->lobby().send_file(*mpLoaded);
+					room->start(mpSetup.seed);
+				} else {
+					if (!room->seat_humans(mpSetup)) {
+						std::fprintf(stderr, "[host] fewer than two players\n");
+						return 2;
+					}
+					room->publish(mpSetup);
+					room->start(mpSetup.seed);
+				}
+			} else {
+				std::string host = mpJoin;
+				int port = 7777;
+				if (const size_t colon = host.rfind(':'); colon != std::string::npos) port = std::atoi(host.c_str() + colon + 1), host.resize(colon);
+				if (!room->join(host, uint16_t(port), "Guest", 30000, merr)) {
+					std::fprintf(stderr, "%s\n", merr.c_str());
+					return 2;
+				}
+				room->set_name("Guest " + std::to_string(room->slot()));
+				const double t0 = CACurrentMediaTime();
+				while (!room->started()) {
+					room->pump();
+					room->transport().idle(20);
+					if (CACurrentMediaTime() - t0 > 120 || room->host_lost()) {
+						std::fprintf(stderr, "[join] the host never started the game\n");
+						return 2;
+					}
+				}
+				if (!room->read_setup(mpSetup)) {
+					std::fprintf(stderr, "[join] the lobby has no map settings\n");
+					return 2;
+				}
+				if (room->lobby().has("from_save")) {  // the host continues a saved game: its file arrives before START
+					if (!room->lobby().file_complete()) {
+						std::fprintf(stderr, "[join] the saved game did not arrive\n");
+						return 2;
+					}
+					mpLoaded = std::make_shared<std::vector<uint8_t>>(room->lobby().file());
+				}
+				std::printf("[join] slot %d: style %d size %d seed %u nations %d\n", room->slot(), mpSetup.map_style, mpSetup.map_size, mpSetup.seed, mpSetup.num_nations);
+			}
+			r = [MapRenderer randomGameWithDevice:device gameDir:gameDir setup:&mpSetup spec:nil error:&error];
+			if (r) {
+				auto rt = std::make_shared<mp::Runtime>(room);
+				rt->enable_bot(mpBot);
+				rt->record_to(mpRecord);  // none unless asked: headless runs must not fill the user's folder
+				if (mpDiverge >= 0) rt->diverge_at(mpDiverge);
+				if (!mpSave.empty()) rt->set_save_path(mpSave);
+				for (const auto& act : mpActs) rt->add_act(act.first, act.second);
+				[r attachMultiplayer:rt loaded:mpLoaded];
+			}
 		} else {
 			r = random_spec ? [MapRenderer randomGameWithDevice:device gameDir:gameDir setup:nullptr spec:random_spec error:&error]
 			                : [[MapRenderer alloc] initWithDevice:device gameDir:gameDir scenario:scenario simulate:simulate seed:seed error:&error];
@@ -5800,6 +6782,8 @@ int main(int argc, const char* argv[]) {
 		[r setUiWidth:w height:h scale:ui_scale];  // the UI the scripts query before any frame is drawn
 		[r setScriptLog:script_log];
 		[r setPanels:panel_flags streamlined:streamlined help:help_level];
+		if (speed_arg >= 0) [r setGameSpeed:speed_arg];
+		if (progress_arg) [r setProgressButtons:YES];
 		if (!std::isnan(hover_x)) [r setHoverX:hover_x y:hover_y];
 		if (const char* t = getenv("RON_POPUP_TEST")) [r testPopup:t];
 		if (const char* t = getenv("RON_GAME_MENU")) [r openGameMenu:std::atoi(t)];  // 1 the game menu, 2 game over
@@ -5816,8 +6800,13 @@ int main(int argc, const char* argv[]) {
 			std::fprintf(stderr, "--load-game failed\n");
 			return 1;
 		}
+		if (r.multiplayer && ![r mpRunHeadless:sim_frames]) {
+			std::fprintf(stderr, "the multiplayer game did not run to frame %d\n", sim_frames);
+			[r mpClose];
+			return 3;
+		}
 		// Scripted moves, then N simulation frames (headless checks with --snapshot).
-		for (int f = 0; f <= sim_frames && r.simulating; f++) {
+		for (int f = 0; f <= sim_frames && r.simulating && !r.multiplayer; f++) {
 			for (const MoveArg& m : moves) {
 				if (m.frame == f && ![r issueMoveWho:m.who objects:m.objs x:m.x y:m.y])
 					std::fprintf(stderr, "--move for leader %d issued nothing\n", m.who);
@@ -5845,6 +6834,12 @@ int main(int argc, const char* argv[]) {
 			for (const TimedZoom& t : timed_zooms) {
 				if (t.frame == f) r.zoom = t.level;
 			}
+			for (const std::string& ms : mouse_script) {
+				const size_t colon = ms.find(':'), at = ms.find('@');
+				float mx = 0, my = 0;
+				std::sscanf(ms.c_str() + colon + 1, "%f,%f", &mx, &my);
+				if ((at == std::string::npos ? 0 : std::atoi(ms.c_str() + at + 1)) == f) [r mouseEvent:ms.substr(0, colon) x:mx y:my];
+			}
 			for (const std::string& k : timed_keys) {
 				const size_t at = k.find('@');
 				if ((at == std::string::npos ? 0 : std::atoi(k.c_str() + at + 1)) == f) [r runKeyString:k.substr(0, at)];
@@ -5864,7 +6859,11 @@ int main(int argc, const char* argv[]) {
 			std::fprintf(stderr, "--save-game failed\n");
 			return 1;
 		}
-		if (snapshot) return [r snapshotTo:snapshot width:w height:h scale:ui_scale] ? 0 : 1;
+		if (snapshot) {
+			const BOOL shot = [r snapshotTo:snapshot width:w height:h scale:ui_scale];
+			[r mpClose];
+			return shot ? 0 : 1;
+		}
 
 		MapAppDelegate* d = [MapAppDelegate new];
 		d.device = device;

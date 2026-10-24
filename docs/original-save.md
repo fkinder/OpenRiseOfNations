@@ -127,8 +127,8 @@ order type ...) and the check fails at that member: the mapped ranges really com
    `CommandPackage::process` (GROUP, MOVE_TO, ATTACK, BUILD, GATHER, SWARM_AROUND, QUEUE_UP, GATHER_POINT, UNQUEUE, LEADER_OPTIONS, HALT, STANCE,
    FORM, DISBAND, BUILDMASK, TRANSPORT, SET_TRANSPORT, BOARD_SHIP, TRADE, CITY_GATHER, GARRISON, SPELL, EJECTALL, BUY, SELL, tribute verbs;
    TURN_DATA, CAMERA, CHECK_SUMS, PLAYER_SPEED, PAUSE, HOTKEY are not simulation); then `Game::do_frame()`;
-5. prints per part the first boundary that differs, or "matches through frame N", and the verbs the engine cannot execute (GUARD and FOLLOW:
-   no `Verb` in `engine/sim/commands.hpp`; UNITMASK has none either but `apps/sav` applies it itself, `Group::action_unitmask` @6fcb90: a toggle of the
+5. prints per part the first boundary that differs, or "matches through frame N", and the verbs the engine cannot execute (since the second pass none of the corpus: GUARD and FOLLOW are `Verb::Guard` / `Verb::Follow`, see the Fidelity log;
+   UNITMASK has no `Verb` but `apps/sav` applies it itself, `Group::action_unitmask` @6fcb90: a toggle of the
    mask over the current group, the first member decides; PATROL, LAUNCH_PATROL, ATTACK_GROUND, FLIGHT, RECALL, SCRAMBLE map to the aircraft verbs).
 
 Before the loop the driver attaches the **game script** the replay header names (`scenarioScript`, `no_nukes` in the whole 2026.08.30 chain; the
@@ -156,6 +156,8 @@ work -> now; "ok" = equal through the end):
 | world | 14 (matched at 8) | 18,351 | 25,553 (first) |
 | rules, scenario_data, script_run_time | ok | ok | ok |
 
+**Second pass (2026-10-24): re-measured, the frontier did not move** - `21'23'34`: units 8, builds 50, ammo 6,896, deaths 7,094, groups 422, guys 14, leaders 566, cities 206, items 6,752, goods 2,318, world 14; `21'45'58`: units / guys 18,345, world 18,351, builds 18,387, cities 18,381, leaders 18,405 (the table above says 18,369; the same value before and after this round, moved by another owner's change), groups 19,047, deaths 20,415; `21'57'16`: units / guys / leaders / world 25,553, ammo / deaths 25,559, builds 25,571, cities 25,577, groups 25,595. The round's work is in the diagnostics (section 6.1), the negative results (section 7), GUARD / FOLLOW and the `--astar-check` oracle.
+
 (`ron-sav` prints the same as "matches through frame N" / "first differs at boundary frame B (matched through M)".) The second and third replay did
 not move: they start in the middle of a game (700 units, fights) and already differ in the first step by many members at once. Over the 45
 replays, `walls`, `rules` and `script_run_time` stay equal in all 45, `scenario_data` in 35, `items` in 38, `goods` in 38 (was 36); `units`
@@ -170,6 +172,19 @@ segment that needs no object-level truth. Over the 44 consecutive pairs of the 2
 (mostly the long fights `22'06'21` .. `22'37'15` and `22'57'36 -> 23'11'20`, where the engine already over-draws), 5 are unchanged. The remaining deficit in peaceful segments is about
 1 - 2 draws per 10 frames; a segment with the engine within a few draws of the original has the animals, birds, farms, anim picks and
 markets in step.
+
+Second pass (round of 2026-10-24, GUARD / FOLLOW executed; the "before" column is the tree at the start of that round, which is not the table above: other
+owners' engine changes moved e.g. `21'49'39 -> 21'50'35` from -644 to -560 and `22'22'47 -> 22'23'40` from -50 to -618). Engine draws minus original draws over the
+44 pairs (6 are more than 4,000,000 draws apart and not listed: `22'06'21 -> 22'09'27`, `22'09'27 -> 22'13'07`, `22'28'28 -> 22'37'15`, `22'56'06 -> 22'57'36`, `22'57'36 -> 23'11'20`, `23'12'35 -> 23'17'25`); sum of |d| over the 38 others
+541,732 -> 530,860. Changed by this round (all because a GUARD / FOLLOW that used to be dropped now runs; 10 closer, 5 further, 23 unchanged):
+`21'50'35 -> 21'52'11` -5,370 -> -6,249; `21'58'34 -> 22'00'17` -1,251 -> -1,239; `22'03'19 -> 22'04'05` -818 -> -824; `22'04'05 -> 22'06'21` -31,318 -> -34,230;
+`22'13'07 -> 22'14'36` -10,988 -> -9,658; `22'14'36 -> 22'15'12` -4,717 -> -4,495; `22'15'12 -> 22'16'35` -2,604 -> -2,242; `22'16'35 -> 22'16'53` -2,764 -> -2,175;
+`22'16'53 -> 22'17'47` -11,489 -> -4,927; `22'17'47 -> 22'18'06` -3,538 -> -2,321; `22'18'06 -> 22'21'11` -54,257 -> -34,598; `22'37'15 -> 22'44'30` -41,601 -> -57,297;
+`22'44'30 -> 22'45'30` -194 -> -882 (one unit, The CEO: it now walks to its guard slot and stops thinking, which removes about one draw per frame the engine had been
+making and the original, with a guard order, would not have made either: the deficit it uncovers is not the guard's); `23'11'20 -> 23'12'05` -4,464 -> -3,608; `23'12'05 -> 23'12'35` -3,102 -> -2,858.
+The big pairs (`21'23'34 -> 21'45'58` -227,833, `21'45'58 -> 21'49'39` -45,201) did not move. The engine draws 230,745 numbers in the 18,337 frames of the first
+segment (by site: 64,802 animation picks of `Guy::inc_time`, 60,831 `Animal::think_bird`, 31,320 `Farms::inc_time`, 26,666 idle-animation picks, 16,519 + 5,509 air physics)
+and the original 458,578: half the original's draws are missing from the very first segment (12 per frame), in a game with no fights.
 
 `--compare-next B.rcx` runs to the frame of the *next* replay's embedded save (the same game, saved when a player rejoined: `21'57'16` ->
 `21'57'36`, 91 frames), loads that save as the truth and lists the mapped members that differ, by count of objects. `--step-diff N` lists what
@@ -192,6 +207,12 @@ engine byte). `ron-sav` turns that into searches over the engine's own stream, l
 | `RON_PATCH="Guy.des_x:1,22,0:+1024@18345"` | add a delta to one member at a boundary (to see how far a single quirk carries) |
 | `RON_DUMP_UNIT=who,o`, `RON_DUMP_CHAIN=who,o`, `RON_DUMP_GOODS`, `RON_SCAN_UNITS=who`, `RON_SCAN_GUYS`, `RON_ANIM_TABLE`, `RON_ANIM_HIST`, `RON_HDR_HIST=<walk fn>` | state dumps used by the searches |
 | `RON_RNG_PROFILE=1` | the draws of the run by call site (needs `-DRON_RNG_PROFILE_HOOK`, see `engine/sim/random.hpp`) |
+| `RON_DUMP_MOVERS=1` (with `--step-diff N`) | every unit whose position, path, orders or collision fields changed: before -> after, with the full path stack |
+| `RON_TAIL=N`, `RON_OBJ_LAYOUT=who,o` (with `--solve-at`) | the labelled hashed ranges in the last N bytes of a differing part's stream; the hashed ranges of one object (step kind, offset / size constants, bytes). The `units` hash is, per unit, `Object` 0x20..0x42, `SubObject` 9..24, `Unit` 0x48..0xb6, the path stack, the order list and the guys (`GuyData` 8..163): the Adler delta (a, b) of a part is `sum e_i` and `sum e_i (N - i)` over its stream |
+| `RON_TRY_PATH=who,o`, `RON_PAIR_SEARCH=who/o,.. (+RON_PAIR_W, RON_PAIR_PART)`, `RON_BIT_SEARCH=R`, `RON_GUY_TRY=B (+RON_GUY_D)`, `RON_RNG_TRY=B` | experiments against the expected hash (all at `RON_SEARCH_AT`, default the first boundary): every subset of one unit's path stack; every small-integer member of the listed units (their `Unit.*`, order bodies and path entries) off by +-W, one or two together; single / three collision-bit flips around the movers; one guy's angle / position / z / speed / clock groups moved by +-D; the generator k draws ahead / behind (no part includes `game_random`). Expect spurious pair hits: 150,000 effects give about 3 chance pairs per run, and members sharing a stream position give many more |
+| `RON_COLL_MAP=x,y@B`, `RON_FOG_DIFF=B`, `RON_LIST_UNIT_DIFF=member` | the engine's collision bits against the union of the guys' footprints around a ucoord; the fog bytes changed since the save; with `--compare-next`, every unit whose `los_x` / `idle` / `tolerance` / `group` / `uid` / `collide` / `unit_masks` / ... differs |
+| `RON_NO_GUARD=1` | the replay driver drops GUARD / FOLLOW again (the state before they were executed) |
+| `--astar-check [--verbose]` (+ `RON_ASTAR_REWIND=1`, `RON_ASTAR_DETAIL=1/2/3`, `RON_ASTAR_ANY=1`) | **the one oracle for the path finder**: for every unit of the save that repathed in the frame just before it (`collide_frame == frame - 1`, standing on a cell centre, a coarse goal entry under >= 2 flag-2 entries) re-run `find_upath` from the loaded state and compare the stack with the original's, entry by entry. The save holds the counter `repaths` after the frame, so it also tries smaller values (the search limit is `500 / repaths^2`, halved when `fast`); `RON_ASTAR_REWIND` first puts back the units processed after the searcher in that frame (guy 0's `last_x/last_y`). Over the 105 saves: 10 distinct candidates (13 counting the SVX copies of the same games), 8 reproduced exactly (paths of 4 to 42 entries, fast and slow, radius 1 - 7), 2 not: an Armored Cavalry whose route the engine sees blocked by a unit standing 4 cells away that was probably created later in that frame (a building trains after the unit loop), and a Light Tank whose original path has a flag-4 (transport) node the engine's search does not produce (section 7) |
 
 A hit is only believable when it is **consistent across parts** (the same object in `units` and `guys`: independent equations) or when the pool is
 small (a few hundred changed members): the unrestricted single-byte search over 90,000 bytes finds a spurious candidate about once per run. Cases it
@@ -210,14 +231,33 @@ pen animals), the `LEADER_NEW_UNITS` flag, the walking gatherers' `Build.recharg
 
 What still **separates the engine from the original**, in the order the replays meet it:
 - **Movement in the first frames.** `21'23'34` matches `guys` and `world` at boundary 8 (the first step from the save: ten citizens walk, the first
-  collision is resolved identically) and differs at 14; `units` differs at 8 with no single member, no small delta of any member of any object and no
-  one- to three-object time shift that explains it. The guys of the 25 player units and the 256 animals are bit-identical after one frame, so the
-  difference is in Unit-level state of the moving units (path stack, collision bookkeeping, order bodies) or in the second frame of a walker (suspect, not
-  shown: the engine keeps a walker for a frame at a path node, `x` equal in two states, e.g. unit 1/2 at boundaries 10 and 14). The later
-  first mismatches of that replay look like consequences of such drift, not separate bugs: builds from 50 (the `Object.up` link of the player-1
-  woodcutter camp is unit 3 in the engine, 2 in the original: the order in which the workers entered the camp's cell), cities 206 (the granary's
-  flag is set a frame earlier), leaders 566 (`LeaderData.explored` +4 for player 1: scouts), goods 2,318 / items 6,752 (a rare resource / ruin that
-  player 1 has discovered in the original at that boundary and not yet in the engine).
+  collision is resolved identically) and differs at 14; `units` differs at 8. The second pass (2026-10-24) narrowed it and ruled out a lot, none of it found the cause:
+  - *Where.* The `units` hash is per unit `Object` 0x20..0x42, `SubObject` 9..24, `Unit` 0x48..0xb6, path stack, order list, guys; its delta at 8 is (a = 25, b = 46,052),
+    `guys` at 14 (a = -1,055, b = 5,723), `world` at 14 (a = -48, b = 15,458). `guys` / `world` match at 8, so positions, angles, animations and collision bits are right; the
+    mismatch is Unit / Order / path state of the ten walkers (or of the 256 animals) after one frame. Every one of the 45 replays differs in `units` and `guys` at its first boundary, so the
+    cause is systematic (and `guys` in 39 of the 42 mid-game ones, with small Adler deltas: |a| < 200 in 20 of those 39, i.e. a few small byte errors, not a wholesale drift).
+  - *What happens in frames 7 -> 8* (`RON_DUMP_MOVERS`): units 1/2, 1/4 and 1/5 (a clump of three) collide: 1/2 finds both sidestep cells blocked, snaps to its cell and repaths (path 2 -> 7 entries,
+    the A* expands 146 nodes, limit 500), draws `pause`; 1/5 waits (`unit_masks` 0x40); 1/4 reaches its sidestep point. `guys` at 8 confirms 1/2's snap (forcing a sidestep for it
+    changes `guys` at 8) and the three collisions of frame 7 (turning each collision off changes `guys` at 8).
+  - *Ruled out* (each by the full `units` / `guys` / `world` hash, which has no false positives): any single member of any object, or one or two members of the ten walkers' objects
+    off by up to +-70 (`RON_PAIR_SEARCH`); every subset / flag variant of 1/2's path stack; the `pause` of 1/2 (all 9 values, alone and with each sidestep choice of 1/5); a sidestep chosen
+    differently for 1/2, 1/5 (frame 7) or 1/4, 0/5, 0/1 (later); every single collision test at frames 7 - 13 skipped for each walker (`guys` at 14); an angle / position / z / speed / clock group
+    of one walker off by +-300 (`guys` at 14); the generator off by +-300 draws; single and triple collision-bit flips; all fog bytes (the engine changes none in these frames); `Unit.visible`,
+    `los_x/y` (written only by `Unit::init`), `trench_angle`, `dest_angle`/`orders_x/y` (`update_action` matches the asm).
+  - *Checked against the decompilation and found equal*: `Unit::process`, `Unit::work` (both halves), `Unit::move_step`, `Unit::resolve_unit_collision`, `Unit::detect_unit_collision`,
+    `Unit::set_new_location`, `Unit::set_angle`, `Unit::update_action`, `Unit::do_idle`, `Unit::check_idle`, `Unit::think` (the economy / AI half is ported), `Animal::process / work / do_idle`,
+    `Guy::move`, `Guy::process`, `Farms::inc_time`, `vector_dist`, `find_upath`'s straightening, the A* loop (neighbour order, start direction, tie-breaking, cost, closed / open rules) and
+    `Objects::process_all`'s order.
+  - *The path finder is right where it can be tested*: `--astar-check` reproduces 8 of the 10 distinct fresh U-level paths of the corpus exactly (section 6.1). So the A* result for 1/2 is almost
+    certainly what the original computed. The two it does not reproduce: a unit another unit (created later in the frame) blocks, and a Light Tank whose original path crosses water with a flag-4
+    node (`needs_transport`; the transport owner's file).
+  - *Still open*: what else in the Unit-level state of those ten walkers or of the 256 animals differs. The candidates left are the members no search can reach because they are not in the
+    engine's change set and have no small delta (a different animal state, an order body field the original rewrites that the engine leaves, the RNG-dependent `pause` with a different
+    draw order) and a second, independent difference; a ground truth of the original's frame 8 (a second save a few frames later in a quiet game) is what it needs. The segment pairs of the chain are all
+    noisy (74 - 443 members differ), the shortest, `22'28'15 -> 22'28'28` (31 frames) and `22'47'57 -> 22'48'11` (31 frames), are fights (Ammo, 27 draws per frame missing).
+  The later first mismatches of that replay look like consequences of such drift, not separate bugs: builds from 50 (the `Object.up` link of the player-1 woodcutter camp is unit 3 in the
+  engine, 2 in the original: the order in which the workers entered the camp's cell), cities 206 (the granary's flag is set a frame earlier), leaders 566 (`LeaderData.explored` +4 for
+  player 1: scouts), goods 2,318 / items 6,752 (a rare resource / ruin that player 1 has discovered in the original at that boundary and not yet in the engine).
 - **The first step of a mid-game save** (`21'45'58`: one guy, `des_x` +1024 on a Crossbowmen that starts an idle animation, a quirk not found in
   the code; `21'57'16`: no single cause, a fight is running).
 - **Random draws.** The engine under-draws by 1 - 2 per 10 frames in quiet segments (`--compare-next`, section 6) and over-draws in the long
@@ -225,7 +265,8 @@ What still **separates the engine from the original**, in the order the replays 
   call of `Random::get` in the binary): `Unit::think_scout`, `Objects::add_flock`, the rest of `Animal`/`Unit::do_air_physics` for birds, `Army::find_target`.
 - **Tech effects on stats.** Over a long segment `Unit.mylos`, `Unit.myhits`, `Build.myhits` / `max_age` differ for most units (the original has
   more hit points and sight: a tech the engine had not researched, or applies differently); not checked at a first mismatch yet.
-- The command stream: `GUARD` and `FOLLOW` have no `Verb`.
+- The command stream: `GUARD` and `FOLLOW` are executed since the second pass (`Verb::Guard` / `Verb::Follow`, `group_action_guard` / `group_action_follow`, `do_guard` / `do_follow` in
+  `orders_guard.cpp`, aliasing the GuardOrder members onto unused `Order` fields so the save layout is unchanged); nothing in the corpus can check them yet (their effect on the draw distance is in section 6).
 - Engine state that is **missing** (frozen at the save's values in the shadow; no first mismatch has pointed at them yet):
   `LeaderData` combat statistics (`average_*_rate`, `*_fifteen_seconds`, `damage_current_frame`, `frame_battle`), command counters
   (`move_orders_issued`, `column_orders_issued`; the first MOVE_TO of `21'23'34` is at record frame 3,320), `best_pop/attack/armor/move`, taunt state,

@@ -1,0 +1,3 @@
+re/decomp/ctw2
+ScenarioFuncSet::ctw_deal_accepted
+ScenarioFuncSet::ctw_set_deal_accepted

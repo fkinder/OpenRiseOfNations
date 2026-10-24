@@ -263,8 +263,16 @@ const ClassMap& map_order(int t) {
 		b.f("data2", &Order::sa_data2).f("data3", &Order::sa_data3).f("data4", &Order::sa_data4).f("ox", &Order::ox).f("whom", &Order::whom);
 	});
 	// Classes with no modelled field but the flags byte.
-	static const ClassMap follow = make_order_map("FollowOrder", "FollowOrder", 0x28, nullptr);
-	static const ClassMap guard = make_order_map("GuardOrder", "GuardOrder", 0x34, nullptr);
+	static const ClassMap follow = make_order_map("FollowOrder", "FollowOrder", 0x28, [](Builder<Order>& b) {
+		order_target(b);
+		b.f("oxx", &Order::oxx).f("whose", &Order::whose).f("uid2", &Order::uid2);
+	});
+	static const ClassMap guard = make_order_map("GuardOrder", "GuardOrder", 0x34, [](Builder<Order>& b) {
+		order_target(b);
+		// (no members of their own: dx / dy = def_x / def_y, the guard point = x / y, idle = timer, retry = pause; see orders.hpp)
+		b.f("dx", &Order::def_x).f("dy", &Order::def_y).f("guard_x", &Order::x).f("guard_y", &Order::y);
+		b.f("idle", &Order::timer).f("retry", &Order::pause);
+	});
 	static const ClassMap gpatrol = make_order_map("GroupPatrolOrder", "GroupPatrolOrder", 0x60, nullptr);
 	static const ClassMap attackground = make_order_map("AttackGroundOrder", "AttackGroundOrder", 0x1c, nullptr);
 	static const ClassMap think = make_order_map("ThinkOrder", "UnitOrder", 0x4, nullptr);

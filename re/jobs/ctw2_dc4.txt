@@ -1,0 +1,7 @@
+re/decomp/ctw2
+ConquestCountries::get_scenario_map_rect
+ConquestCountries::get_map_rect
+ConquestCountries::get_relative_angle
+ConquestCountries::build_map_size_scale
+ConquestCountries::get_country_x
+ConquestCountries::get_country_y

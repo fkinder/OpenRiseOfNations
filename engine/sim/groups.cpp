@@ -10,6 +10,8 @@
 #include "sim/combat.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 
 #include "sim/game.hpp"
 #include "sim/garrison.hpp"
@@ -555,6 +557,124 @@ void group_action_halt(Game& g, Group& gr, int32_t p) {
 		clear_orders(g, *u);
 		u->unit_masks &= ~umask::kAutoExplore;
 	}
+}
+
+// ---- follow and guard (Group::action_follow @6fd510, Group::action_guard @6fcd30)
+
+void group_action_follow(Game& g, Group& gr, int32_t ox, int32_t whom, QueuePos q) {
+	gr.disband = 0;  // action_begin
+	if (gr.buildings || ox < 0 || whom < 0) return;
+	// TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	if (q == kQueueFirst) {
+		std::vector<Order> saved = group_set_up_insert(g, gr);
+		group_action_halt(g, gr, 0);
+		group_action_follow(g, gr, ox, whom, kQueueNew);
+		group_finish_insert(g, gr, saved);
+		return;
+	}
+	gr.form = -1;
+	const Object* T = obj_at(g, whom, ox);
+	if (!T || !T->alive() || !on_map(T)) return;
+	if (T->is_unit && is_plane(*static_cast<const Unit*>(T))) return;
+	for (int32_t i = 0; i < gr.num; i++) {
+		const int32_t o = gr.list[size_t(i)];
+		Object* mo = obj_at(g, gr.who, o);
+		if (!is_valid_unit(mo) || !on_map(mo)) continue;
+		Unit* m = static_cast<Unit*>(mo);
+		if (is_plane(*m)) continue;
+		const int32_t tcap = obj_captain(g, *T);
+		if (o != tcap || gr.who != whom) add_follow_order(g, *m, ox, whom, q);
+	}
+}
+
+void group_action_guard(Game& g, Group& gr, int32_t ox, int32_t whom, QueuePos q, int32_t p4) {
+	Group tmp;  // the guarding members, whose slots are laid out around the target
+	group_clear(tmp, -1);
+	tmp.stamp = 0;
+	gr.disband = 0;  // action_begin
+	// TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	if (gr.buildings || ox < 0 || whom < 0 || gr.num <= 0) return;
+	const Object* T = obj_at(g, whom, ox);
+	if (!T || !T->alive() || !on_map(T)) return;
+	if (q == kQueueFirst) {
+		std::vector<Order> saved = group_set_up_insert(g, gr);
+		group_action_halt(g, gr, 0);
+		group_action_guard(g, gr, ox, whom, kQueueNew, 0);
+		group_finish_insert(g, gr, saved);
+		return;
+	}
+	gr.form = -1;
+	if (!is_ally(g, gr.who, whom)) return;
+	if (ox < 2000 && g.objects[size_t(whom)].unit_mark < ox) return;  // "Invalid order" in the original (debug report)
+	const Object* T2 = obj_at(g, whom, ox);
+	if (!T2 || !on_map(T2)) return;
+	if (T2->is_unit && is_plane(*static_cast<const Unit*>(T2))) return;
+	if (!T2->is_unit) {
+		// A building: every member guards it (no formation slot).
+		for (int32_t i = 0; i < gr.num; i++) {
+			Unit* m = g.unit(gr.who, gr.list[size_t(i)]);
+			if (m) add_guard_order(g, *m, ox, whom, -1, -1, q);
+		}
+	} else {
+		ox = get_captain(g, *static_cast<const Unit*>(T2));
+	}
+	const Object* TO = obj_at(g, whom, ox);  // the guarded object (a unit: its captain)
+	if (!TO) return;
+	const Unit* TU = TO->is_unit ? g.unit(whom, ox) : nullptr;
+	const int32_t Td = TO->ptype ? TO->ptype->domain : 0;
+	// A human player's other units already guarding this target join the formation.
+	if ((g.leaders[size_t(gr.who)].flags & leaderflag::kHuman) != 0) {
+		for (int32_t i = 0; i < g.objects[size_t(gr.who)].unit_mark; i++) {
+			Unit* ou = g.unit(gr.who, i);
+			if (!ou || !ou->alive() || !update_guard_order(g, *ou, ox, whom)) continue;
+			if (member(g, gr, i, gr.who)) continue;
+			const Type& ot = *ou->ptype;
+			if (!(ot.unit_flags & 0x20) && ot.domain != Td && (!(ot.unit_flags & 0x10) || Td != 0)) continue;
+			if (ou->o_up < 0 && (i != ox || gr.who != whom)) group_add(g, tmp, i, gr.who, 0, 0);
+		}
+	}
+	for (int32_t i = 0; i < gr.num; i++) {
+		const int32_t o = gr.list[size_t(i)];
+		Object* mo = obj_at(g, gr.who, o);
+		if (!is_valid_unit(mo) || !on_map(mo)) continue;
+		Unit* m = static_cast<Unit*>(mo);
+		if (is_plane(*m)) continue;
+		const Type& mt = *m->ptype;
+		const bool domain_ok = (mt.unit_flags & 0x20) || mt.domain == Td || ((mt.unit_flags & 0x10) && Td == 0);
+		if (domain_ok && (p4 == 0 || !(mt.unit_flags & 0x20000)) && (o != ox || gr.who != whom)) group_add(g, tmp, o, gr.who, 0, 0);
+	}
+	// (Game::get_patch_version() > 3 in every build the corpus was recorded with.) A target that is itself guarding one of
+	// these units stops.
+	if (TU && TU->order_type() != kOrderNone) {
+		for (int32_t i = 0; i < gr.num; i++) {
+			Unit* tw = g.unit(whom, ox);
+			if (tw && update_guard_order(g, *tw, gr.list[size_t(i)], gr.who)) {
+				clear_orders(g, *tw);
+				break;
+			}
+		}
+	}
+	if (group_get_num_cap(g, tmp) <= 0) return;
+	int32_t lx = 0, ly = 0;
+	group_get_loc(g, tmp, &lx, &ly);
+	uint32_t angle = 0;
+	const int32_t form = (g.leaders[size_t(gr.who)].flags & leaderflag::kHuman) ? 1 : 0;
+	FormData* F = group_compute_form(g, tmp, TO->x, TO->y, form, 0x32, true, &angle, lx, ly, 1);
+	if (!F) return;
+	for (int32_t i = 0; i < tmp.num; i++) {
+		const int32_t o = tmp.list[size_t(i)];
+		if (o == ox) continue;
+		Unit* m = g.unit(gr.who, o);
+		if (!m || get_captain(g, *m) == ox) continue;
+		const int32_t offx = F->off_x[size_t(i)], offy = F->off_y[size_t(i)];
+		if (Order* gd = update_guard_order(g, *m, ox, whom)) {
+			gd->def_y = offy;
+			gd->def_x = offx;
+		} else {
+			add_guard_order(g, *m, ox, whom, offx, offy, q);
+		}
+	}
+	F->clear_scratch();
 }
 
 // ---- stance (Group::action_stance @70d440)

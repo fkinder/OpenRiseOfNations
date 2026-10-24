@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -41,13 +42,26 @@ public:
 	GameHooks(sim::Game& g, const std::array<int, 8>& seat_who, ChecksumMode mode, ExecPolicy policy = ExecPolicy::all_engine(),
 	          const std::string& scenario_rel = std::string(), uint32_t seed = 0);
 
-	int32_t frame() const override { return g_.frame; }
-	void step_frame() override { g_.do_frame(); }
+	int32_t frame() const override { return g_->frame; }
+	void step_frame() override;
 	bool checksums(uint32_t out[16]) override;
 	void begin_package(int slot, uint32_t stamp) override;
 	void execute(int slot, const uint8_t* cmd, size_t len) override;
+	// OOS recovery: the native save of the game is the snapshot. `restore` hands the bytes to `on_restore`, which builds the Game
+	// (sim::load_game_bytes) and calls `rebind` with it; without a callback the hooks cannot restore.
+	bool game_over() const override { return g_->game_over; }   // TURN_DATA then carries bit 7
+	bool snapshot(Bytes& out) override;
+	bool restore(const Bytes& snap, std::string& err) override;
+	std::function<bool(const Bytes& snap, std::string& err)> on_restore;
+	// The application's frame wrapper (script input before, script output after); runs around Game::do_frame.
+	std::function<void()> before_frame, after_frame;
 
-	sim::Game& game() { return g_; }
+	sim::Game& game() { return *g_; }
+	void rebind(sim::Game& g) { g_ = &g; }
+	// The scenario text and seed a native save records (they change when a recovery loads a snapshot of another game).
+	void set_save_identity(const std::string& scenario_rel, uint32_t seed) { scenario_ = scenario_rel, seed_ = seed; }
+	const std::string& scenario() const { return scenario_; }
+	uint32_t seed() const { return seed_; }
 	// What the instance did with the commands it was given.
 	uint64_t commands_run = 0;
 	std::map<int, uint64_t> unsupported;  // opcode -> count (verbs the engine cannot run, or the policy leaves out)
@@ -56,7 +70,7 @@ public:
 	std::string last_error;
 
 private:
-	sim::Game& g_;
+	sim::Game* g_;
 	std::array<int, 8> who_;
 	ChecksumMode mode_;
 	ExecPolicy policy_;

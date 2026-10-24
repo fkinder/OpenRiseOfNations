@@ -222,6 +222,7 @@ bool Session::local_active() const {
 }
 
 bool Session::submit(const uint8_t* cmds, size_t len) {
+	if (recovering_) return false;  // the stamps restart: what is typed now would be lost
 	size_t p = 0;
 	while (p < len) {
 		const size_t n = sim::replay_command_length(cmds + p, len - p);
@@ -253,6 +254,14 @@ void Session::send_local_package() {
 	local_pkg_.clear();
 }
 
+uint32_t Session::request_save(uint32_t ahead) {
+	const uint32_t at = boundaries_ + std::max<uint32_t>(2, ahead);
+	Bytes m{msg::kSaveAt};
+	put32(m, at);
+	t_.broadcast(m, true);
+	return at;
+}
+
 void Session::start() {
 	if (started_) return;
 	started_ = true;
@@ -278,6 +287,14 @@ void Session::pump() {
 
 void Session::handle(int from, const Bytes& m) {
 	if (m.empty()) return;
+	// While a recovery runs, everything a peer sent before its RecReady belongs to the epoch that is being repaired: packages, DSYNC and the
+	// drop agreement alike (per-sender order makes the RecReady the boundary between the two epochs).
+	if (recovering_ && !(rec_.ready_mask & (1u << (from & 7)))) {
+		switch (m[0]) {
+		case msg::kPackage: case msg::kDsync: case msg::kDropFlag: case msg::kDropState: case msg::kDropVote: case msg::kDropDecision: case msg::kDropNeed: return;
+		default: break;
+		}
+	}
 	switch (m[0]) {
 	case msg::kPackage: accept_package(from, m); break;
 	case msg::kDropFlag:
@@ -296,7 +313,22 @@ void Session::handle(int from, const Bytes& m) {
 		if (m.size() == 6) on_drop_need(from, m[1], ld32(m.data() + 2));
 		break;
 	case msg::kDsync:
+		// a DSYNC sent before the peer's RecReady belongs to the epoch that is being repaired
+		if (recovering_ && !(rec_.ready_mask & (1u << (from & 7)))) break;
 		if (m.size() == 5 && from >= 0 && from < kMaxSlots) slot_[size_t(from)].dsync = int32_t(ld32(m.data() + 1));
+		break;
+	case msg::kSaveAt:
+		if (m.size() == 5 && !recovering_) {
+			const uint32_t at = ld32(m.data() + 1);
+			if (at > boundaries_) save_at_.insert(at);
+			else if (on_save_missed) on_save_missed(at);
+		}
+		break;
+	case msg::kRecBegin:
+	case msg::kRecData:
+	case msg::kRecReady:
+	case msg::kRecNeed:
+		if (cfg_.recover) recovery_message(from, m);
 		break;
 	default: break;  // lobby traffic and anything unknown
 	}
@@ -308,6 +340,8 @@ void Session::accept_package(int from, const Bytes& m) {
 	Bytes data;
 	if (!unpack_package_msg(m, stamp, play, data) || play < 0 || play >= kMaxSlots) return;
 	if (!valid_sender(play)) return;  // the original ignores packages of players that are gone (VALID, not WON, none of 0xd0)
+	// During a recovery everything a peer sent before its RecReady belongs to the old epoch (per-sender order): ignored.
+	if (recovering_ && !(rec_.ready_mask & (1u << (from & 7)))) return;
 	Slot& s = slot_[size_t(play)];
 	if (s.drop.pending && from == play) return;  // the final stamp of a given-up player is frozen; only relays count now
 	if (stamp <= s.last_accepted) {
@@ -341,14 +375,10 @@ StepResult Session::step() {
 		r.text = error_;
 		return r;
 	}
-	if (!in_desync_) {
-		for (int q = 0; q < kMaxSlots; ++q)
-			if (q != cfg_.local_slot && slot_[size_t(q)].dsync >= 0) {
-				enter_desync(true, q);
-				break;
-			}
-	}
+	// A peer's DSYNC is acted on at the end of the boundary that reaches its stamp (end_turn), as the original does: every peer then
+	// freezes on the same row of check sums, which the recovery's authority vote needs.
 	if (in_desync_) {
+		if (cfg_.recover) return recovery_step();
 		r.kind = StepKind::Desync;
 		r.text = desync_.text();
 		return r;
@@ -384,6 +414,10 @@ bool Session::begin_turn(std::string& err) {
 		s.sums.fill(0);
 		s.turn_data = false;
 	}
+	for (auto it = save_at_.begin(); it != save_at_.end() && *it <= boundaries_;) {  // a request this peer never reached in time
+		if (on_save_missed) on_save_missed(*it);
+		it = save_at_.erase(it);
+	}
 	BoundaryInfo bi;
 	bi.turn = boundaries_ + 1;
 	bi.sent_stamp = local_stamp_ + 1;
@@ -398,6 +432,11 @@ bool Session::begin_turn(std::string& err) {
 	last_boundary_ = bi;
 	if (local_active()) sim::wire_check_sums(local_pkg_, bi.sums);
 	if (on_boundary) on_boundary(bi);
+	if (!save_at_.empty() && save_at_.count(boundaries_)) {  // the agreed boundary of a synchronized save: the same state on every peer
+		save_at_.erase(boundaries_);
+		Bytes snap;
+		if (h_.snapshot(snap) && on_save) on_save(snap, h_.frame(), boundaries_);
+	}
 	send_local_package();
 	target_stamp_ = local_stamp_ - 1;
 	return true;
@@ -459,6 +498,7 @@ StepResult Session::run_turn() {
 	end_turn();
 	phase_ = 0;
 	if (in_desync_) {
+		if (cfg_.recover) return recovery_step();
 		r.kind = StepKind::Desync;
 		r.text = desync_.text();
 		return r;
@@ -549,9 +589,9 @@ void Session::lockstep_verb(int slot, const uint8_t* cmd, size_t len) {
 		break;
 	}
 	case sim::op::kPause: process_pause(slot, cmd[1]); break;
-	case sim::op::kSpeedSet: set_speed(int(int32_t(ld32(cmd + 1)))); break;
-	case sim::op::kSpeedUp: set_speed(speed_ + 1); break;
-	case sim::op::kSpeedDown: set_speed(speed_ - 1); break;
+	case sim::op::kSpeedSet: set_speed(int(int32_t(ld32(cmd + 1))), slot); break;
+	case sim::op::kSpeedUp: set_speed(speed_ + 1, slot); break;
+	case sim::op::kSpeedDown: set_speed(speed_ - 1, slot); break;
 	case sim::op::kCannonTime: start_cannon_time(slot, cmd[1]); break;
 	case sim::op::kResign:
 	case sim::op::kQuit: {  // Player::resign(0) / quit(1): flag 0x40, the sender leaves the expected set
@@ -569,6 +609,7 @@ void Session::lockstep_verb(int slot, const uint8_t* cmd, size_t len) {
 }
 
 void Session::process_pause(int slot, int state) {
+	const bool before = paused_;
 	if (state) {
 		if (paused_) return;
 		Slot& s = slot_[size_t(slot)];
@@ -578,12 +619,15 @@ void Session::process_pause(int slot, int state) {
 	} else {
 		paused_ = false;
 	}
+	if (paused_ != before && on_pause) on_pause(slot, paused_);
 }
 
-void Session::set_speed(int s) {
+void Session::set_speed(int s, int slot) {
 	if (s < 0 || s > 4) return;
+	const bool changed = s != speed_;
 	speed_ = s;
 	if (cannon_) saved_speed_ = s;
+	if (changed && on_speed) on_speed(slot, s);
 }
 
 void Session::start_cannon_time(int slot, int state) {
@@ -681,6 +725,7 @@ void Session::enter_desync(bool peer_reported, int reporter) {
 				desync_.first_component = k;
 				break;
 			}
+	if (cfg_.recover) recovering_ = true;
 	if (!peer_reported) {
 		Bytes m{msg::kDsync};
 		put32(m, local_stamp_);

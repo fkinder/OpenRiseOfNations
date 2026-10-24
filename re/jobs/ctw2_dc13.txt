@@ -1,0 +1,4 @@
+re/decomp/ctw2
+ScenarioFuncSet::num_units_built
+ScenarioFuncSet::num_decoys
+ScenarioFuncSet::num_unit_category

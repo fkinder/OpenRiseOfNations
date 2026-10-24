@@ -1,0 +1,6 @@
+re/decomp/ctw2
+ScenarioFuncSet::ctw_remove_nuke
+ScenarioFuncSet::get_num_nukes
+ScenarioFuncSet::get_total_nukes
+ScenarioFuncSet::get_defcon_level
+ScenarioFuncSet::set_defcon_level
