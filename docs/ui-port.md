@@ -850,3 +850,42 @@ Snapshots read: `ui3_hud_1920_air.png` (bar, resource / market / infrastructure 
 `RON_PREFER_MILITARY=0|1`, `RON_UIX_TRACE=1` (every command uix issues), `--key "Home@5"`, `--key "Tab@3"`, `--option 36@2` + `--mouse down/up` for a targeting click, `--mouse rdown/rup` for the
 right click orders; `--no-fog` so the clicks find buildings.
 
+### 13.7 Multiplayer window pass (2026-10-24)
+
+Method: the front end is driven through its real hit boxes by `RON_MP_DEMO_UI=PREFIX ronmap GAME --menu mp-lobby --snapshot x.png` (two `FrontEnd`s in one process: the host's
+lobby with a thread guest "Marcus", and a second front end that joins it as guest "Ayla" with `mpDemoJoin`), steps in `RON_MP_DEMO_SCRIPT` (`g:X,Y` / `h:X,Y` click on the guest's /
+host's screen, `gs:NAME` / `hs:NAME` snapshot `PREFIX_NAME.png`, `w:MS`, `st` prints both screens' state). Games: headless `--host` / `--join` processes on 127.0.0.1:27450+ with
+`--snapshot`. A *windowed* two-machine session could not be driven (computer-use access was declined, and a windowed ronmap started from a plain shell does not come up), so the
+in-game HUD chat box was only checked through `--mp-act chat=` / `team=` (the CHAT verb path), not typed in.
+
+| Flow | Result |
+|---|---|
+| Host creates a room (Multiplayer > Host), LAN address shown in the lobby | PASS (`ui_host.png`) |
+| Guest joins (Join on the connect screen path = `Room::join`), host chat "Ayla joined the room." | PASS |
+| Team / colour / handicap / nation changes of the guest mirror on the host (rows + chat lines "Ayla now has team 2.", "green", "Skill +2", "the Maya") | PASS (`ui_host_seats.png`) |
+| Host's settings (map, rules) shown read-only on the guest | PASS (`ui_guest.png`) |
+| Lobby chat (guest lines reach the host with the sender's colour) | PASS (`lobby.png`) |
+| Ready / Not ready, host's "Waiting for ready" until all guests are ready | PASS |
+| Watch only / Play instead (guest becomes an observer: "Watching: Ayla", seat becomes AI 3, START humans `1 1 0`) | PASS (`ui_obs_guest.png`) |
+| Kick: the kicked window returns to the Multiplayer screen with "The host removed you from the room."; the host's room shrinks to 2 humans | PASS (`ui_kicked_guest.png`) |
+| Kick with block: the same name is refused on rejoin | PASS (Room level) |
+| Guest Leave: host stays in the lobby with 2 humans; host Leave: the guest gets "The host closed the room." | PASS |
+| Start countdown: guests see "The game starts in 10 seconds..." in the chat, host's button reads "Cancel (n)", a guest turning Not Ready stops it ("The countdown stopped: a player is not ready.") | PASS (`ui_guest_count.png`, `ui_cancel_host.png`) |
+| START: both front ends call `frontEndPlayMultiplayer` with the same seed, 3 nations and the same humans vector, their own slots | PASS |
+| 4 machines (3 players + 1 observer), chat / team chat / faster / slower / pause / resume, 300 frames | PASS (hook note below) |
+| Observer view ("Observing: you see the game from Host's seat..."), observer chat out of band | PASS (`game_observer.png`) |
+| Out-of-sync recovery notice ("Back in sync at frame 157 (recovery 1); the game goes on.") with `--mp-diverge 150` | PASS (`game_host_recovered.png`) |
+| Conquer the World battle hosted from a campaign (`--ctw-mp --ctw-battle alexander:auto`), host and guest end with the same campaign hash | PASS |
+| Synchronized save (`save@6`) writes byte-identical files; the host reloads it (`--mp-load`) and the guest receives it | PASS |
+| Lobby "Conquer the World..." button / Load Saved Game chooser clicked in the window | NOT RUN (needs the app delegate: campaign session, file chooser) |
+| In-game HUD chat box typed into | NOT RUN (see above) |
+
+Fixed in this pass: `--menu NAME` as the last argument crashed the app at start (`std::strcmp(argv[argc], ...)` in the screens loop, `more` was stale after the match), so
+`ronmap GAME --menu multiplayer` never opened; `Session::lockstep_verb` speed guards (below).
+
+Test-hook note: `--mp-act "pause@5,resume@6"` loses the resume (the act fires while the pause is still in flight, `paused()` is false, the act is dropped) and the game stays paused;
+space the acts at least two turns apart.
+
+Speed guards (`engine/net/lockstep.cpp` vs `engine/sim/commands_extra.cpp`): `process_speed_up` acts only below Fast (speed < 3), `process_speed_down` only above Very Slow, all three
+verbs do nothing when `Game::multiplayer && (info.flags & 0x100)`. The session accepted `SpeedUp` up to Hyper Fast (4), so its clock could run at 1 ms while the game's `ctl.speed` stayed at
+3, and it ignored the lock. Now `kSpeedUp` needs `speed_ < 3`, `kSpeedDown` `speed_ != 0`, and `SessionConfig::speed_locked` (set by `Runtime::ready` from the game's flags) makes `set_speed` a no-op.

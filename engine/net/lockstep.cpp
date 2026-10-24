@@ -590,8 +590,10 @@ void Session::lockstep_verb(int slot, const uint8_t* cmd, size_t len) {
 	}
 	case sim::op::kPause: process_pause(slot, cmd[1]); break;
 	case sim::op::kSpeedSet: set_speed(int(int32_t(ld32(cmd + 1))), slot); break;
-	case sim::op::kSpeedUp: set_speed(speed_ + 1, slot); break;
-	case sim::op::kSpeedDown: set_speed(speed_ - 1, slot); break;
+	// process_speed_up @9461a0 acts only below Fast (speed < 3), process_speed_down @946290 only above Very Slow; the sim's guards, so the session's speed
+	// and Game::ctl.speed cannot drift apart (a Hyper Fast reached by "faster" in the session only).
+	case sim::op::kSpeedUp: if (speed_ < 3) set_speed(speed_ + 1, slot); break;
+	case sim::op::kSpeedDown: if (speed_ != 0) set_speed(speed_ - 1, slot); break;
 	case sim::op::kCannonTime: start_cannon_time(slot, cmd[1]); break;
 	case sim::op::kResign:
 	case sim::op::kQuit: {  // Player::resign(0) / quit(1): flag 0x40, the sender leaves the expected set
@@ -624,6 +626,7 @@ void Session::process_pause(int slot, int state) {
 
 void Session::set_speed(int s, int slot) {
 	if (s < 0 || s > 4) return;
+	if (cfg_.speed_locked) return;  // turn_speed_set: a locked multiplayer game ignores the three verbs
 	const bool changed = s != speed_;
 	speed_ = s;
 	if (cannon_) saved_speed_ = s;

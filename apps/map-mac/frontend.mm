@@ -23,6 +23,7 @@
 #import <QuartzCore/QuartzCore.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -32,6 +33,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "assets/cursors.hpp"
@@ -3029,6 +3031,36 @@ static bool parse_port(const std::string& s, int& out) {
 	}
 	[self mpPlay];
 	[NSThread sleepForTimeInterval:0.5];  // the guests' threads read START
+}
+
+- (BOOL)mpDemoJoin:(int)port name:(NSString*)name pumping:(FrontEnd*)hostFe {
+	auto room = std::make_shared<mp::Room>();
+	std::string err;
+	bool ok = false;
+	std::atomic<bool> done{false};
+	std::shared_ptr<mp::Room> r = room;
+	const std::string nm = name.UTF8String;
+	std::thread t([&]() {
+		ok = r->join("127.0.0.1", uint16_t(port), nm, 4000, err);
+		done = true;
+	});
+	while (!done) {
+		[hostFe mpPump];
+		[NSThread sleepForTimeInterval:0.01];
+	}
+	t.join();
+	if (!ok) {
+		std::fprintf(stderr, "demo guest: %s\n", err.c_str());
+		return NO;
+	}
+	_room = room;
+	[self showScreen:@"mp-lobby"];
+	return YES;
+}
+
+- (NSString*)mpDemoState {
+	NSString* scr = _screen == kMpLobby ? @"mp-lobby" : _screen == kMpConnect ? @"multiplayer" : @"other";
+	return [NSString stringWithFormat:@"screen=%@ room=%d humans=%d counting=%d message='%s'", scr, _room ? 1 : 0, _room ? _room->humans() : 0, _room && _room->counting() ? _room->countdown_left() : 0, _mpMessage.c_str()];
 }
 
 - (BOOL)mpDemoPort:(int)port guests:(NSArray<NSString*>*)guests {

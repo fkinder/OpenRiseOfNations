@@ -59,6 +59,10 @@
 - (BOOL)mpDemoPort:(int)port guests:(NSArray<NSString*>*)guests;
 // Headless test: the host presses Start on the lobby of the demo room (every guest is made ready first).
 - (void)mpDemoStart;
+// Headless test (RON_MP_DEMO_UI): a second front end joins the room of `hostFe` as a real guest (its lobby screen, its pump), the connect running on a thread
+// while the host's front end keeps pumping; `mpDemoState` says which screen it is on and what the room holds (tests read it after each scripted click).
+- (BOOL)mpDemoJoin:(int)port name:(NSString*)name pumping:(FrontEnd*)hostFe;
+- (NSString*)mpDemoState;
 - (void)ctwShowSession:(std::shared_ptr<ctwui::Session>)session sub:(NSString*)sub select:(NSString*)country;
 // Back from a multiplayer game (a Conquer the World battle): the room is a lobby again. The host (`ctw` YES) returns to the campaign map with the
 // room kept (the next battle can be played with the same players), a guest to the lobby, with `message` as a line in the chat.

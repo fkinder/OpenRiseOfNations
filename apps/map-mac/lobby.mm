@@ -842,6 +842,7 @@ bool Runtime::ready() {
 	cfg.local_slot = slot_;
 	cfg.seed = seed_;
 	cfg.speed = speed0_;
+	cfg.speed_locked = game_().multiplayer && (game_().info.flags & 0x100);
 	cfg.recover = recover_;
 	cfg.timeout_ms = 20000;
 	for (int i = 0; i < 8; ++i) {

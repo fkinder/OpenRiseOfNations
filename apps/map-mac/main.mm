@@ -6707,6 +6707,64 @@ static void run_app(MapAppDelegate* d) {
 }
 @end
 
+// RON_MP_DEMO_UI=PREFIX + RON_MP_DEMO_SCRIPT: the host's lobby (`host`, the demo room with its thread guest) and a second front end that joins it as guest "Ayla",
+// both driven through their real hit boxes. Steps separated by ';': `g:X,Y` / `h:X,Y` a click on the guest's / host's screen (UI pixels), `gs:NAME` / `hs:NAME`
+// a snapshot PREFIX_NAME.png, `w:MS` keep both lobbies running, `st` print both screens' state. The host's delegate is an MpTestHost; so is the guest's.
+static int mpDemoUiTest(FrontEnd* host, id<MTLDevice> device, NSString* dir, int port, const char* prefix, int w, int h, float scale) {
+	NSString* error = nil;
+	FrontEnd* guest = [[FrontEnd alloc] initWithDevice:device gameDir:dir error:&error];
+	if (!guest) return 1;
+	NSString* sink = [NSTemporaryDirectory() stringByAppendingPathComponent:@"ron_mp_demo_sink.png"];
+	MpTestHost* hostLog = [MpTestHost new];
+	MpTestHost* guestLog = [MpTestHost new];
+	host.host = hostLog;
+	guest.host = guestLog;
+	if (![guest mpDemoJoin:port name:@"Ayla" pumping:host]) return 1;
+	auto frames = [&](int ms) {
+		for (int t = 0; t < ms; t += 40) {
+			[host snapshotTo:sink width:w height:h scale:scale];
+			[guest snapshotTo:sink width:w height:h scale:scale];
+			[NSThread sleepForTimeInterval:0.04];
+		}
+	};
+	auto click = [&](FrontEnd* fe, float x, float y) {
+		const CGPoint p = CGPointMake(x, y);
+		[fe snapshotTo:sink width:w height:h scale:scale];
+		[fe mouseMoved:p];
+		[fe mouseDown:p clicks:1];
+		[fe mouseUp:p];
+		frames(120);
+	};
+	frames(1500);
+	const char* script = getenv("RON_MP_DEMO_SCRIPT");
+	std::string sc = script ? script : "gs:guest;hs:host;st";
+	int rc = 0;
+	for (size_t q = 0; q < sc.size();) {
+		size_t semi = sc.find(';', q);
+		if (semi == std::string::npos) semi = sc.size();
+		const std::string step = sc.substr(q, semi - q);
+		q = semi + 1;
+		const size_t colon = step.find(':');
+		const std::string cmd = step.substr(0, colon), arg = colon == std::string::npos ? "" : step.substr(colon + 1);
+		float x = 0, y = 0;
+		if (cmd == "g" || cmd == "h") {
+			std::sscanf(arg.c_str(), "%f,%f", &x, &y);
+			click(cmd == "g" ? guest : host, x, y);
+		} else if (cmd == "gs" || cmd == "hs") {
+			frames(80);
+			NSString* path = [NSString stringWithFormat:@"%s_%s.png", prefix, arg.c_str()];
+			if (![(cmd == "gs" ? guest : host) snapshotTo:path width:w height:h scale:scale]) rc = 1;
+			std::printf("snapshot %s\n", path.UTF8String);
+		} else if (cmd == "w") {
+			frames(std::atoi(arg.c_str()));
+		} else if (cmd == "st") {
+			std::printf("host:  %s | %s\n", [host mpDemoState].UTF8String, hostLog.log.UTF8String ?: "-");
+			std::printf("guest: %s | %s\n", [guest mpDemoState].UTF8String, guestLog.log.UTF8String ?: "-");
+		}
+	}
+	return rc;
+}
+
 int main(int argc, const char* argv[]) {
 	@autoreleasepool {
 		NSString* gameDir = [NSHomeDirectory() stringByAppendingPathComponent:@"Games/RiseOfNations"];
@@ -7046,7 +7104,10 @@ int main(int argc, const char* argv[]) {
 				menu = true;
 				static const char* const screens[] = {"main", "tutorials", "skirmish", "skirmish-setup", "scenarios", "quit-popup", "ctw", "ctw-map", "multiplayer", "mp-lobby"};
 				for (const char* sname : screens) {
-					if (more && std::strcmp(argv[i + 1], sname) == 0) menuScreen = @(argv[++i]);
+					if (more && std::strcmp(argv[i + 1], sname) == 0) {
+						menuScreen = @(argv[++i]);
+						break;  // `more` is stale after the ++i: the next compare would read argv[argc] when the screen name is the last argument
+					}
 				}
 			} else if (a.rfind("--", 0) == 0) {
 				std::printf("usage: %s [game-dir] [--menu [main|tutorials|skirmish|skirmish-setup|scenarios|quit-popup]] [--snapshot out.png [--size WxH]]\n"
@@ -7119,7 +7180,9 @@ int main(int argc, const char* argv[]) {
 				} else {
 					if ([menuScreen isEqualToString:@"mp-lobby"]) {  // a room with two guests (threads of this process) for the lobby snapshots
 						const char* port = getenv("RON_MP_DEMO_PORT");
-						if (![fe mpDemoPort:port ? std::atoi(port) : 17777 guests:@[@"Ayla", @"Marcus"]]) std::fprintf(stderr, "the demo room could not be set up\n");
+						const char* uiTest = getenv("RON_MP_DEMO_UI");   // two real front ends (host + guest "Ayla") driven by scripted clicks: docs/ui-port.md 13.x
+						if (![fe mpDemoPort:port ? std::atoi(port) : 17777 guests:uiTest ? @[@"Marcus"] : @[@"Ayla", @"Marcus"]]) std::fprintf(stderr, "the demo room could not be set up\n");
+						if (uiTest) return mpDemoUiTest(fe, device, dir, port ? std::atoi(port) : 17777, uiTest, w, h, ui_scale);
 						if (getenv("RON_MP_DEMO_START")) {  // the host presses Start: a test host receives the call the app delegate would get
 							MpTestHost* th = [MpTestHost new];
 							fe.host = th;

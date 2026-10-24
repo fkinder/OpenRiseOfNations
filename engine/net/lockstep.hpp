@@ -180,6 +180,7 @@ struct SessionConfig {
 	uint32_t seed = 0;                                // GameInfo.seed (informational: wire packages carry no padding)
 	int speed = 2;                                    // game_speed: timings[speed] = {200, 125, 67, 50, 1} ms per frame
 	std::array<uint32_t, kMaxSlots> slot_flags{};     // PlayerFlag bits per slot at the start (VALID, HUMAN, OBSERVER ...)
+	bool speed_locked = false;                        // GameInfo.flags & 0x100 in a multiplayer game: process_speed_* change nothing (commands_extra.cpp turn_speed_set)
 	int max_pauses = 10;                              // pauses per player; <= 0 = unlimited (GameInfo.flags & 0x40)
 	int checksum_failure_threshold = 0;               // GameInfo.checksum_failure_threshold: mismatches tolerated (0 = the first is fatal)
 	int drop_default = kDropReplaceWithAi;            // this peer's vote when a player is dropped
