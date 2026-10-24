@@ -410,63 +410,36 @@ void ConquestGame::clear_selected(int slot) {
 }
 
 void ConquestGame::play_ai_cards(int slot) {
+	// ConquestLeader::play_strategic_cards @79dd60: with a strategic card in hand one is drawn at random; 75 % of the time the AI
+	// plays it on a random legal target (the Wonder card prefers a capital), except Treachery, Commandeer Transport, Fouche,
+	// Talleyrand and Paoli, which it never plays.
 	Leader& L = leaders[size_t(slot)];
-	for (int guard = 0; guard < 6; guard++) {
-		int idx = -1;
-		for (size_t i = 0; i < L.cards.size(); i++) {
-			if (crules->cards[size_t(L.cards[i].type)].strategic()) {
-				idx = int(i);
+	std::vector<int> strategic;
+	for (size_t i = 0; i < L.cards.size(); i++) {
+		if (crules->cards[size_t(L.cards[i].type)].strategic()) strategic.push_back(int(i));
+	}
+	if (strategic.empty()) return;
+	const int idx = strategic[size_t(rget(0, int(strategic.size()) - 1))];
+	if (rget(0, 100) >= 75) return;
+	const Card c = L.cards[size_t(idx)];
+	std::vector<int> tn, ts;
+	if (!card_targets(slot, c, &tn, &ts)) return;
+	const std::vector<int>& targets = !tn.empty() ? tn : ts;
+	if (targets.empty()) return;
+	if (c.type == kTreachery || c.type == kFouche || c.type == kTalleyrand || c.type == kCommandeerTransport || c.type == kPaoli) return;
+	int target;
+	if (c.type == kWonderCard) {
+		target = targets.back();
+		for (int n : targets) {
+			if (nodes[size_t(n)].flags & kCapital) {
+				target = n;
 				break;
 			}
 		}
-		if (idx < 0) return;
-		const Card c = L.cards[size_t(idx)];
-		std::vector<int> tn, ts;
-		if (!card_targets(slot, c, &tn, &ts)) return;
-		int target = -1, target2 = -1;
-		// (?) AI card use is not decompiled: strongest sensible target; the AI plays the card with probability 50%
-		if (rget(0, 99) >= 50) return;
-		switch (c.type) {
-		case kWonderCard:
-		case kMemnon: {
-			int best = -1;
-			for (int n : tn) {
-				if (best < 0 || nodes[size_t(n)].value > nodes[size_t(best)].value) best = n;
-			}
-			target = best;
-			break;
-		}
-		case kSabotage:
-		case kBrigands:
-		case kContinentalSystem:
-		case kTreachery:
-		case kSpitamenes: {
-			int best = -1;
-			for (int n : tn) {
-				const int o = node_eff_owner(n);
-				if (o >= 0 && stance(slot, o) != kWar && c.type != kTreachery) continue;  // only against enemies at war
-				if (best < 0 || nodes[size_t(n)].level > nodes[size_t(best)].level) best = n;
-			}
-			target = best;
-			break;
-		}
-		case kColonyBlockade:
-		case kLetterOfMarque:
-			for (int s : ts) {
-				if (stance(slot, s) == kWar && (target < 0 || leaders[size_t(s)].tribute > leaders[size_t(target)].tribute)) target = s;
-			}
-			break;
-		default:  // (the AI does not use Commandeer Transport: its armies already move where they need)
-			target = -1;
-		}
-		if (target < 0) {
-			// an unplayable strategic card is kept; stop so the same card is not retried this turn
-			return;
-		}
-		if (c.type == kFouche || c.type == kTalleyrand || c.type == kPaoli) return;
-		(void)target2;
-		play_strategic_card(slot, idx, target, target2, nullptr);
+	} else {
+		target = targets[size_t(rget(0, int(targets.size()) - 1))];
 	}
+	play_strategic_card(slot, idx, target, -1, nullptr);
 }
 
 }  // namespace ron::sim::ctw

@@ -38,6 +38,7 @@ namespace ron::sim::ctw {
 constexpr int kSlots = 24;  // the 24 base tribes: ConquestLeader / stance matrices / piece lists are indexed by slot
 constexpr int kNumCardTypes = 38;
 constexpr int kMaxDifficulty = 5;
+constexpr int kUsa = 20, kUssr = 13;  // the Cold War superpowers' slots (americans, russians)
 
 enum Stance : int { kWar = 0, kPeace = 1, kAlly = 2, kVassal = 3 };
 enum NodeFlag : int { kFortified = 1, kCapital = 2, kSupplyDepot = 4, kVisible = 8, kPriority = 0x10 };
@@ -198,6 +199,7 @@ struct Node {  // ConquestNode
 	std::vector<int> links;                  // adjacent node indexes (both directions merged)
 	std::vector<uint8_t> link_sea;           // parallel to links
 	bool take_tribute = true;                // the node's one-time tribute has not been paid out yet
+	bool nuked = false;                      // ConquestNode +0x3c: destroyed by a nuclear strike
 };
 
 struct Colony {
@@ -218,6 +220,8 @@ struct Leader {  // ConquestLeader
 	std::vector<int> rare_resources, wonders, continents, new_nodes, no_attack, no_declare_war;
 	std::vector<Card> cards, selected;  // hand, cards chosen for the next battle
 	int fought_mask = 0, met_mask = 0;
+	int prev_node_attacked = -1;  // ConquestLeader +0x40: the army node of this nation's last attack on the player (plan_strategy)
+	int num_overruns = 0;         // ConquestLeader +0x3c
 };
 
 struct Piece {  // ConquestPiece: one army
@@ -230,9 +234,13 @@ struct News {
 	std::string text;
 };
 
-struct Reinforcement {  // ReinforcementArmy
-	int time = 0, side = 0, node = -1;  // arrival second, 0 player side / 1 other, origin node
-	int dest_x = 0, dest_y = 0, edge = 0;
+struct Reinforcement {  // ReinforcementArmy (setup_reinforcements @789d70)
+	int time = 0;            // arrival tick (seconds of game time); -1 = the Terra Cotta Army's: when the civic line reaches CTW_WONDER_MIN_CIVICS
+	int side = 0;            // the battle seat that receives it (0 the player, 1 the other main nation)
+	int node = -1;           // origin node (-1: the wonder's)
+	int loc_x = 0, loc_y = 0;    // where it appears (battle W cells, on the map edge)
+	int dest_x = 0, dest_y = 0;  // where it marches to (ATTACK_TO)
+	bool placed = false;
 };
 
 // One attackable link of the mover (find_available_links / process_link).
@@ -242,6 +250,7 @@ struct LinkChoice {
 	std::vector<int> att_supporters, def_supporters;  // slots
 	int declare_war_cost = 0;                          // > 0: the mover must declare war first (cost in tribute)
 	bool needs_war = false;
+	bool overrun = false;                              // plan_strategy found an overrun (resolved without a battle)
 };
 
 struct Overrun {
@@ -263,7 +272,7 @@ struct BattleOutcome {
 
 // The result of ai_step().
 struct AiStep {
-	enum Kind { kProgress, kPlayerAttacked, kDone } kind = kProgress;
+	enum Kind { kProgress, kPlayerAttacked, kNukeStrike, kDone } kind = kProgress;  // kNukeStrike: ask the player (nuke_pending), finish_nuclear_exchange, ai_step again
 	LinkChoice battle;  // kPlayerAttacked: the AI's attack on a player node (play it, then resolve_player_defense)
 };
 
@@ -272,6 +281,7 @@ struct ConquestSetup {
 	int difficulty = 2;
 	int player = -1;       // slot, -1 = the campaign's VALID_NATION (random among them)
 	bool random_nations = false, random_bonuses = false;
+	bool vary_battle_seed = false;  // see ConquestGame::vary_battle_seed
 	uint32_t seed = 1;     // "Seed (0 for random)": 0 is replaced by a clock-derived value by the front end
 };
 
@@ -305,8 +315,17 @@ public:
 	    nuke_launch_turns = 0, talleyrand_tribe = -1, talleyrand_state = 0, fouche_tribe = -1, style_index1 = -1,
 	    style_index2 = -1, cur_espionage_level = 0;
 	uint32_t seed = 1;
+	// The original builds every battle's map with conquest_game.seed (build_game copies it into game_random once per battle: two
+	// battles with the same style and size share a map). false = that; true = a seed derived from (seed, link, round), so two
+	// battles of one campaign get different maps (an option of this port).
+	bool vary_battle_seed = false;
 	bool random_nations = false, random_bonuses = false, has_fought_barbarian = false, free_move_turn = false,
 	     need_defensive_bonus = false, piece_moves_disabled = false, attacked_this_round = false;
+	// Cold War (ctw_cold.cpp): a strike in preparation (saved: the AI launched; the UI asks the player whether to retaliate)
+	bool nuke_pending = false, finished_espionage = false;
+	int nuke_p1 = -1, nuke_p2 = -1;
+	std::vector<int> tribe_nukes, tribe2_nukes, tribe_nuke_targets, tribe2_nuke_targets;  // launch nodes / aimed nodes (-1 none) of both sides
+	int tribe_must_attack = -1;  // ConquestGame +0x48: a nation that declared war on the player and must attack him (do_diplomacy)
 	int ai_phase = 0;  // 0: the AI tribe at valid_tribes[ai_index] has not started its turn, 1: planning (saved so a round can resume)
 	std::string map_name, map_id, player_name = "Player";
 	Random random;  // the campaign stream; use rget() (inclusive)
@@ -325,7 +344,7 @@ public:
 	std::map<std::string, std::string> stored_strs;
 	std::vector<std::string> sub_goals;
 	std::vector<int> allied_punks;
-	std::vector<std::string> deals;  // stored_diplo_deals: accepted deal ids
+	std::map<std::string, int> deals;  // stored_diplo_deals (NamedArray<int>): deal id -> 1 accepted / 0 declined; absent = never answered (-1 to the scripts)
 	// script-driven presentation / state (saved): the custom end screen, the nuke / depot switches, no-negotiation text
 	std::string end_title, end_text, end_image, end_button, no_negotiate_text;
 	int end_victory = -1;
@@ -340,6 +359,16 @@ public:
 	std::vector<std::string> log;  // debug / headless trace (not saved)
 	mutable std::array<std::array<int, 2>, 8> start_locs{{{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}}};  // battle seats' start tiles (get_starting_loc_x / y)
 	int center_camera = -1;        // ctw_center_camera: a node the UI should look at (consumed by the UI)
+	// ---- the battle in progress (not saved)
+	std::array<int, 8> battle_slot{{-1, -1, -1, -1, -1, -1, -1, -1}};  // campaign nation of each battle seat
+	std::array<bool, 8> battle_human{};
+	std::array<uint8_t, 8> reinf_arrived{};  // ScenarioData::reinforcements_arrived: read once by ctw_reinforcements_arrived
+	std::vector<bool> reinf_att_side;        // per reinforcement: the army belongs to the attacker's nation
+	int reinforce_mark = 0;                  // reinforcements placed so far
+	std::vector<std::string> battle_notices; // "Reinforcements arrive from X": drained by the UI
+	sim::Game* battle_game = nullptr;        // the battle built by build_battle (valid until it is destroyed)
+	std::vector<std::pair<int, std::u16string>> saved_names;  // rules tribe names replaced by the campaign's during a battle
+	int battle_bonus = 0;                    // Skill Bonus amount of the battle just won (run_bonus_script)
 	std::vector<std::string> messages;  // popup_dialog / notice texts of the script hooks, drained by the UI
 	std::vector<DiploOffer> proposals;   // AI offers to the player (diplo_offer hook)
 
@@ -423,7 +452,9 @@ public:
 	bool buy_fortification(int slot, int node, std::string* why = nullptr);
 	bool demand_tribute(int from, int to, std::string* why = nullptr);  // `from` demands half the purse of `to`
 	bool offer_bribe(int payer, int receiver, int amount, std::string* why = nullptr);
-	void do_ai_diplomacy(int slot);
+	bool available_army_at(int node) const;  // ConquestNode::has_available_armies(node, 1)
+	void do_ai_diplomacy(int slot);           // ConquestLeader::do_diplomacy @79e030
+	bool propose_peace(int me, int target);   // ConquestLeader::propose_peace @7a0c20 (peace -> alliance when already at peace)
 	void adjust_attitudes();                  // post_adjust_attitudes
 	bool diplo_accept(int offerer, int target, int offer_type);  // the response hook (script or built-in rule)
 
@@ -467,6 +498,7 @@ public:
 		std::array<int, 8> start_armies{};  // armies at each seat's start (start_add_armies)
 		std::vector<int> side;              // team of each seat (0 player side, 1 other)
 		bool defender_default = false;      // the defender's start city is built out from BUILDINGS_<diff>[level]
+		int map_style = 0;                  // the style's conquest map style (MapStyle)
 	};
 	BattleDef make_battle(const LinkChoice& l, const StyleChoice& style);
 	// Builds the Game for a battle (new_random_game or Game::load of the custom map), applies the conquest
@@ -474,15 +506,53 @@ public:
 	// `f` and `r` are the files and rules the returned Game will keep pointers into (the caller's, e.g. the renderer's).
 	std::unique_ptr<sim::Game> build_battle(const GameFiles& f, const sim::Rules& r, const BattleDef& b, const sim::AnimSource* anims,
 	                                        sim::RandomExtras* extras, std::string* error) const;
+	// ---- tactical cards in the battle (ctw_tactical.cpp)
+	void select_ai_tactical(int slot, const LinkChoice& l);  // ConquestLeader::select_tactical_cards (the AI's picks)
+	void consume_selected(int slot, bool count_played);      // the cards of a finished battle are spent
+	void apply_battle_cards(sim::Game& g, const BattleDef& b) const;  // setup_scenario_bonuses / _rares and the card units
+	// ConquestStyle::get_bonus_amt: runs the style's `bonus` script on the finished battle; -1 = no script / failed.
+	int run_bonus_script(sim::Game& battle, const StyleDef& style, std::string* text);
+	// ---- reinforcements (ctw_reinf.cpp)
+	void setup_reinforcements(const LinkChoice& l, const StyleDef& style);
+	void locate_reinforcements(const LinkChoice& l, int map_style, int world_w, int world_h);
+	void find_reinforcement_loc(int world_w, int world_h, int a, int b, int n, int map_style, bool att, Reinforcement* out) const;
+	void apply_tribe_names(sim::Rules& r, const BattleDef& b);    // the HUD shows the campaign's nation names in a battle
+	void restore_tribe_names(sim::Rules& r);
+	void place_reinforcement(sim::Game& g, Reinforcement& r);
+	void place_reinforcements(sim::Game& g);  // every frame of a battle (Game::do_frame step 6)
+	int invasion_dir() const;                 // get_conquest_invasion_dir
+	float map_scale() const;
+	float map_width() const;
+	void country_ws(int node, float* x, float* y) const;  // the country's position on the strategic map (starting_coords_ws)
 	// §6 outcome kinds: 0 the battle was played, 1 the attacker wins without a battle, 2 a forced loss.
 	void process_results(int kind, bool player_won, const LinkChoice& l, const StyleChoice& style);
 	// An AI attack on the player's node was resolved (after the battle, or automatically): continues the round.
 	void resolve_player_defense(bool player_won);
 	bool resolve_ai_vs_ai(const LinkChoice& l);  // one automatic attack; returns whether the attacker won
 	bool check_overrun(const LinkChoice& l) const;
+	bool check_overrun_nodes(int attacker_node, int defended_node, int forced_defender, bool* potential) const;
+	bool check_potential_overrun(int me, int target) const;
+	void resolve_overrun(const LinkChoice& l);
+	int num_adjacent(int me, int j) const;         // ConquestLeader::get_num_adjacent
+	bool share_neighbor(int me, int j) const;
+	int nodes_controlled(int slot, bool with_vassals) const;  // ConquestLeader::get_nodes_controlled
+
+	// ---------------------------------------------------------------- Cold War (ctw_cold.cpp)
+	bool nuke_tribes(int* player, int* other) const;  // get_nuke_tribes: the two superpowers, false without strategic nukes
+	int num_nukes(int slot) const;
+	int build_nuke(int node, bool pay);               // ctw_build_nuke: 1 built, 0 refused, -1 bad node
+	void shall_we_play_a_game(int p1, int p2);
+	bool ai_launch_nukes();                           // ctw_ai_launch_nukes
+	void finish_nuclear_exchange(bool retaliate);     // applies the aimed missiles (the_only_move_is_not_to_play)
+	int espionage_category() const;
+	int espionage_missions() const;
+	bool can_espionage(std::string* why = nullptr) const;
+	bool begin_espionage(StyleChoice* out, std::string* why = nullptr);
+	BattleDef make_espionage_battle(const StyleChoice& style);
+	void process_espionage_results(bool won, const StyleChoice& style);
 
 	// ---------------------------------------------------------------- AI (ctw_ai.cpp)
-	bool plan_strategy(int slot, LinkChoice* attack);  // false = no more actions; fills the chosen attack
+	int plan_strategy(int slot, LinkChoice* attack);  // 0 nothing to do, 1 an overrun (attack->overrun), 2 an attack to fight / resolve
 	void play_ai_cards(int slot);
 	int ai_army_target(int slot, const std::vector<LinkChoice>& options) const;  // best option index or -1
 
@@ -517,6 +587,9 @@ public:
 	bool run_diplo_offer(int slot, DiploOffer* offer);
 	// Applies an accepted deal (tribute, territories, colonies, cards, and the Peace / Ally / Vassal stance). "" or a reason.
 	std::string apply_offer(const DiploOffer& offer);
+	// The player's answer to an offer of an AI nation (the diplomacy window / the host): applies it when accepted and records the
+	// deal id in `deals` (ctw_deal_accepted reads it). "" or the reason the deal could not be made.
+	std::string answer_proposal(const DiploOffer& offer, bool accept);
 	std::string tribe_key(int slot) const;  // the TRIBE KEY (lower-case) the scripts use, "" for barbarians
 	LinkChoice pending_script_attack;                    // ctw_ai_set_attack
 	std::vector<std::pair<int, int>> script_links;       // links added by ctw_add_link during the links hook (node pairs)
@@ -525,6 +598,9 @@ public:
 	// the node-level names the scripts use
 	std::string territory_owner_name(int node, bool ignore_vassal) const;
 };
+
+// find_angle / angle_to_degrees (ctw_reinf.cpp): the compass degrees of a strategic-map delta (x right, y down).
+int angle_degrees_of(int dx, int dy);
 
 // Constants of the CTW_* table (rules.xml CONSTANTS) by lower-case name; 0 when unknown.
 int K(const sim::Rules& r, const char* name);

@@ -152,6 +152,11 @@ void leader_set_diplo(Game& g, int32_t who, int32_t t, int32_t d) {
 		eject_units(g, who, t);
 		eject_units(g, t, who);
 	}
+	{  // the tool log (ui-port 11): 15 diplomacy changed
+		GameEvent e;
+		e.frame = g.frame, e.kind = 15, e.who = who, e.other = t, e.value = d, e.alert = L.diplo[size_t(t)];
+		g.events.push_back(e);
+	}
 	L.diplo[size_t(t)] = d;
 	T.diplo[size_t(who)] = d;
 	if (d == 2) {
@@ -215,7 +220,18 @@ int32_t leader_action_declare(Game& g, int32_t who, int32_t t, int32_t d, int32_
 			const int32_t s = std::max(LD(g, t).broke_alliance[size_t(who)], L.broke_alliance[size_t(t)]);
 			if (s != 0 && stamp_age(g, s) < K("ally_to_war_delay")) return 1;
 		}
-		if (check && free == 0 && !afford_dow(g, who, t, d)) return 1;  // (LeaderOut::warn_resources)
+		if (check && free == 0 && !afford_dow(g, who, t, d)) {  // (LeaderOut::warn_resources)
+			GameEvent e;  // the tool log (ui-port 11): 16 resource flash, goods[k] = the shortfall of good k
+			e.frame = g.frame, e.kind = 16, e.who = who, e.other = t;
+			const int32_t base = d == 0 ? kDeclareWar : kCancelAlliance;
+			for (int32_t k = 0; k < 6; k++) {
+				if (!type_avail(g, who, k, 1)) continue;
+				const int32_t c = get_cost(g, base + t, k, who, -1, -1, 0, 1, -1);
+				if (L.bucket[size_t(k)] < c) e.goods[size_t(k)] = c - L.bucket[size_t(k)];
+			}
+			g.events.push_back(e);
+			return 1;
+		}
 		if (d != 0 || war_allowed(g)) {
 			if (free == 0) {
 				pay_dow(g, who, t, d);

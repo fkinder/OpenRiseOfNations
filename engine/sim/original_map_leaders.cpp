@@ -38,7 +38,7 @@ const ClassMap& map_leader() {
 		b.raw(0x74, 64, "diplos", [](Leader& l, const uint8_t* p) { arr_load(l.diplo, p, 4); }, [](const Leader& l, uint8_t* p) { arr_emit(l.diplo, p, 4); });
 		// (`diplos` covers LeaderData.diplos and treaties: the engine keeps both in one contiguous array of 16)
 		b.f("agendas", &Leader::agendas).f("good_deeds", &Leader::good_deeds).f("attack_stamp", &Leader::attack_stamp);
-		b.f("raid_stamp", &Leader::raid_stamp).f("tribute_stamp", &Leader::tribute_stamp).f("gift_stamp", &Leader::gift_stamp);
+		b.f("raid_stamp", &Leader::raid_stamp).f("capital_stamp", &Leader::capital_stamp).f("ally_stamp", &Leader::ally_stamp).f("tribute_stamp", &Leader::tribute_stamp).f("gift_stamp", &Leader::gift_stamp);
 		b.f("hire_stamp", &Leader::hire_stamp).f("hire_who", &Leader::hire_who);
 		b.f("attrition_stamp", &Leader::attrition_warn_stamp).f("attrition_stamp2", &Leader::attrition_hit_stamp);
 		b.f("attrition_stamp3", &Leader::attrition_stamp3).f("repair_stamp", &Leader::repair_stamp).f("blacken", &Leader::blacken);

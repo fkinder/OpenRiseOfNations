@@ -86,6 +86,7 @@ struct BuildView {
 	int32_t hit_points = 0, max_hit_points = 0;
 	int32_t target_who = -1, target_o = -1;  // the building's current attack target
 	bool attacking = false;
+	bool under_attack = false;  // build_masks UNDER_ATTACK (0x20), set by take_damage: the minimap blip blinks
 	bool started = false;  // construction begun (an unstarted site is hidden from non-allies)
 	// Fog of war (docs/fog-spec.md section 9.3), per player p = 0..7 (bit p):
 	uint8_t seen_by = 0;      // drawn for seat p: BuildData::is_seen(p) (seen now or remembered)
@@ -128,6 +129,17 @@ struct LeaderView {
 	// buy/sell right (Nubians or the tech).
 	int32_t gather_rate[6] = {}, income[6] = {}, cap[6] = {}, over_cap[6] = {}, buy[6] = {}, sell[6] = {};
 	bool can_trade = false;
+	// IFaceResources::draw_infra (ui-spec 6.2): per good (food, timber, wealth, knowledge, metal, oil) the workers walking
+	// the leader's units (citizens whose GATHER order targets a farm / woodcutter / mine / university / oil well or platform,
+	// caravans for wealth) and the limit (Leader gather_slots; get_caravan_limit for wealth).
+	int32_t infra_workers[6] = {}, infra_limit[6] = {};
+	// IFaceMainBase::draw_special_resources: the rare goods (TypeIndex 7..49) owned (bit TypeIndex - 6 of rare /
+	// rare_conquest) with the count collected (Leader rares_collected).
+	struct Rare {
+		int32_t good = 0, count = 0;
+	};
+	std::vector<Rare> rares;
+	int32_t armageddon = 0;  // Game::armageddon: nukes left before Armageddon (the timer's count)
 };
 LeaderView leader_view(const Game& g, int32_t who);
 

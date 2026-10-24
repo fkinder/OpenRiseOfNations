@@ -6,7 +6,11 @@
 #include <algorithm>
 
 #include "sim/ctw.hpp"
+#include "sim/game.hpp"
+#include "sim/orders.hpp"
+#include "sim/placement.hpp"
 #include "sim/script_funcs_internal.hpp"
+#include "sim/spells.hpp"
 
 namespace ron::sim::sf {
 
@@ -521,21 +525,14 @@ void install_ctw_funcs(ScriptHost& h) {
 	});
 
 	// ---- deals
-	def("ctw_deal_accepted", [cg](NativeCall& c) {
+	def("ctw_deal_accepted", [cg](NativeCall& c) {  // @9e7120: 1 accepted, 0 declined, -1 never answered
 		if (!cg()) return make_int(-1);
-		const std::string id = S8(c.arg_str(0));
-		return make_int(std::find(cg()->deals.begin(), cg()->deals.end(), id) != cg()->deals.end() ? 1 : 0);
+		auto it = cg()->deals.find(S8(c.arg_str(0)));
+		return make_int(it == cg()->deals.end() ? -1 : it->second);
 	});
-	def("ctw_set_deal_accepted", [cg](NativeCall& c) {
+	def("ctw_set_deal_accepted", [cg](NativeCall& c) {  // @9e7170
 		if (!cg()) return make_int(-1);
-		const std::string id = S8(c.arg_str(0));
-		auto& d = cg()->deals;
-		auto it = std::find(d.begin(), d.end(), id);
-		if (c.arg_int(1) != 0) {
-			if (it == d.end()) d.push_back(id);
-		} else if (it != d.end()) {
-			d.erase(it);
-		}
+		cg()->deals[S8(c.arg_str(0))] = c.arg_int(1);
 		return make_int(1);
 	});
 	def("ctw_clear_offer", [](NativeCall& c) {
@@ -675,20 +672,81 @@ void install_ctw_funcs(ScriptHost& h) {
 		const int s = slot(c.arg_str(0));
 		return make_int(cg() && s >= 0 ? cg()->nuke_cost(s) : -1);
 	});
-	def("ctw_build_nuke", [cg, node](NativeCall& c) {
+	def("ctw_build_nuke", [cg, node](NativeCall& c) {  // @a01e70: at most 3 per node, the effective owner pays unless the flag is 0
 		const int n = node(c.arg_str(0));
-		if (!cg() || n < 0) return make_int(-1);
-		ctw::Node& nd = cg()->nodes[size_t(n)];
-		if (nd.owner < 0) return make_int(-1);
-		if (c.arg_int(1) != 0) {
-			const int cost = cg()->nuke_cost(nd.owner);
-			if (cg()->leaders[size_t(nd.owner)].tribute < cost) return make_int(0);
-			cg()->leaders[size_t(nd.owner)].tribute -= cost;
-		}
-		nd.nukes++;
+		if (!cg()) return make_int(-1);
+		return make_int(cg()->build_nuke(n, c.arg_int(1) != 0));
+	});
+	def("ctw_ai_launch_nukes", [cg](NativeCall&) {  // @a01b60: the strike is applied by the host (ai_step / the UI) after the hook
+		if (!cg()) return make_int(-1);
+		cg()->ai_launch_nukes();
 		return make_int(1);
 	});
-	def("ctw_ai_launch_nukes", [cg](NativeCall&) { return make_int(cg() ? 0 : -1); });  // (?) the launch rule is not decompiled
+	def("ctw_reinforcements_arrived", [cg](NativeCall& c) {  // @9e8d20: 1 once per arrival, 0 until then, -1 for a bad seat
+		const int w = c.arg_int(0) - 1;
+		if (!cg() || w < 0 || w >= 8) return make_int(-1);
+		if (!cg()->reinf_arrived[size_t(w)]) return make_int(0);
+		cg()->reinf_arrived[size_t(w)] = 0;
+		return make_int(1);
+	});
+	def("get_conquest_invasion_dir", [&h, cg](NativeCall&) {  // @9e5ef0: degrees from the defended territory toward the attacker's
+		if (!h.game.ctw || !cg()) return make_int(-1);
+		return make_int(cg()->invasion_dir());
+	});
+
+	// ---- the Skill Bonus scripts (battlebonus.bhs: surviving units over units built)
+	def("num_units_built", [&h](NativeCall& c) {  // @9e9880: LeaderData +0x808
+		Game& g = h.game;
+		const int32_t w = c.arg_int(0) - 1;
+		if (w < 0 || w >= 8 || !(g.leaders[size_t(w)].flags & leaderflag::kValid)) return make_int(-1);
+		return make_int(g.leaders[size_t(w)].units_built);
+	});
+	def("num_decoys", [&h](NativeCall& c) {  // @9e9dc0: the captains of the leader's units with the DECOY mask
+		Game& g = h.game;
+		const int32_t w = c.arg_int(0) - 1;
+		if (!live_leader(g, w)) return make_int(-1);
+		int32_t n = 0;
+		const ObjectList& ol = g.objects[size_t(w)];
+		for (int32_t o = 0; o < ol.unit_mark; o++) {
+			const Unit* u = g.unit(w, o);
+			if (u && u->o_up < 0 && (u->unit_masks & umask::kDecoy)) n++;
+		}
+		return make_int(n);
+	});
+
+	// ---- generic builtins the battle scripts reach
+	def("set_difficulty", [&h](NativeCall& c) {  // @9e52f0: 1..6 -> GameInfo.difficulty 0..5
+		const int d = c.arg_int(0);
+		if (d < 1 || d > 6) return make_int(-1);
+		h.game.info.difficulty = uint8_t(d - 1);
+		return make_int(1);
+	});
+	def("num_good_collected", [&h](NativeCall& c) {  // @9e97d0: the goods gathered so far (statistics); the six basic goods
+		Game& g = h.game;
+		const int32_t t = type_index(g, c.arg_str(1));
+		const int32_t w = c.arg_int(0) - 1;
+		if (t < 0 || t >= kUnits || w < 0 || w >= 8 || !(g.leaders[size_t(w)].flags & leaderflag::kValid)) return make_int(-1);
+		return make_int(t < 6 ? g.leaders[size_t(w)].collected[size_t(t)] : 0);
+	});
+	def("resource_cap_warning", [&h](NativeCall& c) {  // @9f3720: the over-cap flag of a good (0 under the cap, 1 capped, 2 at the ceiling)
+		Game& g = h.game;
+		const int32_t arg = c.arg_int(0);
+		// the original tests leader `arg` (not arg - 1) for valid + active, then reads leader arg - 1
+		if (g.multiplayer || arg > 7 || arg < 0 || !live_leader(g, arg)) return make_int(-1);
+		const int32_t t = type_index(g, c.arg_str(1));
+		if (t < 0 || t >= kUnits || arg < 1) return make_int(-1);
+		return make_int(t < 6 ? g.leaders[size_t(arg - 1)].over_cap[size_t(t)] : 0);
+	});
+	def("citizen_to_militia", [&h](NativeCall& c) {  // @a00010: a citizen takes up arms (TO ARMS)
+		Game& g = h.game;
+		const int32_t w = c.arg_int(0) - 1, o = c.arg_int(1);
+		if (!live_leader(g, w)) return make_int(-1);
+		Unit* u = valid_unit(g, w, o);
+		if (!u || !type_is(*u->ptype, 50)) return make_int(-1);
+		clear_orders(g, *u);
+		cast_to_arms(g, o, w);
+		return make_int(1);
+	});
 
 	// ---- the AI hooks of the strategy script
 	def("ctw_ai_move_army", [cg, slot, node](NativeCall& c) {

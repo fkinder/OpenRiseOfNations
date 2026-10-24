@@ -258,6 +258,13 @@ bool ConquestGame::run_diplo_offer(int slot, DiploOffer* o) {
 	return !o->offer_type.empty();
 }
 
+std::string ConquestGame::answer_proposal(const DiploOffer& o, bool accept) {
+	std::string err;
+	if (accept) err = apply_offer(o);
+	if (!o.id.empty()) deals[o.id] = accept && err.empty() ? 1 : 0;
+	return err;
+}
+
 std::string ConquestGame::apply_offer(const DiploOffer& o) {
 	const int a = slot_of(o.tribe), b = slot_of(o.tribe2);
 	if (a < 0 || b < 0) return "unknown nation";

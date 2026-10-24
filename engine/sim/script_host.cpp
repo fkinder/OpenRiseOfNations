@@ -6,6 +6,7 @@
 
 #include "script/bhs_builtins.hpp"
 #include "script/bhs_compiler.hpp"
+#include "sim/ctw.hpp"
 #include "sim/fog.hpp"
 #include "sim/game.hpp"
 #include "sim/script_funcs_internal.hpp"
@@ -106,6 +107,7 @@ void ScriptHost::run_frame_scripts() {
 	// Game::do_frame @591ef0 step 5 (GameInfo.scenario_script) and step 6 (general powers, frame > 0).
 	if (!scenario_script.empty()) run(scenario_script, {});
 	if (game.frame > 0 && !general_powers_script.empty()) run(general_powers_script, {});
+	if (ctw && game.ctw) ctw->place_reinforcements(game);  // step 6: ConquestGame::place_reinforcements
 }
 
 std::vector<std::pair<std::string, int>> ScriptHost::unported() const {

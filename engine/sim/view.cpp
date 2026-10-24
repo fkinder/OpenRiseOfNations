@@ -7,6 +7,7 @@
 #include "sim/game.hpp"
 #include "sim/orders.hpp"
 #include "sim/production.hpp"
+#include "sim/transport.hpp"
 
 namespace ron::sim {
 
@@ -142,6 +143,7 @@ GameView make_view(const Game& g, bool with_guys) {
 			bv.target_who = b->attack_whom;
 			bv.target_o = b->attack_ox;
 			bv.attacking = (b->flags & objflag::kAttacking) != 0;
+			bv.under_attack = (b->build_masks & bmask::kUnderAttack) != 0;
 			bv.ever_seen = b->ever_seen;
 			bv.ever_seen_completed = b->ever_seen_completed;
 			for (int32_t p = 0; p < 8; p++) {
@@ -263,7 +265,39 @@ LeaderView leader_view(const Game& g, int32_t who) {
 			v.sell[k] = e.sell[size_t(k)];
 		}
 		v.can_trade = e.can_trade;
+		// Infrastructure: citizens by what they gather at, caravans for wealth; limits from the leader's gather slots.
+		const ObjectList& ol = g.objects[size_t(who)];
+		for (int32_t o = 0; o < ol.unit_mark && size_t(o) < ol.units.size(); o++) {
+			const Unit* u = ol.units[size_t(o)].get();
+			if (!u || !u->alive()) continue;
+			if (unit_is_caravan(*u)) {
+				v.infra_workers[2]++;
+				continue;
+			}
+			if (u->type < 50 || u->type > 53) continue;
+			const Order* act = get_action(*u);
+			if (!act || act->type != kGather || act->ox < 0 || act->whom != who) continue;
+			const Build* gb = g.build(act->whom, act->ox);
+			if (!gb || !gb->alive()) continue;
+			int32_t good = -1;
+			switch (gb->type) {
+				case 417: good = 0; break;
+				case 418: good = 1; break;
+				case 419: good = 4; break;
+				case 420: good = 3; break;
+				case 421: case 422: good = 5; break;
+				default: break;
+			}
+			if (good >= 0) v.infra_workers[good]++;
+		}
+		for (int32_t k = 0; k < 6; k++) v.infra_limit[k] = k == 2 ? get_caravan_limit(g, who, 1) : l.gather_slots[size_t(k)];
+		for (int32_t k = 0; k < 44; k++) {
+			const int32_t bit = k;  // TypeIndex 6 + k
+			const bool owned = ((l.rare[size_t(bit >> 3)] | l.rare_conquest[size_t(bit >> 3)]) >> (bit & 7)) & 1;
+			if (owned) v.rares.push_back({6 + k, l.rares_collected[size_t(k)]});
+		}
 	}
+	v.armageddon = g.armageddon;
 	return v;
 }
 

@@ -371,8 +371,31 @@ per-node/leader/army state above, the per-link `available_links` is recomputed. 
 | `Setup::build_game` CtW branches, `Map::place_resources`, `Leader::calc_attrition` | 5ac190, 68f4f0, 6cdea0 | CtW flag consumers |
 | `MapConquest::add_additional_players` / `check_starting_loc` | 68d260, 68d7e0 | battle map starts |
 
-## 11. Unknowns (❓)
+## 11. Unknowns (❓) and what the second pass settled (2026-10-24)
 
-AI scoring in `plan_strategy` / `run_strategy_script` / `find_best_army_loc`; AI diplomacy decisions in `do_diplomacy`/`propose_*`; `ConquestDiploOffer` internals and the `.bhs` bodies; where the CtW flag is set and
-the campaign list is built (`ConquestSetupWin`/`ConquestWin`, not decompiled); `VALID_NATION` and `priority_target` effects; `common_res*`; CtW replay header; `game_end = 9`; the sim-side readers of cards 7 8 9 12 32 (rate
-constants); Cold War nukes/defcon/espionage (`shall_we_play_a_game`, `can_buy_nuke`); the `distance`/`battle_cat` link fields.
+**Settled (decompiled and ported; engine/sim/ctw_*.cpp, addresses in the file headers).**
+- *Tactical cards in the battle* (`setup_scenario_bonuses` @78be90, `setup_scenario_rares` @78ca60, `build_conquest_game` @797c40, `build_units` @797200,
+  `build_cities` @796140): the sim-side readers of cards 7 8 9 10 12 32 are the rate hooks `num_ctw_rate_bonuses` (Great Thinker 400 / 500 and research
+  time, Merchant Guild, Logistics, Partisans, Missionaries, Trade Embargo, read in econ_*, techs, queues, costs, attrition, build). Warpath = Barracks,
+  Stable and Siege Factory in every city plus two military epoch techs. Card units (elephants, generals, spies, citizens) are `build_units`. The AI picks its
+  cards in `select_tactical_cards` @79d600. Skill Bonus: `ConquestStyle::get_bonus_amt` @7a9240 runs the style's `bonus` script on the battle's host.
+- *Reinforcements*: `setup_reinforcements` @789d70 (neighbour list, times, Terra Cotta), `find_reinforcement_loc` @78a3d0 (map edge from the strategic
+  geometry: `find_angle` @92d130, `angle_to_degrees` @a28e00, `map_to_wcoord` @789c90, `get_scenario_map_rect` @75c3b0), `check_edge` @7aa400,
+  `place_army` @7aa560, `place_reinforcements` @798880; `get_conquest_invasion_dir` @9e5ef0; `ctw_reinforcements_arrived` @9e8d20.
+  ConquestLink[0] is the defended node, [1] the attacker's.
+- *Cold War*: `ctw_ai_launch_nukes` @a01b60, `shall_we_play_a_game` @790be0, `the_only_move_is_not_to_play` @791160, `get_nuke_tribes` @791ec0,
+  `ctw_build_nuke` @a01e70 (3 per node), `set_war` @7a35d0 / `get_war_cost` @79c150 (DEFCON), espionage = the styles of categories 4 (USA) / 5 (USSR),
+  `ctw_espionage_cost` per mission. The decision to launch is the campaign script's (coldwar_diplo_offer.bhs).
+- *AI*: `plan_strategy` @79ea80, `check_overrun` @791f90, `check_potential_overrun` @78aba0, `resolve_overrun` @792260, `resolve_ai_strategy` @78b360,
+  `get_num_adjacent` @79c040, `share_neighbor` @79bfa0, `get_nodes_controlled` @7a2cf0, `find_best_army_loc`, `do_diplomacy` @79e030, `propose_peace` @7a0c20,
+  `set_peace` @7a3110, `set_ally` @7a3210, `buy_build` @7a0260 (= +1 level for 20 + 10 x level, up to 7), `demand_tribute` @7a2460.
+  The `ctw_overrun_*_prob` constants are read by `check_overrun`. `ctw_deal_accepted` @9e7120 is tri-state (unset / accepted / refused).
+- Builtins: `group_guard_order` (Group::action_guard @6fcd30), `set_difficulty`, `num_good_collected`, `resource_cap_warning`, `citizen_to_militia` @a00010.
+- Battle seed: `conquest_game.seed` into `game_random` once per battle (option `vary_battle_seed` to differ per battle). HUD names come from the campaign's
+  substituted tribe names.
+
+**Still unknown (❓).** The scoring weights `value` / `priority_target` inside `run_strategy_script` beyond what plan_strategy reads (a heuristic fills the gaps);
+`ConquestDiploOffer` internals and the `.bhs` bodies beyond what the runtime executes; where the CtW flag is set and the campaign list is built
+(`ConquestSetupWin`/`ConquestWin`); `VALID_NATION` effect beyond the player pick; `common_res*`; the CtW replay header; `game_end = 9`; the `distance` /
+`battle_cat` link fields; the player's own nuke targets and retaliation choice (UI, a priority-node heuristic is used); the espionage missions' exact
+enemy seats (they come from the style map); `adjust_attitudes` (no effect in shipped order). Map styles 24-26 belong to the map generator.

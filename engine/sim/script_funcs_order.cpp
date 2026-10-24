@@ -192,6 +192,18 @@ void install_order_funcs(ScriptHost& h) {
 		}
 		return make_int(gr.num);
 	});
+	families("group_guard_order", [&g, &h](NativeCall& c, Group& gr) {  // @9fb4b0 -> Group::action_guard @6fcd30
+		const int32_t tw = c.arg_int(1) - 1, to = c.arg_int(2);
+		const Object* ob = valid_object(g, tw, to);
+		if (!ob) return make_int(-1);
+		// TODO(orders): the GUARD order (Unit::add_guard_order / do_guard @5e5c70) is not simulated: the group attack-moves to the guarded
+		// object instead (the Conquer the World battle scripts use it to hold a post)
+		if (gr.num != 0) {
+			h.todo_calls["group_guard_order: GUARD order (attack-move instead)"]++;
+			group_action_move_to(g, gr, ob->x, ob->y, kQueueNew, false, 0, kAttackTo, 1, -1, -1, 0);
+		}
+		return make_int(gr.num);
+	});
 	families("group_patrol_order", [&g, &h](NativeCall& c, Group& gr) {  // @9fb3f0
 		const int32_t x = c.arg_int(1), y = c.arg_int(2);
 		if (!tile_ok(g, x, y)) return make_int(-1);

@@ -9,10 +9,12 @@
 #include "sim/heroes.hpp"
 #include "sim/ai.hpp"
 #include "sim/combat_internal.hpp"
+#include "sim/economy.hpp"
 #include "sim/garrison.hpp"
 #include "sim/guys.hpp"
 #include "sim/orders.hpp"
 #include "sim/production.hpp"
+#include "sim/transport.hpp"
 #include "sim/trig.hpp"
 
 namespace ron::sim {
@@ -353,6 +355,127 @@ int32_t get_damage(Game& g, const Object& att, int32_t ox, int32_t whom, uint32_
 	return get_damage_core(*g.rules, *att.ptype, *t.ptype, s, death);
 }
 
+namespace {
+
+// The warning part of Object::do_damage @64a480 (combat-spec 5.3), run before take_damage for a hit across owners: the
+// target owner's attack / raid / capital / ally stamps by attacker (LeaderData +0xf4 / +0x114 / +0x134 / +0x154, 300-frame
+// throttles), the city's own attack / raid stamps (+0x14 / +0x18), and the GameEvent each message of the original would
+// be (the messages themselves, sounds and banners are the console's: ui-port 11.2). `hp_int` is the whole hit points of
+// this hit. Returns local_30: a stamp fired, so an AI owner's Armies::emergency runs after a non-lethal hit.
+// TODO(rules): the target type's vslot 0x104 (hits / 4 instead of hits / 10 when clear) is not decoded: read as false.
+bool damage_warnings(Game& g, Object& att, Object& t, int32_t hp_int, bool siege_on_build) {
+	const int32_t a = att.who, whom = t.who, frame = g.frame;
+	Leader& V = g.leaders[size_t(whom)];
+	bool emergency = false;
+	auto alert = [&](int32_t cls, int32_t value) {
+		GameEvent e;
+		e.frame = frame, e.kind = 8, e.who = whom, e.o = t.o, e.other = a, e.o2 = att.o, e.value = value;
+		e.x = t.x, e.y = t.y, e.alert = cls;
+		g.events.push_back(e);
+	};
+	auto ally_warning = [&](int32_t cls) {
+		if (frame - V.ally_stamp[size_t(a)] > 300) {
+			alert(cls, 0);
+			V.ally_stamp[size_t(a)] = frame;
+		}
+	};
+	Build* city_build = nullptr;
+	bool heavy = false;
+	if (t.alive() && is_build_active(t)) {
+		Build& b = static_cast<Build&>(t);
+		if (!siege_on_build) {
+			const int32_t hits = obj_hits(g, t);
+			const int32_t thr = (t.flags & objflag::kCity) ? hits / 10 : hits / 4;  // (the vslot 0x104 test read as clear, see above)
+			heavy = t.damage + hp_int >= thr;
+		} else {
+			heavy = true;
+		}
+		city_build = &b;
+	} else if (Unit* tu = as_unit(&t); tu && is_worker_type(tu->type)) {
+		// A worker under fire counts as a raid on the city it is working for.
+		if (const Order* act = get_action(*tu); act && order_is_targeted(act->type) && act->ox >= 0 && act->whom == whom) {
+			Build* wb = g.build(whom, act->ox);
+			if (wb && wb->alive() && is_build_active(*wb) && wb->city >= 0) city_build = wb;
+		}
+	}
+	if (city_build && city_build->city >= 0 && size_t(city_build->city) < g.cities[size_t(whom)].size()) {
+		City& C = g.cities[size_t(whom)][size_t(city_build->city)];
+		auto raid = [&]() {
+			if (frame - C.raid_stamp > 300) {
+				alert(gamealert::kCityRaided, city_build->city);
+				V.raid_stamp[size_t(a)] = frame;
+				V.attack_stamp[size_t(a)] = frame;
+			}
+			C.raid_stamp = frame;
+		};
+		if (!(C.city_flags & cityflag::kCapital)) {
+			if (!heavy) {
+				raid();
+			} else {
+				if (frame - C.attack_stamp > 300) {
+					alert(gamealert::kCityAttacked, city_build->city);
+					emergency = true;
+					V.raid_stamp[size_t(a)] = frame;
+					V.attack_stamp[size_t(a)] = frame;
+				}
+				C.attack_stamp = frame;
+				C.raid_stamp = frame;
+				ally_warning(gamealert::kAllyCityAttacked);
+			}
+		} else if (!heavy) {
+			raid();
+		} else {
+			if (frame - V.capital_stamp[size_t(a)] > 300) {
+				alert(gamealert::kCapitalAttacked, city_build->city);
+				emergency = true;
+				V.attack_stamp[size_t(a)] = frame;
+				V.raid_stamp[size_t(a)] = frame;
+				V.capital_stamp[size_t(a)] = frame;
+			}
+			ally_warning(gamealert::kAllyCapitalAttacked);
+		}
+	}
+	// The target's own territory: raids on workers, caravans, merchants and buildings; attacks on everything else.
+	const int32_t wx = wcoord_of(t.x), wy = wcoord_of(t.y);
+	const int32_t terr = g.world.in_w(wx, wy) ? g.world.w(wx, wy).who : -1;
+	bool attack_path = true;
+	if (terr == whom) {
+		const Unit* tu = as_unit(&t);
+		const bool plain = !(tu && (is_worker_type(tu->type) || unit_is_caravan(*tu) || unit_is_merchant(*tu)));
+		attack_path = (t.is_unit || heavy) && plain;
+	}
+	if (!attack_path) {
+		if (frame - V.raid_stamp[size_t(a)] > 300) {
+			alert(gamealert::kRaided, 0);
+			V.raid_stamp[size_t(a)] = frame;
+		}
+	} else if (frame - V.attack_stamp[size_t(a)] > 300) {
+		const bool scout = t.is_unit && type_is(*t.ptype, get_graft(g, whom, ptype::kScout));
+		alert(scout ? gamealert::kScoutAttacked : gamealert::kUnitAttacked, terr);
+		V.attack_stamp[size_t(a)] = frame;
+	}
+	return emergency;
+}
+
+// The plain GameEvent 8 of a hit across owners: summed per victim, attacker and frame.
+void log_damage(Game& g, const Object& att, const Object& t, int32_t hp_int) {
+	for (size_t i = g.events.size(), n = 0; i > 0 && n < 8; i--, n++) {
+		GameEvent& e = g.events[i - 1];
+		if (e.frame != g.frame) break;
+		if (e.kind == 8 && e.alert == 0 && e.who == t.who && e.o == t.o && e.other == att.who) {
+			e.value += hp_int;
+			return;
+		}
+	}
+	if (g.events.size() > 100000) return;  // a long game must not grow the log without bound
+	GameEvent e;
+	e.frame = g.frame, e.kind = 8, e.who = t.who, e.o = t.o, e.other = att.who, e.o2 = att.o, e.value = hp_int;
+	e.x = t.x, e.y = t.y;
+	g.events.push_back(e);
+}
+
+}  // namespace
+
 // ---------------------------------------------------------------- do_damage
 
 void do_damage(Game& g, Object& att, int32_t ox, int32_t whom, uint32_t angle, int32_t guys, int32_t ammo,
@@ -393,14 +516,15 @@ void do_damage(Game& g, Object& att, int32_t ox, int32_t whom, uint32_t angle, i
 	const int32_t q = v / 16;
 	const int32_t hp_int = q / 16, frac = q % 16;
 	// Leader bookkeeping (walked LeaderData).
+	bool emergency = false;
 	const int32_t add = (au && type_is_siege(*att.ptype) && !t.is_unit) ? 5 : 1;
 	if (att.who >= 0 && att.who < 8) g.leaders[size_t(att.who)].hits_current_frame = int16_t(g.leaders[size_t(att.who)].hits_current_frame + add);
 	if (t.who >= 0 && t.who < 8) g.leaders[size_t(t.who)].hits_current_frame = int16_t(g.leaders[size_t(t.who)].hits_current_frame + add);
 	if (att.who != t.who && att.who >= 0 && att.who < 8 && t.who >= 0 && t.who < 8) {
 		g.leaders[size_t(att.who)].treaty(t.who) |= 2;
 		g.leaders[size_t(t.who)].treaty(att.who) |= 2;
-		// TODO(combat-spec 5.3): attack / raid / capital / ally stamps with their 300-frame throttles, city stamps,
-		// Armies::emergency for AI owners.
+		emergency = damage_warnings(g, att, t, hp_int, au && type_is_siege(*att.ptype) && !t.is_unit);
+		log_damage(g, att, t, hp_int);
 	}
 	const bool tgt_was_active_build = is_build_active(t);
 	// local_70: an active city not yet reduced before this hit (the "last reduced" stamp is not throttled then).
@@ -434,6 +558,8 @@ void do_damage(Game& g, Object& att, int32_t ox, int32_t whom, uint32_t angle, i
 		}
 		return;
 	}
+	// Armies::emergency for an AI owner whose city or capital warning fired (local_30).
+	if (emergency && whom >= 0 && whom < 8 && !(g.leaders[size_t(whom)].flags & leaderflag::kHuman)) armies_emergency(g, whom);
 	// TODO(combat-spec 5.3): flamethrower ejection / entrenchment removal, Sunka Wakan, garrison ejection by fire
 	// rafts and aircraft.
 	if (t.is_unit) return;

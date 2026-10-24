@@ -190,6 +190,12 @@ void action_offer(Game& g, int32_t who, int32_t whom, int32_t k, int32_t n) {
 	clear_agree(g, whom, who);
 	A.dip[size_t(whom)].offers[size_t(k)] += n;
 	LD(g, whom).dip[size_t(who)].offers[size_t(k)] -= n;
+	{  // the tool log (ui-port 11): 13 tribute offered, 14 tribute demanded
+		GameEvent e;
+		e.frame = g.frame, e.kind = n > 0 ? 13 : 14, e.who = who, e.other = whom, e.value = k;
+		e.goods[size_t(k)] = n > 0 ? n : -n;
+		g.events.push_back(e);
+	}
 }
 
 void action_clear_tributes(Game& g, int32_t who, int32_t whom) {

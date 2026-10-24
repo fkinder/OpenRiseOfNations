@@ -2516,6 +2516,17 @@ attacker and target += 1, or 5 when the attacker is siege and the target a build
 capital or city under attack can also set a local flag that makes `Armies::emergency(whom)` run after a
 non-lethal hit for AI owners.
 
+*Port status (2026-10-24):* the whole stamp block is ported in `combat_damage.cpp` (`damage_warnings`, before `take_damage`, with the
+`Armies::emergency` call after a non-lethal hit); the leader stamps are `Leader::attack_stamp / raid_stamp / capital_stamp / ally_stamp`
+(the last two new, walked, `kSaveVersion` 4). The branch structure (decompile order): an active building: "heavy" when the attacker is
+siege or `damage + hit >= hits / 4` (`/ 10` for a city; the type vslot 0x104 test is read as clear), a city centre or a building of a
+city: heavy and not capital sets the leader's raid + attack stamps and the city's attack + raid stamps (city stamp > 300 old), heavy
+capital the leader's attack + raid + capital stamps (capital_stamp > 300 old), light the raid stamps (city raid stamp > 300 old);
+then the ally stamp; a worker whose action targets an own active building of a city counts as a light hit on that city; in the target's
+own territory a light building hit, a worker, a caravan or a merchant stamps `raid_stamp[attacker]`, everything else
+`attack_stamp[attacker]`. Each stamp that passes its throttle also logs a `GameEvent` 8 with the alert class (ui-port.md 11.2); a plain
+`GameEvent` 8 per victim and frame carries the damage.
+
 ```
 killed = tgt.take_damage(hp_int, frac, death, ammo, 0, angle, att.o, att.who, splash)   // vslot 0x16c
 if killed:

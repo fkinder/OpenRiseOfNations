@@ -100,7 +100,9 @@ struct Leader {
 	int32_t frame_attacked = 0, retarget_budget = 0;
 	int16_t deaths_current_frame = 0, kills_current_frame = 0, hits_current_frame = 0;
 	int16_t units_bribed = 0;  // LeaderData +0x8f4 (cast_bribe counts every converted unit; spells-spec 4.1). Fills the padding after the three counters above; not in the save walk
-	std::array<int32_t, 8> attack_stamp{}, raid_stamp{};
+	// Per attacking leader k: the frame of the last attack / raid / capital / ally warning on this leader's property by k
+	// (LeaderData +0xf4 / +0x114 / +0x134 / +0x154, written by Object::do_damage with 300-frame throttles; combat-spec 5.3).
+	std::array<int32_t, 8> attack_stamp{}, raid_stamp{}, capital_stamp{}, ally_stamp{};
 
 	// ---- production (docs/production-spec.md section 11; plain values, the original keeps the LeaderDataEncrypt
 	// fields XORed). `age` above is LeaderDataEncrypt.ages (the number of age techs gained); `science` mirrors epoch[3].
@@ -422,8 +424,22 @@ struct Heights {
 // paid to the captor, goods2 = to the victim, n_* = buildings / units handled), 2 leader defeated (who, other = the
 // conqueror or -1, value = defeat type), 3 victory (who, value = victory type), 4 game over, 5 capital lost (who, other =
 // holder), 6 capital recaptured (who), 7 building captured (who = new owner, other = old owner, o / o2).
+// Presentation hooks (docs/ui-port.md 11; never read by the simulation, nothing here is walked or hashed):
+// 8 object damaged by another leader (Object::do_damage: who / o = the victim, other / o2 = the attacker, value =
+// whole hit points taken, summed per victim and frame; x / y = the victim's position; alert = the warning class the
+// original's stamps allow, see GameAlert), 9 technology researched (who, value = type, other = 1 when the original
+// announces it), 10 age advanced (who, value = the new age count), 11 wonder started (who, o, value = type), 12 wonder
+// completed (same), 13 tribute offered (who gives to other, value = good, goods[0] = amount), 14 tribute demanded
+// (who asks other), 15 diplomacy changed (who, other, value = new state 0 war / 1 peace / 2 allied, alert = the old
+// state), 16 resource flash (who, goods[k] != 0 for each good the leader lacked for an action: the console's
+// flash_resource_flags).
+namespace gamealert {
+constexpr int32_t kNone = 0, kCityAttacked = 1, kCapitalAttacked = 2, kCityRaided = 3, kAllyCityAttacked = 4,
+                  kAllyCapitalAttacked = 5, kRaided = 6, kUnitAttacked = 7, kScoutAttacked = 8;
+}
 struct GameEvent {
 	int32_t frame = 0, kind = 0, who = -1, other = -1, o = -1, o2 = -1, value = 0;
+	int32_t x = 0, y = 0, alert = 0;
 	std::array<int32_t, 6> goods{}, goods2{};
 	int32_t n_swapped = 0, n_closed = 0, n_disbanded = 0, n_units = 0;
 };

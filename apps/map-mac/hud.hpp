@@ -63,6 +63,10 @@ struct Option {
 	int tex_col = 0, tex_row = 0, tex_x = -1, tex_y = -1;
 	bool enabled = true;
 	bool latched = false;  // the targeting mode this option started is active
+	// IFaceMarket::on_button_redraw: OPTION_BUY / OPTION_SELL buttons of a Market show the good's icon, its price in wealth and
+	// the trend arrow (Game::delta_flux of the good: -1 falling, 0 steady, 1 rising). price < 0: an ordinary option.
+	int price = -1, trend = 0, good = -1;
+	std::string label;  // a text button's caption (ejected units, the "Sell:" / "Buy:" row heads)
 };
 
 struct Blip {
@@ -117,6 +121,49 @@ struct MiniLib {
 	int epoch[4] = {0, 0, 0, 0};
 };
 
+// IFaceLibrary (docs/ui-spec.md 6.8): the grid that replaces the command card for a finished Library. A cell is an age
+// (types 544..550) or the level of a library line (military 572.., civic 565.., commerce 558.., science 551..).
+struct LibCell {
+	int type = -1;
+	bool enabled = false;  // can be queued now
+	bool owned = false;    // already researched
+	int percent = -1;      // in production at a Library
+	std::string tex_id;
+	int tex_col = 0, tex_row = 0, tex_x = -1, tex_y = -1;
+};
+struct Library {
+	bool active = false;
+	LibCell age[7];
+	LibCell tech[4][7];  // [line][level]
+};
+
+// A group of garrisoned units (IFaceGarrison): the units of one type and owner inside the selected building / carrier.
+struct GarrisonUnit {
+	int32_t who = 0, type = 0, count = 1;
+	std::vector<int32_t> objects;  // their object slots
+	std::string tex_id;
+	int tex_col = 0, tex_row = 0, tex_x = -1, tex_y = -1;
+	uint8_t rgb[3] = {255, 255, 255};  // the owner's team colour
+	bool own = false;                  // owned by the viewer (clickable)
+};
+struct Garrison {
+	bool active = false;
+	int32_t building = -1, owner = -1;  // the container
+	bool mixed_owners = false;          // units of more than one leader: buttons are outlined in their owner's colour
+	std::vector<GarrisonUnit> units;
+};
+
+// One production in progress (IFaceMainBase::setup_progress_buttons): an item queued at an own building.
+struct ProgressItem {
+	std::string tex_id;
+	int tex_col = 0, tex_row = 0, tex_x = -1, tex_y = -1;
+	int percent = 0;
+	int32_t who = 0, o = 0;  // the producer
+	float wx = 0, wy = 0;    // its position
+	uint8_t rgb[3] = {255, 255, 255};
+	std::string name;
+};
+
 struct State {
 	float world_w = 1, world_h = 1;  // world units
 	// Fog levels for the viewer (0..3) per fog cell; empty = all visible.
@@ -143,13 +190,27 @@ struct State {
 	bool has_territory = false;  // "MINIMAP_TERR" is registered (the border colours, fog resolution)
 	std::vector<Timer> timers;
 	MiniLib minilib;
-	int rare_columns = 0;  // columns of rare goods owned (MessageWin shifts right by 50 px per column)
+	// Console::flash_resource_flags / _stamp: the resource rows turn red for 8 graphic ticks after an order failed for lack of
+	// a good (bit k = good k).
+	int flash_mask = 0, flash_tick = -1000;
+	// draw_special_resources: the rare goods owned (TypeIndex 7..49) with the count collected.
+	struct Rare {
+		int good = 0, count = 0;
+	};
+	std::vector<Rare> rares;
+	Library library;
+	Garrison garrison;
+	std::vector<ProgressItem> progress;  // own productions (the buttons show with set_progress_buttons)
+	std::string card_message;            // IFaceMarket's text over the card rows (a Market that cannot trade yet)
+	std::string speed_name;              // the clock's game speed word ("Normal"), localised
+	std::string paused_name;             // the word shown while paused
+	int armageddon = -1;                 // nukes left before Armageddon (-1 none): the armageddon timer's count
 };
 
 // What the mouse is over, for the mouse-over help (MouseOver: option, spots, buttons).
 enum class HoverKind { None, Option, SelObject, SelQueue, SelStat, SelHitPoints, Good, CommerceCap, PopCap, CityCap, MarketBuy,
 	                   MarketSell, ToggleMarket, ToggleResources, ToggleInfra, Infra, Caption, BarButton, MinimapButton, Display,
-	                   MiniLibCat, MiniLibToggle, Timer, Clock, Minimap };
+	                   MiniLibCat, MiniLibToggle, Timer, Clock, Minimap, Rare, LibraryCell, Garrison, Progress };
 struct Hover {
 	HoverKind kind = HoverKind::None;
 	int a = -1, b = -1;       // Option: option, object. Good / Market / Infra: the good. BarButton: its index. SelStat: 0 attack 1 armor 2 range.
@@ -158,11 +219,13 @@ struct Hover {
 	bool operator!=(const Hover& o) const { return !(*this == o); }
 };
 
-enum class ActionKind { None, Option, MinimapLook, MinimapOrder, SelectIndex, QueueItem, Consumed, Buy, Sell, BarButton, MinimapButton, MiniLib };
+enum class ActionKind { None, Option, MinimapLook, MinimapOrder, SelectIndex, QueueItem, Consumed, Buy, Sell, BarButton, MinimapButton, MiniLib,
+	                        Library, GarrisonEject, Progress };
 struct Action {
 	ActionKind kind = ActionKind::None;
 	int option = -1, object = -1, index = -1;
 	float wx = 0, wy = 0;
+	bool all = false;  // GarrisonEject: a right click ejects every unit of the type
 };
 
 class Hud {
@@ -185,6 +248,11 @@ public:
 	int panel_flags() const { return res_flags_; }
 	void set_panel_flags(int f);
 	void toggle_panel(int bit);
+	// Production progress buttons (profile pref 0x40, IFaceMainBase::setup_progress_buttons): off by default.
+	bool progress_buttons() const { return progress_buttons_; }
+	void set_progress_buttons(bool on) { progress_buttons_ = on; }
+	// Columns of rare goods drawn (draw_special_resources: a column of 8): MessageWin shifts right by 50 px per column.
+	int rare_columns() const { return rare_cols_; }
 	bool minilib_open() const { return minilib_open_; }
 	void toggle_minilib() { minilib_open_ = !minilib_open_; }
 	// Where MessageWin's feedback / instructions line sits: top 45, or 100 with the mini library expanded.
@@ -227,6 +295,16 @@ private:
 	void draw_infra(ron::metal::UiRenderer& ui, const State& s);
 	void draw_minilib(ron::metal::UiRenderer& ui, const State& s);
 	void draw_timers(ron::metal::UiRenderer& ui, const State& s);
+	void draw_rares(ron::metal::UiRenderer& ui, const State& s);
+	void draw_progress(ron::metal::UiRenderer& ui, const State& s);
+	void draw_library(ron::metal::UiRenderer& ui, const State& s);
+	void draw_garrison(ron::metal::UiRenderer& ui, const State& s);
+	void draw_market_button(ron::metal::UiRenderer& ui, const Option& o, const ron::IfaceRect& r, int factor);
+	ron::IfaceRect garrison_rect() const;
+	int garrison_index_at(int x, int y, const State& s, ron::IfaceRect* cell = nullptr) const;
+	int library_cell_at(int x, int y, const State& s, int* cat = nullptr, int* col = nullptr) const;
+	int progress_index_at(int x, int y, const State& s) const;
+	ron::IfaceRect progress_rect(int i, int timers_bottom) const;
 	void draw_icon_button(ron::metal::UiRenderer& ui, const std::string& tex_id, int col, int row, int tx, int ty, const ron::IfaceRect& r,
 	                      int factor, bool small);
 	void draw_health(ron::metal::UiRenderer& ui, const ron::IfaceRect& r, int hp, int max_hp, bool small);
@@ -252,6 +330,17 @@ private:
 	ron::IfaceRect minilib_win_, toggle_rects_[4], minilib_buttons_[5], market_buttons_[2][4], infra_cells_[6];  // screen rects (set by draw)
 	const ron::XmlElement* ml_el_ = nullptr;
 	int pressed_market_ = -1;
+	bool progress_buttons_ = false, icons_aliased_ = false;
+	int rare_cols_ = 0, timers_bottom_ = 45;
+	struct RareIcon {
+		std::string tex_id;
+		int x = 0, y = 0, w = 0, h = 0;
+	};
+	std::vector<RareIcon> rare_icons_;  // resourcerules.xml TEX2_*, by TypeIndex
+	std::vector<std::pair<ron::IfaceRect, int>> rare_rects_;  // the column's icons (screen) and their good, set by draw
+	ron::IfaceRect library_rect_;
+	std::vector<ron::IfaceRect> progress_rects_;  // the progress buttons drawn last (the map must not take their clicks)
+	const ron::XmlElement* lib_el_ = nullptr;
 	int hover_x_ = -1, hover_y_ = -1;
 	bool minimap_drag_ = false;
 	int pressed_slot_ = -1;

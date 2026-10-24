@@ -1,5 +1,8 @@
 #include "tips.hpp"
 
+#include "assets/strings.hpp"
+#include "uistr.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -227,7 +230,7 @@ struct Layouter {
 
 bool Help::init(const ron::GameFiles& files, std::string& error) {
 	try {
-		const std::string text = files.read_text("Data/help.xml");
+		const std::string text = ron::read_localised(files, "help.xml", uistr::language());
 		// The groups are the children of <ROOT>; entries are looked up in the group of the tooltip's kind.
 		std::string section;
 		int depth = 0;

@@ -398,7 +398,10 @@ bool tech_cost(const Game& g, int32_t t, int32_t rr, int32_t who, int32_t& v) {
 	else if (tc >= 7) v = (!is_age_type(t) && rr != 3) ? (3 * v) / 2 : 2 * v;
 	if (is_age_type(t) || is_epoch_type(t)) {
 		if (tb(g, who, 5) && rr != 3) v = pct(K("greek_research_cost"), v);
-		// TODO(ctw): great-thinker cards num_bonus_cards[7].
+		// TypeData::get_cost @664090: one division per Great Thinker card in play (CtW only).
+		if (g.ctw) {
+			for (int32_t i = l.num_bonus_cards[7]; i > 0; i--) v = (v * 100) / (K("ctw_great_thinker_discount") + 100);
+		}
 	} else {
 		if (o.where == ptype::kGranary && has_rare(g, who, 23)) v = pct(K("bison_granary_cost"), v);
 		if (o.where != ptype::kLibrary) {
@@ -758,7 +761,11 @@ int32_t train_time(const Game& g, int32_t o, int32_t who, int32_t t) {
 		if (has_preq(g, who, 788)) v = (3 * v) / 4;
 		if (has_wonder_prod(g, who, ptype::kAngkorWat)) v = prod::div100k(v, K("angkor_research"));
 		if (has_rare(g, who, 7)) v = pct(K("relics_research_speed"), v);
-		// TODO(ctw): thinker cards; handicap.
+		// ObjectData::train_time @6508c0: one division per Great Thinker card in play, after the relics (CtW only).
+		if (g.ctw) {
+			for (int32_t i = l.num_bonus_cards[7]; i > 0; i--) v = (v * 100) / (K("ctw_great_thinker_time") + 100);
+		}
+		// TODO: handicap.
 		const int32_t tc = g.info.tech_cost;
 		if (tc == 0 || tc == 2) v = (2 * v) / 3;
 		else if (tc == 4 || tc == 6 || tc == 8) v = (3 * v) / 2;

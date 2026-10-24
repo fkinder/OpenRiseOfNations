@@ -5,6 +5,7 @@
 #include <cstdio>
 
 #include "hud.hpp"
+#include "uistr.hpp"
 
 using ron::IfaceBorder;
 using ron::IfacePiece;
@@ -71,8 +72,8 @@ void Hud::draw_market(UiRenderer& ui, const State& s) {
 	ui.next_layer();
 	const int f = ui.font(14);
 	const int half = title.w() / 2;
-	ui.text_centered(f, "Buy", {title.l, title.l + half, title.t, title.b}, kGrey, kBlack);
-	ui.text_centered(f, "Sell", {title.l + half, title.r, title.t, title.b}, kGrey, kBlack);
+	ui.text_centered(f, uistr::tr("Buy"), {title.l, title.l + half, title.t, title.b}, kGrey, kBlack);
+	ui.text_centered(f, uistr::tr("Sell"), {title.l + half, title.r, title.t, title.b}, kGrey, kBlack);
 	const IfaceRect buy0 = rect_in(r, "IFACERECT", "market_buy_rect", w, h), sell0 = rect_in(r, "IFACERECT", "market_sell_rect", w, h);
 	const int pitch = buy0.h() + 3;
 	const IfacePiece t0[3] = {ron::iface_find_piece(r, "market_button_tex00"), ron::iface_find_piece(r, "market_button_tex01"),
@@ -187,6 +188,7 @@ void Hud::draw_minilib(UiRenderer& ui, const State& s) {
 // IFaceMainBase::draw_timers @0080b060 / draw_game_timer @0080a3c0: a column at the top right from y = 45, each a 42 x 39
 // icon with the 60 x 26 background (team-coloured borders for a player's timer) and M:SS in the 11 x 20 timer digits.
 void Hud::draw_timers(UiRenderer& ui, const State& s) {
+	timers_bottom_ = 45;
 	if (s.timers.empty()) return;
 	const ron::XmlElement& b = *base_el_;
 	static const char* icons[8] = {"wonder_timer", "capital_timer", "armageddon_timer", "territory_timer",
@@ -199,6 +201,26 @@ void Hud::draw_timers(UiRenderer& ui, const State& s) {
 		ui.add(icon, float(x), float(y));
 		const IfacePiece bg = ron::iface_find_piece(b, "background_timer");
 		const int bx = x - bg.width, by = y + (icon.height - bg.height) / 2;
+		if (t.kind == 2 && t.count >= 0) {
+			// The armageddon clock: the left and right slices of the "88:88" background joined (32 px, the colon cut out)
+			// with the count of nukes left in two digits over the right slice.
+			const IfacePiece l = ron::iface_find_piece(b, "armageddon_timer_left"), r = ron::iface_find_piece(b, "armageddon_timer_right");
+			const int ax = x - l.width - r.width;
+			ui.add(l, float(ax), float(by), 0, 0, kWhite, UiType::Normal);
+			ui.add(r, float(ax + l.width), float(by), 0, 0, kWhite, UiType::Normal);
+			ui.next_layer();
+			char nb[8];
+			std::snprintf(nb, sizeof nb, "%02d", std::min(99, t.count));
+			int ndx = ax + l.width;
+			for (const char* p = nb; *p; p++) {
+				const IfacePiece d = ron::iface_find_piece(b, std::string(1, *p) + "_digit_timer");
+				ui.add(d, float(ndx), float(by + 3), 0, 0, kWhite, UiType::ColorAlphaMod);
+				ndx += d.width;
+			}
+			y += icon.height + 2;
+			ui.next_layer();
+			continue;
+		}
 		ui.add(bg, float(bx), float(by), 0, 0, kWhite, UiType::Normal);
 		ui.next_layer();
 		if (t.who >= 0) {
@@ -228,6 +250,7 @@ void Hud::draw_timers(UiRenderer& ui, const State& s) {
 		y += icon.height + 2;
 		ui.next_layer();
 	}
+	timers_bottom_ = y;
 }
 
 // MouseOver targets: the card button under the mouse, the resource rows and caps, the toggles, the selection panel's
@@ -291,6 +314,20 @@ Hover Hud::hover_at(int x, int y, const State& s) const {
 			i++;
 		}
 		if (map_.contains(x, y)) return {HoverKind::Minimap, 0, 0};
+	}
+	for (const auto& rr : rare_rects_) {
+		if (rr.first.contains(x, y)) return {HoverKind::Rare, rr.second, 0};
+	}
+	{
+		const int pi = progress_index_at(x, y, s);
+		if (pi >= 0) return {HoverKind::Progress, pi, 0};
+		if (s.library.active) {
+			int cat = -1, col = -1;
+			const int t = library_cell_at(x, y, s, &cat, &col);
+			if (t >= 0) return {HoverKind::LibraryCell, t, 0};
+		}
+		const int gi = garrison_index_at(x, y, s);
+		if (gi >= 0) return {HoverKind::Garrison, gi, 0};
 	}
 	// Timers column.
 	{

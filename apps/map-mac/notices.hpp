@@ -1,9 +1,9 @@
 // Game messages and notices the simulation causes (docs/ui-spec.md 6.7, docs/ui-port.md section 11): MessageWin::add_message lines,
 // AnimNotice banners and minimap pings for city captures and losses, capital loss, attack warnings, completed buildings and
-// wonders, finished research, new ages and diplomacy changes. The simulation logs only some of these as GameEvents (city and
-// building captures, capital loss, defeat, victory); the rest is read from the per-frame view (own objects losing hit points,
-// a building going active, a queued tech leaving the queue, a leader's age, the diplomacy table). The texts are the install's
-// translated_strings.xml entries (the decompiled call sites address them by offset).
+// wonders, finished research, new ages, tribute and diplomacy changes. All of it comes from the simulation's event log
+// (sim/game.hpp GameEvent kinds 1-16), whose attack warnings are written by Object::do_damage's own stamps and throttles;
+// only the "building completed" line is still read from the per-frame view (a building going active). The texts are the
+// install's translated_strings.xml entries (the decompiled call sites address them by offset).
 #pragma once
 
 #include <functional>
@@ -18,7 +18,8 @@
 namespace notices {
 
 struct Note {
-	enum Kind { Message, Notice } kind = Message;
+	enum Kind { Message, Notice, Flash } kind = Message;  // Flash: the resource panel's red flash (`goods` bit k)
+	int goods = 0;
 	std::string text;
 	uint32_t argb = 0xFFB4B4B4;  // MessageWin's default LIGHT_GREY (180, 180, 180)
 	int ticks = 0;               // message duration in 66 ms ticks, 0 = message_length * 45
@@ -28,6 +29,9 @@ struct Note {
 	int ping = 0;                // minimap ping style: 0 default, 1 attack, 2 wonder, 3 citylost, 4 citywon
 	std::string sound;           // soundglobals.xml key (S_CITY_BEING_ATTACKED, ...)
 };
+
+// String::parse: "$NAMEn" is replaced by argument n (the digits end the placeholder).
+std::string fill(std::string text, const std::vector<std::string>& args);
 
 struct Env {
 	const ron::sim::Game* game = nullptr;
@@ -48,9 +52,8 @@ public:
 
 private:
 	struct Obj {
-		int32_t hp = 0, type = 0;
-		bool active = false, build = false, city = false, started = false;
-		int32_t q_type = -1, q_percent = 0;
+		bool active = false, build = false;
+		int32_t type = 0;
 	};
 	std::string loc(int index, const char* expect, const char* fallback) const;
 	static std::string parse(std::string text, const std::vector<std::string>& args);
@@ -62,10 +65,7 @@ private:
 	size_t events_seen_ = 0;
 	bool have_prev_ = false;
 	std::unordered_map<int64_t, Obj> prev_;
-	std::unordered_map<int64_t, int> last_alert_;  // per object: the frame of its last attack warning
-	int last_unit_alert_ = -100000, last_notice_ = -100000;
-	std::vector<int> prev_age_;
-	std::vector<int> prev_rel_;  // relation of leader pairs: 0 war, 1 peace, 2 allied
+	std::unordered_map<int64_t, int> last_alert_;  // per city: the frame of its last attack warning (the banner needs 400 quiet frames)
 };
 
 }  // namespace notices

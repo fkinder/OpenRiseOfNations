@@ -152,7 +152,11 @@ void Session::battle_finished(int outcome) {
 	ctw::ConquestGame& g = game;
 	const size_t news0 = g.news.size();
 	g.last_battle_victory = outcome == 1;
-	if (battle_is_defense) {
+	if (battle_is_espionage) {
+		g.process_espionage_results(outcome == 1, battle.style);
+		battle_is_espionage = false;
+		g.refresh_links();
+	} else if (battle_is_defense) {
 		g.cur_link = battle.link;
 		g.cur_style = battle.style;
 		g.resolve_player_defense(outcome == 1);
@@ -298,7 +302,7 @@ namespace {
 enum HitId : int {
 	kNone = 0, kCampaign, kDiff, kNationPrev, kNationNext, kRandNations, kRandBonus, kStart, kBack, kLoad, kSaveItem, kSaveCancel,
 	kTab, kEndTurn, kSaveGame, kMenuBtn, kOption, kDialog, kCard, kCardPlay, kCardSelect, kCardBuy, kDiploRow, kDiploAct, kDealType,
-	kDealGive, kDealAsk, kDealGo, kMap, kNewsUp, kNewsDown, kZoomIn, kZoomOut, kFit
+	kDealGive, kDealAsk, kDealGo, kMap, kNewsUp, kNewsDown, kZoomIn, kZoomOut, kFit, kVaryMaps, kEspionage, kBuildNuke
 };
 }
 
@@ -314,7 +318,7 @@ struct Screen::Impl {
 	std::vector<std::string> stems;
 	std::vector<std::shared_ptr<const ctw::CampaignDef>> defs;
 	int sel = 0, diff = 2, nation = 0;
-	bool rand_nations = false, rand_bonuses = false;
+	bool rand_nations = false, rand_bonuses = false, vary_maps = false;
 	std::vector<std::string> saves;
 	bool saves_open = false;
 	std::string setup_msg;
@@ -500,6 +504,8 @@ struct Screen::Impl {
 			text(b, f14, std::string(rand_bonuses ? "[x] " : "[ ] ") + "Random bonuses", float(ox + 700), float(oy + ry + 80), kLabel);
 			add_hit(R(696, 900, ry + 76, ry + 98), kRandBonus);
 		}
+		text(b, f14, std::string(vary_maps ? "[x] " : "[ ] ") + "Different battle map each time", float(ox + 462), float(oy + 392), kLabel);
+		add_hit(R(458, 760, 388, 412), kVaryMaps);
 		if (!setup_msg.empty()) text(b, f12, setup_msg, float(ox + 60), float(oy + 616), kRed);
 		// bottom buttons
 		ui.next_window();
@@ -539,6 +545,7 @@ struct Screen::Impl {
 		cs.player = choices.empty() ? -1 : choices[size_t(nation)];
 		cs.random_nations = rand_nations;
 		cs.random_bonuses = rand_bonuses;
+		cs.vary_battle_seed = vary_maps;
 		cs.seed = 0;
 		if (const char* e = getenv("CTW_SEED")) cs.seed = uint32_t(strtoul(e, nullptr, 0));
 		std::string err;
@@ -823,9 +830,15 @@ struct Screen::Impl {
 		                        std::to_string(P.tribute) + "   Territories " + std::to_string(g.num_nodes(g.player_tribe, true)) +
 		                        "   Cards " + std::to_string(P.cards.size());
 		text(b, f14, bar, float(24 + ui.text_width(f16, g.def->name)), 10, kWhite);
+		int dc_w = 0;
+		if (g.def->strategic_nukes) {
+			const std::string dc = "DEFCON " + std::to_string(g.defcon_level) + "   Missiles " + std::to_string(g.num_nukes(g.player_tribe));
+			dc_w = int(ui.text_width(f14, dc)) + 24;
+			text(b, f14, dc, float(W - 12 - dc_w + 24), 10, g.defcon_level >= 4 ? argb(255, 255, 110, 90) : kGold);
+		}
 		if (g.turns_no_attack > 0) {
 			const std::string tn = "Peace: " + std::to_string(g.turns_no_attack) + " more round" + (g.turns_no_attack == 1 ? "" : "s");
-			text(b, f12, tn, float(W - 12 - ui.text_width(f12, tn)), 11, kSecondary);
+			text(b, f12, tn, float(W - 12 - dc_w - ui.text_width(f12, tn)), 11, kSecondary);
 		}
 		draw_panel(b);
 		// hint when targeting a card
@@ -851,9 +864,10 @@ struct Screen::Impl {
 		b.box(panel, argb(230, 14, 12, 40));
 		ui.next_layer();
 		const int f12 = ui.font(12, -1), f14 = ui.font(14, -1), f16 = ui.font(16, -1), f18 = ui.font(18, -1);
-		static const char* const tabs[4] = {"Map", "Cards", "Diplomacy", "News"};
-		const int tw = (panel.w() - 16) / 4;
-		for (int i = 0; i < 4; i++) {
+		static const char* const tabs[5] = {"Map", "Cards", "Diplomacy", "News", "Cold War"};
+		const int ntabs = g.def->strategic_nukes ? 5 : 4;
+		const int tw = (panel.w() - 16) / ntabs;
+		for (int i = 0; i < ntabs; i++) {
 			const IfaceRect r{panel.l + 8 + i * tw, panel.l + 8 + (i + 1) * tw - 3, panel.t + 6, panel.t + 34};
 			btn(b, r, tabs[i], kTab, i, true, 12);
 			if (i == tab) ui.fill(float(r.l), float(r.b + 1), float(r.w()), 2, argb(255, 240, 214, 120), UiType::ColorBlend);
@@ -893,9 +907,22 @@ struct Screen::Impl {
 					text(b, f14, "Fortified", float(x), float(y), kLabel);
 					y += 18;
 				}
-				if (N.owner == g.player_tribe && !(N.flags & ctw::kFortified)) {
+				if (N.nuked) {
+					text(b, f14, "Destroyed by a nuclear strike", float(x), float(y), argb(255, 255, 110, 90));
+					y += 18;
+				}
+				if (N.nukes > 0) {
+					text(b, f14, "Nuclear missiles: " + std::to_string(N.nukes), float(x), float(y), kLabel);
+					y += 18;
+				}
+				if (g.node_eff_owner(sel_node) == g.player_tribe && N.level < 7) {
 					const int cost = g.build_cost(sel_node);
-					btn(b, IfaceRect{x, x + w, y + 4, y + 30}, "Fortify (" + std::to_string(cost) + " tribute)", kOption, 1000 + sel_node, g.leaders[size_t(g.player_tribe)].tribute >= cost, 12);
+					btn(b, IfaceRect{x, x + w, y + 4, y + 30}, "Build up (" + std::to_string(cost) + " tribute)", kOption, 1000 + sel_node, g.leaders[size_t(g.player_tribe)].tribute >= cost, 12);
+					y += 36;
+				}
+				if (g.def->strategic_nukes && N.owner == g.player_tribe && !g.nuke_building_disabled && N.nukes < 3) {
+					const int cost = g.nuke_cost(g.player_tribe);
+					btn(b, IfaceRect{x, x + w, y + 4, y + 30}, "Build a missile (" + std::to_string(cost) + " tribute)", kBuildNuke, sel_node, g.leaders[size_t(g.player_tribe)].tribute >= cost, 12);
 					y += 36;
 				}
 				y += 6;
@@ -942,6 +969,8 @@ struct Screen::Impl {
 			draw_cards(b, x, y, w);
 		} else if (tab == 2) {
 			draw_diplo(b, x, y, w);
+		} else if (tab == 4 && g.def->strategic_nukes) {
+			draw_coldwar(b, x, y, w);
 		} else {
 			draw_news(b, x, y, w);
 		}
@@ -951,6 +980,52 @@ struct Screen::Impl {
 		btn(b, IfaceRect{x, x + w / 2 - 4, by + 46, by + 78}, "Save", kSaveGame, 0, true, 14);
 		btn(b, IfaceRect{x + w / 2 + 4, x + w, by + 46, by + 78}, "Menu", kMenuBtn, 0, true, 14);
 		(void)f16;
+	}
+
+	// The Cold War panel: the DEFCON meter, the two arsenals and the espionage missions.
+	void draw_coldwar(Bridge& b, int x, int y, int w) {
+		ctw::ConquestGame& g = *G();
+		rm::UiRenderer& ui = *b.ui;
+		const int f12 = ui.font(12, -1), f14 = ui.font(14, -1), f16 = ui.font(16, -1);
+		text(b, f16, "Cold War", float(x), float(y), kGold);
+		y += 28;
+		text(b, f14, "DEFCON", float(x), float(y), kLabel);
+		for (int k = 1; k <= 5; k++) {
+			const IfaceRect r{x + 70 + (k - 1) * 40, x + 70 + (k - 1) * 40 + 34, y - 2, y + 20};
+			ui.fill(float(r.l), float(r.t), float(r.w()), float(r.h()), k <= g.defcon_level ? argb(235, 200 - (5 - k) * 10, 40 + (5 - k) * 25, 30) : argb(160, 40, 40, 60), UiType::ColorBlend);
+			ui.next_layer();
+			ui.text_centered(f12, std::to_string(k), r, kWhite, kBlack);
+		}
+		y += 32;
+		int p1 = g.player_tribe, p2 = -1;
+		g.nuke_tribes(&p1, &p2);
+		text(b, f14, g.tribe_name(p1) + " missiles: " + std::to_string(g.num_nukes(p1)), float(x), float(y), kWhite);
+		y += 18;
+		if (p2 >= 0) text(b, f14, g.tribe_name(p2) + " missiles: " + std::to_string(g.num_nukes(p2)), float(x), float(y), kWhite);
+		y += 22;
+		y = paragraph(b, f12, "Select a territory of yours on the Map tab to install a missile (three at most). Declaring war on the other superpower costs more as DEFCON falls.", x, y, w, kSecondary);
+		y += 12;
+		text(b, f16, "Espionage", float(x), float(y), kGold);
+		y += 26;
+		std::string why;
+		const bool can = g.can_espionage(&why);
+		text(b, f14, "Missions done: " + std::to_string(g.cur_espionage_level) + " of " + std::to_string(g.espionage_missions()), float(x), float(y), kWhite);
+		y += 20;
+		if (g.cur_espionage_level < g.espionage_missions()) {
+			int k = 0;
+			for (const ctw::StyleDef& st : g.style_table) {
+				if (st.category != g.espionage_category()) continue;
+				if (k++ == g.cur_espionage_level) {
+					text(b, f14, "Next: " + st.title, float(x), float(y), kLabel);
+					y += 20;
+					y = paragraph(b, f12, st.description, x, y, w, kSecondary, 5);
+				}
+			}
+		}
+		y += 8;
+		btn(b, IfaceRect{x, x + w, y, y + 28}, "Begin the mission (" + std::to_string(ctw::K(*s->rules, "ctw_espionage_cost")) + " tribute)", kEspionage, 0, can && g.game_end == 0, 12);
+		y += 34;
+		if (!can) text(b, f12, why, float(x), float(y), kSecondary);
 	}
 
 	void draw_news(Bridge& b, int x, int y, int w) {
@@ -1210,10 +1285,13 @@ struct Screen::Impl {
 			std::string t = o.response.empty() ? "The " + (from >= 0 ? g.tribe_name(from) : o.tribe) + " make you an offer: " + o.offer_type + "." : o.response;
 			if (o.tribe_trib || o.tribe2_trib) t += "\n\nThey give " + std::to_string(o.tribe_trib) + " tribute and ask " + std::to_string(o.tribe2_trib) + ".";
 			message(from >= 0 ? g.tribe_name(from) : "Offer", t, {"Accept", "Decline"}, [this, o](int i) {
-				if (i != 0) return;
 				ctw::ConquestGame& gg = *G();
+				if (i != 0) {
+					gg.answer_proposal(o, false);  // the deal id is recorded as declined (the campaign scripts read it)
+					return;
+				}
 				// the offer is written from the proposer's side: tribe = the proposer, tribe2 = you
-				const std::string err = gg.apply_offer(o);
+				const std::string err = gg.answer_proposal(o, true);
 				message("Deal", err.empty() ? "The deal is made." : err);
 				gg.refresh_links();
 			});
@@ -1249,12 +1327,17 @@ struct Screen::Impl {
 			ctw::AiStep st = g.ai_step();
 			if (st.kind == ctw::AiStep::kDone) {
 				g.finish_round();
+				if (g.nuke_pending) nuke_strike_dialog();
 				autosave();
 				drain_messages();
 				check_game_end();
 				news_scroll = 0;
 				tab = 3;  // the round's news
 				army_from = -1;
+				return;
+			}
+			if (st.kind == ctw::AiStep::kNukeStrike) {
+				nuke_strike_dialog();
 				return;
 			}
 			if (st.kind == ctw::AiStep::kPlayerAttacked) {
@@ -1275,6 +1358,42 @@ struct Screen::Impl {
 		g.end_turn_player();
 		g.begin_ai_round();
 		run_ai();
+	}
+
+	void begin_espionage() {
+		ctw::ConquestGame& g = *G();
+		ctw::StyleChoice sc;
+		std::string why;
+		if (!g.begin_espionage(&sc, &why)) {
+			message("Espionage", why);
+			return;
+		}
+		s->battle = g.make_espionage_battle(sc);
+		s->battle.style = sc;
+		g.cur_style = sc;
+		s->battle_is_defense = false;
+		s->battle_is_espionage = true;
+		s->battle_pending = true;
+		action = Action::PlayBattle;
+	}
+
+	// An AI superpower has launched (ctw_ai_launch_nukes): the player may answer in kind; the exchange is then applied.
+	void nuke_strike_dialog() {
+		ctw::ConquestGame& g = *G();
+		const int mine = g.num_nukes(g.player_tribe);
+		std::vector<std::string> buttons;
+		if (mine > 0) buttons.push_back("Retaliate (" + std::to_string(mine) + ")");
+		buttons.push_back("Hold fire");
+		message("Nuclear attack!", "The " + g.tribe_name(g.nuke_p2) + " have launched their missiles. DEFCON is 5.", buttons, [this, mine](int i) {
+			ctw::ConquestGame& gg = *G();
+			gg.finish_nuclear_exchange(mine > 0 && i == 0);
+			message("The exchange", gg.news.empty() ? "" : gg.news.back().text);
+			if (gg.ai_in_progress) run_ai();
+			else {
+				autosave();
+				check_game_end();
+			}
+		});
 	}
 
 	void open_attack(const ctw::LinkChoice& l, bool defense) {
@@ -1437,6 +1556,7 @@ struct Screen::Impl {
 		case kNationNext: nation++; break;
 		case kRandNations: rand_nations = !rand_nations; break;
 		case kRandBonus: rand_bonuses = !rand_bonuses; break;
+		case kVaryMaps: vary_maps = !vary_maps; break;
 		case kStart: start_campaign(); break;
 		case kBack: action = Action::Back; break;
 		case kLoad:
@@ -1479,7 +1599,7 @@ struct Screen::Impl {
 		case kOption:
 			if (arg >= 1000) {
 				std::string why;
-				if (!g.buy_fortification(g.player_tribe, arg - 1000, &why)) message("Fortify", why);
+				if (!g.buy_fortification(g.player_tribe, arg - 1000, &why)) message("Build up", why);
 				g.refresh_links();
 			} else if (arg >= 100) {
 				if (size_t(arg - 100) < army_attacks.size()) open_attack(army_attacks[size_t(arg - 100)], false);
@@ -1528,6 +1648,13 @@ struct Screen::Impl {
 			if (!g.buy_card(g.player_tribe, &why)) message("Cards", why);
 			break;
 		}
+		case kBuildNuke: {
+			const int r = g.build_nuke(arg, true);
+			if (r != 1) message("Missile", r == 0 ? "You cannot build another missile there now." : "That territory is not yours.");
+			g.refresh_links();
+			break;
+		}
+		case kEspionage: begin_espionage(); break;
 		case kDiploRow: diplo_sel = arg; break;
 		case kDiploAct: on_diplo_act(arg); break;
 		case kDealType: deal_type = (deal_type + 1) % 4; break;
@@ -1604,6 +1731,7 @@ void Screen::open(bool map_screen, const std::string& sub) {
 	}
 	if (sub == "map") I.dialogs.clear();  // headless: the plain map without the campaign's opening messages
 	else if (sub == "news") I.tab = 3;
+	else if (sub == "coldwar") I.tab = 4;
 	else if (sub == "cards") I.tab = 1;
 	else if (sub == "diplomacy") {
 		I.tab = 2;

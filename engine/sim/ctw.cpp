@@ -3,6 +3,8 @@
 #include "sim/ctw.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstdlib>
 #include <deque>
 #include <stdexcept>
@@ -156,6 +158,7 @@ std::string ConquestGame::setup(const GameFiles& f, const sim::Rules& r, const C
 	ai_phase = 0;
 	random_nations = S.random_nations && C.allow_random_nations;
 	random_bonuses = S.random_bonuses && C.allow_random_bonuses;
+	vary_battle_seed = S.vary_battle_seed;
 	map_name = C.name;
 	map_id = C.file;
 	leaders = {};
@@ -202,7 +205,14 @@ std::string ConquestGame::setup(const GameFiles& f, const sim::Rules& r, const C
 	if (random_nations && owner_slots.size() > 1) {
 		std::vector<std::pair<int, int>> keyed;  // ordered_insert keyed by rand(0..1000)
 		for (int s : owner_slots) keyed.push_back({rget(0, 1000), s});
-		std::stable_sort(keyed.begin(), keyed.end(), [](auto& a, auto& b) { return a.first < b.first; });
+		// LinkListBase::ordered_insert puts a new node before equal keys: ascending key, later slots first on a tie
+	std::stable_sort(keyed.begin(), keyed.end(), [](auto& a, auto& b) { return a.first < b.first; });
+	for (size_t i = 0; i < keyed.size();) {
+		size_t j = i;
+		while (j < keyed.size() && keyed[j].first == keyed[i].first) j++;
+		std::reverse(keyed.begin() + long(i), keyed.begin() + long(j));
+		i = j;
+	}
 		for (size_t k = 0; k < owner_slots.size(); k++) remap[owner_slots[k]] = keyed[k].second;
 	}
 
@@ -391,32 +401,37 @@ void ConquestGame::assign_supply(int slot) {
 int ConquestGame::army_cap(int slot) const {
 	const Leader& L = leaders[size_t(slot)];
 	if (!L.valid || !L.active || L.vassal_of >= 0) return 0;
-	int vassals = 0;
-	for (int s = 0; s < kSlots; s++) {
-		if (leaders[size_t(s)].valid && leaders[size_t(s)].active && leaders[size_t(s)].vassal_of == slot) vassals++;
+	int vassals = 0;  // place_new_armies @7a1f10: a vassal adds an army only in a campaign without client states
+	if (!def->client_state) {
+		for (int s = 0; s < kSlots; s++) {
+			if (leaders[size_t(s)].valid && leaders[size_t(s)].active && leaders[size_t(s)].vassal_of == slot) vassals++;
+		}
 	}
 	return std::max(0, L.base_armies) + (L.base_armies > 0 && L.capital2 >= 0 ? 1 : 0) + vassals + L.supply_depots;
 }
 
 namespace {
-// find_best_army_loc (AI): (?) the exact scoring is unknown; the spec says only that the AI picks one of its empty
-// nodes. Rule here: the capital first, then supply depots, then the node with the most enemy neighbours (border).
-int best_army_loc(const ConquestGame& g, int slot) {
+// ConquestLeader::find_best_army_loc @79c300: over the candidate nodes (in node order) the one with the most hostile
+// surroundings (a barbarian neighbour counts 1, a neighbour of another nation 3); a capital with a foreign neighbour wins at once.
+int best_army_loc(const ConquestGame& g, int slot, const std::vector<int>& candidates) {
 	int best = -1, best_score = -1;
-	for (int n : g.owned_nodes(slot, true)) {
-		if (g.has_army(n)) continue;
-		int score = 1;
-		const Node& N = g.nodes[size_t(n)];
-		if (N.flags & kCapital) score += 100;
-		if (N.flags & kSupplyDepot) score += 40;
-		for (int t : N.links) {
+	for (int n : candidates) {
+		int score = 0;
+		bool foreign = false;
+		for (int t : g.nodes[size_t(n)].links) {
 			const int o = g.node_eff_owner(t);
-			if (o != slot && (o < 0 || g.stance(slot, o) == kWar)) score += 8;
+			if (o < 0) {
+				score += 1;
+			} else if (o != slot) {
+				score += 3;
+				foreign = true;
+			}
 		}
-		score += N.level;
-		if (score > best_score) {
+		const bool capital = (g.nodes[size_t(n)].flags & kCapital) != 0;
+		if (best_score < score || (capital && foreign)) {
 			best_score = score;
 			best = n;
+			if (capital) return n;
 		}
 	}
 	return best;
@@ -434,7 +449,12 @@ std::string ConquestGame::place_new_armies(int slot) {
 		list.erase(list.begin());
 	}
 	while (int(list.size()) < cap) {
-		const int at = best_army_loc(*this, slot);
+		if (nodes_controlled(slot, true) <= int(list.size())) break;  // place_new_armies: only while there is room
+		std::vector<int> free_nodes;
+		for (size_t i = 0; i < nodes.size(); i++) {
+			if (node_eff_owner(int(i)) == slot && !has_army(int(i))) free_nodes.push_back(int(i));
+		}
+		const int at = best_army_loc(*this, slot, free_nodes);
 		if (at < 0) break;
 		list.push_back({at, false});
 		text = "A new army of the " + tribe_name(slot) + " musters at " + node_name(at) + ".";
@@ -763,8 +783,10 @@ void ConquestGame::check_income(int slot) {
 }
 
 void ConquestGame::assign_bonuses() {
+	tribe_must_attack = -1;  // clear_round_data @78b2b0 (called first): the round's battle marks and the forced attacker are reset
 	for (int s = 0; s < kSlots; s++) {
 		Leader& L = leaders[size_t(s)];
+		L.fought_mask = 0;
 		L.nodes_controlled = 0;
 		L.strength = 0;
 		L.base_rate.fill(0);
@@ -831,7 +853,14 @@ void ConquestGame::begin_ai_round() {
 		if (s == player_tribe || !L.valid || !L.active || L.vassal_of >= 0) continue;
 		keyed.push_back({rget(0, 0x7fff), s});
 	}
+	// LinkListBase::ordered_insert puts a new node before equal keys: ascending key, later slots first on a tie
 	std::stable_sort(keyed.begin(), keyed.end(), [](auto& a, auto& b) { return a.first < b.first; });
+	for (size_t i = 0; i < keyed.size();) {
+		size_t j = i;
+		while (j < keyed.size() && keyed[j].first == keyed[i].first) j++;
+		std::reverse(keyed.begin() + long(i), keyed.begin() + long(j));
+		i = j;
+	}
 	valid_tribes.clear();
 	for (auto& k : keyed) valid_tribes.push_back(k.second);
 	ai_index = 0;
@@ -850,52 +879,41 @@ AiStep ConquestGame::ai_step() {
 			continue;
 		}
 		if (ai_phase == 0) {
+			// return_from_scen @78f040 per tribe: its strategic cards, its diplomacy (an offer of the campaign's diplo_offer
+			// script replaces the generic diplomacy: ConquestDiploOffer::make_ai_offer), then plan_strategy
 			play_ai_cards(slot);
-			do_ai_diplomacy(slot);
-			{
-				DiploOffer offer;  // the campaign's story offers (diplo_offer hook)
-				if (run_diplo_offer(slot, &offer)) proposals.push_back(offer);
-			}
+			DiploOffer offer;
+			if (run_diplo_offer(slot, &offer)) proposals.push_back(offer);
+			else do_ai_diplomacy(slot);
 			ai_phase = 1;
-			if (run_strategy_script(slot)) {  // the campaign's script plays this tribe's turn (at most one scripted attack)
-				ai_phase = 2;
-				LinkChoice atk = pending_script_attack;
-				pending_script_attack = LinkChoice();
-				bool legal = atk.from >= 0 && atk.attacker == slot && nodes[size_t(atk.to)].owner != slot;
-				if (legal) {
-					legal = false;
-					for (Piece& p : pieces[size_t(slot)]) {
-						if (p.node == atk.from) legal = true;
-					}
-				}
-				if (legal) {
-					atk.defender = node_eff_owner(atk.to);
-					if (atk.defender == slot) legal = false;
-				}
-				if (legal) {
-					if (atk.defender >= 0 && atk.defender == player_tribe) {
-						step.kind = AiStep::kPlayerAttacked;
-						step.battle = atk;
-						cur_link = atk;
-						return step;
-					}
-					resolve_ai_vs_ai(atk);
-				}
+			if (nuke_pending) {
+				step.kind = AiStep::kNukeStrike;
+				return step;
 			}
 		}
 		if (ai_phase == 1) {
-			// plan_strategy until it finds no attack
-			for (int guard = 0; guard < 32; guard++) {
+			// plan_strategy until it finds nothing; an overrun is resolved at once, a real attack ends the tribe's turn
+			bool attacked = false;
+			for (int guard = 0; guard < 64; guard++) {
 				LinkChoice atk;
-				if (!plan_strategy(slot, &atk)) break;
+				const int r = plan_strategy(slot, &atk);
+				if (r == 0) break;
+				if (r == 1) {
+					resolve_overrun(atk);
+					continue;
+				}
+				attacked = true;
 				if (atk.defender >= 0 && atk.defender == player_tribe) {
+					ai_phase = 2;
 					step.kind = AiStep::kPlayerAttacked;
 					step.battle = atk;
 					cur_link = atk;
 					return step;
 				}
 				resolve_ai_vs_ai(atk);
+				break;
 			}
+			if (!attacked) L.tribute += K(*rules, "ctw_no_attack_bonus");  // return_from_scen: no attack planned
 		}
 		check_income(slot);
 		ai_index++;

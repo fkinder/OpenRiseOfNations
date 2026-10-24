@@ -19,14 +19,14 @@ template <class Ar> void walk(Ar& ar, Card& v) { FIELDS(ar, v.type, v.variant); 
 template <class Ar> void walk(Ar& ar, Piece& v) { FIELDS(ar, v.node, v.moved); }
 template <class Ar> void walk(Ar& ar, News& v) { FIELDS(ar, v.round, v.text); }
 template <class Ar> void walk(Ar& ar, Overrun& v) { FIELDS(ar, v.node, v.slot); }
-template <class Ar> void walk(Ar& ar, Reinforcement& v) { FIELDS(ar, v.time, v.side, v.node, v.dest_x, v.dest_y, v.edge); }
+template <class Ar> void walk(Ar& ar, Reinforcement& v) { FIELDS(ar, v.time, v.side, v.node, v.loc_x, v.loc_y, v.dest_x, v.dest_y, v.placed); }
 template <class Ar> void walk(Ar& ar, DiploOffer& v) {
 	FIELDS(ar, v.tribe, v.tribe2, v.offer_type, v.response, v.id, v.accepted, v.counter_offer, v.tribe_trib, v.tribe2_trib,
 	       v.disable_counter_offer, v.tribe_terr, v.tribe2_terr, v.tribe_col, v.tribe2_col, v.tribe_cards, v.tribe2_cards);
 }
 template <class Ar> void walk(Ar& ar, ctw::Node& v) {
 	FIELDS(ar, v.owner, v.founder, v.level, v.turns_held, v.wonder, v.rare, v.tribute, v.flags, v.value, v.nukes, v.tech_cat,
-	       v.continent, v.tileset, v.card, v.display_name, v.links, v.link_sea, v.take_tribute);
+	       v.continent, v.tileset, v.card, v.display_name, v.links, v.link_sea, v.take_tribute, v.nuked);
 }
 template <class Ar> void walk(Ar& ar, ctw::Colony& v) { FIELDS(ar, v.id, v.name, v.rares, v.wonder, v.value, v.tribute, v.owner); }
 template <class Ar> void walk(Ar& ar, ctw::Leader& v) {
@@ -35,7 +35,7 @@ template <class Ar> void walk(Ar& ar, ctw::Leader& v) {
 	       v.stance_time, v.attitude_base, v.no_attack_time, v.bribe_paid, v.nodes_won_from, v.bonus_card_types_played, v.active,
 	       v.valid, v.no_eliminating, v.no_propose_ally, v.no_negotiation, v.reject_bribe, v.gunpowder_off, v.rares_off, v.name,
 	       v.rare_resources, v.wonders, v.continents, v.new_nodes, v.no_attack, v.no_declare_war, v.cards, v.selected, v.fought_mask,
-	       v.met_mask);
+	       v.met_mask, v.prev_node_attacked, v.num_overruns);
 }
 
 }  // namespace ron::sim::save
@@ -44,7 +44,7 @@ namespace ron::sim::ctw {
 
 namespace {
 
-constexpr uint32_t kSaveVersion = 0x10;  // the original's RonCTWMapSave version
+constexpr uint32_t kSaveVersion = 0x11;  // 0x10 is the original's RonCTWMapSave version; 0x11 adds the second pass's state
 
 template <class Ar>
 void walk_all(Ar& ar, ConquestGame& g, std::string& campaign, std::vector<int>& style_plays, std::vector<uint8_t>& statics) {
@@ -61,7 +61,7 @@ void walk_all(Ar& ar, ConquestGame& g, std::string& campaign, std::vector<int>& 
 		FIELDS(s, campaign, g.seed, rng, g.player_tribe, g.difficulty, g.cur_round, g.num_turns, g.turns_skipped, g.cur_age,
 		       g.starting_age, g.ending_age, g.scen_per_age, g.turns_no_attack, g.game_end, g.return_to_node, g.defcon_level,
 		       g.nuke_launch_turns, g.talleyrand_tribe, g.talleyrand_state, g.fouche_tribe, g.style_index1, g.style_index2,
-		       g.cur_espionage_level, g.random_nations, g.random_bonuses, g.has_fought_barbarian, g.free_move_turn,
+		       g.cur_espionage_level, g.tribe_must_attack, g.nuke_pending, g.finished_espionage, g.nuke_p1, g.nuke_p2, g.vary_battle_seed, g.random_nations, g.random_bonuses, g.has_fought_barbarian, g.free_move_turn,
 		       g.need_defensive_bonus, g.piece_moves_disabled, g.attacked_this_round, g.ai_phase, g.ai_index, g.ai_in_progress,
 		       g.map_name, g.map_id, g.player_name, g.end_title, g.end_text, g.end_image, g.end_button, g.no_negotiate_text,
 		       g.end_victory, g.last_battle_victory, g.nuke_building_disabled, g.supply_depots_hidden, g.espionage_disabled);
@@ -72,6 +72,7 @@ void walk_all(Ar& ar, ConquestGame& g, std::string& campaign, std::vector<int>& 
 	ar.section("CTWC", [&](auto& s) { FIELDS(s, g.colonies, g.continents_captured); });
 	ar.section("CTWP", [&](auto& s) { FIELDS(s, g.pieces, g.reinforcements, g.overrun_armies, g.valid_tribes); });
 	ar.section("CTWD", [&](auto& s) { FIELDS(s, g.deck, g.pool); });
+	ar.section("CTWK", [&](auto& s) { FIELDS(s, g.tribe_nukes, g.tribe2_nukes, g.tribe_nuke_targets, g.tribe2_nuke_targets); });
 	ar.section("CTWV", [&](auto& s) { io(s, statics); });
 	ar.section("CTWS", [&](auto& s) {
 		FIELDS(s, g.stored_ints, g.stored_strs, g.deals, g.sub_goals, g.allied_punks, g.news, style_plays, g.proposals);

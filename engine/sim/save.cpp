@@ -41,7 +41,7 @@ static_assert(sizeof(ObjectList) == 64, "ObjectList changed: update walk_objects
 static_assert(sizeof(Groups) == 1282084, "Groups changed: update walk_groups()");
 static_assert(sizeof(Regions) == 10248, "Regions changed: update the REGN section in walk_body()");
 // 1647392 + 16 (+ 32: Game::herds with its padding): Game::original (the original-save shadow, sim/original_save.hpp) is derived state the native save never writes.
-static_assert(sizeof(Game) == 1647440, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
+static_assert(sizeof(Game) == 1648080, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
 // 1608 + 8: ScriptHost::ctw (the Conquer the World campaign the scripts run for, sim/ctw.hpp) is a run-time link the native battle save never writes.
 static_assert(sizeof(ScriptHost) == 1616, "ScriptHost changed: update walk_scripts()");
 #endif

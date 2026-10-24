@@ -1,5 +1,7 @@
 #include "notices.hpp"
 
+#include "uistr.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -15,13 +17,12 @@ namespace {
 
 constexpr int64_t key(int who, int o) { return int64_t(who) * 4096 + o; }
 constexpr uint32_t kWhite = 0xFFFFFFFF;
-constexpr int kAlertGap = 300;   // frames between warnings for the same city (Object::do_damage: frame - city stamp > 300)
 constexpr int kNoticeGap = 400;  // frames between banners (frame - stamp > 400)
 
 }  // namespace
 
 // String::parse: "$NAMEn" is replaced by argument n (the digits end the placeholder), in the order of the digits.
-std::string Notifier::parse(std::string text, const std::vector<std::string>& args) {
+std::string fill(std::string text, const std::vector<std::string>& args) {
 	std::string out;
 	for (size_t i = 0; i < text.size();) {
 		if (text[i] != '$') {
@@ -43,12 +44,16 @@ std::string Notifier::parse(std::string text, const std::vector<std::string>& ar
 	return out;
 }
 
+std::string Notifier::parse(std::string text, const std::vector<std::string>& args) { return fill(std::move(text), args); }
+
 // loc_str_array element `index` (docs/ui-spec.md 3.5), checked against a piece of its expected text so a different build's
 // table falls back to the English text written here.
 std::string Notifier::loc(int index, const char* expect, const char* fallback) const {
 	if (tables_ && index >= 0 && size_t(index) < tables_->translated().size()) {
 		const std::string& s = tables_->translated()[size_t(index)];
-		if (s.find(expect) != std::string::npos) return s;
+		// The tables are positional in every language: the expected English word only guards the English table against a
+		// different build's numbering.
+		if (uistr::language() != ron::Language::English ? !s.empty() : s.find(expect) != std::string::npos) return s;
 	}
 	return fallback;
 }
@@ -58,15 +63,12 @@ void Notifier::reset(const ron::sim::Game& g) {
 	have_prev_ = false;
 	prev_.clear();
 	last_alert_.clear();
-	last_unit_alert_ = last_notice_ = -100000;
-	prev_age_.clear();
-	prev_rel_.clear();
 }
 
 void Notifier::update(const Env& env, std::vector<Note>& out) {
 	if (!env.game || !env.view) return;
 	const ron::sim::Game& g = *env.game;
-	const int me = env.me, frame = g.frame;
+	const int me = env.me;
 	auto nation = [&](int who) { return env.leader ? env.leader(who) : env.nation ? env.nation(who) : std::string(); };
 	auto type_name = [&](int t) { return env.type_name ? env.type_name(t) : std::string(); };
 	auto find_build = [&](int who, int o) -> const BuildView* {
@@ -75,20 +77,20 @@ void Notifier::update(const Env& env, std::vector<Note>& out) {
 		}
 		return nullptr;
 	};
-	auto city_name = [&](int who, int o, int type) {
-		const BuildView* b = find_build(who, o);
-		if (b && b->city_index >= 0 && who >= 0 && who < 8 && size_t(b->city_index) < g.cities[size_t(who)].size()) {
-			const std::string& n = g.cities[size_t(who)][size_t(b->city_index)].name;
+	auto city_name = [&](int who, int city_index, int fallback_type) {
+		if (who >= 0 && who < 8 && city_index >= 0 && size_t(city_index) < g.cities[size_t(who)].size()) {
+			const std::string& n = g.cities[size_t(who)][size_t(city_index)].name;
 			if (!n.empty()) return n;
 		}
-		return type_name(type);
+		return type_name(fallback_type);
 	};
+	static const char* goods_names[6] = {"Food", "Timber", "Wealth", "Knowledge", "Metal", "Oil"};
 	// ---- the simulation's event log
 	for (; events_seen_ < g.events.size(); events_seen_++) {
 		const ron::sim::GameEvent& e = g.events[events_seen_];
 		if (e.kind == 1) {  // city captured: who = new owner, other = old owner, o / o2 = old / new city object
 			const BuildView* nb = find_build(e.who, e.o2);
-			const std::string name = nb ? city_name(e.who, e.o2, nb->type) : std::string("the city");
+			const std::string name = nb ? city_name(e.who, nb->city_index, nb->type) : std::string("the city");
 			Note n;
 			n.located = nb != nullptr;
 			if (nb) n.x = float(nb->x), n.y = float(nb->y);
@@ -97,9 +99,8 @@ void Notifier::update(const Env& env, std::vector<Note>& out) {
 				for (int k = 0; k < 6; k++) {
 					if (e.goods[size_t(k)] > amount) amount = e.goods[size_t(k)], best = k;
 				}
-				static const char* goods[6] = {"Food", "Timber", "Wealth", "Knowledge", "Metal", "Oil"};
 				n.text = best >= 0 ? loc_or(274, "Plunder", "City of $CITYNAME0 captured. Plunder: +$NUMBER0 $GOODTYPE1",
-				                            {name, std::to_string(amount), goods[best]})
+				                            {name, std::to_string(amount), goods_names[best]})
 				                   : loc_or(275, "captured", "City of $CITYNAME0 captured.", {name});
 				n.argb = kWhite, n.ping = 4;
 				out.push_back(n);
@@ -131,190 +132,154 @@ void Notifier::update(const Env& env, std::vector<Note>& out) {
 				b.kind = Note::Notice, b.image = "capital_notice", b.text = n.text.substr(0, n.text.find('!') + 1);
 				out.push_back(b);
 			}
+		} else if (e.kind == 8 && e.alert != 0 && e.frame >= 1) {
+			// Object::do_damage's warnings (the throttles are the simulation's stamps). who = the victim's owner, other = the
+			// attacker; value = the city index (classes 1-5), the territory owner (7, 8) or 0.
+			namespace ga = ron::sim::gamealert;
+			const std::string by = nation(e.other);
+			Note n;
+			n.argb = kWhite, n.located = true, n.x = float(e.x), n.y = float(e.y), n.ping = 1;
+			auto notice = [&](const char* image) {
+				Note b;
+				b.kind = Note::Notice, b.image = image, b.text = n.text;
+				out.push_back(b);
+			};
+			const bool mine = e.who == me;
+			const bool ally = !mine && e.who >= 0 && me >= 0 && ron::sim::is_ally(g, e.who, me);
+			const std::string cname = city_name(e.who, e.value, ron::sim::ptype::kVillage);
+			switch (e.alert) {
+				case ga::kCityAttacked:
+				case ga::kCapitalAttacked: {
+					const bool capital = e.alert == ga::kCapitalAttacked;
+					if (!mine) break;
+					int& last = last_alert_.try_emplace(key(e.who, e.value), -100000).first->second;
+					const bool banner = e.frame - last > kNoticeGap;
+					last = e.frame;
+					n.text = capital ? loc_or(2684, "CAPITAL", "Our CAPITAL is under ATTACK by $SOMEJERK0!", {by})
+					                 : loc_or(2686, "under attack", "Our city of $CITYNAME0 is under attack by $FRANCISXRUSHMASTER1!", {cname, by});
+					n.sound = capital ? "S_YOUR_CAPITAL_ATTACKED" : "S_CITY_BEING_ATTACKED";
+					out.push_back(n);
+					if (banner) {
+						notice(capital ? "capital_under_attack_notice" : "city_under_attack_notice");
+					}
+					break;
+				}
+				case ga::kAllyCityAttacked:
+				case ga::kAllyCapitalAttacked: {
+					if (!ally) break;
+					const bool capital = e.alert == ga::kAllyCapitalAttacked;
+					n.text = capital ? loc_or(2685, "Allied", "Allied Capital under attack by $JOHNQWHINER0!", {by})
+					                 : loc_or(2687, "Allied", "Allied City of $CITYNAME0 is under attack by $JOHNQWHINER1!", {cname, by});
+					n.sound = "S_ALLY_UNDER_ATTACK";
+					out.push_back(n);
+					break;
+				}
+				case ga::kCityRaided:
+					if (!mine) break;
+					n.text = loc_or(2688, "raided", "Our city of $CITYNAME0 is being raided by $FRANCISXRUSHMASTER1!", {cname, by});
+					n.sound = "S_RAID_ATTACKED";
+					out.push_back(n);
+					break;
+				case ga::kRaided:
+					if (!mine) break;
+					n.text = loc_or(2689, "RAIDED", "We are being RAIDED by $THEBURGLER0!", {by});
+					n.sound = "S_RAID_ATTACKED";
+					out.push_back(n);
+					break;
+				case ga::kUnitAttacked:
+				case ga::kScoutAttacked: {
+					if (!mine || ron::sim::is_ally(g, e.other, e.who)) break;
+					// A scout is named only outside the viewer's own territory (e.value = the territory owner).
+					const bool scout = e.alert == ga::kScoutAttacked && e.value != me;
+					n.text = scout ? loc_or(2690, "Scout", "Our Scout is being attacked by $JOESIXPACK0!", {by})
+					               : loc_or(2691, "ATTACK", "We are under ATTACK by $FREDTHEFLYINGTRACTOR0!", {by});
+					n.sound = scout ? "S_SCOUT_ATTACKED" : "S_BEING_ATTACKED";
+					out.push_back(n);
+					break;
+				}
+				default: break;
+			}
+		} else if (e.kind == 9 && e.frame >= 1 && e.other != 0 && e.who == me) {  // tech researched
+			Note n;
+			n.text = loc_or(2298, "researched", "$BOZOTHECLOWN0 has researched $TECHNAME1", {nation(e.who), type_name(e.value)});
+			out.push_back(n);
+		} else if (e.kind == 10 && e.frame >= 1) {  // age advanced: who = the leader, value = the new age count
+			if (e.who == me && e.value >= 1 && e.value <= 7) {
+				Note b;
+				b.kind = Note::Notice, b.image = "age_notice" + std::to_string(e.value), b.text = type_name(543 + e.value);
+				out.push_back(b);
+			} else if (e.who != me && e.value >= 1 && e.value <= 7) {
+				Note n;
+				n.text = nation(e.who) + " has entered the " + type_name(543 + e.value) + ".";  // (no stock line)
+				n.argb = kWhite;
+				out.push_back(n);
+			}
+		} else if ((e.kind == 11 || e.kind == 12) && e.frame >= 1) {  // wonder started / completed
+			if (e.who < 0 || e.who >= 8) continue;
+			Note n;
+			n.argb = kWhite, n.located = true, n.x = float(e.x), n.y = float(e.y), n.ping = 2;
+			const std::string name = type_name(e.value);
+			if (e.kind == 11) {
+				n.text = loc_or(96, "started a wonder", "$KINGTUT0 has started a wonder: $WONDERNAME1!", {nation(e.who), name});
+				out.push_back(n);
+			} else {
+				n.text = e.who == me ? loc_or(107, "completed", "$WONDERNAME0 completed!", {name})
+				                     : loc_or(109, "completed a wonder", "$PRESIDENTCLINTON0 has completed a wonder: $WONDERNAME1!", {nation(e.who), name});
+				out.push_back(n);
+				Note b;
+				b.kind = Note::Notice, b.image = "wonder_notice", b.text = n.text;
+				out.push_back(b);
+			}
+		} else if ((e.kind == 13 || e.kind == 14) && e.frame >= 1 && e.other == me && e.who != me) {  // tribute offered / demanded of us
+			int k = e.value;
+			const int amount = k >= 0 && k < 6 ? e.goods[size_t(k)] : 0;
+			Note n;
+			n.argb = kWhite;
+			n.text = e.kind == 13 ? nation(e.who) + " is offering you " + std::to_string(amount) + " " + (k >= 0 && k < 6 ? goods_names[k] : "goods") + "."
+			                      : nation(e.who) + " demands " + std::to_string(amount) + " " + (k >= 0 && k < 6 ? goods_names[k] : "goods") + " in tribute.";
+			out.push_back(n);
+		} else if (e.kind == 15 && e.frame >= 1 && e.who >= 0 && e.other >= 0) {  // diplomacy changed: value = the new state, alert = the old
+			const std::string na = nation(e.who), nb = nation(e.other);
+			Note n;
+			n.argb = kWhite;
+			if (e.value == 2) n.text = loc_or(574, "alliance", "$LEADERNAME0 has formed an alliance with $LEADERNAME1.", {na, nb});
+			else if (e.alert == 2) n.text = loc_or(2338, "broken", "$DUBYA0 and $SADDAM1 have broken their alliance.", {na, nb});
+			else if (e.value == 1 && e.alert == 0) n.text = loc_or(573, "peace", "$LEADERNAME0 has signed a peace treaty with $LEADERNAME1.", {na, nb});
+			if (!n.text.empty()) out.push_back(n);
+		} else if (e.kind == 16 && e.frame >= 1 && e.who == me) {  // resource flash
+			Note f;
+			f.kind = Note::Flash;
+			for (int k = 0; k < 6; k++) {
+				if (e.goods[size_t(k)] != 0) f.goods |= 1 << k;
+			}
+			if (f.goods) out.push_back(f);
 		}
 	}
-	// ---- the view's differences
+	// ---- the view's differences: a building going active (its completion line; wonders have their events)
 	std::unordered_map<int64_t, Obj> cur;
-	cur.reserve(env.view->units.size() + env.view->builds.size());
-	for (const UnitView& u : env.view->units) {
-		if (!u.alive || u.who != me) continue;
-		Obj o;
-		o.hp = u.hit_points, o.type = u.type;
-		cur[key(u.who, u.o)] = o;
-	}
+	cur.reserve(env.view->builds.size());
 	for (const BuildView& b : env.view->builds) {
-		if (!b.alive) continue;
-		const bool wonder = g.type(b.type).cat == 2;
-		if (b.who != me && !(wonder && b.who >= 0 && b.who < 8)) continue;
+		if (!b.alive || b.who != me) continue;
 		Obj o;
-		o.hp = b.hit_points, o.type = b.type, o.active = b.active, o.build = true, o.city = b.city, o.started = b.started;
-		if (!b.queue.empty()) {
-			o.q_type = b.queue.front().type;
-			o.q_percent = b.queue.front().time > 0 ? int(int64_t(b.queue.front().job_counter) * 100 / b.queue.front().time) : 0;
-		}
+		o.type = b.type, o.active = b.active, o.build = true;
 		cur[key(b.who, b.o)] = o;
 	}
-	if (have_prev_) {
-		auto attacker = [&](int tw, int to, float px, float py) {
-			int who = -1;
-			for (const UnitView& u : env.view->units) {
-				if (u.alive && u.target_who == tw && u.target_o == to && u.who != tw) return u.who;
-			}
-			for (const BuildView& b : env.view->builds) {
-				if (b.alive && b.target_who == tw && b.target_o == to && b.who != tw) return b.who;
-			}
-			float best = 2500;
-			for (const UnitView& u : env.view->units) {
-				if (!u.alive || u.who == tw || u.who >= 8 || !ron::sim::is_enemy(g, tw, u.who)) continue;
-				const float d = std::hypot(float(u.x) - px, float(u.y) - py);
-				if (d < best) best = d, who = u.who;
-			}
-			return who;
-		};
+	if (have_prev_ && g.frame > 1) {
 		for (const auto& [k, o] : cur) {
 			auto pit = prev_.find(k);
-			if (pit == prev_.end()) {
-				// A wonder started by someone: "$LEADER has started a wonder: $NAME!" (only sites appearing now).
-				if (o.build && !o.active && o.started && g.type(o.type).cat == 2 && frame > 1) {
-					const int who = int(k / 4096);
-					Note n;
-					n.text = loc_or(96, "started a wonder", "$KINGTUT0 has started a wonder: $WONDERNAME1!", {nation(who), type_name(o.type)});
-					n.argb = kWhite;
-					const BuildView* b = find_build(who, int(k % 4096));
-					if (b) n.located = true, n.x = float(b->x), n.y = float(b->y), n.ping = 2;
-					out.push_back(n);
-				}
-				continue;
-			}
-			const Obj& p = pit->second;
-			const int who = int(k / 4096), oo = int(k % 4096);
-			if (o.build && !p.started && o.started && !o.active && g.type(o.type).cat == 2) {  // a wonder begun
-				Note n;
-				n.text = loc_or(96, "started a wonder", "$KINGTUT0 has started a wonder: $WONDERNAME1!", {nation(who), type_name(o.type)});
-				n.argb = kWhite;
-				if (const BuildView* b = find_build(who, oo)) n.located = true, n.x = float(b->x), n.y = float(b->y), n.ping = 2;
-				out.push_back(n);
-			}
-			if (o.build && !p.active && o.active) {  // construction finished
-				std::string name = type_name(o.type);
-				std::string lower = name;
-				for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
-				const bool wonder = g.type(o.type).cat == 2;
-				if (wonder) {
-					Note n;
-					n.text = who == me ? loc_or(107, "completed", "$WONDERNAME0 completed!", {name})
-					                   : loc_or(109, "completed a wonder", "$PRESIDENTCLINTON0 has completed a wonder: $WONDERNAME1!", {nation(who), name});
-					n.argb = kWhite;
-					if (const BuildView* b = find_build(who, oo)) n.located = true, n.x = float(b->x), n.y = float(b->y), n.ping = 2;
-					out.push_back(n);
-					Note b;
-					b.kind = Note::Notice, b.image = "wonder_notice", b.text = n.text;
-					out.push_back(b);
-				} else if (who == me && lower.find("wall") == std::string::npos && lower.find("gate") == std::string::npos) {
-					Note n;
-					n.text = loc_or(3734, "completed", "$BUILDINGNAME0 completed.", {name});
-					if (const BuildView* b = find_build(who, oo)) n.located = true, n.x = float(b->x), n.y = float(b->y);
-					out.push_back(n);
-				}
-			}
-			if (who != me) continue;
-			// A tech leaving the front of a queue at (nearly) full progress: "$LEADER has researched $TECH".
-			if (o.build && p.q_type >= 0 && !ron::sim::is_unit_type(p.q_type) && p.q_percent >= 90 && o.q_type != p.q_type) {
-				Note n;
-				n.text = loc_or(2298, "researched", "$BOZOTHECLOWN0 has researched $TECHNAME1", {nation(who), type_name(p.q_type)});
-				out.push_back(n);
-			}
-			// Attack warnings (Object::do_damage): an own object lost hit points.
-			if (o.hp < p.hp) {
-				const BuildView* b = o.build ? find_build(who, oo) : nullptr;
-				float px = 0, py = 0;
-				if (b) px = float(b->x), py = float(b->y);
-				else {
-					for (const UnitView& u : env.view->units) {
-						if (u.who == who && u.o == oo) px = float(u.x), py = float(u.y);
-					}
-				}
-				const int enemy = attacker(who, oo, px, py);
-				if (enemy < 0 || frame < 5) continue;  // no attacker in sight: attrition, a script, the start-up settling
-				const std::string by = nation(enemy);
-				auto notice = [&](const char* image, const std::string& text) {
-					if (frame - last_notice_ <= kNoticeGap) return;
-					last_notice_ = frame;
-					Note n;
-					n.kind = Note::Notice, n.image = image, n.text = text;
-					out.push_back(n);
-				};
-				if (o.build && o.city && b) {
-					int& last = last_alert_.try_emplace(k, -100000).first->second;
-					if (frame - last > kAlertGap) {
-						last = frame;
-						bool capital = false;
-						if (b->city_index >= 0 && size_t(b->city_index) < g.cities[size_t(who)].size())
-							capital = (g.cities[size_t(who)][size_t(b->city_index)].city_flags & ron::sim::cityflag::kCapital) != 0;
-						Note n;
-						n.text = capital ? loc_or(2684, "CAPITAL", "Our CAPITAL is under ATTACK by $SOMEJERK0!", {by})
-						                 : loc_or(2686, "under attack", "Our city of $CITYNAME0 is under attack by $FRANCISXRUSHMASTER1!",
-						                          {city_name(who, oo, o.type), by});
-						n.argb = kWhite, n.located = true, n.x = px, n.y = py, n.ping = 1;
-						n.sound = capital ? "S_YOUR_CAPITAL_ATTACKED" : "S_CITY_BEING_ATTACKED";
-						out.push_back(n);
-						notice(capital ? "capital_under_attack_notice" : "city_under_attack_notice", n.text);
-					}
-				} else if (!o.build && frame - last_unit_alert_ > kAlertGap) {
-					last_unit_alert_ = frame;
-					Note n;
-					n.text = o.type == ron::sim::ptype::kScout ? loc_or(2690, "Scout", "Our Scout is being attacked by $JOESIXPACK0!", {by})
-					                                           : loc_or(2691, "ATTACK", "We are under ATTACK by $FREDTHEFLYINGTRACTOR0!", {by});
-					n.argb = kWhite, n.located = true, n.x = px, n.y = py, n.ping = 1;
-					out.push_back(n);
-				}
-			}
+			if (pit == prev_.end() || pit->second.active || !o.active || g.type(o.type).cat == 2) continue;
+			std::string name = type_name(o.type);
+			std::string lower = name;
+			for (char& c : lower) c = char(std::tolower(static_cast<unsigned char>(c)));
+			if (lower.find("wall") != std::string::npos || lower.find("gate") != std::string::npos) continue;
+			Note n;
+			n.text = loc_or(3734, "completed", "$BUILDINGNAME0 completed.", {name});
+			if (const BuildView* b = find_build(int(k / 4096), int(k % 4096))) n.located = true, n.x = float(b->x), n.y = float(b->y);
+			out.push_back(n);
 		}
 	}
 	prev_ = std::move(cur);
 	have_prev_ = true;
-	// ---- ages and diplomacy
-	const size_t nl = std::min<size_t>(8, g.leaders.size());
-	if (prev_age_.size() != nl) {
-		prev_age_.assign(nl, 0);
-		for (size_t i = 0; i < nl; i++) prev_age_[i] = g.leaders[i].age;
-	}
-	for (size_t i = 0; i < nl; i++) {
-		const ron::sim::Leader& L = g.leaders[i];
-		if (!(L.flags & 1) || L.age <= prev_age_[i]) {
-			prev_age_[i] = L.age;
-			continue;
-		}
-		prev_age_[i] = L.age;
-		if (int(i) == me && L.age >= 1 && L.age <= 7) {
-			Note b;
-			b.kind = Note::Notice, b.image = "age_notice" + std::to_string(L.age), b.text = type_name(543 + L.age);
-			out.push_back(b);
-		}
-	}
-	std::vector<int> rel(nl * nl, 1);
-	for (size_t a = 0; a < nl; a++) {
-		for (size_t b = 0; b < nl; b++) {
-			if (a == b || !(g.leaders[a].flags & 1) || !(g.leaders[b].flags & 1)) continue;
-			rel[a * nl + b] = ron::sim::is_ally(g, int(a), int(b)) ? 2 : ron::sim::is_enemy(g, int(a), int(b)) ? 0 : 1;
-		}
-	}
-	if (prev_rel_.size() == rel.size()) {
-		for (size_t a = 0; a < nl; a++) {
-			for (size_t b = a + 1; b < nl; b++) {
-				const int was = prev_rel_[a * nl + b], now = rel[a * nl + b];
-				if (was == now || !(g.leaders[a].flags & 1) || !(g.leaders[b].flags & 1)) continue;
-				const std::string na = nation(int(a)), nb = nation(int(b));
-				Note n;
-				n.argb = kWhite;
-				if (now == 2) n.text = loc_or(574, "alliance", "$LEADERNAME0 has formed an alliance with $LEADERNAME1.", {na, nb});
-				else if (was == 2) n.text = loc_or(2338, "broken", "$DUBYA0 and $SADDAM1 have broken their alliance.", {na, nb});
-				else if (now == 1) n.text = loc_or(573, "peace", "$LEADERNAME0 has signed a peace treaty with $LEADERNAME1.", {na, nb});
-				if (!n.text.empty()) out.push_back(n);
-			}
-		}
-	}
-	prev_rel_ = std::move(rel);
 }
 
 }  // namespace notices

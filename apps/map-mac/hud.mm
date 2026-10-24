@@ -4,7 +4,9 @@
 #include <cmath>
 #include <cstdio>
 
+#include "assets/strings.hpp"
 #include "assets/xml.hpp"
+#include "uistr.hpp"
 
 using ron::IfaceBorder;
 using ron::IfacePiece;
@@ -64,12 +66,13 @@ bool Hud::init(const ron::GameFiles& files, const ron::IfaceLayout& layout, std:
 	rm_el_ = layout.find("IFACERENDERMANAGER");
 	btn_el_ = layout.find("IFACEBUTTONCLASS");
 	ml_el_ = layout.find("IFACEMINILIBRARY");
+	lib_el_ = layout.find("IFACELIBRARY");
 	if (!base_el_ || !res_el_ || !sel_el_ || !opt_el_ || !mini_el_ || !rm_el_ || !btn_el_) {
 		error = "interface.xml lacks a HUD window";
 		return false;
 	}
 	// options.xml: one OPTION per OptionIndex, with its command-card icon.
-	const ron::XmlElement doc = ron::parse_xml(files.read_text("Data/options.xml"));
+	const ron::XmlElement doc = ron::parse_xml(ron::read_localised(files, "options.xml", uistr::language()));
 	ron::for_each_element(doc, "OPTION", [&](const ron::XmlElement& e) {
 		OptionInfo o;
 		o.tex_id = e.get("tex_id");
@@ -80,6 +83,24 @@ bool Hud::init(const ron::GameFiles& files, const ron::IfaceLayout& layout, std:
 		if (const ron::XmlElement* n = e.child("DESC")) o.desc = n->get("#text");
 		option_info_.push_back(o);
 	});
+	// resourcerules.xml: the rare-goods column icons (TEX2_ID / X / Y / XS / YS) by TypeIndex.
+	{
+		const ron::XmlElement rdoc = ron::parse_xml(files.read_text("Data/resourcerules.xml"));
+		int index = 0;
+		ron::for_each_element(rdoc, "RESOURCE", [&](const ron::XmlElement& e) {
+			RareIcon ic;
+			const std::string id = e.get("TEX2_ID");
+			if (const ron::XmlElement* c = e.child("TEX2_ID")) ic.tex_id = c->get("#text");
+			if (const ron::XmlElement* c = e.child("TEX2_X")) ic.x = std::atoi(c->get("#text").c_str());
+			if (const ron::XmlElement* c = e.child("TEX2_Y")) ic.y = std::atoi(c->get("#text").c_str());
+			if (const ron::XmlElement* c = e.child("TEX2_XS")) ic.w = std::atoi(c->get("#text").c_str());
+			if (const ron::XmlElement* c = e.child("TEX2_YS")) ic.h = std::atoi(c->get("#text").c_str());
+			(void)id;
+			if (ic.tex_id == "CRAP") ic.tex_id.clear();
+			rare_icons_.push_back(ic);
+			index++;
+		});
+	}
 	return true;
 }
 
@@ -121,6 +142,7 @@ void Hud::layout(int w, int h) {
 		bar_buttons_.push_back(rect_in(*base_el_, "BUTTON", n, bw, bh).offset(base_.l, base_.t));
 	}
 	display_btn_ = rect_in(*base_el_, "BUTTON", "display", bw, bh).offset(base_.l, base_.t);
+	library_rect_ = IfaceRect{left_.l + (left_.w() - 319) / 2, left_.l + (left_.w() - 319) / 2 + 319, left_.t, left_.t + 168};
 	// Help and menu buttons sit on the top strip (screen coordinates, resolved against the HUD width).
 	bar_buttons_.push_back(rect_in(*base_el_, "IFACERECT", "help_button", bw, bh));
 	bar_buttons_.push_back(rect_in(*base_el_, "IFACERECT", "menu_button", bw, bh));
@@ -203,6 +225,9 @@ bool Hud::captures(int x, int y) const {
 	for (size_t i = 0; i < bar_buttons_.size(); i++) {
 		if ((opened_ || i >= 6) && bar_buttons_[i].contains(x, y)) return true;
 	}
+	for (const IfaceRect& r : progress_rects_) {
+		if (r.contains(x, y)) return true;
+	}
 	if (minilib_open_ ? minilib_win_.contains(x, y) : toggle_rects_[3].contains(x, y)) return true;
 	const IfaceRect cap = rect_in(*base_el_, "IFACERECT", "cap_area", base_.w(), base_.h());
 	if (cap.contains(x, y)) return true;
@@ -277,6 +302,13 @@ void Hud::draw_health(UiRenderer& ui, const IfaceRect& r, int hp, int max_hp, bo
 
 void Hud::draw(UiRenderer& ui, const State& s) {
 	layout(ui.width(), ui.height());
+	if (!icons_aliased_) {
+		// interface.xml defines TEX_SPECIAL_RESOURCES twice (the global iface_specialresource.tga, then the main bar's
+		// resource_icon.tga for the rare-goods buttons) and the layout keeps the last; the market buttons' goods and the rare
+		// column's TEX2 rectangles are in the first file.
+		ui.add_texload("TEX_GOOD_ICONS", "art/iface_specialresource.tga");
+		icons_aliased_ = true;
+	}
 	ui.depth = 0;
 	has_sel_ = !s.selection.empty();
 	draw_bar(ui, s);
@@ -285,13 +317,18 @@ void Hud::draw(UiRenderer& ui, const State& s) {
 	ui.next_window();
 	draw_selected(ui, s);
 	ui.next_window();
-	draw_options(ui, s);
+	if (s.library.active) draw_library(ui, s);
+	else draw_options(ui, s);
+	ui.next_window();
+	draw_garrison(ui, s);
 	ui.next_window();
 	draw_top_strip(ui, s);
 	ui.next_window();
 	draw_resources(ui, s);
 	draw_minilib(ui, s);
 	draw_timers(ui, s);
+	draw_rares(ui, s);
+	draw_progress(ui, s);
 }
 
 // IFaceMainBase::on_redraw @00811600 and on_window_redraw @00811b60. Opened: the full bar. Streamlined: the bar only over the
@@ -319,7 +356,10 @@ void Hud::draw_bar(UiRenderer& ui, const State& s) {
 		ui.add(ron::iface_find_piece(b, "time_back"), float(timer.l), float(timer.t), float(timer.w()), float(timer.h()), kWhite, UiType::Normal);
 		// draw_button_row_area: "<speed>: H:MM:SS", font clock_size, white with a 1,1 black shadow; blinks off while paused.
 		const int f = ui.font_tag("clock_size");
-		if (!(s.paused && (s.graphic_tick & 8))) ui.text_centered(f, std::string(s.paused ? "Paused" : "Normal") + ": " + clock_text(s.frame), timer, kWhite, kBlack);
+		if (!(s.paused && (s.graphic_tick & 8)))
+			ui.text_centered(f, (s.paused ? (s.paused_name.empty() ? std::string("Paused") : s.paused_name)
+			                              : (s.speed_name.empty() ? std::string("Normal") : s.speed_name)) + ": " + clock_text(s.frame),
+			                 timer, kWhite, kBlack);
 	}
 	// Frame edges (tile_random): opened: left edge, bottom and right edges. Streamlined: the left edge and a bottom edge under
 	// the left slot, and the end cap at its right edge, while the slot shows.
@@ -473,9 +513,10 @@ void Hud::draw_resources(UiRenderer& ui, const State& s) {
 			const int good = order[i];
 			// draw_resource @00818840: plate (YELLOW with black text, blinking, while over the cap), icon (first_good_tex + 25 *
 			// good) at x + 1, stockpile at x + 29 in digit set 0, then "/" and "+rate" in grey.
-			const bool capped = s.res.over_cap[size_t(good)] != 0 && (s.graphic_tick & 8);
+			const bool flashing = ((s.flash_mask >> good) & 1) && s.graphic_tick - s.flash_tick < 8 && s.graphic_tick >= s.flash_tick;
+			const bool capped = flashing || (s.res.over_cap[size_t(good)] != 0 && (s.graphic_tick & 8));
 			ui.next_layer();
-			plate(row, capped ? kYellow : kPlate);
+			plate(row, flashing ? kRed : capped ? kYellow : kPlate);
 			ui.next_layer();
 			IfacePiece icon = first;
 			icon.left += (first.width + 4) * good;
@@ -652,7 +693,7 @@ void Hud::draw_selected(UiRenderer& ui, const State& s) {
 		const uint32_t team = rgb(o.rgb[0], o.rgb[1], o.rgb[2]);
 		if (o.building && (o.progress >= 0 || !o.queue.empty())) {
 			const int pct = o.progress >= 0 ? o.progress : o.queue.front().percent;
-			const std::string label = o.progress >= 0 ? "Construction " + std::to_string(pct) + "%"
+			const std::string label = o.progress >= 0 ? uistr::tr("Construction") + " " + std::to_string(pct) + "%"
 			                                          : o.queue.front().name + " " + std::to_string(pct) + "%";
 			const IfaceRect bar = rect_in(e, "IFACERECT", "progress_bar_streamlined", pw, ph).offset(ox, oy);
 			const IfacePiece p0 = ron::iface_find_piece(e, "progress_bar0"), p1 = ron::iface_find_piece(e, "progress_bar1");
@@ -725,7 +766,7 @@ void Hud::draw_selected(UiRenderer& ui, const State& s) {
 	// button, then the rest of the queue in 30x32 buttons; the in-progress item gets a translucent green overlay.
 	if (o.building && (o.progress >= 0 || !o.queue.empty())) {
 		const int pct = o.progress >= 0 ? o.progress : o.queue.front().percent;
-		const std::string label = o.progress >= 0 ? "Construction " + std::to_string(pct) + "%"
+		const std::string label = o.progress >= 0 ? uistr::tr("Construction") + " " + std::to_string(pct) + "%"
 		                                          : o.queue.front().name + " " + std::to_string(pct) + "%";
 		const IfaceRect bar = rect_in(e, "IFACERECT", "progress_bar", pw, ph).offset(ox, oy);
 		const IfacePiece p0 = ron::iface_find_piece(e, "progress_bar0"), p1 = ron::iface_find_piece(e, "progress_bar1");
@@ -839,7 +880,16 @@ void Hud::draw_options(UiRenderer& ui, const State& s) {
 			}
 			IfaceRect r = rc;
 			if (held || !o->enabled) r = r.offset(0, 0);
+			if (o->price >= 0) {
+				draw_market_button(ui, *o, r, factor);
+				continue;
+			}
 			draw_icon_button(ui, tex, col, row, o->tex_x, o->tex_y, r, factor, false);
+			if (!o->label.empty()) {
+				const int lf = ui.font(10, ron::kFontBold);
+				ui.next_layer();
+				ui.text_centered(lf, o->label, r, kWhite, kBlack);
+			}
 			if (o->option == kOptResearch) {
 				const IfacePiece badge = ron::iface_find_piece(*btn_el_, "research_icon");
 				ui.add(badge, float(rc.r - 19), float(rc.b - 25));
@@ -851,6 +901,29 @@ void Hud::draw_options(UiRenderer& ui, const State& s) {
 		}
 	}
 	ui.next_layer();
+	if (!s.card_message.empty()) {
+		// IFaceMarket::on_redraw: the message wrapped and centred over the lower rows of the card.
+		const IfaceRect area{card_[0][2].l, card_[4][3].r, card_[0][2].t, card_[0][3].b};
+		const int f = ui.font(14, ron::kFontBold);
+		const ron::FontMetrics* fm = ui.font_metrics(f);
+		std::vector<std::string> lines;
+		size_t pos = 0;
+		while (pos <= s.card_message.size()) {
+			size_t nl = s.card_message.find('\n', pos);
+			if (nl == std::string::npos) nl = s.card_message.size();
+			lines.push_back(s.card_message.substr(pos, nl - pos));
+			pos = nl + 1;
+		}
+		const int lh = fm ? fm->line_height : 16;
+		int y = area.t + (area.h() - lh * int(lines.size())) / 2;
+		ui.fill(float(area.l), float(area.t), float(area.w()), float(area.h()), argb(0xA0, 0, 0, 0), UiType::ColorBlend);
+		ui.next_layer();
+		for (const std::string& l : lines) {
+			ui.text_centered(f, l, {area.l, area.r, y, y + lh}, kWhite, kBlack);
+			y += lh;
+		}
+		ui.next_layer();
+	}
 	if (hl_x >= 0 && !s.highlight_tex.empty()) {
 		// GraphicPieces::draw_highlight_circle @00902e40: the BUTTONHIGHLIGHT texture centred on the button, half extents
 		// = half the texture size, turning 20 degrees per graphic tick, WHITE.
@@ -968,6 +1041,26 @@ Action Hud::mouse_up(int x, int y, bool right, const State& s) {
 		a.kind = ActionKind::MinimapOrder;
 		a.wx = wx, a.wy = wy;
 		return a;
+	}
+	if (!right && s.library.active) {
+		int cat = -1, col = -1;
+		const int type = library_cell_at(x, y, s, &cat, &col);
+		if (type >= 0) {
+			a.kind = ActionKind::Library, a.object = type, a.index = cat;
+			return a;
+		}
+	}
+	{
+		const int gi = garrison_index_at(x, y, s);
+		if (gi >= 0) {
+			a.kind = ActionKind::GarrisonEject, a.index = gi, a.all = right;
+			return a;
+		}
+		const int pi = right ? -1 : progress_index_at(x, y, s);
+		if (pi >= 0) {
+			a.kind = ActionKind::Progress, a.index = pi;
+			return a;
+		}
 	}
 	const int slot = card_slot_at(x, y);
 	if (!right && slot >= 0 && slot == pressed_slot_ && !s.selection.empty()) {

@@ -115,7 +115,8 @@ void leader_calc_attrition(Game& g, int32_t who) {
 		};
 		if (has_wonder(g, who, kColosseum)) pct(RON_K(g, "colosseum_attrition"));
 		if (has_tribe_bonus(g, who, kTbRussian)) pct(RON_K(g, "russian_attrition"));
-		// TODO(ctw): the CtW attrition card (LeaderData +0x6900) with ctw_attrition.
+		// Partisans (card 10, LeaderData +0x6900): this leader's attrition against enemy units on its land, +ctw_attrition %.
+		if (g.ctw && g.leaders[size_t(who)].num_bonus_cards[10] != 0) pct(RON_K(g, "ctw_attrition"));
 		if (has_wonder(g, who, kKremlin)) pct(RON_K(g, "kremlin_attrition"));
 	}
 	l.att = v;
@@ -290,6 +291,8 @@ int32_t process_attrition_impl(Game& g, Unit& u) {
 	if (!(O.flags & leaderflag::kValid) || !(O.flags & leaderflag::kActive)) return 0;
 	if (L.diplos(owner) == 2 && O.diplos(me) == 2) return 0;
 	if (L.take_att_disabled != 0) return 0;
+	// Logistics (card 9, CtW, not the team style 2): this leader's units are immune to attrition (@5e11a0).
+	if (g.ctw && g.info.team_style != 2 && L.num_bonus_cards[9] != 0) return 0;
 	if (O.give_att_disabled != 0) return 0;
 	if (is_worker_type(u.type)) {
 		// TODO(economy): a gathering worker is exempt only when its gather action's byte +0x25 is set (not traced);
@@ -385,9 +388,11 @@ void unit_repair_damage(Game& g, Unit& u, int32_t hp, bool show, bool conquest) 
 	// @60de10. The CtW heal cards scale the amount; `left` (amount minus the damage before the clamp) overflows down
 	// the chain and regenerates dead members. The heal underlay (internal_random) is UI.
 	(void)show;
-	// In Conquer the World with healing cards (LeaderData +0x68ff): hp = ((cards * 100 + ctw_heal_bonus) / 100) * hp.
-	// TODO(ctw): the cards are not kept (0), so the amount is unchanged.
-	(void)conquest;
+	// In Conquer the World with healing cards (Logistics, LeaderData +0x68ff): hp = ((cards * 100 + ctw_heal_bonus) / 100) * hp.
+	if (conquest && g.ctw) {
+		const int32_t cards = g.leaders[size_t(u.who)].num_bonus_cards[9];
+		if (cards != 0) hp = ((cards * 100 + RON_K(g, "ctw_heal_bonus")) / 100) * hp;
+	}
 	const int32_t left = hp - u.damage;
 	if (u.damage != 0) {
 		const int32_t h = obj_hits(g, u);

@@ -151,7 +151,8 @@ int32_t wall_update_hits(Game& g, Build& b, bool full) {
 		int32_t add = g.rules->constants.at(uint32_t(constant_offset("temple_upgrade_hp")) + uint32_t(lvl - 1) * 4);
 		if (has_wonder_prod(g, who, ptype::kTikal)) add = ((K("tikal_temple_hp") + 100) * add + 99) / 100;
 		h = ((add + 100) * h) / 100;
-		// TODO(ctw): missionaries bonus.
+		// Missionaries (card 32, Wall::update_hits @63f0d0): the temple effect on the wall hit points, + ctw_missionaries_bonus %.
+		if (g.ctw && g.leaders[size_t(who)].num_bonus_cards[32] != 0) h = ((K("ctw_missionaries_bonus") + 100) * h) / 100;
 	}
 	b.myhits = h;
 	int32_t ch = h;
@@ -491,6 +492,13 @@ void wall_start_me_off(Game& g, Build& b) {
 	}
 }
 
+// GameEvent 11 (wonder started) / 12 (wonder completed): the tool log the HUD's messages and banners read (ui-port 11.2).
+static void wonder_event(Game& g, const Build& b, int32_t kind) {
+	GameEvent e;
+	e.frame = g.frame, e.kind = kind, e.who = b.who, e.o = b.o, e.value = b.type, e.x = b.x, e.y = b.y;
+	g.events.push_back(e);
+}
+
 void build_start(Game& g, Build& b, bool msg) {
 	(void)msg;
 	b.flags |= objflag::kStarted;
@@ -519,6 +527,7 @@ void build_start(Game& g, Build& b, bool msg) {
 	check_ever_seen(g, b, false);
 	// Build::start: wonders become visible to everyone (update_local_seen).
 	if (is_wonder_type(b.type)) object_update_local_seen(g, b);
+	if (is_wonder_type(b.type) && !g.scenario_loading) wonder_event(g, b, 11);
 }
 
 // ---------------------------------------------------------------- activation (4.6, 5.3)
@@ -659,6 +668,7 @@ void build_activate_full(Game& g, Build& b, bool loading, bool msg, bool count) 
 	if (!(b.flags & objflag::kStarted)) build_start(g, b, msg);
 	b.flags |= objflag::kActive;
 	b.build_masks |= bmask::kActivated;
+	if (is_wonder_type(b.type) && !loading && !g.scenario_loading) wonder_event(g, b, 12);
 	b.job_counter = b.job_counter_2 = 0;
 	if (type_is(*b.ptype, ptype::kAirDefense)) b.job_counter = 0x40000000;
 	if ((b.ptype->build_flags & 0x10) || b.city >= 0) wall_increment_stats(g, b);

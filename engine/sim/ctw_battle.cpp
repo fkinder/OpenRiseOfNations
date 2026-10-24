@@ -6,10 +6,9 @@
 //  - conquest map styles 24-26 (MapConquest, the sea variant, MapScenario) are not in the generator: land links use the
 //    "Random Land" picker (map style 1), sea links "Random Sea" (2), custom maps are loaded from their .scx.
 //    TODO(ctw 24-26): MapConquest::make (the node-shaped terrain), check_starting_loc / check_sea_map.
-//  - the battle seed: the original reuses conquest_game.seed for every battle; here it is derived per link and round
-//    (seed, from, to, round) so two battles of one campaign are not the same map. (Deviation, documented.)
-//  - reinforcement armies (setup_reinforcements) are computed into `reinforcements` but not spawned in the battle:
-//    TODO(ctw) the edge spawns (find_reinforcement_loc / find_angle).
+//  - the battle seed: conquest_game.seed for every battle, as build_game does; ConquestGame::vary_battle_seed derives one per link
+//    and round instead (an option, off by default).
+//  - reinforcement armies: ctw_reinf.cpp; the tactical cards: ctw_tactical.cpp.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -130,6 +129,7 @@ ConquestGame::BattleDef ConquestGame::make_battle(const LinkChoice& l, const Sty
 	BattleDef B;
 	B.link = l;
 	B.style = style;
+	battle_game = nullptr;
 	static const StyleDef kFallback = [] {
 		StyleDef s;
 		s.title = "Conquest";
@@ -195,7 +195,8 @@ ConquestGame::BattleDef ConquestGame::make_battle(const LinkChoice& l, const Sty
 		const int v = cat_idx(*rules, "map_sizes", st.str("mapsizes"));
 		if (v >= 0) S.map_size = v;
 	}
-	S.seed = seed * 2654435761u + uint32_t(l.to) * 0x9e3779b1u + uint32_t(l.from) * 0x85ebca6bu + uint32_t(cur_round) * 0xc2b2ae35u + 1u;
+	// build_game: info.seed = conquest_game.seed for every battle (the option derives one per link and round instead)
+	S.seed = vary_battle_seed ? seed * 2654435761u + uint32_t(l.to) * 0x9e3779b1u + uint32_t(l.from) * 0x85ebca6bu + uint32_t(cur_round) * 0xc2b2ae35u + 1u : seed;
 	B.seed = S.seed;
 	S.starting_town = player_attacks ? 2 : 1;
 	// build_cities by conquest map style: No City and Custom start without cities (nomads); the Player / Enemy City styles
@@ -274,65 +275,58 @@ ConquestGame::BattleDef ConquestGame::make_battle(const LinkChoice& l, const Sty
 	if (st.map_style == kMsCustom && !st.custom_map.empty()) B.custom_map = st.custom_map;
 	const bool attacker_tileset = st.map_style == kMsAttacker;
 	B.tileset = nodes[size_t(attacker_tileset ? l.from : l.to)].tileset;
-	// armies at the start (start_add_armies): the player's attacking army / the defended node's army, +1 per Mercenaries card
+	// the AI's tactical cards (select_tactical_cards): only the two main nations, only in the default styles, and not an easy
+	// game's AI against the player (setup_scenario_bonuses @78be90). The picks use the campaign's stream.
+	B.map_style = st.map_style;
+	if (st.is_default) {
+		for (const BattleSeat& s : B.seats) {
+			if (&s - B.seats.data() >= 2 || s.slot < 0 || s.slot == player_tribe) continue;
+			const int opponent = s.slot == l.attacker ? l.defender : l.attacker;
+			if (difficulty < 2 && opponent == player_tribe) {
+				for (const Card& c : leaders[size_t(s.slot)].selected) leaders[size_t(s.slot)].cards.push_back(c);
+				leaders[size_t(s.slot)].selected.clear();
+				continue;
+			}
+			select_ai_tactical(s.slot, l);
+		}
+	} else {
+		for (const BattleSeat& s : B.seats) {
+			if (s.slot >= 0 && s.slot != player_tribe) {
+				for (const Card& c : leaders[size_t(s.slot)].selected) leaders[size_t(s.slot)].cards.push_back(c);
+				leaders[size_t(s.slot)].selected.clear();
+			}
+		}
+	}
+	// armies at the start (start_add_armies): the attacking army / the defended node's army, +1 per Mercenaries card
 	B.start_armies.fill(0);
 	B.start_armies[0] = 1;
 	B.start_armies[1] = 1;
-	for (const Card& c : leaders[size_t(player_tribe)].selected) {
-		if (c.type == kMercenaries) B.start_armies[0]++;
+	for (int i = 0; i < 2 && i < n; i++) {
+		if (B.seats[size_t(i)].slot < 0) continue;
+		for (const Card& c : leaders[size_t(B.seats[size_t(i)].slot)].selected) {
+			if (c.type == kMercenaries) B.start_armies[size_t(i)]++;
+		}
 	}
 	for (int i = 2; i < n; i++) B.start_armies[size_t(i)] = 1;
 	B.defender_default = st.is_default;
 	B.setup = S;
-	// setup_reinforcements @789d70: every neighbour of the defended node whose owner is the attacker's (with an army) or the
-	// defender's (with an army) sends one army; arrival times accumulate per side, rand(min..max) minutes each.
-	// (Recorded in the campaign state; the battle does not spawn them yet: TODO(ctw) find_reinforcement_loc / find_angle.)
-	reinforcements.clear();
-	{
-		int total[2] = {0, 0};
-		Random rr(S.seed ^ 0x1f123bb5u);
-		for (int n2 : nodes[size_t(l.to)].links) {
-			if (n2 == l.from || !has_army(n2)) continue;
-			const int o2 = node_eff_owner(n2);
-			int side = -1;
-			if (o2 == l.attacker || (l.attacker >= 0 && o2 >= 0 && stance(l.attacker, o2) >= kAlly)) side = player_attacks ? 0 : 1;
-			else if (l.defender >= 0 && (o2 == l.defender || (o2 >= 0 && stance(l.defender, o2) >= kAlly))) side = player_attacks ? 1 : 0;
-			if (side < 0) continue;
-			total[side] += rr.get(crules->min_arrival_time, crules->max_arrival_time + 1);
-			Reinforcement r;
-			r.time = total[side] * 60;
-			r.side = side;
-			r.node = n2;
-			reinforcements.push_back(r);
-		}
+	// the seats' campaign nations for the reinforcement placement and the tribe names
+	battle_slot.fill(-1);
+	battle_human.fill(false);
+	for (int i = 0; i < n && i < 8; i++) {
+		battle_slot[size_t(i)] = B.seats[size_t(i)].slot;
+		battle_human[size_t(i)] = B.seats[size_t(i)].human;
 	}
+	setup_reinforcements(l, st);  // setup_reinforcements @789d70: who sends an army and when (the campaign's stream)
+	reinforce_mark = 0;
+	reinf_arrived.fill(0);
+	battle_notices.clear();
 	return B;
 }
 
 // ---------------------------------------------------------------- building the battle
 
 namespace {
-
-// Gains `n` technologies of library line `line` (0 military, 1 civic, 2 commerce, 3 science) the leader can research next.
-void gain_line_techs(Game& g, int who, int line, int n) {
-	for (int k = 0; k < n; k++) {
-		int pick = -1;
-		for (int t = 579; t < 629 && pick < 0; t++) {
-			const Type& T = g.rules->types[size_t(t)];
-			if (!T.loaded || T.cat != line || has_tech(g, who, t)) continue;
-			if (is_gov_type(t)) continue;
-			if (T.age > g.leaders[size_t(who)].age) continue;
-			if (tribe_can_type(g, who, t) == 0) continue;
-			pick = t;
-		}
-		if (pick < 0) return;
-		for (int q = 0; q < 3; q++) {
-			const int p = get_preq(g, pick, q, who);
-			if (p >= 579 && p < 629 && !has_tech(g, who, p)) gain_tech(g, who, p, 0, 0, false, true);
-		}
-		gain_tech(g, who, pick, 0, 0, false, true);
-	}
-}
 
 // The seat's first city (position and slot), or null.
 const Build* seat_city(const Game& g, int who) {
@@ -444,12 +438,6 @@ std::unique_ptr<sim::Game> ConquestGame::build_battle(const GameFiles& F, const 
 		const Leader& L = leaders[size_t(s)];
 		sim::Leader& GL = g.leaders[size_t(i)];
 		for (int k = 0; k < 6; k++) GL.base_rate[size_t(k)] += L.base_rate[size_t(k)] << 4;  // set_base_rate: n << 4
-		for (int rg : L.rare_resources) {
-			if (rg >= 6 && rg < 50) GL.rare[size_t((rg - 6) >> 3)] |= uint8_t(1u << ((rg - 6) & 7));
-		}
-		for (const Card& c : L.selected) {
-			if (c.type == kOath) GL.conquest_racial_powers[size_t(c.variant >> 3) & 3] |= uint8_t(1u << (c.variant & 7));
-		}
 	}
 	// the defender's build-out and the resource multiplier (default styles only)
 	const bool player_attacks = B.link.attacker == player_tribe;
@@ -542,59 +530,38 @@ std::unique_ptr<sim::Game> ConquestGame::build_battle(const GameFiles& F, const 
 			else std::fprintf(stderr, "ctw: setup script %s: %s\n", B.setup_script.c_str(), err.c_str());
 		}
 	}
-	// ---- tactical cards (setup_scenario_bonuses)
-	const Leader& P = leaders[size_t(player_tribe)];
-	for (const Card& c : P.selected) {
-		sim::Leader& GL = g.leaders[0];
-		switch (c.type) {
-		case kEureka: {
-			const int node = player_attacks ? B.link.from : B.link.to;
-			if (c.variant == 4) {
-				for (int line = 0; line < 4; line++) gain_line_techs(g, 0, line, K(*rules, "ctw_eureka_all_techs"));
-			} else {
-				const int line = c.variant >= 0 && c.variant < 4 ? c.variant : nodes[size_t(node)].tech_cat;
-				gain_line_techs(g, 0, line, K(*rules, "ctw_eureka_techs"));
-			}
-			break;
-		}
-		case kEconomicBoom:
-			if (c.variant >= 0 && c.variant < 6) GL.num_ctw_rate_bonuses[size_t(c.variant)]++;
-			break;
-		case kSkillBonus:
-			for (int k = 0; k < 6; k++) GL.bucket[size_t(k)] += 100;  // (?) the amount comes from the style's bonus script
-			break;
-		case kSpyNetwork: GL.flags |= 0x1000; break;
-		case kCulturalDominance:
-			for (int i = 1; i < n && i < 8; i++) {
-				if (B.seats[size_t(i)].team != 0) g.leaders[size_t(i)].flags2 |= 0x40;
-			}
-			break;
-		case kPoliticalDissidents:
-			for (int i = 1; i < n && i < 8; i++) {
-				if (B.seats[size_t(i)].team != 0) g.leaders[size_t(i)].flags2 |= 0x800;
-			}
-			break;
-		case kPropaganda:
-			// gain the enemy's nation power: the opponent's tribe bit
-			if (B.seats.size() > 1 && B.seats[1].slot >= 0) {
-				const int sl = B.seats[1].slot;
-				GL.conquest_racial_powers[size_t(sl >> 3) & 3] |= uint8_t(1u << (sl & 7));
-			}
-			break;
-		case kWarpath:
-			gain_line_techs(g, 0, 0, 2);
-			if (const Build* city = seat_city(g, 0)) {
-				for (const char* bn : {"Barracks", "Stable", "Siege Factory"}) {
-					const int t = find_type_named(*rules, kBuilds, kEndBuilds, bn);
-					if (t >= 0) produce_building(g, 0, t, city->o, 0);
-				}
-			}
-			break;
-		default: break;
-		}
-		if (c.type >= 0 && c.type < kNumCardTypes && GL.num_bonus_cards[size_t(c.type)] < 255) GL.num_bonus_cards[size_t(c.type)]++;
+	// ---- tactical cards (setup_scenario_bonuses), rares, the card units, reinforcement entries
+	apply_battle_cards(g, B);
+	{
+		ConquestGame& self = const_cast<ConquestGame&>(*this);
+		self.battle_game = gp.get();
+		self.locate_reinforcements(B.link, B.map_style, g.world.xs, g.world.ys);
+		self.apply_tribe_names(const_cast<sim::Rules&>(R), B);
 	}
 	return gp;
+}
+
+// Tribe::set_substitute_tribe: the battle shows the campaign's nation names (slot 5 plays as the Macedonians) in the HUD. The
+// names live in the rules the renderer reads (Rules::tribes[].name); the originals are kept and put back by restore_tribe_names.
+void ConquestGame::apply_tribe_names(sim::Rules& r, const BattleDef& B) {
+	restore_tribe_names(r);
+	for (size_t i = 0; i < B.seats.size() && i < 8; i++) {
+		const int slot = B.seats[i].slot;
+		const int tribe = B.setup.nation[i].tribe;
+		if (slot < 0 || tribe < 0 || size_t(tribe) >= r.tribes.size() || !def) continue;
+		const std::string& nm = def->tribes[size_t(slot)].display_name;
+		if (nm.empty()) continue;
+		if (std::none_of(saved_names.begin(), saved_names.end(), [&](const auto& p) { return p.first == tribe; }))
+			saved_names.push_back({tribe, r.tribes[size_t(tribe)].name});
+		r.tribes[size_t(tribe)].name = decode_utf8(reinterpret_cast<const uint8_t*>(nm.data()), nm.size());
+	}
+}
+
+void ConquestGame::restore_tribe_names(sim::Rules& r) {
+	for (const auto& p : saved_names) {
+		if (size_t(p.first) < r.tribes.size()) r.tribes[size_t(p.first)].name = p.second;
+	}
+	saved_names.clear();
 }
 
 // ---------------------------------------------------------------- outcomes (6)
@@ -603,15 +570,27 @@ void ConquestGame::process_results(int kind, bool player_won, const LinkChoice& 
 	Leader& P = leaders[size_t(player_tribe)];
 	const bool player_attacks = l.attacker == player_tribe;
 	if (style.index >= 0 && size_t(style.index) < style_table.size()) style_table[size_t(style.index)].times_played++;
-	// the selected tactical cards are consumed (General Parmenio survives its first play)
-	for (const Card& c : P.selected) {
-		const bool first = P.bonus_card_types_played[size_t(c.type)] == 0;
-		P.bonus_card_types_played[size_t(c.type)]++;
-		if (c.type == kParmenio && first) P.cards.push_back(c);
-	}
-	P.selected.clear();
+	// the selected tactical cards of both main nations are consumed (General Parmenio survives his first play)
+	consume_selected(l.attacker, true);
+	consume_selected(l.defender, true);
+	consume_selected(player_tribe, true);
 	if (kind == 2) player_won = false;
 	if (kind == 1) player_won = player_attacks;  // an overrun: the attacker wins without a battle
+	// the Skill Bonus card (get_bonus_amt): a won battle's style script rates the performance
+	int bonus = 0;
+	if (kind == 0 && player_won && style.index >= 0 && size_t(style.index) < style_table.size() && battle_game) {
+		std::string txt;
+		bonus = std::max(0, run_bonus_script(*battle_game, style_table[size_t(style.index)], &txt));
+	}
+	battle_game = nullptr;
+	battle_bonus = bonus;
+	if (bonus > 0) {
+		Card sb;
+		sb.type = kSkillBonus;
+		sb.variant = bonus;
+		P.cards.push_back(sb);
+		add_news("Skill Bonus: +" + std::to_string(bonus) + " of every resource in a battle.");
+	}
 	// wonders nobody owns any more are released
 	assign_bonuses();
 	auto move_in = [&](int slot) {

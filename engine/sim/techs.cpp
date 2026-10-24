@@ -867,9 +867,6 @@ void free_loop_u(Game& g, int32_t who, int32_t t, int32_t lo, int32_t hi) {
 }  // namespace
 
 void gain_tech(Game& g, int32_t who, int32_t t, int32_t x, int32_t y, bool notify, bool upgrade_existing) {
-	(void)x;
-	(void)y;
-	(void)notify;  // messages and sounds only
 	if (!valid_who(who) || t < 0 || t >= kNumTypes) return;
 	Leader& l = L(g, who);
 	const Type& T = g.type(t);
@@ -911,16 +908,23 @@ void gain_tech(Game& g, int32_t who, int32_t t, int32_t x, int32_t y, bool notif
 	}
 	// 6. Counters.
 	if (!has_tech(g, who, t)) {
+		GameEvent ev;  // the tool log (ui-port 11): tech researched (9) / age advanced (10)
+		ev.frame = g.frame, ev.who = who, ev.value = t, ev.other = notify ? 1 : 0, ev.x = x, ev.y = y;
 		if (is_age_type(t)) {
 			l.age++;
 			l.age_stamp[size_t(t - kAges)] = g.frame;
+			ev.kind = 10, ev.value = l.age;
+			ev.o = t;
 		} else if (is_epoch_type(t)) {
 			l.epochs++;
 			l.epoch[size_t(T.cat & 3)]++;
 			l.science = l.epoch[3];
+			ev.kind = 9;
 		} else {
 			l.discovered++;
+			ev.kind = 9;
 		}
+		g.events.push_back(ev);
 	}
 	// 7. CTW civic threshold (TODO(ctw): conquest wonders are not loaded; the branch runs only under ctw).
 	if (g.ctw && is_epoch_type(t) && T.cat == 1 && g.frame != 0 && l.epoch[1] == cst(g, "ctw_wonder_min_civics")) {

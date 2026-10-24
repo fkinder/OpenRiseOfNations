@@ -772,8 +772,8 @@ void View::draw(UiRenderer& ui, const ScriptPresentation* p, const Env& env) {
 	announces_.erase(std::remove_if(announces_.begin(), announces_.end(), [&](const Announce& a) { return env.tick - a.tick >= 8; }),
 	                 announces_.end());
 	ui.next_window();
-	// MessageWin::on_redraw: anchor x = 10 (+ 50 per column of rare goods, none drawn yet), y = resource panel height + 20.
-	const int ax = 10, ay = (env.hud && env.hud_visible) ? env.hud->resource_bottom() + 20 : 20;
+	// MessageWin::on_redraw: anchor x = 10 + 50 per column of rare goods (the HUD's draw_special_resources), y = resource panel height + 20.
+	const int ax = 10 + (env.hud && env.hud_visible ? 50 * env.hud->rare_columns() : 0), ay = (env.hud && env.hud_visible) ? env.hud->resource_bottom() + 20 : 20;
 	int y = ay;
 	if (p) y = draw_objectives(ui, *p, env, ax, y);
 	draw_messages(ui, env, ax, y);

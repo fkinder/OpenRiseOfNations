@@ -29,6 +29,7 @@ struct Session {
 	// A battle waiting to be played (set by the map screen's Play button; consumed by the host).
 	bool battle_pending = false;
 	bool battle_is_defense = false;  // the AI attacked the player (resolve_player_defense afterwards) or the player attacked
+	bool battle_is_espionage = false;  // an espionage mission (Cold War): process_espionage_results afterwards
 	ron::sim::ctw::ConquestGame::BattleDef battle;
 	// After a battle: the line the map shows (outcome) and whether the AI round must continue.
 	std::string last_result;
@@ -77,7 +78,7 @@ public:
 	std::shared_ptr<Session> session() const;
 	bool has_session() const;
 
-	// "ctw" (campaign list / set-up) or "ctw-map". Sub-screens of the map for snapshots: "news", "cards", "diplomacy", "attack", "menu".
+	// "ctw" (campaign list / set-up) or "ctw-map". Sub-screens of the map for snapshots: "news", "cards", "diplomacy", "coldwar", "attack", "menu".
 	void open(bool map_screen, const std::string& sub = std::string());
 	bool on_map() const;
 	// Frame: draws into `b.ui` (the caller has begun the frame and drawn the backdrop).
