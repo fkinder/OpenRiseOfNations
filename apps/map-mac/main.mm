@@ -94,6 +94,8 @@
 #include "sim/game.hpp"
 #include "sim/garrison.hpp"
 #include "sim/newgame.hpp"
+#include "ctw_cli.h"
+#include "ctw_ui.h"
 #include "sim/rules.hpp"
 #include "sim/rules_xml.hpp"
 #include "sim/save.hpp"
@@ -402,6 +404,12 @@ static bool debug_skip(const char* pass) {
                       simulate:(BOOL)simulate
                           seed:(uint32_t)seed
                          error:(NSString* __autoreleasing*)error;
+// A Conquer the World battle (sim/ctw.hpp): the Game is built by `build` (ConquestGame::build_battle) on the renderer's files / rules.
++ (instancetype)ctwBattleWithDevice:(id<MTLDevice>)device
+                           gameDir:(NSString*)dir
+                             build:(std::function<std::unique_ptr<ron::sim::Game>(const ron::GameFiles&, const ron::sim::Rules&, const ron::sim::AnimSource*,
+                                                                                   ron::sim::RandomExtras*, std::string*)>)build
+                             error:(NSString* __autoreleasing*)error;
 // A random-map skirmish (sim/newgame.hpp): `setup` from the setup screen, or `spec` (the --random option text) when setup is null.
 + (instancetype)randomGameWithDevice:(id<MTLDevice>)device
                              gameDir:(NSString*)dir
@@ -464,6 +472,12 @@ static bool debug_skip(const char* pass) {
 - (void)runKeyString:(const std::string&)keys;
 // Leaving the game from the game menu or the game-over screen: quit = NO returns to the Main Menu. Nil: Quit only.
 @property(nonatomic, copy) void (^onExit)(BOOL quit);
+// Conquer the World battle only: called once with the result (1 won, 0 lost, 2 left the battle) a few seconds after the game
+// is decided, or at once when the player returns to the main menu from the game menu.
+@property(nonatomic, copy) void (^onCtwEnd)(int outcome);
+// -1 while undecided, else 1 / 0 from the local player's game-over event.
+- (int)ctwOutcome;
+- (int)ctwAdjudicated;
 // Opens the game menu (Esc / F10): 1 the pause menu, 2 the game-over choices.
 - (void)openGameMenu:(int)kind;
 // Save / load of the simulation (engine/sim/save.hpp). A save loads only into the scenario it was made in.
@@ -602,6 +616,9 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	BOOL _randomActive;         // a random-map skirmish (sim/newgame.hpp) instead of a scenario file
 	ron::sim::RandomGameSetup _randomSetup;
 	std::string _randomSpec;    // the --random option text, parsed once the rules are loaded
+	std::function<std::unique_ptr<ron::sim::Game>(const ron::GameFiles&, const ron::sim::Rules&, const ron::sim::AnimSource*,
+	                                              ron::sim::RandomExtras*, std::string*)> _ctwBuild;  // a Conquer the World battle
+	int _ctwOutcome, _ctwEndFrames;
 	std::unordered_map<int32_t, int> _pieceGraphic;    // gpiece -> unit graphic (-1: unknown)
 	ron::sim::CommandManager _cm;
 	ron::sim::GameView _prevView, _curView;
@@ -717,6 +734,8 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
                           seed:(uint32_t)seed
                          error:(NSString* __autoreleasing*)error {
 	if (!(self = [super init])) return nil;
+	_ctwOutcome = -1;
+	_ctwEndFrames = -1;
 	_simEnabled = simulate;
 	_fogOn = YES;
 	_uiScale = 1;
@@ -773,14 +792,23 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 				}
 			}
 			ron::sim::RandomExtras extras;
-			randomGame = ron::sim::new_random_game(files, *_simRules, _art.get(), _randomSetup, &extras);
+			if (_ctwBuild) {
+				std::string cerr;
+				randomGame = _ctwBuild(files, *_simRules, _art.get(), &extras, &cerr);
+				if (!randomGame) {
+					*error = [NSString stringWithFormat:@"The battle could not be built: %s", cerr.c_str()];
+					return nil;
+				}
+			} else {
+				randomGame = ron::sim::new_random_game(files, *_simRules, _art.get(), _randomSetup, &extras);
+			}
 			if (!randomGame) {
 				*error = [NSString stringWithFormat:@"The random map could not be generated: %s", extras.error.c_str()];
 				return nil;
 			}
 			_randomSetup = extras.setup;
 			_simSeed = extras.setup.seed;
-			path = ron::sim::random_setup_string(extras.setup);
+			path = _ctwBuild ? std::string("ctw:battle") : ron::sim::random_setup_string(extras.setup);
 			sc = std::move(extras.scenario);
 		} else {
 			path = scenarioPath.UTF8String;
@@ -1032,6 +1060,45 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		}
 	}
 	return self;
+}
+
++ (instancetype)ctwBattleWithDevice:(id<MTLDevice>)device
+                           gameDir:(NSString*)dir
+                             build:(std::function<std::unique_ptr<ron::sim::Game>(const ron::GameFiles&, const ron::sim::Rules&, const ron::sim::AnimSource*,
+                                                                                   ron::sim::RandomExtras*, std::string*)>)build
+                             error:(NSString* __autoreleasing*)error {
+	MapRenderer* r = [MapRenderer alloc];
+	r->_randomActive = YES;
+	r->_ctwBuild = std::move(build);
+	return [r initWithDevice:device gameDir:dir scenario:@"" simulate:YES seed:1 error:error];
+}
+
+// Headless adjudication of an undecided battle: the side (team) with more live units and buildings wins.
+- (int)ctwAdjudicated {
+	const int o = [self ctwOutcome];
+	if (o >= 0 || !_game) return o;
+	const int me = [self localPlayer];
+	int mine = 0, theirs = 0;
+	for (int w = 0; w < 8; w++) {
+		if (!(_game->leaders[size_t(w)].flags & 1)) continue;
+		int alive = 0;
+		const ron::sim::ObjectList& ol = _game->objects[size_t(w)];
+		for (int32_t k = 0; k < ol.unit_mark; k++) alive += _game->unit(w, k) && _game->unit(w, k)->alive();
+		for (int32_t k = ron::sim::kBuildBase; k < ol.build_mark; k++) alive += _game->build(w, k) && _game->build(w, k)->alive();
+		const bool same = w == me || (_game->info.team[size_t(w)] >= 0 && _game->info.team[size_t(w)] == _game->info.team[size_t(me)]);
+		(same ? mine : theirs) += alive;
+	}
+	return mine >= theirs ? 1 : 0;
+}
+
+- (int)ctwOutcome {
+	if (!_game) return -1;
+	for (const ron::sim::GameEvent& ev : _game->events) {
+		if (ev.who != [self localPlayer]) continue;
+		if (ev.kind == 3) return 1;
+		if (ev.kind == 2) return 0;
+	}
+	return -1;
 }
 
 + (instancetype)randomGameWithDevice:(id<MTLDevice>)device
@@ -3547,6 +3614,11 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	_lastFrame = 0;  // no catch-up after the pause
 	if (it == "Save Game") [self quickSave];
 	else if (it == "Load Game") [self quickLoad];
+	else if (it == "Return to Main Menu" && _ctwBuild && self.onCtwEnd) {  // leaving a campaign battle: it is lost
+		auto cb = self.onCtwEnd;
+		self.onCtwEnd = nil;
+		cb(_ctwOutcome >= 0 ? _ctwOutcome : 2);
+	}
 	else if (it == "Return to Main Menu" && self.onExit) self.onExit(NO);
 	else if (it == "Quit") {
 		if (self.onExit) self.onExit(YES);
@@ -4646,6 +4718,15 @@ static int vk_of(NSEvent* e) {
 			if (won) _audio->music_win();
 			else _audio->music_lose();
 		}
+		if (_ctwBuild && _ctwOutcome < 0) {  // Conquer the World: back to the campaign after a short look at the result
+			_ctwOutcome = won ? 1 : 0;
+			_ctwEndFrames = 75;
+		}
+	}
+	if (_ctwBuild && _ctwOutcome >= 0 && _ctwEndFrames >= 0 && --_ctwEndFrames < 0 && self.onCtwEnd) {
+		auto cb = self.onCtwEnd;
+		self.onCtwEnd = nil;
+		cb(_ctwOutcome);
 	}
 }
 
@@ -4985,9 +5066,12 @@ static int vk_of(NSEvent* e) {
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, copy) NSString* gameDir;
 @property(nonatomic, copy) NSString* startScreen;
+- (void)setCtwSession:(std::shared_ptr<ctwui::Session>)s;
 @end
 
-@implementation MapAppDelegate
+@implementation MapAppDelegate {
+	std::shared_ptr<ctwui::Session> _ctwSession;  // the Conquer the World campaign in progress (outlives the menu and the battles)
+}
 // Everything is created once the app has finished launching, inside [NSApp run]: a window ordered front (or a modal
 // session run) before that is torn down during launch, and the app then quits as its last window closed.
 - (void)applicationDidFinishLaunching:(NSNotification*)notification {
@@ -5036,6 +5120,48 @@ static int vk_of(NSEvent* e) {
 	else [NSApp activateIgnoringOtherApps:YES];
 	[self.window orderFrontRegardless];
 	if (getenv("RON_FLOW_TEST")) [self flowTest:0];
+	if (getenv("RON_CTW_FLOW_TEST") && _ctwSession) [self ctwFlowTest:0];
+}
+
+// Debugging aid (RON_CTW_FLOW_TEST=1 with --ctw CAMPAIGN): the strategic map -> Play (the first attack) -> the battle opens in
+// the window -> it is won (the game-over callback the real end triggers) -> the front end is back on the map with the node taken.
+- (void)ctwFlowTest:(int)step {
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, int64_t(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+		ctwui::Session* s = _ctwSession.get();
+		std::printf("ctw flow step %d: %s\n", step, self.renderer ? "game" : self.menu ? "menu" : "?");
+		std::fflush(stdout);
+		switch (step) {
+			case 0: {
+				ron::sim::ctw::LinkChoice l;
+				std::string err;
+				if (!ctwcli::pick_link(s->game, "auto", &l, &err)) {
+					std::printf("ctw flow: %s\n", err.c_str());
+					[NSApp terminate:nil];
+					return;
+				}
+				s->game.cur_link = l;
+				s->game.cur_style = s->game.pick_style(l);
+				s->battle = s->game.make_battle(l, s->game.cur_style);
+				s->battle_is_defense = false;
+				s->battle_pending = true;
+				std::printf("ctw flow: attacking %s\n", s->game.node_name(l.to).c_str());
+				[self frontEndPlayCtwBattle:_ctwSession];
+				break;
+			}
+			case 1:
+				if (self.renderer.onCtwEnd) self.renderer.onCtwEnd(1);
+				break;
+			case 2: {
+				const auto& l = s->battle.link;
+				std::printf("ctw flow: %s is now owned by %s; news: %s\n", s->game.node_name(l.to).c_str(),
+				            s->game.nodes[size_t(l.to)].owner >= 0 ? s->game.tribe_name(s->game.nodes[size_t(l.to)].owner).c_str() : "nobody",
+				            s->game.news.empty() ? "" : s->game.news.back().text.c_str());
+				[NSApp terminate:nil];
+				return;
+			}
+		}
+		[self ctwFlowTest:step + 1];
+	});
 }
 
 // Debugging aid (RON_FLOW_TEST=1): menu -> Play (tutorial 1) -> game menu "Return to Main Menu" -> Play (skirmish) ->
@@ -5142,6 +5268,47 @@ static int vk_of(NSEvent* e) {
 			[self.menu showError:[NSString stringWithFormat:@"Could not create the map: %@", err ?: @"unknown error"]];
 			return;
 		}
+		const CGSize ds = self.view.drawableSize;
+		const float scale = float(self.window.backingScaleFactor > 0 ? self.window.backingScaleFactor : 1);
+		[r setUiWidth:int(ds.width) height:int(ds.height) scale:scale];
+		[self.menu stopAudio];
+		self.view.frontEnd = nil;
+		self.menu = nil;
+		[self attachGame:r];
+	});
+}
+
+// ---- Conquer the World (ctw_ui.h): the campaign's own battles run in the game window like any other game; its end brings
+// the front end back to the strategic map with the outcome applied.
+- (std::shared_ptr<ctwui::Session>)frontEndCtwSession {
+	return _ctwSession;
+}
+
+- (void)setCtwSession:(std::shared_ptr<ctwui::Session>)s {
+	_ctwSession = std::move(s);
+}
+
+- (void)frontEndPlayCtwBattle:(std::shared_ptr<ctwui::Session>)session {
+	_ctwSession = session;
+	[self.menu setBusy:@"Preparing the battle…"];
+	[self.view draw];
+	dispatch_async(dispatch_get_main_queue(), ^{
+		auto build = [session](const ron::GameFiles& f, const ron::sim::Rules& r, const ron::sim::AnimSource* a, ron::sim::RandomExtras* x,
+		                       std::string* err) { return session->game.build_battle(f, r, session->battle, a, x, err); };
+		NSString* err = nil;
+		MapRenderer* r = [MapRenderer ctwBattleWithDevice:self.device gameDir:self.gameDir build:build error:&err];
+		if (!r) {
+			[self.menu setBusy:nil];
+			[self.menu showError:[NSString stringWithFormat:@"Could not prepare the battle: %@", err ?: @"unknown error"]];
+			return;
+		}
+		__weak MapAppDelegate* weakSelf = self;
+		r.onCtwEnd = ^(int outcome) {
+			dispatch_async(dispatch_get_main_queue(), ^{
+				session->battle_finished(outcome);
+				[weakSelf showMenu:@"ctw-map"];
+			});
+		};
 		const CGSize ds = self.view.drawableSize;
 		const float scale = float(self.window.backingScaleFactor > 0 ? self.window.backingScaleFactor : 1);
 		[r setUiWidth:int(ds.width) height:int(ds.height) scale:scale];
@@ -5261,6 +5428,11 @@ int main(int argc, const char* argv[]) {
 		std::vector<NSString*> positional;
 		bool menu = false;
 		NSString* menuScreen = nil;
+		// Conquer the World (ctw_cli.h, ctw_ui.h)
+		NSString *ctwCampaign = nil, *ctwBattle = nil, *ctwLoad = nil, *ctwScreen = nil, *ctwSelect = nil, *ctwOut = nil;
+		int ctwRound = 0, ctwRounds = 3;
+		std::vector<CGPoint> ctwClicks;  // --ctw-click X,Y: mouse clicks (window points) played on the CtW screens before the snapshot
+		bool ctwCheck = false, ctwSelftest = false, ctwSim = false, ctwSaveLoad = false, ctwVerbose = false;
 		for (int i = 1; i < argc; i++) {
 			const std::string a = argv[i];
 			const bool more = i + 1 < argc;
@@ -5424,9 +5596,41 @@ int main(int argc, const char* argv[]) {
 				fog = false;
 			} else if (a == "--no-bloom") {
 				bloom = false;
+			} else if (a == "--ctw-check") {
+				ctwCheck = true;
+			} else if (a == "--ctw-selftest") {
+				ctwSelftest = true;
+			} else if (a == "--ctw-sim" && more) {
+				ctwSim = true;
+				ctwCampaign = @(argv[++i]);
+			} else if (a == "--ctw-saveload" && more) {
+				ctwSaveLoad = true;
+				ctwCampaign = @(argv[++i]);
+			} else if (a == "--ctw" && more) {
+				ctwCampaign = @(argv[++i]);  // the strategic map of a new campaign (--round N plays N AI rounds first)
+			} else if (a == "--ctw-load" && more) {
+				ctwLoad = @(argv[++i]);
+			} else if (a == "--ctw-battle" && more) {
+				ctwBattle = @(argv[++i]);  // CAMPAIGN:auto or CAMPAIGN:FROM>TO: one hand-off battle
+			} else if (a == "--round" && more) {
+				ctwRound = std::atoi(argv[++i]);
+			} else if (a == "--rounds" && more) {
+				ctwRounds = std::atoi(argv[++i]);
+			} else if (a == "--ctw-screen" && more) {
+				ctwScreen = @(argv[++i]);  // news, cards, diplomacy, attack, menu
+			} else if (a == "--ctw-select" && more) {
+				ctwSelect = @(argv[++i]);  // a territory id selected on the map
+			} else if (a == "--ctw-out" && more) {
+				ctwOut = @(argv[++i]);
+			} else if (a == "--ctw-click" && more) {
+				float cx = 0, cy = 0;
+				std::sscanf(argv[++i], "%f,%f", &cx, &cy);
+				ctwClicks.push_back(CGPointMake(cx, cy));
+			} else if (a == "--ctw-verbose") {
+				ctwVerbose = true;
 			} else if (a == "--menu") {
 				menu = true;
-				static const char* const screens[] = {"main", "tutorials", "skirmish", "skirmish-setup", "scenarios", "quit-popup"};
+				static const char* const screens[] = {"main", "tutorials", "skirmish", "skirmish-setup", "scenarios", "quit-popup", "ctw", "ctw-map"};
 				for (const char* sname : screens) {
 					if (more && std::strcmp(argv[i + 1], sname) == 0) menuScreen = @(argv[++i]);
 				}
@@ -5447,7 +5651,12 @@ int main(int argc, const char* argv[]) {
 			if (launcher::looks_like_install(positional[0])) explicitDir = gameDir = positional[0];
 			else scenario = positional[0];
 		}
-		if (!scenario && !random_spec) menu = true;
+		if (ctwCheck) return ctwcli::check(gameDir.UTF8String);
+		if (ctwSelftest) return ctwcli::selftest(gameDir.UTF8String);
+		if (ctwSim) return ctwcli::simulate(gameDir.UTF8String, ctwCampaign.UTF8String, seed, ctwRounds, g_difficulty >= 0 ? g_difficulty : 2,
+		                                    ctwOut ? ctwOut.UTF8String : "", ctwVerbose);
+		if (ctwSaveLoad) return ctwcli::save_roundtrip(gameDir.UTF8String, ctwCampaign.UTF8String, seed);
+		if (!scenario && !random_spec && !ctwBattle) menu = true;
 		if (menu) {
 			// The front end: headless with --snapshot, else the app opens its window on the Main Menu.
 			id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -5463,13 +5672,66 @@ int main(int argc, const char* argv[]) {
 					std::fprintf(stderr, "%s\n", (error ?: @"no Rise of Nations install found").UTF8String);
 					return 1;
 				}
-				[fe showScreen:menuScreen ?: @"main"];
+				if (ctwCampaign || ctwLoad) {
+					std::string err;
+					std::shared_ptr<ctwui::Session> session;
+					if (ctwLoad) {
+						session = ctwui::load_session(dir.UTF8String, ctwLoad.UTF8String, &err);
+					} else {
+						ron::GameFiles files(dir.UTF8String);
+						ron::sim::ctw::ConquestSetup cs;
+						cs.campaign = ctwcli::resolve_campaign(files, ctwCampaign.UTF8String);
+						cs.seed = seed;
+						cs.difficulty = g_difficulty >= 0 ? g_difficulty : 2;
+						session = cs.campaign.empty() ? nullptr : ctwui::new_session(dir.UTF8String, cs, &err);
+						if (cs.campaign.empty()) err = "no such campaign";
+						if (session) ctwcli::play_rounds(session->game, ctwRound);
+					}
+					if (!session) {
+						std::fprintf(stderr, "%s\n", err.c_str());
+						return 1;
+					}
+					[fe ctwShowSession:session sub:ctwScreen select:ctwSelect];
+					if (!ctwClicks.empty()) {
+						[fe snapshotTo:@"/dev/null" width:w height:h scale:ui_scale];  // a priming frame builds the hit boxes
+						for (const CGPoint& p : ctwClicks) {
+							[fe mouseMoved:p];
+							[fe mouseDown:p clicks:1];
+							[fe mouseUp:p];
+							[fe snapshotTo:@"/dev/null" width:w height:h scale:ui_scale];
+						}
+					}
+				} else {
+					[fe showScreen:menuScreen ?: @"main"];
+				}
 				return [fe snapshotTo:snapshot width:w height:h scale:ui_scale] ? 0 : 1;
 			}
 			MapAppDelegate* d = [MapAppDelegate new];
 			d.device = device;
 			d.gameDir = explicitDir;
 			d.startScreen = menuScreen;
+			if (ctwCampaign || ctwLoad) {
+				const std::string dirStr = (explicitDir ?: gameDir).UTF8String;
+				std::string err;
+				std::shared_ptr<ctwui::Session> session;
+				if (ctwLoad) {
+					session = ctwui::load_session(dirStr, ctwLoad.UTF8String, &err);
+				} else {
+					ron::GameFiles files(dirStr);
+					ron::sim::ctw::ConquestSetup cs;
+					cs.campaign = ctwcli::resolve_campaign(files, ctwCampaign.UTF8String);
+					cs.seed = seed;
+					cs.difficulty = g_difficulty >= 0 ? g_difficulty : 2;
+					session = cs.campaign.empty() ? nullptr : ctwui::new_session(dirStr, cs, &err);
+					if (session) ctwcli::play_rounds(session->game, ctwRound);
+				}
+				if (!session) {
+					std::fprintf(stderr, "%s\n", err.empty() ? "no such campaign" : err.c_str());
+					return 1;
+				}
+				[d setCtwSession:session];
+				d.startScreen = @"ctw-map";
+			}
 			run_app(d);
 			return 0;
 		}
@@ -5479,8 +5741,50 @@ int main(int argc, const char* argv[]) {
 			return 1;
 		}
 		NSString* error = nil;
-		MapRenderer* r = random_spec ? [MapRenderer randomGameWithDevice:device gameDir:gameDir setup:nullptr spec:random_spec error:&error]
-		                             : [[MapRenderer alloc] initWithDevice:device gameDir:gameDir scenario:scenario simulate:simulate seed:seed error:&error];
+		std::shared_ptr<ctwui::Session> ctwSess;
+		MapRenderer* r = nil;
+		if (ctwBattle) {
+			// CAMPAIGN:LINK -> a hand-off battle of a fresh campaign (the player attacks along LINK: auto or FROM>TO)
+			const std::string spec = ctwBattle.UTF8String;
+			const size_t colon = spec.find(':');
+			ron::GameFiles files(gameDir.UTF8String);
+			ron::sim::ctw::ConquestSetup cs;
+			cs.campaign = ctwcli::resolve_campaign(files, spec.substr(0, colon));
+			cs.seed = seed;
+			cs.difficulty = g_difficulty >= 0 ? g_difficulty : 2;
+			std::string err;
+			if (!cs.campaign.empty()) ctwSess = ctwui::new_session(gameDir.UTF8String, cs, &err);
+			if (!ctwSess) {
+				std::fprintf(stderr, "ctw-battle: %s\n", cs.campaign.empty() ? "no such campaign" : err.c_str());
+				return 1;
+			}
+			if (ctwRound > 0) ctwcli::play_rounds(ctwSess->game, ctwRound);
+			ron::sim::ctw::LinkChoice link;
+			if (!ctwcli::pick_link(ctwSess->game, colon == std::string::npos ? "auto" : spec.substr(colon + 1), &link, &err)) {
+				std::fprintf(stderr, "ctw-battle: %s\n", err.c_str());
+				return 1;
+			}
+			ron::sim::ctw::ConquestGame& cg = ctwSess->game;
+			cg.cur_link = link;
+			cg.cur_style = cg.pick_style(link);
+			ctwSess->battle = cg.make_battle(link, cg.cur_style);
+			if (g_randomAllAi) {
+				for (auto& n : ctwSess->battle.setup.nation) n.human = false;
+				for (auto& seat : ctwSess->battle.seats) seat.human = false;
+			}
+			std::printf("ctw battle: %s attacks %s (%s) from %s; style \"%s\"%s%s; %zu seats\n", cg.tribe_name(link.attacker).c_str(), cg.node_name(link.to).c_str(),
+			            link.defender >= 0 ? cg.tribe_name(link.defender).c_str() : "barbarians", cg.node_name(link.from).c_str(),
+			            cg.cur_style.index >= 0 ? cg.style_table[size_t(cg.cur_style.index)].title.c_str() : "default",
+			            ctwSess->battle.custom_map.empty() ? "" : ", map ", ctwSess->battle.custom_map.c_str(), ctwSess->battle.seats.size());
+			std::shared_ptr<ctwui::Session> sess = ctwSess;
+			auto build = [sess](const ron::GameFiles& f, const ron::sim::Rules& rr, const ron::sim::AnimSource* a, ron::sim::RandomExtras* x, std::string* e2) {
+				return sess->game.build_battle(f, rr, sess->battle, a, x, e2);
+			};
+			r = [MapRenderer ctwBattleWithDevice:device gameDir:gameDir build:build error:&error];
+		} else {
+			r = random_spec ? [MapRenderer randomGameWithDevice:device gameDir:gameDir setup:nullptr spec:random_spec error:&error]
+			                : [[MapRenderer alloc] initWithDevice:device gameDir:gameDir scenario:scenario simulate:simulate seed:seed error:&error];
+		}
 		if (!r) {
 			std::fprintf(stderr, "%s\n", error.UTF8String);
 			return 1;
@@ -5546,6 +5850,13 @@ int main(int argc, const char* argv[]) {
 				if ((at == std::string::npos ? 0 : std::atoi(k.c_str() + at + 1)) == f) [r runKeyString:k.substr(0, at)];
 			}
 			if (f < sim_frames) [r stepSimulation:1];
+		}
+		if (ctwSess) {
+			int outcome = [r ctwAdjudicated];
+			const bool decided = [r ctwOutcome] >= 0;
+			ctwSess->battle_finished(outcome);  // last_result: the first news line the outcome produced
+			std::printf("ctw battle: frame %d, %s%s; campaign: %s\n", sim_frames, outcome == 1 ? "victory" : "defeat", decided ? "" : " (adjudicated: more units and buildings)",
+			            ctwSess->last_result.c_str());
 		}
 		if (select_all) [r selectAll];
 		if (census) [r printCensus];

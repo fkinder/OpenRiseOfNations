@@ -653,6 +653,7 @@ std::unique_ptr<Game> new_random_game(const GameFiles& files, const Rules& rules
 	g.scen = ScenarioData();
 	g.buildings_gather = g.building_unit_bonus = g.building_resource_bonus = true;
 	g.scripted_rules = gi.game_rules == 10;
+	g.ctw = S.ctw;  // Conquer the World battle (sim/ctw.hpp): scripts and the CtW branches of the simulation
 
 	// ---- Game::run: game_random := GameInfo.seed, Game::init_starting_resources (S1 / S2); Setup::build_game then reseeds
 	// (inside the generator) and draws world.seed first.

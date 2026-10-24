@@ -378,6 +378,48 @@ In a random game F5 / F9 work as in a scenario (the save records the setup text,
 state), and `--random STYLE,SIZE,SEED,NATIONS[,TRIBES...] [--all-ai] [--frames N] [--census] [--save-game f] [--snapshot f]` runs one
 headless (`--difficulty` sets every computer seat).
 
+### 10.2 Conquer the World (`ctw_ui.*`, `ctw_cli.*`, 2026-10-24)
+
+The Main Menu gains **Conquer the World** (fourth button; Multiplayer and Quit move down one) opening `ctw` (campaign list and
+set-up) and, with a campaign in play, `ctw-map` (the strategic map). `ctwui::Screen` draws them through a `Bridge` of the front
+end's own primitives (popup button, thin box, bronze frame, list row, ribbon), so the look is the other screens' (section 10);
+`ctwui::Session` holds the campaign (`sim/ctw.hpp`'s `ConquestGame`, its own files and rules) and outlives the front end, which is
+rebuilt around every battle.
+
+| Screen | What |
+|---|---|
+| `ctw` | ribbon "Conquer the World"; the five campaigns in a framed list (name, rounds, territories, colonies), the selected one's description / intro / victory text; **Your nation** (< > over the campaign's `VALID_NATION`s, "Random" first when there are several), **Difficulty** (six buttons), Random nations / Random bonuses (only where the campaign allows them); Back, **Load Campaign...** (the autosave and the manual saves of `~/Library/Application Support/OpenRiseOfNations/Conquer the World`, newest first), **Start** |
+| `ctw-map` | the campaign's art (`conquest/RenderMaps/RENDER_<file>.png`, at most 2048 px on the long side) with every country tinted by its owner (24 fixed colours by nation slot, 42 % alpha; barbarian countries untinted), found through the colour-picking map `conquest/<file>.png` (`<COUNTRY red green blue>`, nearest-sampled so the colours stay exact); link lines from country label point to label point (dashed for sea links, gold from the selected territory, red for the attacks of the selected army), a dot per country (a gold ring for capitals), the name, level pips (one per strength level), supply-depot / fortified marks; **armies are discs** in the owner's colour (white centre; dimmed once moved; a gold ring for the selected one), not the original's 3D pieces (`CONQUESTGRAPHICPIECES` is Cold War art not used) |
+| top bar | campaign, round n of N, age name, nation and leader, tribute, territories, cards, the peace rounds left |
+| right panel | tabs **Map** (the selected territory: owner / vassal, strength, capital, one-time tribute, resource, wonder, card, depot, fortified, Fortify; with an army selected a button per move and per attack, the attack naming the defender and the war price) , **Cards** (hand with "map" / "battle" tags, description, Play on the map / Use in the next battle, the cards chosen for the battle, Buy a card), **Diplomacy** (nations with stance and territories; War / Peace / Alliance / Vassal with their prices, Demand tribute, Bribe 25, and a **deal** builder: type Peace / Ally / Vassal / Exchange, tribute each way, Propose -> the campaign's own `diplo_response` script answers and an accepted deal is applied), **News**; End Turn, Save, Menu |
+| dialogs | modal: messages of the campaign scripts (`popup_dialog`), the attack (who marches where, the picked battle's title / description / objective with `$NUM0` = the time limit, the seats, the war price, the cards in play; **Play** or Cancel), the invasion of the player's territory (**Defend (Play)** / Auto-resolve), AI offers, card target choices, game end |
+
+Input: click a territory to select it (the player's army on it becomes the selected army); click a green territory to move, a red one to
+attack; wheel zooms around the pointer, drag pans, `+` / `-` / `f` zoom and fit, arrows pan, Esc cancels (dialog, targeting, selection,
+then back to the menu), right button deselects. A card that needs a territory highlights the valid ones in green; one that needs a
+nation opens a button list. End Turn runs the AI round at once and shows the News tab; the autosave is written after every round.
+
+Flow into a battle (`frontEndPlayCtwBattle:` in `main.mm`): Play fills `Session::battle` (`BattleDef`: link, style, seats,
+`RandomGameSetup` or the `.scx`), the host builds `MapRenderer` through `+ctwBattleWithDevice:...build:` whose `build` lambda is
+`ConquestGame::build_battle(files, rules, battle, anims, extras, error)` on the renderer's own files / rules (the `Game` keeps
+pointers into them), then attaches it like a skirmish. The game-over line shows as usual; 75 simulation frames (5 s) after the local
+player's victory / defeat `onCtwEnd(1 | 0)` fires, or at once with `onCtwEnd(2)` when "Return to Main Menu" is chosen in the game menu
+(a retreat is a loss); the host calls `Session::battle_finished(outcome)` (`process_results` or `resolve_player_defense`, then the
+autosave), rebuilds the front end and opens `ctw-map`; an AI round interrupted by an invasion resumes there (`resume_ai`).
+`RON_CTW_FLOW_TEST=1 ronmap --ctw alexander` runs map -> battle -> win -> map in the real window and prints the steps.
+
+Headless (all `--snapshot out.png [--size WxH]`): `--menu ctw` (the list), `--ctw CAMPAIGN [--round N] [--seed S] [--difficulty D]
+[--ctw-screen map|news|cards|diplomacy|attack|menu] [--ctw-select ID] [--ctw-click X,Y]...` (N AI rounds first; the clicks are
+real mouse events on the screens), `--ctw-load FILE`, `--ctw-battle CAMPAIGN:LINK --frames N` (the battle in the renderer). Snapshots
+read for this section: `re/previews/ctw_list.png`, `ctw_map_alexander.png`, `ctw_map_select.png`, `ctw_map_napoleon.png`,
+`ctw_map_newworld.png`, `ctw_map_coldwar.png`, `ctw_map_world.png`, `ctw_news.png`, `ctw_cards.png`, `ctw_diplomacy.png`,
+`ctw_attack.png`, `ctw_battle_alexander.png`.
+
+**Not done / approximate.** The original's `conquest.xml` windows (977 `IFACETEX`; the invade, diplomacy, card, wonder, reward, victory
+and final windows) are not reproduced: the panels above are this port's layout. No army drag (click-click), no animation of AI
+moves (the round resolves at once and the News tab reports it), no sound, the Cold War nuke / espionage / defcon screens, the
+continent-victory and end-game image screens, a bonus-card reward screen after a defence.
+
 ## 11. HUD leftovers (2026-10-24)
 
 ### 11.1 Mouse-over help (`tips.*`, `main.mm` `tipFor`)

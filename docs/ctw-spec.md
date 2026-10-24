@@ -3,7 +3,7 @@
 Status 2026-10-24: ✅ file schemas (checked against all five shipped campaigns), campaign state layout, save format
 (already in state-walk.md), diplomacy costs, cards table, battle set-up chain; 🟡 turn loop and outcome rules
 (decompiles read, not run against a live game); ❓ the AI scoring in `plan_strategy`, the UI windows, the `.bhs` bodies.
-Nothing here is ported yet (roadmap phase 7). Strategic layer = **not lockstep**: it runs on one machine between
+Ported 2026-10-24 (roadmap phase 7: `engine/sim/ctw*.cpp`, `script_funcs_ctw.cpp`, `apps/map-mac/ctw_*`; what is spec, what is heuristic and the notes found while porting are in sim-implementation.md "Conquer the World"). Strategic layer = **not lockstep**: it runs on one machine between
 battles with its own RNG; only the battle (`Setup::build_game` + sim) must stay bit-exact.
 
 Related: script-spec §6.3 / §7 (CTW builtins, 330 scripts), rules-spec (all `CTW_*` constants, table at "ctw_starting_tribute"

@@ -123,5 +123,6 @@ void install_query_funcs(ScriptHost& h);
 void install_mutation_funcs(ScriptHost& h);
 void install_ui_funcs(ScriptHost& h);
 void install_order_funcs(ScriptHost& h);
+void install_ctw_funcs(ScriptHost& h);
 
 }  // namespace ron::sim::sf

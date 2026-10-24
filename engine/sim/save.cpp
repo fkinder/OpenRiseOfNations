@@ -42,7 +42,8 @@ static_assert(sizeof(Groups) == 1282084, "Groups changed: update walk_groups()")
 static_assert(sizeof(Regions) == 10248, "Regions changed: update the REGN section in walk_body()");
 // 1647392 + 16: Game::original (the original-save shadow, sim/original_save.hpp) is derived state the native save never writes.
 static_assert(sizeof(Game) == 1647408, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
-static_assert(sizeof(ScriptHost) == 1608, "ScriptHost changed: update walk_scripts()");
+// 1608 + 8: ScriptHost::ctw (the Conquer the World campaign the scripts run for, sim/ctw.hpp) is a run-time pointer, never saved.
+static_assert(sizeof(ScriptHost) == 1616, "ScriptHost changed: update walk_scripts()");
 #endif
 
 // A time-sliced / cached search. PathNode pointers (parent, the open and closed trees) become indices into the arena.

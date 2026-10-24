@@ -10,6 +10,7 @@
 #import <MetalKit/MetalKit.h>
 
 #include "assets/files.hpp"
+#include "ctw_ui.h"
 #include "sim/newgame.hpp"
 
 // What the menu asks of the app.
@@ -20,6 +21,11 @@
 - (void)frontEndPlayRandom:(const ron::sim::RandomGameSetup&)setup;
 - (void)frontEndChangeFolder;
 - (void)frontEndQuit;
+@optional
+// Conquer the World (ctw_ui.h): the campaign in progress, kept by the host across the battles (the front end is rebuilt around
+// a game), and the request to play the battle the session prepared.
+- (std::shared_ptr<ctwui::Session>)frontEndCtwSession;
+- (void)frontEndPlayCtwBattle:(std::shared_ptr<ctwui::Session>)session;
 @end
 
 @interface FrontEnd : NSObject <MTKViewDelegate>
@@ -37,6 +43,8 @@
 - (void)stopAudio;
 // Offscreen render of the current screen (w x h drawable pixels, `scale` drawable pixels per point).
 - (BOOL)snapshotTo:(NSString*)path width:(int)w height:(int)h scale:(float)scale;
+// Headless (--ctw): opens the strategic map of `session` ("" / news / cards / diplomacy / attack / menu), `country` selected.
+- (void)ctwShowSession:(std::shared_ptr<ctwui::Session>)session sub:(NSString*)sub select:(NSString*)country;
 // Input in view points with a top-left origin.
 - (void)mouseMoved:(CGPoint)p;
 - (void)mouseDown:(CGPoint)p clicks:(NSInteger)clicks;

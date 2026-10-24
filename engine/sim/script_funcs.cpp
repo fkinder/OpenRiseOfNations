@@ -753,6 +753,7 @@ void install_script_funcs(ScriptHost& h) {
 	sf::install_mutation_funcs(h);
 	sf::install_order_funcs(h);
 	sf::install_ui_funcs(h);
+	sf::install_ctw_funcs(h);  // last: the campaign-aware versions replace the stand-alone ones (script_funcs_ctw.cpp)
 }
 
 }  // namespace ron::sim

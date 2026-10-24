@@ -42,6 +42,7 @@
 #include "renderer.hpp"
 #include "ui.hpp"
 #import "launcher.h"
+#import "ctw_ui.h"
 
 namespace {
 
@@ -62,23 +63,26 @@ struct MainItem {
 	const char* help;
 	bool enabled;
 };
-const MainItem kMainItems[5] = {
+const MainItem kMainItems[6] = {
     {"Tutorials", "Learn to play, step by step. Start with Tutorial 1.", true},
     {"Skirmish", "Battle computer opponents on a ready-made map, or set up a random map.", true},
     {"Scenarios", "Chess exercises and the battle maps of the Conquer the World campaigns.", true},
+    {"Conquer the World", "Lead a nation through a campaign: move armies on the world map, make deals, play the battles.", true},
     {"Multiplayer", "Not available yet.", false},
     {"Quit", "Leave Rise of Nations and return to the desktop.", true},
 };
 
-enum Screen { kMain = 0, kTutorials, kSkirmish, kScenarios, kSkirmishSetup };
-const char* const kScreenNames[5] = {"main", "tutorials", "skirmish", "scenarios", "skirmish-setup"};
-const char* const kListTitles[5] = {"Main Menu", "Tutorials", "Skirmish", "Scenarios", "Skirmish Setup"};
-const char* const kListNotes[5] = {
+enum Screen { kMain = 0, kTutorials, kSkirmish, kScenarios, kSkirmishSetup, kCtw, kCtwMap };
+const char* const kScreenNames[7] = {"main", "tutorials", "skirmish", "scenarios", "skirmish-setup", "ctw", "ctw-map"};
+const char* const kListTitles[7] = {"Main Menu", "Tutorials", "Skirmish", "Scenarios", "Skirmish Setup", "Conquer the World", "Conquer the World"};
+const char* const kListNotes[7] = {
     "",
     "Start with Tutorial 1. The tutorials guide you with voice-overs, arrows and objectives.",
     ("You play the map's human player against computer opponents. Press Random Map to choose a map style, its size, "
      "the nations and the teams, and play on a map made for you."),
     "Chess exercises and the battle maps of the Conquer the World campaigns.",
+    "",
+    "",
     "",
 };
 
@@ -302,6 +306,10 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	int _rulesBottom, _setupListVis, _openCombo, _openTop;
 	BOOL _seedRandom, _seedFocus;
 	std::string _seedText;
+	std::string _ctwSub;  // headless: the sub-screen to open
+	// Conquer the World (ctw_ui.h): the screens and their drawing bridge
+	std::unique_ptr<ctwui::Screen> _ctw;
+	ctwui::Bridge _ctwb;
 }
 
 - (NSString*)gameDir {
@@ -566,12 +574,16 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		return;
 	}
 	Screen s = kMain;
-	for (int i = 0; i < 5; i++) {
+	for (int i = 0; i < 7; i++) {
 		if ([name isEqualToString:@(kScreenNames[i])]) s = Screen(i);
 	}
 	_screen = s;
 	_sel = 0, _top0 = 0, _focus = 0;
 	_entries.clear();
+	if (s == kCtw || s == kCtwMap) {
+		[self ctwOpen:s == kCtwMap];
+		return;
+	}
 	if (s == kSkirmishSetup) [self openSetup];
 	if (s != kMain && s != kSkirmishSetup) {
 		_entries = launcher::entries_for(s == kTutorials ? launcher::Mode::Tutorials : s == kSkirmish ? launcher::Mode::Skirmish
@@ -676,7 +688,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		L.title = _titleRect.offset(wx, wy);
 		L.title_text = _titleText.offset(wx, wy);
 		int bottom = 0;
-		for (int i = 0; i < 5; i++) {
+		for (int i = 0; i < 6; i++) {
 			const IfaceRect r = _btnRect.offset(wx, wy + i * _btnInc);
 			L.buttons.push_back(r);
 			bottom = r.b;
@@ -868,7 +880,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	_ui.border(_border, L.frame.offset(_ox, _oy));
 	[self banner:L text:"Main Menu"];
 	_ui.next_layer();
-	for (int i = 0; i < 5; i++) {
+	for (int i = 0; i < 6; i++) {
 		const bool hot = _hover == kMainBtn + i || _pressed == kMainBtn + i || (_hover == kNone && _focus == i && !_popup.open);
 		[self menuButton:L.buttons[size_t(i)] label:kMainItems[i].label hot:hot && kMainItems[i].enabled enabled:kMainItems[i].enabled];
 		_ui.next_layer();
@@ -1065,6 +1077,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	const Layout L = [self layout];
 	if (_screen == kMain) [self drawMain:L];
 	else if (_screen == kSkirmishSetup) [self drawSetup:L];
+	else if (_screen == kCtw || _screen == kCtwMap) [self ctwDraw];
 	else [self drawList:L];
 	[self drawPopup];
 	_ui.encode(enc);
@@ -1120,7 +1133,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		return kNone;
 	}
 	if (_screen == kMain) {
-		for (int i = 0; i < 5; i++) {
+		for (int i = 0; i < 6; i++) {
 			if (L.buttons[size_t(i)].contains(x, y) && kMainItems[i].enabled) return kMainBtn + i;
 		}
 		if (L.change.contains(x, y)) return kChange;
@@ -1166,25 +1179,35 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 
 - (void)setHover:(int)h {
 	_hover = h;
-	if (_screen == kMain && h >= kMainBtn && h < kMainBtn + 5) {
+	if (_screen == kMain && h >= kMainBtn && h < kMainBtn + 6) {
 		_help = kMainItems[h - kMainBtn].help;
 		_focus = h - kMainBtn;
 	}
 }
 
 - (void)mouseMoved:(CGPoint)p {
+	if (_ctw && (_screen == kCtw || _screen == kCtwMap)) {
+		[self ctwBridge];
+		_ctw->mouse_move(_ctwb, p.x / _fit, p.y / _fit);
+		return;
+	}
 	_mouse = [self canvas:p];
 	_mouseKnown = YES;
 	int h = [self hit:_mouse];
 	// The help box also explains the disabled Multiplayer button.
 	if (_screen == kMain && !_popup.open && h == kNone) {
 		const Layout L = [self layout];
-		if (L.buttons[3].contains(int(_mouse.x), int(_mouse.y))) _help = kMainItems[3].help;
+		if (L.buttons[4].contains(int(_mouse.x), int(_mouse.y))) _help = kMainItems[4].help;
 	}
 	[self setHover:h];
 }
 
 - (void)mouseDown:(CGPoint)p clicks:(NSInteger)clicks {
+	if (_ctw && (_screen == kCtw || _screen == kCtwMap)) {
+		[self ctwBridge];
+		_ctw->mouse_down(_ctwb, p.x / _fit, p.y / _fit, int(clicks), false);
+		return;
+	}
 	_mouse = [self canvas:p];
 	const int h = [self hit:_mouse];
 	if (_screen == kSkirmishSetup && !_popup.open) {
@@ -1221,6 +1244,11 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 }
 
 - (void)mouseDragged:(CGPoint)p {
+	if (_ctw && (_screen == kCtw || _screen == kCtwMap)) {
+		[self ctwBridge];
+		_ctw->mouse_drag(_ctwb, p.x / _fit, p.y / _fit);
+		return;
+	}
 	_mouse = [self canvas:p];
 	if (_dragThumb) {
 		const Layout L = [self layout];
@@ -1233,6 +1261,12 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 }
 
 - (void)mouseUp:(CGPoint)p {
+	if (_ctw && (_screen == kCtw || _screen == kCtwMap)) {
+		[self ctwBridge];
+		_ctw->mouse_up(_ctwb, p.x / _fit, p.y / _fit);
+		[self ctwTakeAction];
+		return;
+	}
 	_mouse = [self canvas:p];
 	_dragThumb = NO;
 	const int h = [self hit:_mouse];
@@ -1244,6 +1278,11 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 }
 
 - (void)scrollWheel:(CGFloat)dy at:(CGPoint)p {
+	if (_ctw && (_screen == kCtw || _screen == kCtwMap)) {
+		[self ctwBridge];
+		_ctw->scroll(_ctwb, float(dy), p.x / _fit, p.y / _fit);
+		return;
+	}
 	if (_screen == kMain || _popup.open) return;
 	if (_screen == kSkirmishSetup) {
 		if (_openCombo >= 0 && size_t(_openCombo) < _sc.size()) {
@@ -1289,13 +1328,14 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		if (kind == 0 && b == 0) [self.host frontEndQuit];
 		return;
 	}
-	if (h >= kMainBtn && h < kMainBtn + 5) {
+	if (h >= kMainBtn && h < kMainBtn + 6) {
 		[self click];
 		switch (h - kMainBtn) {
 			case 0: [self showScreen:@"tutorials"]; break;
 			case 1: [self showScreen:@"skirmish"]; break;
 			case 2: [self showScreen:@"scenarios"]; break;
-			case 4: [self openQuitPopup]; break;
+			case 3: [self showScreen:@"ctw"]; break;
+			case 5: [self openQuitPopup]; break;
 			default: break;
 		}
 		return;
@@ -1351,6 +1391,12 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	const unichar c = chars.length ? [chars characterAtIndex:0] : 0;
 	const bool ret = c == '\r' || c == 3, esc = e.keyCode == 53;
 	_hover = kNone;
+	if (_ctw && (_screen == kCtw || _screen == kCtwMap)) {
+		[self ctwBridge];
+		_ctw->key(_ctwb, chars.UTF8String ?: "", int(e.keyCode), (e.modifierFlags & NSEventModifierFlagShift) != 0);
+		[self ctwTakeAction];
+		return;
+	}
 	if (_screen == kSkirmishSetup && !_popup.open) {
 		[self setupKey:e];
 		return;
@@ -1375,8 +1421,8 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	}
 	if (_screen == kMain) {
 		auto step = [&](int d) {
-			for (int k = 0; k < 5; k++) {
-				_focus = (_focus + d + 5) % 5;
+			for (int k = 0; k < 6; k++) {
+				_focus = (_focus + d + 6) % 6;
 				if (kMainItems[_focus].enabled) break;
 			}
 			_help = kMainItems[_focus].help;
@@ -1811,6 +1857,86 @@ static std::vector<std::string> numbered(int lo, int hi) {
 - (NSCursor*)cursor {
 	if (!_cursor) _cursor = ron_game_cursor(*_files, ron::kCursorMain);
 	return _cursor;
+}
+
+// ---------------------------------------------------------------- Conquer the World (ctw_ui.h)
+
+// Opens the campaign screens: the list / set-up, or the strategic map of the session the host holds (a campaign in progress
+// comes back here after a battle).
+- (void)ctwOpen:(BOOL)map {
+	if (!_ctw) _ctw = std::make_unique<ctwui::Screen>(std::make_shared<ron::GameFiles>(_dir.UTF8String), _dir.UTF8String);
+	std::shared_ptr<ctwui::Session> session = [self.host respondsToSelector:@selector(frontEndCtwSession)] ? [self.host frontEndCtwSession] : nullptr;
+	if (session && !_ctw->has_session()) _ctw->set_session(session);  // a campaign in progress comes back after a battle
+	_screen = map && _ctw->has_session() ? kCtwMap : kCtw;
+	_ctw->open(_screen == kCtwMap, _ctwSub);
+	_ctwSub.clear();
+}
+
+// Headless: the screens of a campaign in progress (--ctw ... --snapshot): `sub` is "", "news", "cards", "diplomacy", "attack", "menu".
+- (void)ctwShowSession:(std::shared_ptr<ctwui::Session>)session sub:(NSString*)sub select:(NSString*)country {
+	if (!_ctw) _ctw = std::make_unique<ctwui::Screen>(std::make_shared<ron::GameFiles>(_dir.UTF8String), _dir.UTF8String);
+	_ctw->set_session(session);
+	_ctwSub = sub ? sub.UTF8String : "";
+	_screen = kCtwMap;
+	_ctw->open(true, _ctwSub);
+	if (country.length) _ctw->select_country(country.UTF8String);
+}
+
+- (void)ctwBridge {
+	_ctwb.ui = &_ui;
+	_ctwb.ox = _ox, _ctwb.oy = _oy, _ctwb.ui_w = _uiW, _ctwb.ui_h = _uiH;
+	_ctwb.device = _device;
+	_ctwb.queue = _queue;
+	if (_ctwb.button) return;
+	__unsafe_unretained FrontEnd* me = self;
+	_ctwb.button = [me](const IfaceRect& r, const std::string& label, int state, int font) {
+		const IfaceRect c = r.offset(-me->_ox, -me->_oy);
+		const int f = font;
+		if (state == 3) {  // disabled: the normal button with grey text
+			const IfaceRect R = r;
+			const IfacePiece* p = me->_popBtn[0];
+			if (p[0].valid() && p[1].valid() && p[2].valid()) me->_ui.expander(p[0], p[1], p[2], R);
+			me->_ui.next_layer();
+			me->_ui.text_centered(f, label, R, rgb(150, 150, 150), kBlack);
+			return;
+		}
+		[me popupButton:c label:label state:state font:f];
+	};
+	_ctwb.box = [me](const IfaceRect& r, uint32_t fill) { [me thinBox:r.offset(-me->_ox, -me->_oy) fill:fill]; };
+	_ctwb.frame = [me](const IfaceRect& r) { me->_ui.border(me->_border, r); };
+	_ctwb.row = [me](const IfaceRect& R, bool selected, bool hot) {
+		if (!selected && !hot) return;
+		IfacePiece p[3] = {me->_large[0], me->_large[1], me->_large[2]};
+		if (!selected)
+			for (IfacePiece& q : p) q.top += q.height + 1;
+		if (p[0].valid()) me->_ui.expander(p[0], p[1], p[2], {R.l, R.r, R.t + 1, R.b - 1});
+	};
+	_ctwb.banner = [me](const std::string& title) {
+		const Layout L = [me layout];
+		[me banner:L text:title.c_str()];
+	};
+	_ctwb.click = [me]() { [me click]; };
+}
+
+- (void)ctwDraw {
+	if (!_ctw) return;
+	[self ctwBridge];
+	_ctw->draw(_ctwb);
+	[self ctwTakeAction];
+}
+
+// What the screens asked for: back to the main menu, or play the battle they prepared.
+- (void)ctwTakeAction {
+	if (!_ctw) return;
+	switch (_ctw->take_action()) {
+		case ctwui::Action::Back: [self showScreen:@"main"]; _focus = 3; break;
+		case ctwui::Action::PlayBattle: {
+			std::shared_ptr<ctwui::Session> s = _ctw->session();
+			if (s && [self.host respondsToSelector:@selector(frontEndPlayCtwBattle:)]) [self.host frontEndPlayCtwBattle:s];
+			break;
+		}
+		default: break;
+	}
 }
 
 @end

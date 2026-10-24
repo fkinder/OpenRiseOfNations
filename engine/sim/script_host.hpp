@@ -23,6 +23,9 @@
 namespace ron::sim {
 
 class Game;
+namespace ctw {
+class ConquestGame;
+}  // namespace ctw
 
 // ScriptTimers (ScenarioData::timers @a049e0..): at most 100 named timers, each an expiry tick (Game::tick, seconds).
 struct ScriptTimers {
@@ -93,6 +96,9 @@ public:
 	// host. TODO(ctw): move to the conquest state once the strategic layer is ported.
 	std::map<bhs::U16, int32_t> ctw_ints;
 	std::map<bhs::U16, bhs::U16> ctw_strs;
+	// The Conquer the World campaign these scripts run for (sim/ctw.hpp): the strategic-layer hooks and the battle's
+	// ctw_* builtins read / write it (script_funcs_ctw.cpp). Null for a battle started on its own (the stored values above).
+	ctw::ConquestGame* ctw = nullptr;
 	std::shared_ptr<XmlNode> xml_root, xml_curr, xml_parent;
 	std::vector<std::shared_ptr<XmlNode>> xml_elements;
 	bhs::U16 xml_curr_entry;

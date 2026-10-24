@@ -55,6 +55,7 @@ struct RandomGameSetup {
 	int game_speed = 1;                      // GameInfo.game_speed (presentation; not read by the simulation)
 	bool randomize_starts = false;           // map->randomize_starts: shuffle the start locations
 	bool no_tribe_powers = false;            // GameInfo.flags & 4
+	bool ctw = false;                        // Conquer the World battle (semaphore byte2 & 2: sim/ctw.hpp builds these); not in the text form
 };
 
 // Seats 0..7 default: seat 0 human with a random tribe, the others AI.
