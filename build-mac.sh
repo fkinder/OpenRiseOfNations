@@ -64,6 +64,9 @@ clang++ "${CXXFLAGS[@]}" -fobjc-arc -I platform/metal -I platform/audio "${OBJS[
 	-framework Cocoa -framework Metal -framework MetalKit -framework QuartzCore -framework CoreText -framework AVFoundation -lz \
 	-o build/ronmap
 
+echo "Building ron-mapgen..."
+clang++ "${CXXFLAGS[@]}" "${OBJS[@]}" apps/mapgen/main.cpp -lz -o build/ron-mapgen
+
 echo
 echo "Done. Next:"
 echo "  ./build/ron-check <game dir>    # parses every unit asset; should end with 'failures: 0'"
@@ -75,5 +78,6 @@ echo "  ./build/ron-econ-check <game dir>    # gather rates / income (compare: n
 echo "  ./build/ron-sim <game dir> scenario/Tutorial1/tut1.scx --list    # headless simulation (see apps/sim/main.cpp)"
 echo "  ./build/ron-script --parse-all <game dir>    # compiles every shipped .bhs script (== bhs-parse.mjs --all)"
 echo "  ./build/ron-ui-check <game dir> check    # interface readers (layout, strings, fonts, cursors); 'failures: 0'"
+echo "  ./build/ron-mapgen <game dir> --style 12 --size 3 --seed 1 --nations 4 --png map.png    # random-map generator (--all: matrix check)"
 echo "  ./build/ronviewer <game dir>    # opens the unit viewer"
 echo "  ./build/ronmap <game dir> scenario/Tutorial1/tut1.scx    # renders a scenario's terrain"
