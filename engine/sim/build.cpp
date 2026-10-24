@@ -3,6 +3,7 @@
 // closing.
 #include <algorithm>
 
+#include "sim/heroes.hpp"
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
 #include "sim/fog.hpp"
@@ -684,8 +685,9 @@ void build_activate_full(Game& g, Build& b, bool loading, bool msg, bool count) 
 		} else if (is_t(g, t, ptype::kMarket)) {
 			if (ct) ct->city_flags |= cityflag::kHasMarket;
 		} else if (is_t(g, t, ptype::kSenate)) {
-			// TODO(gov heroes): the government hero spawn (train(get_gov_hero) when none is near and
-			// gov_hero_frame <= frame); needs ObjectsData::find_unit with FILTER_GOV_HERO.
+			// The government hero spawn (Build::activate @623e20): train(get_gov_hero) when none is alive and
+			// gov_hero_frame <= frame.
+			if (!loading) build_try_train_gov_hero(g, b);
 			if (in_city && !loading) {
 				l.senates_built++;
 				int32_t c = -1, w = -1;

@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include "sim/heroes.hpp"
 #include "sim/ai.hpp"
 #include "sim/combat_internal.hpp"
 #include "sim/garrison.hpp"
@@ -419,7 +420,9 @@ void do_damage(Game& g, Object& att, int32_t ox, int32_t whom, uint32_t angle, i
 				L.score_combat -= kv / 5;
 				if (L.score_combat < 0) L.score_combat = 0;
 			}
-			// TODO(economy): Build::plunder(att.who) when not allied, not splash and the attacker is not an aircraft.
+			// Build::plunder(att.who) @623660 (heroes-spec 7.2): not allied, not splash, the attacker is not an aircraft.
+			if (att.ptype->domain != kDomainAir && !splash && !is_ally(g, whom, att.who))
+				build_plunder(g, static_cast<Build&>(t), att.who);
 			const int16_t k = tgt_was_active_build ? 5 : 2;
 			L.kills_current_frame = int16_t(L.kills_current_frame + k);
 		}
@@ -598,7 +601,36 @@ int32_t take_damage(Game& g, Object& tgt, int32_t hp, int32_t frac, int32_t deat
 						L.score_combat -= kv / 5;
 						if (L.score_combat < 0) L.score_combat = 0;
 					}
-					// TODO(economy): Unit::plunder (Aztec / Despot / Inca branches; draws game_random).
+					// Unit::plunder (Object::take_damage @652020; heroes-spec 7.1): on a kill by a live non-allied object that
+					// is not splash fire. Aztec barracks / stable / dock units plunder as Aztecs; spies, generals and
+					// merchants plunder plainly; anyone else only with THE DESPOT / Spitamenes in range.
+					Unit& dying = *tu;
+					const Object* aobj = g.object(att_who, att_o);
+					if (aobj && aobj->is_unit && aobj->alive() && !splash && !is_ally(g, victim->who, att_who)) {
+						bool call = false;
+						int32_t aztec = 0, despot = 0;
+						const int32_t aw = aobj->ptype->where;
+						if (has_tribe_bonus(g, att_who, 0) && (aw == 0x1ab || aw == 0x1ac || aw == 0x1b0)) {
+							call = true;
+							aztec = 1;
+						} else if (type_is(*victim->ptype, 0x3b) || type_is(*victim->ptype, 0x36) || type_is(*victim->ptype, 0x3f)) {
+							call = true;  // a spy, general or the like dies: plundered plainly
+						} else {
+							const Leader& AL = g.leaders[size_t(att_who)];
+							const bool d = (AL.num_units[size_t(hero::kTheDespot - kUnits)] != 0 &&
+							                find_hero(g, dying.x, dying.y, att_who, 0, hero::kTheDespot, 0) >= 0) ||
+							               (AL.num_units[size_t(hero::kSpitamenes - kUnits)] != 0 &&
+							                find_hero(g, dying.x, dying.y, att_who, 0, hero::kSpitamenes, 0) >= 0);
+							if (d && RON_K(g, "thedespot_unit_plunder") != 0) {
+								call = true;
+								despot = 1;
+							}
+						}
+						if (call) unit_plunder(g, dying, att_o, att_who, aztec, despot);
+					}
+					// The Inca refund: the victim's owner gets part of the price back.
+					if (!is_ally(g, victim->who, att_who) && RON_K(g, "inca_refund") != 0 && has_tribe_bonus(g, victim->who, 2))
+						unit_plunder(g, dying, dying.o, dying.who, 0, 0);
 				}
 			}
 		}

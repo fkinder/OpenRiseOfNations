@@ -38,6 +38,20 @@ namespace ron::sim {
 
 // ---------------------------------------------------------------- leaders
 
+// A running general power (heroes-spec 1): ActiveSpell {t, start, frame}, `frame` = the expiry frame.
+struct ActiveSpell {
+	int32_t t = 0, start = 0, frame = 0;
+};
+// HeroData / SpecialData (a Caster, 0x30 bytes): the active spells of one hero (Leader::heroes) or one spy / commando
+// (Leader::specials). `hero` is the record's own slot (+0x24, Unit.cara of its unit), `o` the unit (+0x26), hero_flags
+// bit 0 = in use (+0x28), `who` +0x29.
+struct Caster {
+	std::vector<ActiveSpell> active_spells;
+	int16_t hero = -1, o = -1;
+	uint8_t hero_flags = 0;
+	int8_t who = -1;
+};
+
 // The leader (player) state the movement core reads. LeaderData is ~0x6eec bytes in the original; most of it is
 // economy and AI and lives in later modules.
 struct Leader {
@@ -96,6 +110,11 @@ struct Leader {
 	std::array<uint8_t, (kNumTypes + 7) / 8> tech_at_start{}, obs_flags{};  // +0x6c80 / +0x6cf4 BitMask<806>
 	std::array<int32_t, 7> age_stamp{};      // +0x8f8
 	int32_t gov = -1, gov_hero_frame = -1, misery = 0;  // +0x14, +0xa48, +0x7ec
+	// Heroes::lists[who] (20 preallocated records, grown by one; heroes-spec 2) and Specials::lists[who]: the records of
+	// this leader, num_heroes +0x420 / num_specials +0x43c = slots in use below the high mark (sim/heroes.hpp).
+	std::vector<Caster> heroes, specials;
+	int32_t num_heroes = 0, num_specials = 0;
+	float plunder_scale = -1.0f;  // +0x914 (scenario set_plunder_scale; < 0 = none)
 	std::array<uint16_t, kNumTypes> num_queued{};           // +0x5a22: queued items per type, all buildings
 	std::array<int16_t, kEndBuilds - kBuilds> num_buildings{}, high_buildings{};  // +0x555e / +0x5660
 	std::array<std::array<int16_t, kEndBuilds - kBuilds>, 64> reg_buildings{};      // +0x14de [region][type - 414]

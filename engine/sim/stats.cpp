@@ -1,7 +1,7 @@
 // Leader-dependent unit and building stats (docs/combat-spec.md section 5.1): ObjectData / UnitData / BuildData ::attack,
 // armor, hits, max_range and min_range, Unit::update_hits / update_armor (captain computes, copied down the o_down
-// chain), the upgrade counters and BuildTypeData::get_building_range. Hero (general) terms are written but do not fire
-// yet (has_general and HeroesData::find_hero are -1); the garrison terms count what is inside (sim/garrison.hpp).
+// chain), the upgrade counters and BuildTypeData::get_building_range. Hero (general) terms go through sim/heroes.hpp
+// (has_general / find_hero); the garrison terms count what is inside (sim/garrison.hpp).
 #include <algorithm>
 
 #include "sim/combat_internal.hpp"
@@ -48,14 +48,12 @@ const Leader& LD(const Game& g, int32_t who) { return g.leaders[size_t(who)]; }
 bool owns(const Game& g, int32_t who, int32_t t) {
 	return valid_who(who) && t >= kUnits && t < kEndUnits && LD(g, who).num_units[size_t(t - kUnits)] != 0;
 }
-// "general(t)": owns(t) and a hero of type t in range (ObjectData::has_general; -1 until heroes exist).
+// "general(t)": owns(t) and a hero of type t in range (ObjectData::has_general).
 bool general(const Game& g, const Unit& u, int32_t t) { return owns(g, u.who, t) && has_general(g, u, 0, t) >= 0; }
 
-// HeroesData::find_hero(x, y, who, mask, type, slack) @73a1b0. TODO(heroes, combat-spec 5.1): HeroesData is not ported;
-// no hero is ever found.
-int32_t find_hero(const Game& g, const Object& ob, int32_t type, int32_t radius) {
-	(void)g, (void)ob, (void)type, (void)radius;
-	return -1;
+// HeroesData::find_hero(x, y, who, mask 0, type, slack) @73a1b0 around an object (sim/heroes.hpp).
+int32_t find_hero_near(const Game& g, const Object& ob, int32_t type, int32_t radius) {
+	return find_hero(g, ob.x, ob.y, ob.who, 0, type, radius);
 }
 
 // The leader's general type: tribe_can_type(types[0x36]) ? 0x36 : its tribe substitute (LeaderData::get_graft).
@@ -229,7 +227,7 @@ int32_t unit_armor(const Game& g, const Unit& u) {
 	const int32_t who = u.who;
 	int32_t h;
 	if (is_active_obj(u) && is_hero_obj(u)) h = u.o;
-	else h = find_hero(g, u, -1, 0);  // radius (x_size + y_size) * 96 only for buildings; a unit is not one
+	else h = find_hero_near(g, u, -1, 0);  // radius (x_size + y_size) * 96 only for buildings; a unit is not one
 	if (h >= 0) {
 		a += RON_K(g, "general_rally_armor") * (get_general_upgrade(g, who) + 1);
 		if (owns(g, who, kPtolemy) && general(g, u, kPtolemy)) a += RON_K(g, "ptolemy_armor");
@@ -251,7 +249,7 @@ int32_t build_armor(const Game& g, const Build& b) {
 		const bool active = is_active_obj(b);
 		bool senator = active && is_hero_obj(b) && type_is(*b.ptype, kTheSenator);
 		if (!senator && owns(g, b.who, kTheSenator))
-			senator = find_hero(g, b, kTheSenator, (b.ptype->x_size + b.ptype->y_size) * 96) >= 0;
+			senator = find_hero_near(g, b, kTheSenator, (b.ptype->x_size + b.ptype->y_size) * 96) >= 0;
 		if (senator) a += RON_K(g, "thesenator_build_armor");
 	}
 	if (!is_active_obj(b)) a /= 2;

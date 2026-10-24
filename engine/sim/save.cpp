@@ -39,7 +39,7 @@ static_assert(sizeof(PathNode) == 40 && sizeof(SavedSearch) == 176, "the pathfin
 static_assert(sizeof(ObjectList) == 64, "ObjectList changed: update walk_objects()");
 static_assert(sizeof(Groups) == 1282084, "Groups changed: update walk_groups()");
 static_assert(sizeof(Regions) == 10248, "Regions changed: update the REGN section in walk_body()");
-static_assert(sizeof(Game) == 1646832, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
+static_assert(sizeof(Game) == 1647392, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
 static_assert(sizeof(ScriptHost) == 1608, "ScriptHost changed: update walk_scripts()");
 #endif
 

@@ -21,13 +21,6 @@
 
 namespace ron::sim {
 
-// ObjectData::has_general @646b00: a hero (general) in range giving `mask`. TODO(heroes): no heroes yet (-1), so the
-// generals' bonuses (stats.cpp, attrition.cpp, groups) never fire. Declared in groups.hpp.
-int32_t has_general(const Game& g, const Unit& u, int32_t mask, int32_t p) {
-	(void)g, (void)u, (void)mask, (void)p;
-	return -1;
-}
-
 namespace {
 
 

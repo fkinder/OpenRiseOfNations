@@ -117,8 +117,10 @@ void unit_close(Game& g, Unit& u, int32_t death, int32_t gpiece, float deg) {
 			u.unit_masks &= ~umask::kEntrenched;
 		}
 		if (who < 8) g.leaders[size_t(who)].flags |= 0x800000u;  // LEADER_CALC_UNIT_STATS
+		// A government hero's death starts the respawn clock (gov_hero_respawn seconds of 15 frames; heroes-spec 5.2).
+		if (who < 8 && unit_is_gov_hero(u)) g.leaders[size_t(who)].gov_hero_frame = RON_K(g, "gov_hero_respawn") * 15 + g.frame;
 		if ((u.ptype->unit_flags2 & 0x40) && u.supply >= 0 && who < 8) supplies_close_supply(g, who, u.supply);
-		// TODO(economy / heroes): spies (Kremlin), governor hero respawn, carried production, planes leaving their
+		// TODO(economy / heroes): spies (Kremlin), carried production, planes leaving their
 		// carrier, gatherer doobers, Lakota / American recompute flags.
 		const int32_t t = u.type;
 		if (t == 0x3d || t == 0x3e || t == 400) {
@@ -189,8 +191,15 @@ void unit_close(Game& g, Unit& u, int32_t death, int32_t gpiece, float deg) {
 			    u.type < kUnits + 352)
 				g.scen.units_killed[size_t(who)][size_t(u.type - kUnits)]++;
 		}
-		// TODO(heroes / supplies / caravans / specials): close_hero, close_supply, close_caravan, close_special;
-		// aircraft carriers re-anchor their planes' patrol points.
+		// Heroes::close_hero / Specials::close_special (close_supply and close_caravan are done elsewhere here).
+		if (unit_is_hero(u) && u.cara >= 0 && who < 8) {
+			heroes_close_hero(g, who, u.cara);
+			u.cara = -1;
+		} else if (unit_is_special(u) && u.hero >= 0 && who < 8 && u.type > 53) {
+			specials_close_special(g, who, u.hero);
+			u.hero = -1;
+		}
+		// TODO(aircraft): aircraft carriers re-anchor their planes' patrol points.
 	}
 	if (death != 0) {
 		if (!blocked_merchant && is_live_unit(u) && u.on_map() && !(u.unit_masks & umask::kDecoy)) {

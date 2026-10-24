@@ -1,6 +1,6 @@
 # Heroes: generals, patriots, campaign heroes, their powers and plunder
 
-Status 2026-10-24: 🟡 decoded from the decompiles (`re/decomp/heroes`, `re/decomp/heroes2`, local) and the PDB layouts; not
+Status 2026-10-24: ✅ ported (engine/sim/heroes.cpp, spells.cpp; section 11 lists what the port corrected). 🟡 decoded from the decompiles (`re/decomp/heroes`, `re/decomp/heroes2`, local) and the PDB layouts; not
 checked against a recording. Companion of `docs/transport-spec.md` §4 (the cast order, `do_cast`, `is_castable`,
 `pay_cast_costs`, `get_job_time`: the general powers are spells cast through the same machinery) and `docs/combat-spec.md`
 (every `has_general(mask, type)` term in the stat getters, healing and attrition).
@@ -383,3 +383,47 @@ No draws. `bucket_add` is the leader's income bucket (economy-spec).
 | `Unit::plunder` / `Build::plunder` (callers: `Object::take_damage` 652020, `Object::disband` 6455c0, `Object::do_damage` 64a480, `SpellType::cast_disband` 671ed0) | 605b00 / 623660 | §7 |
 | PDB: `HeroData`, `Caster`, `CasterData`, `ActiveSpell`, `HeroesData` | `re/decomp/heroes_types*.txt` | §1 |
 | Callers lists | `re/decomp/heroes_callers*.txt` | §3.5 |
+
+## 11. Port notes (engine/sim/heroes.hpp, heroes.cpp, spells.cpp) and corrections to sections 1-9
+
+Checked against the decompiles / disassembly while porting; the earlier sections keep the first reading.
+
+1. **`find_hero` returns the hero UNIT's `o`** (`Caster +0x26`, @73a1b0 `return iVar5`), not the record slot. `UnitData::speed`
+   @60aae0 indexes `objects[who]` with it. The slot (`Unit.cara`) is only used for `heroes[who][cara]`.
+2. **`Unit::think_spellcaster` general path (§4.7)**: an idle general (`!is_moving`) returns 0 when ANY captain decoy of the leader exists,
+   else DECOY if `mana() >= mana_burn + mana(0x27a)`; a moving one needs guy 0 `avg_speed != 0`, then: `if !(L.flags & 0x8000)` ONE draw
+   `Random::get(0, 0xffff)`, odd -> FORCED MARCH (if affordable); otherwise AMBUSH only when the general stands in a **foreign**
+   territory (`owner >= 0 && owner != who`; the spec said own land) and can pay. `is_castable` is not called on this path. The
+   `% 3` draw is the special (non-hero) path's, so a general draws 0 or 1 time per call, never two.
+3. **`gov_hero_frame` writers**: besides `Unit::close` (`frame + gov_hero_respawn * 15`), `Unit::init` @612100 stores `frame` for every
+   government hero; `Leader::gain_tech` @6dcb60 writes 1 only when `frame == 0` (the engine already had that).
+4. **`Build::plunder` §7.2**: the unfinished-site fraction is `job_counter_2 (+0x4c) / construct_time(0)` (`vslot 0x18c`), not
+   `construct_hits / hits(0)`; the plunder percentage is skipped for unfinished sites and for an own razer unless the town's city
+   race is not the razer (a missing town / city also keeps the full value). The `Spitamenes` and `Despot` shares use the same formula
+   (the later one wins, they do not add).
+5. **Unit::plunder call sites** (`Object::take_damage` @652020): only for a live attacking UNIT, not splash, not allied to the victim:
+   Aztec leader + attacker built at a barracks / stable / dock -> `aztec = 1`; else a victim of type 0x3b / 0x36 / 0x3f -> plain;
+   else only with THE DESPOT / Spitamenes in range of the corpse and `thedespot_unit_plunder != 0` -> `despot = 1`. Then the Inca refund
+   (`inca_refund != 0`, victim owner Inca, victim not allied): `plunder(self, self)`. `Object::disband` calls it with `aztec = 1` for an
+   `UNIT_AZTEC_DAMAGE` captain of an active Aztec damager. `Build::plunder`: `Object::do_damage` (kill, attacker not an aircraft, not
+   splash, not allied) and `cast_disband` (an active building, razer = its owner).
+6. **`Caster::process_spells`**: a spell expires when `S.frame < game.frame` (the spec text `>=` for "not expired" is right); the
+   0x283 shockwave branch is the dead JAM RADAR craft. The call is step 2 of `Unit::process` (before `process_healing`).
+7. **Mana regeneration** (`Unit::process` @610f1c): `mana_burn != 0`, not a supply unit unless governor, `unit_masks & 0x2a000 == 0`
+   (cloak, march, casting): `rate = 2`, `4` for a French general (`is(0x36, strict)`), `x2` with SPIES_GENERALS_RECOVER_CRAFT (0x301) for
+   a general or spy, `* memnon_regen_rate / 256` for Memnon; `mana_burn -= min(mana_burn, (rate + (frame & 1)) / 2)`.
+8. **Decoys** (`Unit::process`): `mana_burn++`; at `(general_upgrade + 2) * decoy_time / 2` the decoy closes itself; while on a cell an
+   enemy detects it suffers attrition (`suffer_attrition(frame % 7 == 0)`).
+9. **`UnitData::speed`**: forced march uses `find_hero(x, y, who, 0x8000 mask, any type, extra 0)` or the unit itself when it is a
+   marching hero; Alexander / Napoleon on either side (types 0x166 / 0x167) use the Alexander product; `s = max(v, myspeed)`; then the
+   CTW multipliers (Spitamenes /256 and Blucher /100 on stable units, Porus /256 on elephants, Charles /100, Napoleon /100 on siege),
+   each gated by the leader owning the hero. `update_speed` adds `general_upgrade * s / 4` for heroes. `general_speed_bonus` has no
+   reader in the decompiles examined (❓).
+10. **`is_castable`** (spells-spec 2.1): the owner chain tests `is(from)`, `is(from2)` and their tribe grafts; 0x27a..0x27d have no case
+    (3 once the chain passes); 0x27e is 3 only inside an own city (tile flag 0x100, owner, `city.race == who`), else 2. SUPPLIES and
+    JAM RADAR are dead in the shipped data.
+11. Units never carry `objflag::kActive` in this port, so "active" in `has_general` / `is_map_unit` is "alive".
+12. Open (❓): `unit_masks2` bits 0x20 / 0x40 / 0x80 of `process_cloak` are unnamed; the Aztec slay count (`LeaderDataEncrypt +0xdc ^ 0x62766`)
+    is read from `Leader::units_killed` (+0x80c); `find_units` subtracts `big_radius` for sea units too; the jamming toggle of step 2
+    is not ported; the `ScenarioFuncSet::cast_spell` craft / unit registers were lost by the decompiler (the wrapper's craft and its
+    second script argument are used).

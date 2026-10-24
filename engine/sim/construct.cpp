@@ -4,6 +4,7 @@
 // Build::process, Wall::inc_time, Group::action_disband.
 #include <algorithm>
 
+#include "sim/heroes.hpp"
 #include "sim/capture.hpp"
 #include "sim/combat.hpp"
 #include "sim/combat_internal.hpp"
@@ -726,7 +727,26 @@ void build_process(Game& g, Build& b) {
 			else if (type_is(*b.ptype, ptype::kMarket)) c.city_flags |= 0x800;
 		}
 	}
-	// TODO(heroes): government-hero healing (french_supply_heal_rate; needs has_general).
+	// Government heroes mend damaged buildings every french_supply_heal_rate frames: THE PRESIDENT (0x163) on neutral or
+	// allied land, THE SENATOR (0x161) / THE CEO (0x165) on allied land (Build::process @61edf0).
+	if ((l.num_units[size_t(0x161 - kUnits)] != 0 || l.num_units[size_t(0x165 - kUnits)] != 0 ||
+	     l.num_units[size_t(0x163 - kUnits)] != 0) &&
+	    (b.damage != 0 || b.damage_frac != 0) && K("french_supply_heal_rate") != 0 &&
+	    (b.o + g.frame) % K("french_supply_heal_rate") == 0) {
+		const int32_t wx = wcoord_of(b.x), wy = wcoord_of(b.y);
+		const int32_t terr = g.world.in_w(wx, wy) ? g.world.w(wx, wy).who : -1;
+		bool heal;
+		if (has_general(g, b, 0, 0x163) < 0)
+			heal = terr >= 0 && is_ally(g, who, terr) && (has_general(g, b, 0, 0x161) >= 0 || has_general(g, b, 0, 0x165) >= 0);
+		else
+			heal = terr < 0 || is_ally(g, who, terr);
+		if (heal) {
+			b.damage = std::min(b.damage, obj_hits(g, b));  // Object::repair_damage(1, 0, 1)
+			b.damage_frac = 0;
+			b.damage = std::max(0, b.damage - 1);
+			b.healing = int16_t(std::max<int32_t>(K("french_supply_heal_rate"), b.healing));
+		}
+	}
 	build_do_queue(g, b, 0);
 	if (!b.alive()) return;
 	if (is_gather_type(*b.ptype) && !is_flat_gather(*b.ptype)) {
@@ -790,7 +810,8 @@ void build_process(Game& g, Build& b) {
 		// (d) the 64-frame capture poll and the AI's repair call (sim/capture.cpp); a capture ends Build::process.
 		if (build_capture_poll(g, b)) return;
 		if (C.race != who) {
-			// (THECITIZEN inside: TODO(heroes))
+			// THE COMRADE (0x164, "the citizen") in range slows the assimilation clock.
+			if (has_general(g, b, 0, 0x164) >= 0) C.assimilation_timer += 1 - K("thecitizen_assimilation_speed");
 			int32_t t = g.frame - C.assimilation_timer;
 			if (tb(g, who, 8)) t = (K("turk_assimilate") + 100) * t / 100;
 			if (who == C.founder) t = (K("reassimilation") + 100) * t / 100;
@@ -835,6 +856,10 @@ void group_action_disband(Game& g, Group& gr, int32_t all) {
 				Unit& u = static_cast<Unit&>(*ob);
 				// Object::disband(0) for a unit: carried units are disbanded first (TODO(garrison)), then die(rnd(3) + 1)
 				// on the map, die(1) off it.
+				// An Aztec-damaged captain (UNIT_AZTEC_DAMAGE) disbanded: the damaging active Aztec leader plunders it.
+				if (u.o_up < 0 && (u.unit_masks & umask::kAztecDamage) && u.damage_who >= 0 && u.damage_who < 8 &&
+				    (LD(g, u.damage_who).flags & 3) == 3 && has_tribe_bonus(g, u.damage_who, 0))
+					unit_plunder(g, u, u.damage_o, u.damage_who, 1, 0);
 				if (u.on_map()) {
 					const int32_t d = int32_t(g.rng.get(0, 0xffff) % 3) + 1;  // @6459c3
 					object_die(g, u, d, -1, 0.0f);

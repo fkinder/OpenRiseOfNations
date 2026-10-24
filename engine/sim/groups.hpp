@@ -7,14 +7,14 @@
 #include <cstdint>
 #include <vector>
 
+#include "sim/heroes.hpp"
 #include "sim/objects.hpp"
 
 namespace ron::sim {
 
 class Game;
 
-// ObjectData::has_general @646b00 (groups.cpp): a hero of type p (mask 0: any) in range; TODO(heroes): always -1.
-int32_t has_general(const Game& g, const Unit& u, int32_t mask, int32_t p);
+// ObjectData::has_general @646b00 is sim/heroes.hpp's (included here for the callers that always had it from groups.hpp).
 
 constexpr int32_t kGroupMax = 128, kGroupsPerLeader = 64, kNumGroups = 512, kGroupOpenSlots = 46;
 

@@ -34,6 +34,10 @@
 // --eject-all GROUP + EJECTALL (the listed buildings let their garrison out; /1 = back_to_work: citizens only, orders
 // kept). --list prints `inside N` on a building (and on a unit) with a garrison. Transports (docs/transport-spec.md):
 // --transport / --set-transport / --board (see parse_transport); RON_TRANSPORT_TRACE=1 logs casts, barges and landings.
+// Heroes (docs/heroes-spec.md): --cast WHO:o@SPELL[@FRAME] issues GROUP + SPELL (verb 23, ox / whom -1, x / y at the unit) for
+// a general's power (SPELL: a craft index such as 0x27b, or DECOY / AMBUSH / MARCH / ENTRENCH / SUPPLIES); --heroes-every K
+// prints per leader every hero (radius in tiles, running powers), the units under cover and the decoys; --list shows each
+// hero's radius and powers.
 // --attack issues GROUP + ATTACK (target object TO of leader TWHO). --combat-every prints a combat summary (alive
 // units and hit points per leader, live ammo, corpses, kills) every K frames.
 // --move issues GROUP + MOVE_TO for the listed units of leader WHO at FRAME (default 0); /form sets the formation
@@ -80,6 +84,7 @@
 #include "sim/game.hpp"
 #include "sim/garrison.hpp"
 #include "sim/guys.hpp"
+#include "sim/heroes.hpp"
 #include "sim/rules.hpp"
 #include "sim/save.hpp"
 #include "sim/script_host.hpp"
@@ -92,7 +97,7 @@ using namespace ron::sim;
 
 struct Script {
 	enum Kind { Move, Halt, Form, Attack, Build, Queue, Rally, Swarm, Disband, Unqueue, Gather, CityGather, Buy, Sell,
-		        Tribute, Respond, Peasants, Select, Option, Garrison, EjectAll, Transport, SetTransport, Board } kind = Move;
+		        Tribute, Respond, Peasants, Select, Option, Garrison, EjectAll, Transport, SetTransport, Board, Cast } kind = Move;
 	int32_t who = 0;
 	std::vector<int32_t> objs;
 	int32_t x = 0, y = 0, frame = 0, form = -1, queue = 2, rotate = 0;
@@ -273,6 +278,28 @@ Script parse_transport(const std::string& a, Script::Kind kind) {
 		rest = at2 == std::string::npos ? std::string() : rest.substr(at2 + 1);
 	}
 	if (!rest.empty()) s.frame = int32_t(std::strtol(rest.c_str(), nullptr, 0));
+	return s;
+}
+
+// --cast WHO:o@SPELL[@FRAME]: SPELL is a craft index (0x27b, 635) or a name.
+Script parse_cast(const std::string& a) {
+	Script s;
+	s.kind = Script::Cast;
+	const size_t colon = a.find(':'), at = a.find('@');
+	if (colon == std::string::npos || at == std::string::npos || at < colon) throw std::runtime_error("bad --cast (WHO:o@SPELL[@FRAME]) " + a);
+	s.who = int32_t(std::strtol(a.substr(0, colon).c_str(), nullptr, 0));
+	s.objs = parse_list(a.substr(colon + 1, at - colon - 1));
+	std::string rest = a.substr(at + 1);
+	const size_t at2 = rest.find('@');
+	std::string name = rest.substr(0, at2);
+	if (at2 != std::string::npos) s.frame = int32_t(std::strtol(rest.c_str() + at2 + 1, nullptr, 0));
+	for (char& ch : name) ch = char(std::toupper(static_cast<unsigned char>(ch)));
+	if (name == "DECOY") s.to = 0x27a;
+	else if (name == "AMBUSH") s.to = 0x27b;
+	else if (name == "MARCH") s.to = 0x27c;
+	else if (name == "ENTRENCH") s.to = 0x27d;
+	else if (name == "SUPPLIES") s.to = 0x27e;
+	else s.to = int32_t(std::strtol(name.c_str(), nullptr, 0));
 	return s;
 }
 
@@ -703,6 +730,7 @@ struct FogOpts {
 	int32_t reveal = -1;     // --reveal N (default: the scenario header's value, else 1)
 	int32_t econ_every = 0;  // --econ-every K (economy summary)
 	int32_t ai_every = 0;    // --ai-every K (AI summary)
+	int32_t heroes_every = 0;  // --heroes-every K (heroes summary)
 	int32_t starting_resources = -1;  // --starting-resources N (GameInfo setting before loading)
 	int32_t difficulty = -1;          // --difficulty N (GameInfo difficulty, the lobby setting; 0 easiest .. 5)
 	bool scripts = true;              // --no-scripts: no scenario / general powers / AI production scripts
@@ -1093,6 +1121,35 @@ void print_anim_table(const Game& g, const AssetAnimSource& art) {
 	std::printf("\n");
 }
 
+// Heroes summary (--heroes-every K): per leader its heroes (radius in tiles, running powers with their expiry), the units
+// under cover (UNIT_UNDER_COVER) and the decoys.
+void print_heroes(const Game& g) {
+	for (int32_t who = 0; who < 8; who++) {
+		const Leader& l = g.leaders[size_t(who)];
+		if (!(l.flags & leaderflag::kValid)) continue;
+		int32_t cover = 0, decoys = 0;
+		for (int32_t o = 0; o < g.objects[size_t(who)].unit_mark; o++) {
+			const Unit* u = g.unit(who, o);
+			if (!u || !u->alive()) continue;
+			if (u->unit_masks & umask::kUnderCover) cover++;
+			if ((u->unit_masks & umask::kDecoy) && u->o_up < 0) decoys++;
+		}
+		if (l.num_heroes == 0 && cover == 0 && decoys == 0) continue;
+		std::printf("  f%-5d heroes L%d: %d (flags ambush %d march %d) under_cover %d decoys %d\n", g.frame, who, l.num_heroes,
+		            (l.flags & 0x4000) ? 1 : 0, (l.flags & 0x8000) ? 1 : 0, cover, decoys);
+		for (int32_t i = 0; i < l.num_heroes && size_t(i) < l.heroes.size(); i++) {
+			const Caster& h = l.heroes[size_t(i)];
+			if (!(h.hero_flags & 1)) continue;
+			const Unit* u = g.unit(who, h.o);
+			std::printf("    hero %d:%-4d %-14s mana_burn %d/%d radius %d tiles masks %08x spells", who, h.o,
+			            u ? type_name(g, u->type).c_str() : "?", u ? int(u->mana_burn) : 0, u ? unit_mana(g, *u) : 0,
+			            hero_get_radius(g, h), u ? u->unit_masks : 0u);
+			for (const ActiveSpell& s : h.active_spells) std::printf(" [0x%x f%d..f%d]", unsigned(s.t), s.start, s.frame);
+			std::printf("\n");
+		}
+	}
+}
+
 // Production summary (--prod-every K, and --list): per leader the stockpile and population, per building the
 // construction progress, the queue with progress, and the rally points.
 void print_production(const Game& g, bool full) {
@@ -1422,6 +1479,11 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 				cm.issue_set_transport(*g, s.objs, s.num != 0);
 				if (print) std::printf("  f%-5d SET_TRANSPORT %d:%d%s = %d\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0],
 				                       s.objs.size() > 1 ? "+" : "", s.num != 0);
+			} else if (s.kind == Script::Cast) {
+				const Unit* cu = s.objs.empty() ? nullptr : g->unit(s.who, s.objs[0]);
+				cm.issue_spell(*g, s.objs, s.to, -1, -1, cu ? cu->x : 0, cu ? cu->y : 0);
+				if (print) std::printf("  f%-5d CAST %d:%d%s spell 0x%x\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0],
+				                       s.objs.size() > 1 ? "+" : "", unsigned(s.to));
 			} else if (s.kind == Script::Board) {
 				cm.issue_board_ship(*g, s.objs, s.to, QueuePos(s.queue));
 				if (print) std::printf("  f%-5d BOARD_SHIP %d:%d%s -> ship %d:%d\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0],
@@ -1522,6 +1584,7 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 		}
 		if (print && fo.econ_every > 0 && g->frame % fo.econ_every == 0) print_economy(*g);
 		if (print && fo.ai_every > 0 && g->frame % fo.ai_every == 0) print_ai(*g);
+		if (print && fo.heroes_every > 0 && g->frame % fo.heroes_every == 0) print_heroes(*g);
 		if (print && prod_every > 0 && g->frame % prod_every == 0) {
 			print_production(*g, false);
 			print_new_units(*g, rr.initial_uids);
@@ -1681,6 +1744,7 @@ int main(int argc, char** argv) {
 			else if (std::strcmp(argv[i], "--eject-all") == 0) scripts.push_back(parse_eject_all(argv[i + 1]));
 			else if (std::strcmp(argv[i], "--transport") == 0) scripts.push_back(parse_transport(argv[i + 1], Script::Transport));
 			else if (std::strcmp(argv[i], "--set-transport") == 0) scripts.push_back(parse_transport(argv[i + 1], Script::SetTransport));
+			else if (std::strcmp(argv[i], "--cast") == 0) scripts.push_back(parse_cast(argv[i + 1]));
 			else if (std::strcmp(argv[i], "--board") == 0) scripts.push_back(parse_transport(argv[i + 1], Script::Board));
 			else if (std::strcmp(argv[i], "--build") == 0) scripts.push_back(parse_prod(Script::Build, argv[i + 1]));
 			else if (std::strcmp(argv[i], "--queue") == 0 || std::strcmp(argv[i], "--research") == 0)
@@ -1738,6 +1802,13 @@ int main(int argc, char** argv) {
 					            type_name(g, u->type).c_str(), u->x, u->y, u->angle, int(u->myspeed), object_los(g, *u),
 					            obj_hits(g, *u), obj_attack(g, *u), obj_armor(g, *u), obj_max_range(g, *u),
 					            u->on_map() ? "" : " inside", u->o_up >= 0 ? " follower" : "");
+					if (unit_is_hero(*u) && u->cara >= 0 && size_t(u->cara) < l.heroes.size()) {
+						const Caster& h = l.heroes[size_t(u->cara)];
+						std::printf("      hero slot %d radius %d tiles mana %d/%d spells", int(u->cara), hero_get_radius(g, h),
+						            int(u->mana_burn), unit_mana(g, *u));
+						for (const ActiveSpell& s : h.active_spells) std::printf(" [0x%x f%d..f%d]", unsigned(s.t), s.start, s.frame);
+						std::printf("\n");
+					}
 				}
 			}
 			print_production(g, true);
@@ -1754,6 +1825,7 @@ int main(int argc, char** argv) {
 		fo.reveal = reveal;
 		if (const char* ee = arg_value(argc, argv, "--econ-every")) fo.econ_every = int32_t(std::strtol(ee, nullptr, 0));
 		if (const char* ae = arg_value(argc, argv, "--ai-every")) fo.ai_every = int32_t(std::strtol(ae, nullptr, 0));
+		if (const char* he = arg_value(argc, argv, "--heroes-every")) fo.heroes_every = int32_t(std::strtol(he, nullptr, 0));
 		if (const char* sr = arg_value(argc, argv, "--starting-resources"))
 			fo.starting_resources = int32_t(std::strtol(sr, nullptr, 0));
 		if (const char* df = arg_value(argc, argv, "--difficulty")) fo.difficulty = int32_t(std::strtol(df, nullptr, 0));

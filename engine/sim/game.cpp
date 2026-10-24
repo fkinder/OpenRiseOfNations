@@ -11,6 +11,7 @@
 #include "sim/economy.hpp"
 #include "sim/garrison.hpp"
 #include "sim/guys.hpp"
+#include "sim/heroes.hpp"
 #include "sim/production.hpp"
 #include "sim/script_host.hpp"
 #include "sim/territory.hpp"
@@ -207,6 +208,7 @@ void Game::load(const GameFiles& files, const Scenario& s, const Rules& r, uint3
 		leader_calc_attrition(*this, who);  // Leader::init (combat-spec 7.4)
 		leader_calc_anti_attrition(*this, who);
 	}
+	heroes_init(*this);  // Heroes::init / Specials::init: 20 preallocated records per leader
 	for (auto& v : supplies) v.clear();
 	for (auto& v : attrition_free_points) v.clear();
 	farms.clear();

@@ -42,4 +42,17 @@ int32_t do_cast(Game& g, Unit& u, Order& o);
 // SpellType::cast(o, who, p3, p4) @676ce0: is_castable == 3, then the switch on the spell. 0x28a -> cast_transport.
 void spell_cast(Game& g, int32_t spell, int32_t o, int32_t who, int32_t p3, int32_t p4);
 
+// LeaderData::has_spell @6e0bc0: the leader may use the craft (a spell with flag 1 needs the tech bit as well as type_avail).
+bool leader_has_spell(const Game& g, int32_t who, int32_t spell);
+// ScenarioFuncSet::cast_spell @9e2140 (general_forced_march / general_entrench ...): a valid unit of a valid leader, a
+// spell type the leader has and is_castable == 3, then Unit::add_cast_order(QUEUE_NEW, not explicit). 1 or -1.
+int32_t scenario_cast_spell(Game& g, int32_t who, int32_t unit_o, int32_t ox, int32_t whom, int32_t x, int32_t y, int32_t spell);
+
+struct Group;
+// Group::action_spell(spell, ox, whom, x, y) @6fe1a0 (replay cmd 23 SPELL; spells-spec 3.4), the generic untargeted
+// path: each valid member that may cast the spell, has the mana and the price gets a CAST_SPELL order (explicit).
+// Not ported (TODO(spells)): GroupOut::validate_spell, targeted spells (is_valid_target), TRANSPORT / aircraft /
+// building casts, the "busy" test, the UI feedback.
+void group_action_spell(Game& g, Group& gr, int32_t spell, int32_t ox, int32_t whom, int32_t x, int32_t y);
+
 }  // namespace ron::sim

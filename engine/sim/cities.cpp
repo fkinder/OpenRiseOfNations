@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "sim/heroes.hpp"
 #include "sim/ai.hpp"
 #include "sim/capture.hpp"
 #include "sim/combat.hpp"
@@ -521,7 +522,8 @@ void city_assimilate(Game& g, int32_t who, int32_t c) {
 			build_new_library(g, *b);
 			b->flags |= objflag::kActive;
 		}
-		// TODO(gov heroes): an active SENATE respawns the government hero as in Build::activate.
+		// An active SENATE respawns the government hero as in Build::activate (City::assimilate @738e90).
+		if ((b->flags & objflag::kActive) && type_is(*b->ptype, ptype::kSenate)) build_try_train_gov_hero(g, *b);
 	}
 }
 

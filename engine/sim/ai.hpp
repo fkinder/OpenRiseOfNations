@@ -143,6 +143,7 @@ void armies_process_all(Game& g);                   // Armies::process_all @6f3b
 void armies_emergency(Game& g, int32_t who);        // @6f3250
 void armies_diplo_change(Game& g, int32_t who);     // @6f30f0
 int32_t unit_add_to_army(Game& g, Unit& u);         // Unit::add_to_army @5f7740
+void army_add_unit(Game& g, int32_t who, int32_t army, int32_t o);  // Army::add_unit @6f9f40
 int32_t object_get_army(const Game& g, const Unit& u);  // Object::get_army @649d70
 void army_charge(Game& g, Army& a, int32_t o, int32_t w);  // Army::charge @6f9a90
 void army_stop(Game& g, Army& a);                     // Army::stop @6f9180

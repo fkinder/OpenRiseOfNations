@@ -10,7 +10,9 @@
 #include "sim/ai_internal.hpp"
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
+#include "sim/heroes.hpp"
 #include "sim/orders.hpp"
+#include "sim/spells.hpp"
 #include "sim/trig.hpp"
 
 namespace ron::sim {
@@ -67,7 +69,36 @@ int32_t think_spellcaster(Game& g, Unit& u) {
 	if (L.flags & leaderflag::kHuman) return 0;  // (is_special && castable 631 && target: not simulated)
 	if (get_diff(g, u.who) < 2 || (u.unit_masks & umask::kDecoy)) return 0;
 	if (type_is(*u.ptype, ptype::kSpy)) return 0;  // needs is_cloaked and castable spells
-	if (!is_special(u)) return 0;                   // heroes: S2 needs the guy field +0x84 (TODO)
+	if (!is_special(u)) {
+		// A general (heroes-spec 4.7, decompile @5f27a0; the spec's "two draws" belongs to the special path below): idle ->
+		// DECOY unless a decoy already exists; moving (guy 0 with a non-zero avg_speed) -> FORCED MARCH on a coin
+		// (one game_random draw, only while no march runs) or else AMBUSH in foreign territory.
+		if (!is_hero(u)) return 0;
+		auto affordable = [&](int32_t sp) { return unit_mana(g, u) >= u.mana_burn + g.type(sp).mana; };
+		int32_t sp;
+		if (!unit_is_moving(u)) {
+			for (int32_t o = 0; o < g.objects[size_t(u.who)].unit_mark; o++) {
+				const Unit* d = g.unit(u.who, o);
+				if (d && d->alive() && d->o_up < 0 && (d->unit_masks & umask::kDecoy)) return 0;
+			}
+			if (!affordable(0x27a)) return 0;
+			sp = 0x27a;
+		} else {
+			if (u.guys.empty() || u.guys[0].avg_speed == 0) return 0;
+			if (!(L.flags & 0x8000) && (rnd_raw(g) & 1) != 0) {
+				if (!affordable(0x27c)) return 0;
+				sp = 0x27c;
+			} else {
+				const int32_t wx = wcoord_of(u.x), wy = wcoord_of(u.y);
+				const int32_t terr = g.world.in_w(wx, wy) ? g.world.w(wx, wy).who : -1;
+				if (terr < 0 || terr == u.who) return 0;
+				if (!affordable(0x27b)) return 0;
+				sp = 0x27b;
+			}
+		}
+		add_cast_order(g, u, -1, -1, u.x, u.y, sp, kQueueFirst, false);
+		return 1;
+	}
 	// SNIPER (641) not castable; then the S1 draw (always made here).
 	const int32_t r = rnd_raw(g);
 	if (r % 3 != 0 && object_get_army(g, u) < 0) return 0;

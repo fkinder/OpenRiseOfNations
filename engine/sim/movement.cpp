@@ -104,6 +104,10 @@ void update_speed(Game& g, Unit& u0) {
 	// (bantu_units_move + 100) * s / 100; where 0x1ae/0x1af: French (bonus 10) french_siege_move, Versailles (wonder
 	// 0x218) versailles_units_move; air with the aluminum bit aluminum_air_speed; is 0x3a: s += spy_upgrade * s / 4;
 	// heroes: general_upgrade; supply: supply_upgrade; types 50/51 with tribe bonus 0: aztec_move_speed.
+	if (unit_is_hero(u)) {  // heroes: s += general_upgrade * s / 4 (the terms above do not apply to heroes)
+		const int32_t gu = get_general_upgrade(g, u.who) * s;
+		s += (gu + ((gu >> 31) & 3)) >> 2;
+	}
 	u.myspeed = int16_t(s);
 	for (int32_t d = u.o_down; d >= 0;) {
 		Unit* f = g.unit(u.who, d);
@@ -129,12 +133,40 @@ int32_t unit_speed(const Game& g, const Unit& u) {
 			else if (unit_is(g, u, 0xa9, true)) s += c.at(0x844);
 		}
 	}
-	if (g.leaders[size_t(u.who)].flags & 0x8000) {
-		// TODO(heroes): forced march: a forced-march hero on the unit or HeroesData::find_hero within
-		// (x_size + y_size) * 0x60 -> v = forced_march_speed * unit_move_speed (types 0x166/0x167 on either side:
-		// forced_march_speed * alexander_forced_march_speed * unit_move_speed / 256); s = max(v, myspeed).
+	const Leader& L = g.leaders[size_t(u.who)];
+	const Constants& c = g.rules->constants;
+	if (L.flags & 0x8000) {
+		// Forced march: the unit is a marching hero itself, or HeroesData::find_hero(mask kMarchRunning) covers it
+		// (a unit has no extra radius). docs/heroes-spec.md 3.5; UnitData::speed @60aae0.
+		int32_t h;
+		if (unit_is_hero(u) && (u.unit_masks & umask::kMarchRunning)) h = u.o;
+		else h = find_hero(g, u.x, u.y, u.who, umask::kMarchRunning, -1, 0);
+		if (h >= 0) {
+			const Unit* H = g.unit(u.who, h);
+			int32_t v;
+			if ((H && unit_is(g, *H, 0x166)) || unit_is(g, u, 0x166) || (H && unit_is(g, *H, 0x167)) || unit_is(g, u, 0x167)) {
+				v = c.at(0xc50) * c.at(0xb4c) * c.at(0x4);  // forced_march_speed * alexander_forced_march_speed * unit_move_speed
+				v = (v + ((v >> 31) & 0xff)) >> 8;
+			} else {
+				v = c.at(0xc50) * c.at(0x4);
+			}
+			s = v <= u.myspeed ? int32_t(u.myspeed) : v;
+		}
 	}
-	// TODO(CTW): Conquer-the-World hero multipliers (Spitamenes, Blucher, Porus, Charles, Napoleon on siege).
+	// Campaign heroes (the owns(type) gates are the leader's unit counters).
+	auto owns = [&](int32_t t) { return L.num_units[size_t(t - kUnits)] != 0; };
+	if (owns(0x16d) && u.ptype->where == 0x1ac && has_general(g, u, 0, 0x16d) >= 0) {  // Spitamenes: stable units
+		s = c.at(0xb78) * s;
+		s = (s + ((s >> 31) & 0xff)) >> 8;
+	}
+	if (owns(0x175) && u.ptype->where == 0x1ac && has_general(g, u, 0, 0x175) >= 0) s = (c.at(0xbd4) * s) / 100;  // Blucher
+	if (owns(0x16f) && unit_is(g, u, 0x105) && has_general(g, u, 0, 0x16f) >= 0) {  // Porus: elephants
+		s = c.at(0xb7c) * s;
+		s = (s + ((s >> 31) & 0xff)) >> 8;
+	}
+	if (owns(0x171) && has_general(g, u, 0, 0x171) >= 0) s = (c.at(0xbc0) * s) / 100;  // Archduke Charles
+	if (owns(0x167) && (u.ptype->unit_flags & 0x20000) && has_general(g, u, 0, 0x167) >= 0)
+		s = (c.at(0xbb0) * s) / 100;  // Napoleon: siege
 	return s;
 }
 
@@ -149,7 +181,7 @@ int32_t get_speed(const Game& g, const Unit& u, int32_t x, int32_t y, bool nocap
 		if (u.unit_masks & umask::kZoc) s /= 2;
 		const int32_t tx = tcoord_of(x), ty = tcoord_of(y);
 		if (u.z < 1 && g.world.in_t(tx, ty) && (g.world.t(tx, ty) & tmask::kRiverB)) s /= 2;  // ford
-		// TODO(heroes): ObjectData::has_general(0, 0x162) >= 0 and is_siege (unit_flags 0x20000) -> s *= 2
+		if (has_general(g, u, 0, 0x162) >= 0 && (u.ptype->unit_flags & 0x20000)) s *= 2;  // THE MONARCH: siege
 	}
 	if (!nocap && u.group >= 0 && u.group < kNumGroups && at == kOrderNone) {
 		const int32_t gs = g.groups.g[size_t(u.group)].speed;  // Group +0x40
@@ -728,8 +760,7 @@ int32_t do_move(Game& g, Unit& u, Order& m) {
 
 	// 6. Modern infantry without a general snap to guy 0 and pack.
 	if (((u.o * 17 + g.frame) & 0x7f) == 0 && !(u.unit_masks & umask::kInCombat) && unit_is_modern_infantry(g, u) &&
-	    !u.guys.empty()) {
-		// TODO(heroes): only when ObjectData::has_general(0x8000, -1) < 0 (no general nearby).
+	    !u.guys.empty() && has_general(g, u, umask::kMarchRunning, -1) < 0) {
 		const uint32_t ga = u.guys[0].angle;
 		const int32_t gx = u.guys[0].x, gy = u.guys[0].y;
 		unit_set_angle(g, u, ga, true);

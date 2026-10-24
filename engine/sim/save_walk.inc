@@ -4,6 +4,14 @@
 // Region::coords (rebuilt by Game::load), PathFinder::lists / blocklist and Unit::openlist (saved by hand in save.cpp).
 // When a struct gains a member the sizeof assertion at the end of this file fails: add the member (rerun regen.py).
 
+template <class Ar> void walk(Ar& ar, ActiveSpell& v) {
+	FIELDS(ar, v.t, v.start, v.frame);
+}
+
+template <class Ar> void walk(Ar& ar, Caster& v) {
+	FIELDS(ar, v.active_spells, v.hero, v.o, v.hero_flags, v.who);
+}
+
 template <class Ar> void walk(Ar& ar, Leader& v) {
 	FIELDS(ar, v.flags, v.flags2, v.tribe, v.color, v.age, v.name, v.combat_stance, v.worker_stance, v.options_flags, v.units_built);
 	FIELDS(ar, v.chat_status, v.diplo, v.ally_mask, v.tech, v.rare, v.rare_conquest, v.conquest_racial_powers, v.science, v.city_num);
@@ -11,36 +19,37 @@ template <class Ar> void walk(Ar& ar, Leader& v) {
 	FIELDS(ar, v.prod_step, v.prod_script, v.score_combat, v.units_killed, v.units_lost, v.buildings_razed, v.buildings_lost);
 	FIELDS(ar, v.frame_attacked, v.retarget_budget, v.deaths_current_frame, v.kills_current_frame, v.hits_current_frame);
 	FIELDS(ar, v.attack_stamp, v.raid_stamp, v.bucket, v.escrow, v.epochs, v.discovered, v.epoch, v.tech_at_start, v.obs_flags);
-	FIELDS(ar, v.age_stamp, v.gov, v.gov_hero_frame, v.misery, v.num_queued, v.num_buildings, v.high_buildings, v.reg_buildings);
-	FIELDS(ar, v.last_unit_finished, v.last_building_finished, v.barracks_units, v.stable_units, v.factory_units, v.combat_units);
-	FIELDS(ar, v.dock_units, v.air_units, v.barracks_queued, v.stable_queued, v.factory_queued, v.combat_queued, v.dock_queued);
-	FIELDS(ar, v.air_queued, v.peasants, v.scholars, v.scouts, v.scholar_militia, v.peasants_inside, v.stable_inside, v.special_inside);
-	FIELDS(ar, v.barracks_inside, v.ages_queued, v.epochs_queued, v.tech_frame, v.tech_cat_frame, v.pop, v.pop_cap, v.pop_issues);
-	FIELDS(ar, v.control, v.active, v.caras, v.city_mine, v.city_mark, v.city_name, v.fort_mark, v.wonder_mark, v.lost_city_stamp);
-	FIELDS(ar, v.reg_pop, v.reg_terr, v.reg_known_rares, v.territory, v.territory_high, v.num_bonus_cards, v.buildings_built);
-	FIELDS(ar, v.cities_built, v.wonders_built, v.wonders_held, v.senates_built, v.forts_built, v.defense, v.gather_slots);
-	FIELDS(ar, v.gather_slots_high, v.attrition_stamp3, v.disable_building_attrition, v.repair_stamp, v.att, v.anti_att);
-	FIELDS(ar, v.give_att_disabled, v.take_att_disabled, v.neutral_attrition, v.attrition_warn_stamp, v.attrition_hit_stamp);
-	FIELDS(ar, v.supply_mark, v.nukes_used, v.nukes_launched, v.missiles_used, v.handicap, v.difficulty, v.wonderwin_timer);
-	FIELDS(ar, v.lost_capital_stamp, v.lost_capital_timer, v.lost_capital_modifier, v.popwin_stamp, v.wonderwin_stamp);
-	FIELDS(ar, v.cities_captured, v.cities_lost, v.defeated_by, v.defeat_stamp, v.defeat_type, v.victory_type, v.leftover);
-	FIELDS(ar, v.resource_cap, v.over_cap, v.resources, v.support, v.income, v.rate, v.bonus, v.escrow_rate, v.tributes, v.base_rate);
-	FIELDS(ar, v.collected, v.bonus_cap, v.rares_collected, v.known_rares, v.gather_stamp, v.rare_owned, v.num_ctw_rate_bonuses);
-	FIELDS(ar, v.opt_peasants, v.opt_peasants_wait, v.opt_buildings, v.dip, v.tribute_sent, v.tribute_received, v.tribute_stamp);
-	FIELDS(ar, v.gift_stamp, v.oil_wells, v.caravan_mark, v.pers, v.sites, v.make_list, v.mil_trainers, v.site_mark, v.village_num);
-	FIELDS(ar, v.village_mine, v.score, v.score_explored, v.score_territory, v.score_units, v.score_attack_units, v.score_buildings);
-	FIELDS(ar, v.score_economy, v.score_pop, v.score_upgrades, v.score_research, v.score_wonders, v.econ, v.worst_good, v.best_good);
-	FIELDS(ar, v.shortages, v.reg_unpack_merch, v.wonder_mod, v.ground_mod, v.air_mod, v.sea_mod, v.infra_mod, v.defense_mod);
-	FIELDS(ar, v.army_high, v.peasant_high, v.scholar_high, v.caravan_high, v.merchant_high, v.city_high, v.village_high);
-	FIELDS(ar, v.population_high, v.city_pop_high, v.resources_controlled, v.filled_gather_slots, v.combat, v.non_siege);
-	FIELDS(ar, v.sea_combat, v.siege, v.attack, v.naval, v.air, v.missile, v.transports, v.fishermen, v.idle_fishermen, v.merchants);
-	FIELDS(ar, v.fighters, v.bombers, v.cruise, v.nuke, v.wars, v.allies, v.active_wars, v.active_wars_with, v.free_peasants);
-	FIELDS(ar, v.xport_peasants, v.gatherers, v.home_reg, v.attacked, v.full_cities, v.effective_pop, v.other_team_terr, v.min_other_team_terr);
-	FIELDS(ar, v.my_team_terr, v.attacked_by, v.nukes_in_flight, v.popwin_timer, v.strategy, v.reg_active, v.reg_combat, v.reg_attack);
-	FIELDS(ar, v.reg_defense, v.reg_peasants, v.reg_free_peasants, v.reg_xport_peasants, v.reg_gatherers, v.reg_gather_slots);
-	FIELDS(ar, v.reg_land, v.reg_naval, v.reg_transports, v.reg_attacked, v.reg_wars, v.reg_neutrals, v.reg_allies, v.agendas);
-	FIELDS(ar, v.good_deeds, v.hire_stamp, v.hire_who, v.aggression, v.strong, v.weak, v.dow, v.invaders, v.broke_alliance, v.made_peace);
-	FIELDS(ar, v.counteroffer, v.tribute_demanded, v.blacken, v.got_diplo_message, v.goody_box_resources);
+	FIELDS(ar, v.age_stamp, v.gov, v.gov_hero_frame, v.misery, v.heroes, v.specials, v.num_heroes, v.num_specials, v.plunder_scale);
+	FIELDS(ar, v.num_queued, v.num_buildings, v.high_buildings, v.reg_buildings, v.last_unit_finished, v.last_building_finished);
+	FIELDS(ar, v.barracks_units, v.stable_units, v.factory_units, v.combat_units, v.dock_units, v.air_units, v.barracks_queued);
+	FIELDS(ar, v.stable_queued, v.factory_queued, v.combat_queued, v.dock_queued, v.air_queued, v.peasants, v.scholars, v.scouts);
+	FIELDS(ar, v.scholar_militia, v.peasants_inside, v.stable_inside, v.special_inside, v.barracks_inside, v.ages_queued);
+	FIELDS(ar, v.epochs_queued, v.tech_frame, v.tech_cat_frame, v.pop, v.pop_cap, v.pop_issues, v.control, v.active, v.caras);
+	FIELDS(ar, v.city_mine, v.city_mark, v.city_name, v.fort_mark, v.wonder_mark, v.lost_city_stamp, v.reg_pop, v.reg_terr);
+	FIELDS(ar, v.reg_known_rares, v.territory, v.territory_high, v.num_bonus_cards, v.buildings_built, v.cities_built, v.wonders_built);
+	FIELDS(ar, v.wonders_held, v.senates_built, v.forts_built, v.defense, v.gather_slots, v.gather_slots_high, v.attrition_stamp3);
+	FIELDS(ar, v.disable_building_attrition, v.repair_stamp, v.att, v.anti_att, v.give_att_disabled, v.take_att_disabled);
+	FIELDS(ar, v.neutral_attrition, v.attrition_warn_stamp, v.attrition_hit_stamp, v.supply_mark, v.nukes_used, v.nukes_launched);
+	FIELDS(ar, v.missiles_used, v.handicap, v.difficulty, v.wonderwin_timer, v.lost_capital_stamp, v.lost_capital_timer);
+	FIELDS(ar, v.lost_capital_modifier, v.popwin_stamp, v.wonderwin_stamp, v.cities_captured, v.cities_lost, v.defeated_by);
+	FIELDS(ar, v.defeat_stamp, v.defeat_type, v.victory_type, v.leftover, v.resource_cap, v.over_cap, v.resources, v.support);
+	FIELDS(ar, v.income, v.rate, v.bonus, v.escrow_rate, v.tributes, v.base_rate, v.collected, v.bonus_cap, v.rares_collected);
+	FIELDS(ar, v.known_rares, v.gather_stamp, v.rare_owned, v.num_ctw_rate_bonuses, v.opt_peasants, v.opt_peasants_wait);
+	FIELDS(ar, v.opt_buildings, v.dip, v.tribute_sent, v.tribute_received, v.tribute_stamp, v.gift_stamp, v.oil_wells, v.caravan_mark);
+	FIELDS(ar, v.pers, v.sites, v.make_list, v.mil_trainers, v.site_mark, v.village_num, v.village_mine, v.score, v.score_explored);
+	FIELDS(ar, v.score_territory, v.score_units, v.score_attack_units, v.score_buildings, v.score_economy, v.score_pop);
+	FIELDS(ar, v.score_upgrades, v.score_research, v.score_wonders, v.econ, v.worst_good, v.best_good, v.shortages, v.reg_unpack_merch);
+	FIELDS(ar, v.wonder_mod, v.ground_mod, v.air_mod, v.sea_mod, v.infra_mod, v.defense_mod, v.army_high, v.peasant_high, v.scholar_high);
+	FIELDS(ar, v.caravan_high, v.merchant_high, v.city_high, v.village_high, v.population_high, v.city_pop_high, v.resources_controlled);
+	FIELDS(ar, v.filled_gather_slots, v.combat, v.non_siege, v.sea_combat, v.siege, v.attack, v.naval, v.air, v.missile, v.transports);
+	FIELDS(ar, v.fishermen, v.idle_fishermen, v.merchants, v.fighters, v.bombers, v.cruise, v.nuke, v.wars, v.allies, v.active_wars);
+	FIELDS(ar, v.active_wars_with, v.free_peasants, v.xport_peasants, v.gatherers, v.home_reg, v.attacked, v.full_cities);
+	FIELDS(ar, v.effective_pop, v.other_team_terr, v.min_other_team_terr, v.my_team_terr, v.attacked_by, v.nukes_in_flight);
+	FIELDS(ar, v.popwin_timer, v.strategy, v.reg_active, v.reg_combat, v.reg_attack, v.reg_defense, v.reg_peasants, v.reg_free_peasants);
+	FIELDS(ar, v.reg_xport_peasants, v.reg_gatherers, v.reg_gather_slots, v.reg_land, v.reg_naval, v.reg_transports, v.reg_attacked);
+	FIELDS(ar, v.reg_wars, v.reg_neutrals, v.reg_allies, v.agendas, v.good_deeds, v.hire_stamp, v.hire_who, v.aggression, v.strong);
+	FIELDS(ar, v.weak, v.dow, v.invaders, v.broke_alliance, v.made_peace, v.counteroffer, v.tribute_demanded, v.blacken, v.got_diplo_message);
+	FIELDS(ar, v.goody_box_resources);
 }
 
 template <class Ar> void walk(Ar& ar, Leader::Deal& v) {
@@ -329,7 +338,9 @@ template <class Ar> void walk(Ar& ar, LandMake& v) {
 // Drift guard: the sizes these walks were written for (LP64, libc++). A member added to a struct changes its size and
 // stops the build here; add the member to the walk above (and to docs/save-format.md if it is a new kind of state).
 #if defined(__LP64__) && defined(_LIBCPP_VERSION)
-static_assert(sizeof(Leader) == 27984, "Leader changed: update its walk() in save_walk.inc");
+static_assert(sizeof(ActiveSpell) == 12, "ActiveSpell changed: update its walk() in save_walk.inc");
+static_assert(sizeof(Caster) == 32, "Caster changed: update its walk() in save_walk.inc");
+static_assert(sizeof(Leader) == 28040, "Leader changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Leader::Deal) == 92, "Leader::Deal changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Personality) == 96, "Personality changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Site) == 24, "Site changed: update its walk() in save_walk.inc");

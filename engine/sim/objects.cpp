@@ -8,6 +8,7 @@
 #include "sim/game.hpp"
 #include "sim/garrison.hpp"
 #include "sim/guys.hpp"
+#include "sim/heroes.hpp"
 #include "sim/movement.hpp"
 #include "sim/orders.hpp"
 #include "sim/search.hpp"
@@ -362,9 +363,20 @@ void unit_init(Game& g, Unit& u, int32_t who, int32_t type, int32_t o, int32_t x
 	if (u.ptype->unit_flags2 & 8) g.leaders[size_t(who)].caras++;
 	// Supplies::init_supply for supply units (economy-spec 7.2).
 	if (who < 8 && (u.ptype->unit_flags2 & 0x40)) u.supply = int16_t(supplies_init_supply(g, who, o));
-	// Caravans::init_caravan for non-hero land caravans (economy-spec 6.1); TODO(heroes / specials).
-	if (who < 8 && !(u.ptype->unit_flags2 & 0x20) && (u.ptype->unit_flags2 & 8) && u.ptype->domain == 0)
+	// The +0x86 slot (Unit.cara, shared with the doober / herd / special slots): a hero takes its Heroes record
+	// (Heroes::init_hero; a government hero also stamps gov_hero_frame), a land caravan its Caravan record
+	// (Caravans::init_caravan, economy-spec 6.1), a spy / commando (not a citizen) its Specials record (kept in the unused
+	// `hero` member, so the economy digest that hashes `cara` only changes for real heroes).
+	if (u.ptype->unit_flags2 & 0x20) {
+		if (who < 8) {
+			u.cara = int16_t(heroes_init_hero(g, who, o));
+			if (u.ptype->unit_flags & 0x4000000) g.leaders[size_t(who)].gov_hero_frame = g.frame;
+		}
+	} else if (who < 8 && (u.ptype->unit_flags2 & 8) && u.ptype->domain == 0) {
 		u.cara = int16_t(caravans_init(g, who, o));
+	} else if (who < 8 && type > 53 && (u.ptype->unit_flags2 & 0x10)) {
+		u.hero = int16_t(specials_init_special(g, who, o));  // (the original's +0x86 "special"; see objects.hpp)
+	}
 	u.damage_frac = 0;
 	unit_update_hits(g, u);   // Unit::update_hits @60e930 (combat-spec 5.1)
 	unit_update_los(g, u);
@@ -452,7 +464,8 @@ void unit_process(Game& g, Unit& u) {
 	if (u.full) u.full--;
 	if (u.waiting) u.waiting--;
 	if (u.healing) u.healing--;
-	// 2./3./4. TODO(frame-spec 9): decoys, spell casters and mana, aircraft fuel, carried production, process_healing.
+	// 2. decoys, spell casters (Caster::process_spells, mana). TODO(frame-spec 9): aircraft fuel, carried production.
+	if (!unit_process_casters(g, u)) return;
 	// 4.
 	process_healing(g, u);
 	if (u.on_map()) {
@@ -461,7 +474,8 @@ void unit_process(Game& g, Unit& u) {
 		// 5.
 		if ((g.frame + u.o) % 16 == 0) {
 			u.targeted = int8_t(u.targeted / 4);
-			// TODO(frame-spec 9): process_cloak, detected marks.
+			unit_process_cloak(g, u);
+			// TODO(frame-spec 9): detected marks.
 			if ((g.frame + u.o) % 32 == 0) {
 				u.unit_masks2 &= ~umask2::kAttritionSafe;
 				process_attrition(g, u);

@@ -1591,6 +1591,11 @@ int32_t object_get_army(const Game& g, const Unit& u) {  // @649d70
 	return -1;
 }
 
+void army_add_unit(Game& g, int32_t who, int32_t army, int32_t o) {  // Army::add_unit @6f9f40 (cast_create_decoy)
+	if (who < 0 || who >= 8 || army < 0 || army >= int32_t(g.armies[size_t(who)].size())) return;
+	add_unit(g, g.armies[size_t(who)][size_t(army)], o);
+}
+
 int32_t unit_add_to_army(Game& g, Unit& u) {  // Unit::add_to_army @5f7740
 	int32_t a = object_get_army(g, u);
 	if (a >= 0) return a;

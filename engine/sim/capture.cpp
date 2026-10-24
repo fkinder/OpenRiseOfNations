@@ -14,6 +14,7 @@
 #include "sim/economy.hpp"
 #include "sim/fog.hpp"
 #include "sim/garrison.hpp"
+#include "sim/heroes.hpp"
 #include "sim/guys.hpp"
 #include "sim/orders.hpp"
 #include "sim/pathfinder.hpp"
@@ -57,15 +58,6 @@ int32_t list_value(const Game& g, const char* list, int32_t idx) {
 	const CategoryList* cl = g.rules->category_list(list);
 	if (!cl || idx < 0 || size_t(idx) >= cl->items.size()) return 0;
 	return cl->items[size_t(idx)].data[0];
-}
-
-// HeroesData::find_hero(x, y, who, mask, type, slack) @73a1b0: the first live hero of `who` of that type whose radius
-// covers the point. TODO(heroes): HeroesData is not ported (no hero records exist); always -1. Callers keep the
-// original's count gate (LeaderData +0x59be / +0x59d8: alive THEDESPOT / SPITAMENES units).
-int32_t find_hero(const Game& g, int32_t who, int32_t type) {
-	if (!leader_ok(who) || type < kUnits || type >= kEndUnits) return -1;
-	if (LD(g, who).num_units[size_t(type - kUnits)] == 0) return -1;
-	return -1;
 }
 
 void log_event(Game& g, const GameEvent& e) { g.events.push_back(e); }
@@ -478,12 +470,13 @@ int32_t cities_capture_city(Game& g, int32_t new_who, int32_t idx, int32_t old_w
 			}
 		}
 	}
-	// ---- plunder (the despot / Spitamenes bonus needs heroes: TODO(heroes))
+	// ---- plunder: THE DESPOT / Spitamenes in range of the new city building (HeroesData::find_hero with the building's
+	// extra radius, ObjectData::has_general; the owns(type) gate is inside has_general)
 	bool despot = false;
 	if (new_idx >= 0) {
 		const Build* ncb = g.build(new_who, g.cities[size_t(new_who)][size_t(new_idx)].o);
-		if (ncb && find_hero(g, new_who, 352) >= 0) despot = true;
-		if (ncb && find_hero(g, new_who, 365) >= 0) despot = true;  // has_general(0, SPITAMENES)
+		if (ncb && has_general(g, *ncb, 0, hero::kTheDespot) >= 0) despot = true;
+		if (ncb && has_general(g, *ncb, 0, hero::kSpitamenes) >= 0) despot = true;
 	}
 	int32_t russian = 0;  // the victim keeps the plunder (Russians; after Rise of Legends only for non-capitals)
 	if (tb(g, old_who, 0xd) && K("russian_plunder_steal") != 0) russian = was_capital ? 0 : 1;

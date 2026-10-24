@@ -3,6 +3,7 @@
 // Unit::come_out, unqueue and refunds, gather points, BUILDMASK, libraries, Unit::set_type, containment.
 #include <algorithm>
 
+#include "sim/heroes.hpp"
 #include "sim/ai.hpp"
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
@@ -977,6 +978,7 @@ int32_t build_finished(Game& g, Build& b, int32_t t) {
 	if (is_spell_type(t) && l.has_tech_bit(t)) {
 		// SpellType::cast(o, who): TODO(spells). DISBAND demolishes the building.
 		if (t == ptype::kDisband) {
+			if (b.alive() && (b.flags & objflag::kActive)) build_plunder(g, b, who);  // SpellType::cast_disband @671ed0
 			build_disband(g, b, false);
 		}
 		return 1;
@@ -999,7 +1001,18 @@ int32_t build_finished(Game& g, Build& b, int32_t t) {
 		return 1;
 	}
 	gain_tech(g, who, t, b.x, b.y, true, true);
-	// TODO(gov heroes): a Senate trains / converts the government hero.
+	// Build::finished @628490: a finished Senate trains the new government's hero, or converts the living one.
+	if (type_is(*b.ptype, ptype::kSenate)) {
+		const int32_t h = get_gov_hero(g, who);
+		if (h >= 0) {
+			if (l.gov_hero_frame < 0) {
+				build_train(g, b, h);
+				return 1;
+			}
+			const int32_t uo = find_gov_hero_unit(g, who, b.x, b.y);
+			if (uo >= 0) unit_set_type(g, *g.unit(who, uo), h, 0);
+		}
+	}
 	return 1;
 }
 

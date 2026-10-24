@@ -679,10 +679,10 @@ void calc_city_resources(Game& g, int32_t who, int32_t c, int32_t* out) {
 	in.forbidden_is = centre && type_is(*centre->ptype, ptype::kForbiddenCity);
 	const Leader& l = LD(g, who);
 	if (l.num_units[size_t(etype::kTheCeo - kUnits)] != 0) {
-		// The first live hero that is a map unit and is(THECEO): its city decides. TODO(heroes): the Heroes list
-		// (Leader +0x420 count); approximated by the leader's units in slot order.
-		for (int32_t o = 0; o < g.objects[size_t(who)].unit_mark; o++) {
-			const Unit* u = g.unit(who, o);
+		// The first live hero (Heroes list, slot order) that is a map unit and is(THECEO): its city decides.
+		for (int32_t i = 0; i < l.num_heroes && size_t(i) < l.heroes.size(); i++) {
+			if (!(l.heroes[size_t(i)].hero_flags & 1)) continue;
+			const Unit* u = g.unit(who, l.heroes[size_t(i)].o);
 			if (!u || !u->alive() || !u->on_map() || !(u->ptype->unit_flags2 & 0x20)) continue;
 			if (!type_is(*u->ptype, etype::kTheCeo, true)) continue;
 			in.ceo = find_city_at(g, u->x, u->y, who, -1, 0) == c;

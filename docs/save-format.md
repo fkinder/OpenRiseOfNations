@@ -1,4 +1,4 @@
-# Save format (native, version 1)
+# Save format (native, version 2)
 
 The engine's own save format for its simulation state: `engine/sim/save.hpp` / `save.cpp` (API and the section walks),
 `save_archive.hpp` (the writer / reader), `save_walk.inc` (the member lists, generated). It is **not** the original game's
@@ -35,7 +35,7 @@ strings and containers as a `u32` count followed by the elements (`std::u16strin
 member by member in declaration order, so there is no padding in the file and equal states give byte-identical files.
 
 ```
-"RONS" | u32 version (1) | u32 flags (0) | section*
+"RONS" | u32 version (2) | u32 flags (0) | section*
 section = tag (4 ASCII bytes) | u64 payload length | u32 CRC-32 of the payload | payload
 ```
 
@@ -58,7 +58,7 @@ reads gzip and plain files alike (`gzopen` on a plain file). Writing goes to `<p
 | `CORE` | `rng` (the whole generator: its 32-bit state), `frame`, `tick`, `seed`, `total_units`, `everyone_mask`, `GameDaemon` (`busy`, `repaths`), `Market`, `good_mark`, `world_total_land`, the budget / counter members (`queue_fail`, `check_borders_budget`, `armageddon`, `musical_chairs`), the mode flags (`editor`, `scripted_rules`, `ctw`, `multiplayer`, `field_battle`, `ai_speed`, `ai_off`, `scenario_mode`, `building_*_bonus`, `buildings_gather`), game over / victory-checked |
 | `WRLD` | `World`: dimensions (checked against the loaded scenario), `sea_map`, `wdata`, `tdata`, `seen` / `seen2` / `seen3` / `wcoord_seen` (fog), `danger`, the collision block pool and its free list, `empty_colls` |
 | `REGN` | `Regions`: every `Region` member except the coordinate list, `sea`, `land` |
-| `LEAD` | the 10 `Leader`s (all ~270 members: economy, production, census, AI personality / sites / make list, diplomacy, victory clocks, stamps ...) |
+| `LEAD` | the 10 `Leader`s (all ~270 members, the hero / special records included: economy, production, census, AI personality / sites / make list, diplomacy, victory clocks, stamps ...) |
 | `OBJS` | per leader: `unit_mark`, `build_mark`, `obj_ctr`, then every `unique_ptr<Unit>` and `unique_ptr<Build>` slot **including dead and empty ones** (a presence byte, the `ptype` index, the object; a unit also its time-sliced search) |
 | `GOOD` | `goods`, `items` (`GoodObj`) |
 | `CITY` | `cities`, `forts`, `wonder_records`, `unbuilt_*`, `wonders`, `terra_cotta_total`, `world_pop`, `world_cities`, `starting`, `supplies`, `caravans`, `farms`, `hold_doobers` |

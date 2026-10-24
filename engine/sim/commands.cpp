@@ -4,6 +4,7 @@
 #include "sim/economy.hpp"
 #include "sim/game.hpp"
 #include "sim/garrison.hpp"
+#include "sim/spells.hpp"
 #include "sim/transport.hpp"
 #include "sim/production.hpp"
 
@@ -124,6 +125,14 @@ void CommandPackage::process(Game& g, const Command& c, int32_t play, int32_t pl
 	case Verb::SetTransport:
 		if (group >= 0) group_action_set_transport(g, g.groups.g[size_t(group)], c.flags);  // process_set_transport @948f60
 		return;
+	case Verb::Spell: {
+		// process_spell @948340: whom < 0, ox < 0 or the target is alive -> Group::action_spell(type, ox, whom, x, y).
+		if (group < 0) return;
+		const Object* t = (c.ox >= 0 && c.whom >= 0) ? g.object(c.whom, c.ox) : nullptr;
+		if (c.whom < 0 || c.ox < 0 || (t && t->alive()))
+			group_action_spell(g, g.groups.g[size_t(group)], c.type, c.ox, c.whom, c.x, c.y);
+		return;
+	}
 	case Verb::BoardShip: {
 		// process_board_ship @948e00: ox < 0 or objects[group owner][ox] valid -> Group::action_board_ship(ox, queued).
 		if (group < 0) return;
@@ -415,6 +424,20 @@ bool CommandManager::issue_set_transport(const Game& g, const std::vector<int32_
 	Command c;
 	c.verb = Verb::SetTransport;
 	c.flags = flag ? 1 : 0;
+	local_.push_back(c);
+	return true;
+}
+
+bool CommandManager::issue_spell(const Game& g, const std::vector<int32_t>& objs, int32_t spell, int32_t ox, int32_t whom,
+                                 int32_t x, int32_t y) {
+	if (!issue_group(g, objs)) return false;
+	Command c;
+	c.verb = Verb::Spell;
+	c.type = spell;
+	c.ox = ox;
+	c.whom = whom;
+	c.x = x;
+	c.y = y;
 	local_.push_back(c);
 	return true;
 }

@@ -5,6 +5,8 @@
 // directly, as the original does (no command queue); ScenarioData::ignore_orders, which the bodies force to 0 around
 // the action, is not modelled (groups.cpp TODO).
 #include "script/bhs_stdlib.hpp"
+#include "sim/heroes.hpp"
+#include "sim/spells.hpp"
 #include "sim/combat.hpp"
 #include "sim/garrison.hpp"
 #include "sim/groups.hpp"
@@ -290,20 +292,22 @@ void install_order_funcs(ScriptHost& h) {
 	});
 	// ScenarioFuncSet::cast_spell @9e2140 (general_forced_march @9f8bc0 / general_entrench @9f8ac0): a valid unit
 	// of a valid leader, a spell type the leader has and SpellTypeData::is_castable == 3, then Unit::add_cast_order.
-	auto cast = [&g, &h](NativeCall& c, const char* what) {
+	// (the wrappers pass ox = whom = x = y = -1; the craft and the unit travel in registers the decompile lost: the
+	// craft is the wrapper's own (0x27c / 0x27d), the unit its second script argument. ❓ heroes-spec 4)
+	auto cast = [&g](NativeCall& c, int32_t spell) {
 		const int32_t w = c.arg_int(0) - 1;
 		if (!valid_leader(g, w) || !valid_unit(g, w, c.arg_int(1))) return make_int(-1);
-		h.todo_calls[what]++;  // TODO(spells): has_spell / is_castable / add_cast_order (spells are not simulated)
-		return make_int(-1);
+		return make_int(scenario_cast_spell(g, w, c.arg_int(1), -1, -1, -1, -1, spell));
 	};
-	def("general_forced_march", [cast](NativeCall& c) { return cast(c, "general_forced_march: cast_spell"); });
-	def("general_entrench", [cast](NativeCall& c) { return cast(c, "general_entrench: cast_spell"); });
-	def("unit_stop_effect", [&g, &h](NativeCall& c) {  // @9f7930: a hero's running spell effects stop
+	def("general_forced_march", [cast](NativeCall& c) { return cast(c, 0x27c); });
+	def("general_entrench", [cast](NativeCall& c) { return cast(c, 0x27d); });
+	def("unit_stop_effect", [&g](NativeCall& c) {  // @9f7930: a hero's running spell effects stop
 		const int32_t w = c.arg_int(0) - 1, o = c.arg_int(1);
 		if (!active_unit_slot(g, w, o) || !valid_unit(g, w, o)) return make_int(-1);
 		const Unit* u = unit_at(g, w, o);
 		if (!(u->ptype->unit_flags2 & utflag2::kHero)) return make_int(0);  // UnitData::is_hero (+0x2b8 & 0x20)
-		h.todo_calls["unit_stop_effect: Caster::process_spells"]++;  // TODO(heroes): Caster records
+		Leader& L = g.leaders[size_t(w)];
+		if (u->cara >= 0 && size_t(u->cara) < L.heroes.size()) caster_process_spells(g, L.heroes[size_t(u->cara)], o, w, true);
 		return make_int(1);
 	});
 	def("air_unit_transfer_order", [&g, &h](NativeCall& c) {  // @9f8720

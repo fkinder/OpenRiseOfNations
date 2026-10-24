@@ -840,7 +840,7 @@ Checks (seed 12345):
   `GameInfo.num_nations` is still the default 2 (TODO: Game::init_rules_and_teams sets it from GameInfo.players + 1 in
   single player; the scenario value of `players` is not known).
 
-Not done (TODO in code): heroes (despot / Spitamenes plunder, THECITIZEN), garrisons (the strength scan's num_inside,
+Not done (TODO in code): garrisons (the strength scan's num_inside,
 ejection by swap_team, the AI alarm), Unit::swap_team's cargo and the exact GuyData copy, musical-chairs and economic
 victory (Game.on_team, get_economic), CTW retake adjustments, balance mode, scripted `city_lost` bookkeeping, the
 caravan repath of City::close.
@@ -864,7 +864,23 @@ caravan repath of City::close.
 8. ~~Economy~~ done (see "Economy"). Next: caravan roads (PathFinder::find_road), packers (merchants), the AI parts
    (strategy_all), then compare with replays that contain gathering, trading and market commands.
 9. ~~AI~~ (ai-spec 15 steps 1-11) done (see "Computer opponent"). ~~City capture~~ done (see "Capture and
-   victory"). Next: ~~transports~~ (see "Transports"), the other spells, heroes (the despot plunder, THECITIZEN), garrisons (ejection, the strength
+   victory"). Next: ~~transports~~ (see "Transports"), the other spells, garrisons (ejection, the strength
    scan's num_inside, the AI alarm); ~~the most-called scenario builtins~~ done (see "Scripts": 472 names, the
    tutorials call no unported builtin); then save / load of the script state, the renderer side of
    `sim/script_ui.hpp` (apps/map-mac), the CTW strategic layer.
+
+
+## Heroes (docs/heroes-spec.md; engine/sim/heroes.cpp)
+
+- `Leader::heroes` / `specials` (20 preallocated `Caster` records, grown by one) with `num_heroes` / `num_specials`; the slot is
+  `Unit.cara` (`unit_init` registers every `unit_flags2 & 0x20` hero and every spy / commando, `unit_close` frees it and expires the
+  hero's powers). `find_hero(x, y, who, mask, type, extra)` returns the hero unit's `o`; `has_general(obj, mask, type)` is the single
+  entry for every general term (stats, healing, attrition, speed, construction / training time, assimilation).
+- Powers: `cast_ambush` / `cast_march` push an `ActiveSpell`; `caster_process_spells` (step 2 of `unit_process`) expires them;
+  `process_cloak` (every 16 frames) hides friendly units in an ambushing general's radius (`kUnderCover`). `cast_entrench`,
+  `cast_create_decoy` (decoys age in `mana_burn`, `decoy_time`), `cast_supplies`. Mana regenerates in `unit_process_casters`.
+- Government heroes: `build_try_train_gov_hero` (Senate activation, `City::assimilate`), Senate `finished` (train or convert), the
+  respawn clock written by `unit_init` / `unit_close`, the Senate / capital train in `build_process`.
+- Plunder: `unit_plunder` (Aztec / THE DESPOT / Spitamenes draws `rnd(25)` per available good, Inca refund) from `take_damage` and
+  `Object::disband`; `build_plunder` from `do_damage` kills and the DISBAND queue.
+- Harness: `ron-sim --cast WHO:o@SPELL[@FRAME]`, `--heroes-every K`, `--list` (hero radius and powers); `RON_HERO_TRACE=1` logs casts.

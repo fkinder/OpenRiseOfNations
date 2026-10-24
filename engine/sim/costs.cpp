@@ -3,6 +3,7 @@
 // Checked against re/tools/production-ref.mjs --examples by ron-prod-check.
 #include <algorithm>
 
+#include "sim/heroes.hpp"
 #include "sim/fog.hpp"
 #include "sim/production_internal.hpp"
 
@@ -672,7 +673,8 @@ int32_t train_time(const Game& g, int32_t o, int32_t who, int32_t t) {
 		const int32_t cap = v * 3;
 		v += int32_t(l.num_units[size_t(t - kUnits)]) * int32_t(ty.job_extra_time) * K("unit_rate_progression");
 		v = (v < 0 || cap < 0) ? 0 : std::min(v, cap);
-		// TODO(handicap): semaphore[0] & 4 handicap mode; The President nearby (has_general, heroes not ported).
+		// TODO(handicap): semaphore[0] & 4 handicap mode ((200 - handicap) * v / 200).
+		if (prod && has_general(g, *prod, 0, 0x163) >= 0) v = (v * 100) / (K("thepresident_unit_build_speed") + 100);
 		const int32_t where = ty.where;
 		if (tb(g, who, 17) && ty.attack != 0 && where >= 0 && is_t(g, where, ptype::kStable))
 			v = prod::div100k(v, K("mongol_stable_speed"));
@@ -807,7 +809,8 @@ int32_t construct_time(const Game& g, const Build& b, int32_t all) {
 	}
 	if (all == 0) {
 		// Hanging Gardens in the same city (hanging_gardens_build_time, 0 in the stock rules): TODO with wonder
-		// cities. The President nearby: heroes not ported.
+		// cities.
+		if (has_general(g, b, 0, 0x163) >= 0) v = int32_t(uint32_t(v * 100) / uint32_t(K("thepresident_building_speed") + 100));
 		if (tb(g, who, 18) && is_t(g, b.type, ptype::kSenate) && K("iroquois_quick_senate") != 0 &&
 		    LD(g, who).high_buildings[ptype::kSenate - kBuilds] == 0)
 			v = 0;

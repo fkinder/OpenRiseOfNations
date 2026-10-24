@@ -1,4 +1,5 @@
 // Fog of war and line of sight (docs/fog-spec.md); see sim/fog.hpp. Every function names the original it ports.
+#include "sim/heroes.hpp"
 #include "sim/fog.hpp"
 #include "sim/production.hpp"
 
@@ -118,10 +119,9 @@ bool unit_is_packing(const Unit& u) {
 	(void)u;
 	return false;
 }
-// ObjectData::has_general @646b00: TODO(heroes) — no heroes yet (as groups.cpp).
+// ObjectData::has_general @646b00 (sim/heroes.hpp).
 int32_t object_has_general(const Game& g, const Unit& u, int32_t mask, int32_t type) {
-	(void)g, (void)u, (void)mask, (void)type;
-	return -1;
+	return has_general(g, u, uint32_t(mask), type);
 }
 
 }  // namespace

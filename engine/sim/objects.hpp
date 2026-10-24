@@ -231,7 +231,10 @@ struct Unit : Object {
 	int8_t stance = 0, safe = 0, collide_who = -1, inside_up_who = -1, guy_mark = 0, play = 0;
 	// Economy (economy-spec 0): +0x54 rare (union: the good a merchant / fisherman collects, the previous type of a
 	// scholar militia; Unit::init writes 0), +0x86 held doober (>= 0 while a woodcutter / miner holds wood or ore; the
-	// Doober objects themselves are presentation, TODO) / caravan slot of a caravan (cara).
+	// Doober objects themselves are presentation, TODO) / caravan slot of a caravan (cara). The same +0x86 field holds
+	// the record slot of a hero (Leader::heroes[cara], sim/heroes.hpp). A spy / commando keeps its Specials slot
+	// (Leader::specials[hero]) in the `hero` member above (+0x86 too in the PDB, "special"), not in `cara`: a unit is
+	// never two of these, but the harness digest hashes `cara`.
 	int32_t rare = 0;
 	int16_t doober = -1, cara = -1;
 	// AnimalData +0x150..+0x154 (gaia animals): ox / whom of the farm pen a farm animal belongs to, aid (its index).
