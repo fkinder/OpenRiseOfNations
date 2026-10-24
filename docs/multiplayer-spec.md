@@ -1,6 +1,6 @@
 # Multiplayer: lockstep session, start, drops, desyncs, saves (roadmap phase 8)
 
-Status: ✅ decompiled from `riseofnations.exe` (+ `CrossplayNetLib.dll`, PDB applied) and checked against the 59 multiplayer
+Status: ✅ lockstep layer, replay reader and tests built (section 8) · ✅ decompiled from `riseofnations.exe` (+ `CrossplayNetLib.dll`, PDB applied) and checked against the 59 multiplayer
 replays in `re/oracle/Recorded Games/Multi` (gitignored; refer to files by date only) · 🟡 inferred from code or data, not
 proven · ❓ unknown. Builds on [replay-spec.md](replay-spec.md) §7–§11, §14 (package records, verbs, `TurnControl`, checksums);
 that text is not repeated. Decompiles: `re/decomp/multiplayer/` (jobs `re/jobs/dc_mp*.txt`). The corpus is described in
@@ -296,73 +296,112 @@ must be executed deterministically even though it looks cosmetic. For observers 
 NETMSG_SPLINE (30); receivers show out-of-band chat only if they are not active players, unless `info.flags & 0x20`
 (observer chat to all). NETMSG_TAUNT is a no-op. Lobby chat is lobby-layer.
 
-## 8. What the port needs
+## 8. The port: what was built (roadmap phase 8)
 
-### 8.1 Architecture (`engine/net`, new; no sim dependency)
+✅ built and checked against the corpus as stated in §8.4. Files: `engine/sim/replay.{hpp,cpp}` (the `.rcx` reader and the package codec),
+`engine/net/` (the lockstep layer and its transports), `apps/net/` (`ron-net`, the tests; `rcxcompare.mjs` checks the reader against
+`rcxdump.mjs`). The layer has no dependency on the engine's `Game`: it knows the verb table (`sim/replay.hpp`) and talks to the simulation
+through `SimHooks`.
 
-```
-Transport (abstract)   reliable ordered per peer; send(peer,bytes) / broadcast(bytes, include_self);
-                       poll() -> (peer, bytes); peers(); local_peer(); is_host(); on_timeout(peer); now_ms()
-  LoopbackTransport    N endpoints in one process, deterministic delay/jitter, loss=0 (tests; also unit-test stalls)
-  ... real one later   (UDP/ENet or platform P2P); star-relay via host is allowed: semantics below do not change
-Lockstep::Session      owns: package_stamps[8], local_package_stamp, FIFO[8] (cap ≥ 20, history 3), TurnClock,
-                       DropState, ChecksumState, Recorder
-  submit(bytes)        append verbs to the local package (≤ 512)          [UI thread]
-  pump()               transport -> accept package iff stamp == last+1    [any time]
-  step()               -> Advance | Stalled(slot) | Desync(report) | Ended; at most one sim tick per call
-Sim contract           execute_package(play, bytes);  step_frame();  checksums() -> u32[16];  snapshot() / restore()
-```
+### 8.1 Architecture
 
-Algorithm (must stay observably identical to §1.3): per tick, `turn_counter++`; at `turn_length`: compute 16 sums;
-queue sums + TURN_DATA + CAMERA into the local package; broadcast stamp *s*; for slot 0..7 in the expected-sender set,
-block until stamp *s−1* is present; execute in slot order; compare `all`; recompute `turn_length` from the
-executed TURN_DATAs; then step frames. Paused → keep counting turns, skip `step_frame`. **The only wall-clock use is deciding when
-a tick happens**; ticks never change which commands run. Keep the original package bytes (verbs of replay-spec §9, group
-state `last_*_received`) so recorded games and `rcxdump` stay usable; XOR/padding on a live wire is unnecessary (strip it, keep it
-in the `.rcx` reader). Record each peer's executed packages as `.rcx` segments (same layout, stamps from 1, embedded save).
+| File | What |
+|---|---|
+| `engine/sim/replay.{hpp,cpp}` | `read_replay`: gzip or plain `.rcx` -> header (`GameInfo`, 8 players, setup, semaphore, `save_name`), the embedded save (offset, size, frame, its own `GameInfo`), the random-game info, the rules block (located, not decoded), the package records with the multiplayer de-XOR and padding (replay-spec §7-§8), the stream located after a save by the same scan as `rcxdump.mjs`. The verb table (82 verbs: names, lengths), `replay_command_length`, `replay_to_engine` / `engine_to_wire` (the engine's `Command` for the 36 verbs it has one for, raw bytes for the rest), `wire_check_sums` / `wire_turn_data` / `wire_camera` / `wire_pause` / `wire_resign` / `wire_drop`, `replay_obfuscate` / `replay_decode_package`. `ron-net survey --codec` checks the codec on the whole corpus: 104,206 engine commands re-encode byte for byte (2 LEADER_OPTIONS differ in the BitMask's middle word, 0 in all the others, which `Command` does not keep), and the XOR + padding of 172,278 multiplayer packages undo themselves |
+| `engine/net/lockstep.{hpp,cpp}` | `Transport` (abstract: `peers`, `send`, `broadcast(msg, include_self)`, `poll`, `take_timeout`, `now_ms`), `LoopbackHub` / `LoopbackTransport` (N endpoints in one process; deterministic per-link delay, `hold`, `kill`, `kill_after_sends` = death in the middle of a broadcast), `SimHooks`, `Session` |
+| `engine/net/tcp.{hpp,cpp}` | `TcpTransport`: plain sockets, a star (host = slot 0, clients get 1..n, the host relays client-to-client traffic; per-sender order is kept). Connection loss -> `take_timeout` (the host also tells the other clients) |
+| `engine/net/lobby.{hpp,cpp}` | `Lobby`: the host's key/value store mirrored to the peers (SET), ready flags, START (the whole table + the seed the host picked, key `game_seed`), a rendezvous barrier (`SyncPoint`). Game messages that arrive early are given back to the transport (`push_front`) |
+| `engine/net/game_link.{hpp,cpp}` | `GameHooks` (`SimHooks` over `sim::Game`: runs `CommandPackage::process`, `do_frame`, the 15 sums), `ExecPolicy`, `setup_to_lobby` / `lobby_to_setup` (the keys of §2.1 for `RandomGameSetup`) |
+| `apps/net/main.cpp` ... | `ron-net survey | timing | replay | selftest | host | join` |
 
-### 8.2 Decisions
-1. Keep the **constant** ping (200 → 72 after masking) so `turn_length` matches the corpus (6 at speed 2 for 2–5 humans). An
-   adaptive scheme is a port extension and must travel inside TURN_DATA, never be derived locally.
-2. Dropped player: agree on the dropped slot's **last executed stamp** through the host (or lowest live slot) and only then
-   apply the `'P'` command at a boundary; do not skip a pending slot locally as the original does (§3.5).
-3. Transport must be reliable-ordered; treat stamp gaps as a protocol error (original drops silently, then deadlocks).
-4. OOS: keep the aggregate compare + per-component report; threshold 0; on mismatch freeze, send a dsync notice,
-   offer reload from the authority's snapshot (needs the save-port); until `leaders`-only divergence (§5.4) is understood, a
-   failed post-load run is not by itself a port bug.
-5. Observers: decide explicitly (their packages must be either not sent or drained); never let a FIFO overflow end a game.
-6. Cross-play with original clients is out of scope; lobby = port-defined key/value set mirroring §2.1.
+`Session` (one per peer): `submit(cmds)` queues verbs into the local package (<= 512 bytes, room kept for the automatic ones), `start()` sends stamp 1,
+`step()` runs **at most one simulation tick** and returns `Advanced | Stalled(slot) | Desync | Ended | Error`; `pump()` is part of it.
+Callbacks: `on_boundary` (the 16 sums of each boundary, before its packages run), `on_package` (every executed package: this is where a `.rcx`
+segment writer would hook in), `on_waiting`, `on_drop`, `on_resign`. The only wall clock is `Transport::now_ms` for the late-package timeout
+(`SessionConfig::timeout_ms`, 0 = only the transport's notices decide) and the caller's loop, which decides when a tick happens.
+
+**The tick, as implemented** (observably the original's, §1.3):
+1. `turn_counter++`. If it reached `turn_length`: boundary.
+2. Boundary: zero the per-turn sums; `SimHooks::checksums` (15 parts + `all`) over the state **before** any package runs; append CHECK_SUMS to the
+   local package; `on_boundary`; append TURN_DATA (`ping_time` = 72, the constant of §1.4, bit 7 when `game_over`) and CAMERA; stamp++; broadcast
+   stamp *s* (`send_all`: the sender receives its own copy through the transport, as the original's).
+3. Gate (see "differences"): apply the drops whose agreed final stamp is behind this boundary, then wait until every expected sender has a package queued.
+4. Execute stamp *s*-1 of every expected sender in slot order 0..7 (`begin_package`, each command, `end_package`). The lockstep verbs are handled by the
+   layer and also given to the sim: CHECK_SUMS (`sums[play] = all`), TURN_DATA (`last_ping[play]`, bit 7 -> `view_all`), PAUSE (state 1/0 sets the flag), SPEED_SET/UP/DOWN,
+   CANNON_TIME (speed 0 for 0x4a frames, `can_cannon_time` hook), RESIGN / QUIT (flag 0x40, the sender leaves the expected set), UNGRACEFUL_PLAYER_DROP.
+5. Compare: all non-zero `all` equal and no peer sent DSYNC; else `fail_count++` against `checksum_failure_threshold` (0: the first is fatal) -> `Desync`.
+6. `turn_length = ceil(clamp(max(2 x max ping of the TURN_DATA executed, min_turn_time), <= 1000) / timings[speed])`, 1 if there was none;
+   `min_turn_time = clamp(80 x humans, 400, 600)`. `turn_counter = 0`.
+7. Unless paused: `step_frame`. Pause keeps counting turns and stamps (frames stand still, stamps go on).
+
+**Messages** (first byte): 7 package `u32 stamp, i8 play, i16 size, data` (commands back to back, **no XOR, no padding** on the wire: the `.rcx` reader strips
+them), 29 DROP_FLAG, 13 DROP_VOTE, 14 DROP_DECISION, 0x87 DSYNC (`i32 stamp`), and the port's 0x91 DROP_STATE `(slot, last accepted stamp)`, 0x92 DROP_NEED
+`(slot, stamp)`; 0xA0-0xA3 the lobby.
+
+**Differences from the original, on purpose:**
+- The late-package wait finishes *before the first package of the boundary runs* (the original executes in slot order while waiting). Without
+  drops it changes nothing observable; with drops it is what lets every peer apply the drop at the same point (before any package of the boundary).
+- Package acceptance: `stamp == last + 1`; an older stamp is a harmless duplicate (counted), a gap is a protocol error (`Error`), a full FIFO (20) is an error.
+- A DSYNC from any peer stops this peer at once (the original notices at its next `end_process`), so all peers report within one turn.
+- Observers (`kPlayerObserver`) send no package, are never waited for, and execute everybody's (tested with 2 observers).
+
+### 8.2 Decisions (all taken as proposed; status)
+
+1. ✅ Constant ping: `ping_time` 72 -> `turn_length` 6 at speed 2 for 2-5 humans (9 for 8 humans, 8 for 6, by formula). Speed changes (`SPEED_*`, cannon time)
+   change `timings[speed]` before the next `turn_length`, identically on every peer. 🟡 `SPEED_*` and `CANNON_TIME` do not occur in the corpus; the clamps (0..4) and the
+   cannon-time end test are from the decompile, checked only in `ron-net selftest`.
+2. ✅ Dropped player (`Session::report_timeout`, called by the transport's notices): every peer flags the slot (DROP_FLAG); when all remaining peers have flagged it, each
+   freezes the slot (direct packages from it are ignored, relays accepted), broadcasts DROP_STATE (its last accepted stamp of the slot) and DROP_VOTE
+   (`set_drop_preference`, default REPLACE_WITH_AI); once everybody's state and vote are in, the arbiter (lowest remaining slot) sends DROP_DECISION
+   `(slot, option, final_stamp = max of the states)`. Whoever has packages another peer lacks sends them (DROP_STATE round, plus DROP_NEED when a peer is still short
+   at the boundary: the dying peer's last broadcast reached only some peers). The drop is applied at the start of the boundary that would execute stamp
+   `final_stamp + 1`: the clear-text `'P'` command `[0x50, slot, option]` goes through the same path as a recorded one (`lockstep_verb` + `SimHooks::execute`).
+   REPLACE_WITH_AI clears HUMAN|DROPPED (the slot stays valid, the AI plays it), the other options set DROPPED. Votes: unanimous -> that option, else the plurality with
+   REPLACE_WITH_AI breaking ties; there is no 90 s timer because every peer votes automatically. Engine side (`GameHooks`, `ExecPolicy::player_exit`): REPLACE_WITH_AI clears
+   `leaderflag::kHuman`; the other options and RESIGN / QUIT call `leader_defeat(who, 7 or 6)`. 🟡 DIPLOMACY / SURVIVAL do not reset teams and diplomacy yet; co-op seats sharing a leader are not modelled.
+3. ✅ A stamp gap is `Error`; duplicates are ignored (resends rely on it).
+4. 🟡 OOS: detection and the per-component report are built (`DesyncReport`: the 16 sums of every sender, the first of the 15 parts that differs; DSYNC broadcast; frozen
+   afterwards). **Recovery from the authority's snapshot is not built** (the native save could carry it: `save_game_bytes` / `load_game_bytes`; stamps would restart at 1).
+5. ✅ Observers: they send nothing, nobody waits for them, they execute every package; a FIFO never fills for them (packages of non-expected slots are not queued).
+6. ✅ Lobby = port-defined key/value set mirroring §2.1 (`map_style map_size game_seed gamerules gamespeed pop_limit tech_cost rush_rules reveal_map victory elimination
+   score_goal time_limit wonderwin popwin econwin starting_town starting_resources starting_technology ending_technology randomize_starts no_tribe_powers num_nations`, per slot
+   `slot_type_n tribe_n team_n diff_n color_n`; `scenario`, `humans` for a scenario game). No cross-play with original clients.
 
 ### 8.3 Determinism risks the current engine must close (cf. [sim-implementation.md](sim-implementation.md))
 - **Iteration order**: players, leaders, objects, groups by index only; no pointer- or hash-ordered containers in the sim;
   `qsort`/`std::sort` ties (original: MSVC `qsort`, insertion sorts in `queues.cpp`/`normalize`) need stable explicit comparators.
 - **Floating point**: the original is x86 SSE2 single precision, no FMA. On arm64 compile `engine/sim` with
-  `-ffp-contract=off` globally (today only some files use `#pragma clang fp contract(off)`), no fast-math, no libm
+  `-ffp-contract=off` globally (today only some files use `#pragma clang fp contract(off)`; **`build-mac.sh` passes no `-ffp-contract=off`**, and clang's default is `on`), no fast-math, no libm
   transcendentals (the original uses its own `sin_table`/`cos` tables), and mirror x86 `cvttss2si` for out-of-range / NaN
-  float→int (returns 0x80000000; arm64 `fcvtzs` saturates / returns 0) wherever a float is truncated in the sim.
+  float->int (returns 0x80000000; arm64 `fcvtzs` saturates / returns 0) wherever a float is truncated in the sim.
 - **RNG**: one global `game_random` seeded from `info.seed` (replay-spec §12); UI/sound RNGs must never touch it; draw sites
   must be exhaustive (the RNG is not in any checksum, so a missed draw shows up only through its effects).
 - **Peer-local state**: nothing derived from the camera, window, console `play`, audio, locale or wall time may reach the sim or
   the 15 sums (the original's `leaders` divergences hint at exactly this kind of leak, §5.4).
 - **Uninitialised memory** and `memcmp`-style hashing of padded structs: hash fields, not bytes (state-spec §6 already does).
 - **Package order and re-entrancy**: execute in slot order 0..7 inside the turn boundary, before the frame step; single sim thread.
+Evidence so far: several engine instances in one process (so any shared mutable static would show) stay byte-identical for 15,334 turns of the 45 save-based replays, with
+delivery delays up to 25 ms; two processes over TCP end 600 / 1500 / 6000 frames of random games (and a scenario) with identical native saves. Not run: x86-64 against arm64.
 
-### 8.4 Acceptance criteria (no original needed)
-1. **Timing oracle**: from a corpus replay's stamps + PAUSE/speed verbs alone, `TurnClock` must reproduce the `frame` column of
-   every record (e.g. 84,007 gaps all 6; boundaries 1, 7, 13…; repeated frames during pauses; mid-game segments start at
-   header.frame + 1). No wall clock input.
-2. **Loopback lockstep**: two (and four, using 4-human files) `Session`s over `LoopbackTransport` with random delivery delay,
-   each fed only its own human's recorded packages, advance in lockstep; their 16-sum vectors are equal to each other at every
-   turn; staged equality with the recorded `all` as sim components land (first `rules`, already reproducible; then the rest:
-   oracle-corpus.md). Replay the 14 fresh MP files, then the 45 save-embedded ones.
-3. **Stall**: withholding one package freezes both instances at the same boundary (no frame advance, no divergence) and resumes
-   when delivered; stamp gap / duplicate is rejected.
-4. **Resign**: the 6 corpus RESIGN endings: leaver leaves the expected set, survivors continue to match.
-5. **Drop** (no corpus oracle): kill a peer at a random turn and at a random point of its broadcast; survivors must apply the same
-   drop at the same boundary and keep equal sums, for each of the 4 options.
-6. **OOS**: flip one bit of one instance's state; both report OOS within one turn (`all` or dsync); recovery from the authority
-   snapshot resumes with equal sums and stamps restarting at 1.
-7. **Cross-platform soak**: the same replay on x86-64 and arm64 gives identical sums turn by turn (floating-point criteria §8.3).
+### 8.4 Acceptance criteria and results (no original needed)
+1. ✅ **Timing oracle** (`ron-net timing "re/oracle/Recorded Games/Multi"`): the `Session` over loopback, fed only each player's stamps, PAUSE and RESIGN (everything else is
+   ignored, the sums and TURN_DATA are its own), reproduces the `frame` column of **all 172,276 packages of the 59 files** (86,144 turns; 84,007 gaps of 6, boundaries at header.frame + 1, 7, 13..., the repeated
+   frames of every pause, the RESIGN endings), 0 differences, also with random delivery delays up to 40 ms. The 14 files that start from scratch are covered too (the sim is a frame counter there).
+2. ✅ **Loopback lockstep** (`ron-net replay <file>`): 2 engine instances (`--observers K` adds instances that only watch), each fed only its own player's packages through the layer, the sums computed by each
+   instance's `EngineProvider` at every boundary. On the **45 save-based replays: the instances agree on all 15 parts at every turn (15,334 turns) and end in identical states, 45/45**, at delivery delays 0..3 ms and 0..25 ms.
+   The fidelity numbers (first turn each part differs from the replay's CHECK_SUMS) are **identical to `ron-sav --replay` for 45/45 files** (the output lines are `diff`-equal; the aircraft verbs
+   ATTACK_GROUND / PATROL / LAUNCH_PATROL / FLIGHT / RECALL / SCRAMBLE are left out by default exactly as `ron-sav` leaves them out, `--all-verbs` runs them). The 14 files without an embedded save need the
+   random-map path from the header setup plus the replay's own rules block and are only covered by criterion 1.
+3. ✅ **Stall** (`ron-net selftest`): withholding one peer's packages freezes the others at the same boundary (no frame, no divergence) and they resume when it is delivered; a duplicate stamp is ignored, a gap is `Error`.
+4. ✅ **Resign**: the 6 RESIGN endings of the corpus run through criterion 1 (the leaver leaves the expected set); `selftest` keeps playing with the survivors: equal sums, nothing queues up for the leaver.
+5. ✅ **Drop**: for each of the 4 options, random victim, random turn and a broadcast cut at a random link (`kill_after_sends`), 3-4 peers: the survivors apply the same drop at the same boundary and keep equal sums
+   (30/30 per option in 10 seeds). On real sockets: three `ron-net` processes, one killed with `kill -9`: the two survivors apply REPLACE_WITH_AI at the same turn and end 20,000 frames with identical saves.
+6. 🟡 **OOS**: flipping one bit of one instance makes every peer report within 2 turns (threshold 0) / `threshold + 2` (tested with 3); the simulation stays frozen. Recovery (reload from the authority) not built.
+7. ❓ **Cross-platform soak** (x86-64 against arm64): not run.
+
+`ron-net host <port> --random STYLE,SIZE,SEED,NATIONS [--humans N] [--frames N] [--save F]` / `ron-net join <port>`: the host's lobby fixes the setup and the seed, every process builds the same
+`new_random_game`, a small bot plays each seat (so there are commands), the game stops at frame N and the processes write their native save: two processes, 600 frames, 100 turns, 80 commands:
+about 1.8 MB each, byte-identical. `--scenario FILE --seed S` starts the same scenario instead (tested with the first tutorial).
 
 ## Evidence
 
@@ -382,6 +421,7 @@ in the `.rcx` reader). Record each peer's executed packages as `.rcx` segments (
 | Types `NetMsgType`, `NetMsg_*`, `MPDropOptions`, `PlayerFlags`, `DropPacket`, `GameConnectionData(Full)`, `NetSys`, vtables | `rise.pdb`, `CrossplayNetLib.pdb` | §1.2, §3 |
 | Strings: `loc 0x16a8 0x17e8 0x1824 0xf0f0 0x56f4 0x13358 0x11a58…` | `re/tools/locstrings.mjs` | popup / status texts |
 | Corpus statistics (59 MP replays) | `rcxdump --json`; this session's scripts | gaps = 6, ping = 72, 45 saves, 48 mismatches |
+| The port: reader, lockstep, tests | `engine/sim/replay.*`, `engine/net/*`, `apps/net/*` (`ron-net`) | section 8 |
 
 ## Open questions (❓)
 
@@ -397,3 +437,5 @@ in the `.rcx` reader). Record each peer's executed packages as `.rcx` segments (
 10. `Version`/handshake details inside `ICrossPlayService` (build gate), and lobby ranked / Elo flow (out of scope for the sim).
 11. MP playback feature (live replay sharing) not traced beyond `send_local_package`.
 12. The 15 per-component sums as a function of the engine state: see state-spec §6 / oracle-corpus (not multiplayer-specific).
+13. (port) The pause quota: whether `Player.pauses` counts used or remaining pauses, and whether a second PAUSE(1) while paused counts. The layer accepts every recorded pause (`max_pauses` 0 = unlimited) and sets the flag from `state`.
+14. (port) The OOS recovery path (§8.2.4) and `.rcx` recording of a live session (the `on_package` callback is the hook) are not built.

@@ -85,3 +85,10 @@ echo "  ./build/ron-mapgen <game dir> --style 12 --size 3 --seed 1 --nations 4 -
 echo "  ./build/ron-sav re/oracle/Saves/<file>.SVX --verify    # decodes an original save (or a replay's embedded save) and recomputes its Adler-32 verify block"
 echo "  ./build/ronviewer <game dir>    # opens the unit viewer"
 echo "  ./build/ronmap <game dir> scenario/Tutorial1/tut1.scx    # renders a scenario's terrain"
+
+echo "Building ron-net..."
+clang++ "${CXXFLAGS[@]}" "${OBJS[@]}" apps/net/*.cpp -lz -o build/ron-net
+echo "  ./build/ron-net replay \"re/oracle/Recorded Games/Multi/<file>.rcx\"    # N engine instances in lockstep, fed by one multiplayer replay; the numbers of ron-sav --replay plus the instances' agreement"
+echo "  ./build/ron-net selftest    # lockstep acceptance tests on a toy simulation: stall, pause, speed, resign, drops, desync"
+echo "  ./build/ron-net timing \"re/oracle/Recorded Games/Multi\"    # the turn clock reproduces the frame column of every recorded package"
+echo "  ./build/ron-net host 7777 --random 18,0,1,2 --frames 600 & ./build/ron-net join 7777 --frames 600    # a LAN game of two processes"
