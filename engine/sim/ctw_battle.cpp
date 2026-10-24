@@ -3,25 +3,28 @@
 // campaign's custom .scx maps), the tactical cards' battle-side effects and the outcome rules.
 //
 // Deviations / marks:
-//  - conquest map styles 24-26 (MapConquest, the sea variant, MapScenario) are not in the generator: land links use the
-//    "Random Land" picker (map style 1), sea links "Random Sea" (2), custom maps are loaded from their .scx.
-//    TODO(ctw 24-26): MapConquest::make (the node-shaped terrain), check_starting_loc / check_sea_map. Status of the generator side: the
-//    style files (CONQUESTMAP / CONQUESTMAPSEA) and the rest of Map::make are the generic path; what is missing is make_continents, which turns the two
-//    countries' silhouette images (conquest/RenderMaps/MapPieces/<map>/xpack_temp_country<N><map>.png) into land and water (import_image: box average
-//    against a percent, docs/randommap-terrain-groups.md B3.13) and places the starts; it needs the silhouettes and rectangles from this layer.
+//  - conquest map styles 24-26: generated battles use MapConquest (24) or MapConquestSea (25, a sea link) of the generator
+//    (mapgen_conquest.cpp, docs/randommap-terrain-groups.md B3.13): conquest_battle_input below draws the square around the two countries from
+//    the silhouette pieces (conquest/RenderMaps/MapPieces/<map>/xpack_temp_country<N><map>.png) and build_battle keeps it in a
+//    mapgen::ConquestScope while new_random_game runs. RandomGameSetup clamps its map style to the shipped ones, so BattleDef.setup keeps the
+//    "Random Land" / "Random Sea" pickers (1 / 2) and the scope upgrades them. Style 26 (MapScenario) is the campaign's custom .scx, loaded as
+//    a scenario. Without the piece files the battle falls back to the plain pickers.
 //  - the battle seed: conquest_game.seed for every battle, as build_game does; ConquestGame::vary_battle_seed derives one per link
 //    and round instead (an option, off by default).
 //  - reinforcement armies: ctw_reinf.cpp; the tactical cards: ctw_tactical.cpp.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <stdexcept>
 
+#include "assets/png.hpp"
 #include "assets/scenario.hpp"
 #include "sim/ai.hpp"
 #include "sim/ctw.hpp"
 #include "sim/game.hpp"
 #include "sim/heroes.hpp"
+#include "sim/mapgen.hpp"
 #include "sim/production.hpp"
 #include "sim/rules_xml.hpp"
 #include "sim/script_host.hpp"
@@ -190,7 +193,7 @@ ConquestGame::BattleDef ConquestGame::make_battle(const LinkChoice& l, const Sty
 	// ---- the engine setup
 	RandomGameSetup S = default_random_setup(std::max(2, n));
 	S.ctw = true;
-	S.map_style = l.sea ? 2 : 1;  // TODO(ctw 24-26): MapConquest / MapConquestSea
+	S.map_style = l.sea ? 2 : 1;  // upgraded to MapConquest / MapConquestSea by build_battle's ConquestScope
 	// map size: 2-3 players -> 3, >= 4 -> 4, +1 for a sea link, or the style's `mapsizes`
 	S.map_size = n >= 4 ? 4 : 3;
 	if (l.sea) S.map_size = std::min(6, S.map_size + 1);
@@ -275,7 +278,9 @@ ConquestGame::BattleDef ConquestGame::make_battle(const LinkChoice& l, const Sty
 		s.slot = s.slot;  // the campaign nation stays in the seat; `ns.tribe` is the engine tribe
 	}
 	S.num_nations = n;
-	if (st.map_style == kMsCustom && !st.custom_map.empty()) B.custom_map = st.custom_map;
+	// RON_CTW_GENERATE=1 plays a custom-map battle on a generated conquest map instead (a test aid: the early battles of Alexander and Napoleon
+	// are all scripted historical maps, so this is the only way to see the generator on them)
+	if (st.map_style == kMsCustom && !st.custom_map.empty() && !std::getenv("RON_CTW_GENERATE")) B.custom_map = st.custom_map;
 	const bool attacker_tileset = st.map_style == kMsAttacker;
 	B.tileset = nodes[size_t(attacker_tileset ? l.from : l.to)].tileset;
 	// the AI's tactical cards (select_tactical_cards): only the two main nations, only in the default styles, and not an easy
@@ -327,6 +332,95 @@ ConquestGame::BattleDef ConquestGame::make_battle(const LinkChoice& l, const Sty
 	return B;
 }
 
+// ---------------------------------------------------------------- the conquest map input (styles 24 / 25)
+
+// Everything MapConquest::make_continents reads from the CtW layer for the battle B (docs/randommap-terrain-groups.md B3.13): the square image
+// of the link's two countries (ConquestCountries::draw_scenario_area; the rectangle of get_scenario_map_rect with param_1 = the attacker's
+// node, param_2 = the defended node), the start seats (start_who: the player's side is seat 0) and the extra opponents. Declared where it is
+// used (build_battle, apps/mapgen). Returns false with `err` when a piece file is missing.
+bool conquest_battle_input(const ConquestGame& g, const GameFiles& F, const ConquestGame::BattleDef& B, mapgen::ConquestInput* out, std::string* err) {
+	if (!g.def) {
+		if (err) *err = "no campaign";
+		return false;
+	}
+	const CampaignDef& D = *g.def;
+	const LinkChoice& l = B.link;
+	const int a = l.to, b = l.from;  // link[0] = the defended node, link[1] = the attacker's
+	if (a < 0 || b < 0 || size_t(a) >= D.countries.size() || size_t(b) >= D.countries.size() || a == b) {
+		if (err) *err = "link without two distinct countries";
+		return false;
+	}
+	mapgen::ConquestInput ci;
+	ci.sea = l.sea;
+	ci.node_a = a;
+	ci.node_b = b;
+	const mapgen::ConquestRect rect = mapgen::conquest_scenario_rect(D.countries[size_t(b)].x, D.countries[size_t(b)].y, D.countries[size_t(a)].x,
+	                                                                  D.countries[size_t(a)].y, D.tex_width, B.map_style);
+	std::vector<mapgen::ConquestCountry> cs;
+	for (const CountryDef& c : D.countries) {
+		mapgen::ConquestCountry k;
+		k.left = c.left;
+		k.right = c.right;
+		k.top = c.top;
+		k.bottom = c.bottom;
+		k.cx = c.x;
+		k.cy = c.y;
+		cs.push_back(k);
+	}
+	std::map<int, Image> cache;
+	std::string missing;
+	auto piece = [&](int i) -> const Image* {
+		auto it = cache.find(i);
+		if (it == cache.end()) {
+			Image img;
+			const std::string rel = "conquest/RenderMaps/MapPieces/" + D.file + "/xpack_temp_country" + std::to_string(i) + D.file + ".png";
+			const std::string path = F.resolve(rel);
+			std::string e2;
+			if (path.empty() || !load_png(path, img, &e2)) {
+				if (missing.empty()) missing = path.empty() ? rel + " is missing" : e2;
+				img = Image();
+			}
+			it = cache.emplace(i, std::move(img)).first;
+		}
+		return it->second.width > 0 ? &it->second : nullptr;
+	};
+	if (!mapgen::conquest_draw_scenario_area(rect, D.tex_width, g.map_scale(), cs, piece, ci)) {
+		if (err) *err = "empty conquest map rectangle";
+		return false;
+	}
+	if (!missing.empty()) {
+		if (err) *err = missing;
+		return false;
+	}
+	// start_who: seat 0 is the player. The first start (b, the attacker's node) is local_34 = (seat 0's nation == the defender), the second the other
+	const int player_slot = B.seats.empty() ? g.player_tribe : B.seats[0].slot;
+	ci.who_b = (l.defender >= 0 && l.defender == player_slot) ? 1 : 0;
+	ci.who_a = 1 - ci.who_b;
+	ci.swap = B.map_style == kMsAttackerDefense || B.map_style == kMsDefenderAttack;
+	// seats 2..: the supporters (make_battle adds the attacker's side first, then the defender's: near_second = allied to the defended node's
+	// owner), then the barbarian seats
+	{
+		size_t k = 2;
+		if (B.defender_default) {
+			for (int pass = 0; pass < 2; pass++) {
+				const std::vector<int>& list = pass == 0 ? l.att_supporters : l.def_supporters;
+				for (size_t i = 0; i < list.size() && k < B.seats.size(); i++, k++) {
+					if (B.seats[k].barbarian) break;
+					mapgen::ConquestSupporter sp;
+					sp.near_second = pass == 1;
+					ci.supporters.push_back(sp);
+				}
+			}
+		}
+		for (size_t i = 2; i < B.seats.size(); i++) ci.barbarians += B.seats[i].barbarian ? 1 : 0;
+	}
+	if (B.style.index >= 0 && size_t(B.style.index) < g.style_table.size()) ci.no_rare = g.style_table[size_t(B.style.index)].no_rare;
+	ci.tileset = B.tileset;
+	ci.valid = true;
+	*out = std::move(ci);
+	return true;
+}
+
 // ---------------------------------------------------------------- building the battle
 
 namespace {
@@ -362,6 +456,11 @@ std::unique_ptr<sim::Game> ConquestGame::build_battle(const GameFiles& F, const 
 	std::unique_ptr<Game> gp;
 	const int n = int(B.seats.size());
 	if (B.custom_map.empty()) {
+		mapgen::ConquestInput conquest;
+		std::string conquest_err;
+		const bool have_conquest = conquest_battle_input(*this, F, B, &conquest, &conquest_err);
+		if (!have_conquest) std::fprintf(stderr, "ctw: no conquest map (%s): a plain random map is generated\n", conquest_err.c_str());
+		mapgen::ConquestScope conquest_scope(have_conquest ? &conquest : nullptr);
 		gp = new_random_game(F, R, anims, B.setup, &X);
 		if (!gp) {
 			if (error) *error = X.error;

@@ -65,6 +65,11 @@ Gen::Gen(Context& ctx, const Params& p, Result& out)
 	ys = xs;
 	cells = xs * ys;
 	style = p.style;
+	// A CtW battle (sim/ctw_battle.cpp keeps a ConquestScope open): the random-map pickers 0..5 the setup carries become MapConquest /
+	// MapConquestSea (build_conquest_game: style 0x18, 0x19 for a sea link).
+	if (const ConquestInput* ci = conquest_input()) {
+		if (ci->valid && style >= 0 && style <= 5) style = ci->sea ? kStyleConquestSea : kStyleConquest;
+	}
 }
 
 void Gen::phase(const char* name) {
@@ -105,7 +110,7 @@ void Gen::make() {
 	if (tgd.coast_base >= 0) change_coast_base();
 	fix_transitions();
 	phase("terrain groups");
-	place_resources();
+	if (!(style >= kStyleConquest && conquest_input() && conquest_input()->no_rare)) place_resources();  // the CtW style says no_rare
 	phase("place_resources");
 	rg.clear_all(w);
 	adjust_for_blocking(w, rg, placed_mountains);
@@ -125,8 +130,10 @@ void Gen::build_game() {
 	res.world_seed = world_seed;
 	phase("world.seed");
 	// step 4: Map::new_map, Map::make
-	if (P.style < 0 || P.style >= kStyleConquest) throw std::runtime_error("map style " + std::to_string(P.style) + " is not a random map style");
-	res.style = P.style;
+	if (P.style < 0 || P.style >= kStyleScenario) throw std::runtime_error("map style " + std::to_string(P.style) + " is not a random map style");
+	if ((style == kStyleConquest || style == kStyleConquestSea) && !(conquest_input() && conquest_input()->valid))
+		throw std::runtime_error("No conquest map data available.");
+	res.style = style;
 	{
 		// oracle: current 2.SVX (lobby style 1 -> 14, seed 18119929): the picks of Map::set_map are d1..d3 of the stream, and
 		// the tileset (d1, d2: early_autumn), base_edge (d3) and the Great Lakes start angle (d4, d5) that follow reuse the
@@ -158,6 +165,7 @@ void Gen::build_game() {
 	create_herd_units();
 	phase("herds");
 	for (const WCoord& s : starts) res.starts.push_back({s.x, s.y});
+	res.conquest_starts = conq_starts;
 	for (const GoodObj& go : c.goods) {
 		if (go.alive() && go.type == kOilGood) res.oil_locations.push_back({wcoord_of(go.x), wcoord_of(go.y)});
 	}

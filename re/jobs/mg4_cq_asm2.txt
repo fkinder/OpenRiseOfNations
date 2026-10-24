@@ -1,0 +1,4 @@
+re/decomp/mapgen_fid4/asm
+ConquestCountries::init_countries
+ConquestCountries::load_country_data
+ConquestMap::init_land

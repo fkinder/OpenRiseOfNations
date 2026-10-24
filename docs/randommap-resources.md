@@ -64,7 +64,7 @@ States) and negative `numrare` (`-1`, `-2`, `-8 SCALE`, meaning ×n); no shipped
 ## 2. `Map::place_resources(n)` @68f4f0
 
 1. Pool: for good `g = 6..49` ascending: add to `resource_pool` (`ResourceDivvyPool` at `Map +0x274`, §3) when
-   `GoodType.random_rare_drop (+0x2f8) ≠ 0` and not (CtW (`semaphore byte2 & 2`) and `exclude_ctw (+0x2f4) ≠ 0`).
+   `GoodType.random_rare_drop (+0x2f8) ≠ 0` and not (CtW (`semaphore byte2 & 2`) and `exclude_ctw (+0x2f4) ≠ 0`). (`Map::make` also skips the whole `place_resources` call in a CtW battle whose style has `no_rare`: `mapgen::ConquestInput::no_rare`, fourth pass.)
    In `resourcerules.xml` that is goods **6..36** (Fish 6, Relics 7 … Titanium 36), minus Marble 20 under CtW. Then
    `done_adding_goods`.
 2. `prev_group = −1`, `total = 0`. For `pass = 0..2`: pick the element (§1); for each `<BONUS>`:

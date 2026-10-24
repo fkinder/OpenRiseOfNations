@@ -1,0 +1,6 @@
+re/decomp/mapgen_fid4
+Map::force_continent_spacing
+Map::make_coastlines
+Regions::find_all
+Regions::clear_all
+World::is_edge_of_region

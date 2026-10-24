@@ -9,10 +9,12 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
 #include "assets/files.hpp"
+#include "assets/tga.hpp"
 #include "sim/objects.hpp"
 #include "sim/random.hpp"
 #include "sim/regions.hpp"
@@ -33,6 +35,62 @@ constexpr int kStyleOldWorld = 6, kStyleSahara = 7, kStyleAmazon = 8, kStyleHima
               kStyleEastMeetsWest = 19, kStyleSeaPower = 20, kStyleNileDelta = 21, kStyleBritishIsles = 22,
               kStyleBlank = 23, kStyleConquest = 24, kStyleConquestSea = 25, kStyleScenario = 26;
 constexpr int kNumStyleNames = 27;
+
+// ---------------------------------------------------------------- Conquer the World battle maps (styles 24 / 25, mapgen_conquest.cpp)
+// MapConquest::make_continents @68dba0 turns the silhouettes of the two countries (and their surroundings) into the land grid. The
+// inputs live in the CtW layer: the CtW battle builder (sim/ctw_battle.cpp) fills a ConquestInput and keeps it alive with a
+// ConquestScope around new_random_game; the generator picks it up (a scope also upgrades the random-map styles 1 / 2 the
+// RandomGameSetup carries to 24 / 25, because RandomGameSetup clamps its style to the shipped ones).
+struct ConquestRect {  // RectTemplateBase<float>: left, right, top, bottom
+	float left = 0, right = 0, top = 0, bottom = 0;
+};
+// ConquestCountries::get_scenario_map_rect @75c3b0, the texture-pixel branch (param_5 = 0), two different countries: the square drawn
+// around them. (x1, y1) = starting_coords of `param_1` (the attacker's node), (x2, y2) of `param_2` (the defended node).
+ConquestRect conquest_scenario_rect(int x1, int y1, int x2, int y2, int tex_width, int map_style);
+
+struct ConquestCountry {  // one ConquestCountries entry
+	int left = 0, right = 0, top = 0, bottom = 0;  // the COUNTRY attributes (texture pixels; the piece image covers right-left+1 x bottom-top+1)
+	int cx = 0, cy = 0;                            // starting_coords_x / y (the COUNTRY x / y)
+};
+struct ConquestSupporter {
+	bool near_second = false;  // allied to the defended node's owner: its start goes around the second start (else the first)
+	int armies = 0;            // start_add_armies
+};
+struct ConquestInput {
+	bool valid = false;
+	bool sea = false;                    // MapConquestSea (style 25: CONQUESTMAPSEA.xml)
+	// ConquestCountries::draw_scenario_area @761310: the square image (1 = land, 0 = water) and the countries whose centre is in it
+	int side = 0;
+	std::vector<uint8_t> land;           // side * side
+	std::vector<int> ids, xs, ys;        // country index, centre in image pixels
+	int node_a = -1, node_b = -1;        // the defended node (link.to) and the attacker's (link.from)
+	int who_b = 0, who_a = 1;            // start_who of the starts of b and a (before the style 6 / 7 swap)
+	bool swap = false;                   // the conquest map style is 6 or 7
+	int barbarians = 0;                  // additional_opponents[difficulty]
+	std::vector<ConquestSupporter> supporters;  // the link's supporters (seats 2..) before the barbarians
+	std::string tileset;                 // the defended node's tileset (the attacker's for style 5); empty = the style's pick
+	bool no_rare = false;                // the battle style says no_rare: Map::make skips place_resources
+};
+// draw_scenario_area: `piece(country)` returns the silhouette image of a country (alpha != 0 = land) or null. Fills side / land / ids / xs /
+// ys of `out` (the other fields are the caller's). `scale` = the strategic map's map_scale (map_width / tex_width).
+using ConquestPieceLoader = std::function<const Image*(int)>;
+bool conquest_draw_scenario_area(const ConquestRect& rect, int tex_width, float scale, const std::vector<ConquestCountry>& countries,
+                                 const ConquestPieceLoader& piece, ConquestInput& out);
+
+void set_conquest_input(const ConquestInput* in);  // thread-local
+const ConquestInput* conquest_input();
+struct ConquestScope {
+	explicit ConquestScope(const ConquestInput* in) : prev_(conquest_input()) { set_conquest_input(in); }
+	~ConquestScope() { set_conquest_input(prev_); }
+	ConquestScope(const ConquestScope&) = delete;
+	ConquestScope& operator=(const ConquestScope&) = delete;
+private:
+	const ConquestInput* prev_;
+};
+
+struct ConquestStart {  // the conquest start lists (start_who / start_capital / start_node / start_add_armies) of one start
+	int32_t who = 0, node = -1, armies = 0, x = 0, y = 0;
+};
 
 struct Params {
 	int style = kStyleOldWorld;  // MapStyleIndex
@@ -91,6 +149,7 @@ struct Result {
 	std::string tileset;
 	std::array<int32_t, 6> territory_limits{};  // player base / civic / city, colonized base / civic / city
 	std::vector<std::array<int32_t, 2>> starts;  // start_x / start_y
+	std::vector<ConquestStart> conquest_starts;  // styles 24 / 25: one per start, in the same order
 	std::vector<std::array<int32_t, 2>> oil_locations;
 	std::array<int32_t, 8> start_order{};
 	std::vector<PlacedMountain> mountains;

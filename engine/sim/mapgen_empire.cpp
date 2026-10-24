@@ -241,7 +241,21 @@ void Gen::build_empires() {
 		for (int i = 0; i < 8; i++) {
 			const int who = order[size_t(i)];
 			if (!valid_leader_slot(P, who) || placed[size_t(who)]) continue;
-			const int start = P.randomize_starts ? next_start : who;
+			int start = P.randomize_starts ? next_start : who;
+			if (style >= kStyleConquest) {  // the conquest start lists say which start belongs to which seat (start_who)
+				start = -1;
+				for (size_t k = 0; k < conq_starts.size(); k++) {
+					if (conq_starts[k].who == who) {
+						start = int(k);
+						break;
+					}
+				}
+				if (start < 0) {  // a seat without a start (conquest map styles 4-7): nothing is built for it
+					placed[size_t(who)] = 1;
+					placed_count++;
+					continue;
+				}
+			}
 			build_empire(who, start);
 			placed[size_t(who)] = 1;
 			placed_count++;

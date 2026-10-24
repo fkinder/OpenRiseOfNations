@@ -1,0 +1,3 @@
+re/decomp/mapgen_fid4
+Fractal::get_height
+Fractal::init

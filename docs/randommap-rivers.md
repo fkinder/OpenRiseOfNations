@@ -331,8 +331,9 @@ The heights live in the same `master_land_heights` grid that `Terrain::init`'s c
 After the third pass the A* paths are exact: every generated river cell is in each save, and `DO NOT DELETE`, `DO NOT DELETE 2` and
 `curent dec 14` match on all 0x1000 cells (1074 / 1202 / 768 differing before, 0 now) and on all tdata 0x800 trough tiles
 (7510 / 8462 / 6049 before, 0 now). On `current 2.SVX` the cells go 202 save / 129 ours (78 common) -> 212 ours (201 common) and the trough
-tiles 1730 -> 99 differing. The remaining river difference there sits on the lake shore, where the half-land and corner heights still differ
-(see `randommap-spec.md`, "Still different").
+tiles 1730 -> 99 differing. The remaining river difference there sat on the lake shore, where the half-land and corner heights still differed;
+the fourth pass fixed those heights (`randommap-spec.md`, "Fourth pass": the second influence line is chosen through the owner cell), after which
+the saved river cells are all matched (202 of 202, 11 extra on lake shores) and so are all 1730 saved trough tiles (82 extra).
 
 What closed it: the `astar_river` tie order (`ordered_insert` @4796f0 sends equal keys left, so the newest equal node pops first), the
 open/closed dedup (closed receives only expanded nodes and dead ends), the ancestor-chain test, and the orthogonal neighbour pinch test

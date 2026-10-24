@@ -1,0 +1,7 @@
+re/decomp/mapgen_fid4/asm
+ConquestCountries::draw_scenario_area
+MapConquest::make_continents
+MapConquest::add_additional_players
+MapConquest::check_starting_loc
+ScenarioEditor::import_image
+ConquestCountries::get_scenario_map_rect

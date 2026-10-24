@@ -3,11 +3,20 @@
 // Usage: ron-mapgen <game dir> --style N|NAME --size N --seed S --nations K [--teams a,b,..] [--randomize]
 //                   [--town N] [--tribes a,b,..] [--png out.png] [--scale N] [--dump out.txt] [--quiet]
 //        ron-mapgen <game dir> --compare <file.SVX> [--style N] [--side out.png] [--quiet]
-//        ron-mapgen <game dir> --all [--seed S] [--jobs N] [--styles a-b] [--sizes a-b] [--nations a-b] [--quiet]
+//        ron-mapgen <game dir> --all [--seed S] [--jobs N] [--styles a-b] [--sizes a-b] [--nations a-b] [--quiet] [--no-conquest]
+//        ron-mapgen <game dir> --ctw CAMPAIGN:LINK [--style 24|25] [--difficulty D] [--seed S] [--png out.png] [--dump out.txt] [--quiet]
+//        ron-mapgen <game dir> --png-check [DIR]
+//
+// --ctw generates the battle map of a Conquer the World link (styles 24 / 25, MapConquest; LINK = auto, auto:N or FROM>TO as for ronmap's
+// --ctw-battle); --style 25 forces the sea variant on a land link. --all also runs the conquest styles over a few links of every campaign
+// (skipped by --no-conquest). --png-check decodes every file under DIR (default conquest/RenderMaps/MapPieces of the game dir) with the PNG
+// reader and compares the country silhouettes with the campaigns' COUNTRY rectangles.
 //
 // --style takes a MapStyleIndex (0..5 pickers, 6..22 the shipped styles, 23 blank map) or a name ("Old World", "OLDWORLD").
 // --png writes a top-down preview (water / land by subtype / forest / mountain / rock / river / resources / goodies /
 // starts); --dump a text digest (grid hashes per layer, regions, resources, starts, empire placements, draw counts).
+// --compare also takes --hfull FILE (every height, save and generated, binary) and --wfull FILE (the differing wcoords, text) for offline analysis; its
+// height section ends with the sum of |generated - save| over the aquatic vertices. --ctw takes --image FILE (the square the countries' silhouettes drew).
 // --compare loads an original save (re/oracle/Saves/*.SVX), regenerates its map from the save's setup (seed, size, lobby style,
 // nations, tribes, teams) and prints, per layer, the number of differing cells and the first one (docs/randommap-spec.md).
 // --all runs every shipped style x every map size x nations 2..8, each generation twice (determinism) and timed.
@@ -30,6 +39,10 @@
 #include <iterator>
 #include <set>
 
+#include <filesystem>
+
+#include "assets/png.hpp"
+#include "sim/ctw.hpp"
 #include "sim/datawalk.hpp"
 #include "sim/game.hpp"
 #include "sim/mapgen.hpp"
@@ -87,8 +100,9 @@ struct Generated {
 	double seconds = 0;
 };
 
-void run_one(const GameFiles& files, const Rules& rules, const Params& p, Generated& g) {
+void run_one(const GameFiles& files, const Rules& rules, const Params& p, Generated& g, const ConquestInput* conquest = nullptr) {
 	const auto t0 = std::chrono::steady_clock::now();
+	ConquestScope scope(conquest);
 	Context ctx{files, rules, g.world, g.regions, g.rng, g.goods, g.items};
 	g.res = generate(ctx, p);
 	g.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -182,6 +196,9 @@ std::string dump_text(const GameFiles&, const Rules& rules, const Params& p, con
 	line("start_order %d %d %d %d %d %d %d %d", r.start_order[0], r.start_order[1], r.start_order[2], r.start_order[3],
 	     r.start_order[4], r.start_order[5], r.start_order[6], r.start_order[7]);
 	for (size_t i = 0; i < r.starts.size(); i++) line("start %zu %d %d", i, r.starts[i][0], r.starts[i][1]);
+	for (size_t i = 0; i < r.conquest_starts.size(); i++)
+		line("conquest start %zu who=%d node=%d armies=%d at %d,%d", i, r.conquest_starts[i].who, r.conquest_starts[i].node,
+		     r.conquest_starts[i].armies, r.conquest_starts[i].x, r.conquest_starts[i].y);
 	line("mountains %zu oil_locations %zu rivers %zu", r.mountains.size(), r.oil_locations.size(), r.rivers.size());
 	for (const auto& rv : r.rivers) {
 		if (rv.pts.empty()) continue;
@@ -320,6 +337,133 @@ Png render_png(const Generated& g, int scale) {
 }
 
 bool write_png(const std::string& path, const Rules&, const Generated& g, int scale) { return render_png(g, scale).save(path); }
+
+// ---------------------------------------------------------------- Conquer the World battle maps (styles 24 / 25)
+
+}  // namespace
+namespace ron::sim::ctw {
+// sim/ctw_battle.cpp: the conquest map input of a battle (declared here, it has no header).
+bool conquest_battle_input(const ConquestGame& g, const GameFiles& F, const ConquestGame::BattleDef& B, mapgen::ConquestInput* out, std::string* err);
+}  // namespace ron::sim::ctw
+namespace {
+
+std::string resolve_campaign_stem(const GameFiles& files, const std::string& arg) {
+	auto norm = [](std::string s) {
+		std::string o;
+		for (char ch : s) {
+			if (ch != '_' && ch != ' ' && ch != '-') o.push_back(char(std::tolower(static_cast<unsigned char>(ch))));
+		}
+		return o;
+	};
+	const std::string want = norm(arg);
+	std::string best;
+	for (const std::string& stem : ctw::list_campaigns(files)) {
+		const std::string n = norm(stem);
+		if (n == want) return stem;
+		if (best.empty() && n.find(want) != std::string::npos) best = stem;
+	}
+	return best;
+}
+
+// One CtW battle ready to generate: the campaign (kept alive: BattleDef points into nothing, but the input was built from it), the generator
+// parameters as new_random_game would build them from BattleDef.setup, and the conquest map input.
+struct CtwCase {
+	std::unique_ptr<ctw::ConquestGame> game;
+	ctw::ConquestGame::BattleDef battle;
+	Params p;
+	ConquestInput input;
+	std::string desc;
+};
+
+// links: the player's available attacks of a fresh campaign, in find_available_links order.
+std::vector<ctw::LinkChoice> ctw_links(const GameFiles& files, const Rules& rules, const std::string& stem, int difficulty, uint32_t seed,
+                                       std::unique_ptr<ctw::ConquestGame>& game, std::string* err) {
+	game = std::make_unique<ctw::ConquestGame>();
+	ctw::ConquestSetup cs;
+	cs.campaign = stem;
+	cs.seed = seed;
+	cs.difficulty = difficulty;
+	const std::string e = game->setup(files, rules, cs);
+	if (!e.empty()) {
+		if (err) *err = e;
+		return {};
+	}
+	return game->find_available_links(game->player_tribe);
+}
+
+bool build_ctw_case(const GameFiles& files, const Rules& rules, CtwCase& c, const ctw::LinkChoice& link, int style_override, uint32_t seed,
+                    std::string* err) {
+	ctw::ConquestGame& g = *c.game;
+	if (link.needs_war) g.set_war(link.attacker, link.defender);
+	g.cur_link = link;
+	g.cur_style = g.pick_style(link);
+	c.battle = g.make_battle(link, g.cur_style);
+	const sim::RandomGameSetup& S = c.battle.setup;
+	// A campaign's named historical battles are custom .scx maps (loaded, not generated); the generator is exercised on them anyway.
+	const bool custom_ignored = !c.battle.custom_map.empty();
+	c.battle.custom_map.clear();
+	c.p = Params();
+	c.p.style = S.map_style;
+	c.p.size = S.map_size;
+	c.p.seed = seed ? seed : S.seed;
+	c.p.nations = S.num_nations;
+	c.p.randomize_starts = S.randomize_starts;
+	c.p.starting_town = S.starting_town;
+	c.p.starting_resources = S.starting_resources;
+	c.p.reveal_map = S.reveal_map;
+	c.p.ctw = true;
+	for (int i = 0; i < 8; i++) {
+		c.p.team[size_t(i)] = i < S.num_nations && S.nation[size_t(i)].team >= 0 ? S.nation[size_t(i)].team : 8;
+		c.p.tribe[size_t(i)] = i < S.num_nations && S.nation[size_t(i)].tribe >= 0 ? S.nation[size_t(i)].tribe : i;
+	}
+	std::string e;
+	if (!ctw::conquest_battle_input(g, files, c.battle, &c.input, &e)) {
+		if (err) *err = e;
+		return false;
+	}
+	if (style_override == kStyleConquest || style_override == kStyleConquestSea) {
+		c.input.sea = style_override == kStyleConquestSea;
+		c.p.style = style_override;
+	} else if (style_override >= 0) {
+		if (err) *err = "--ctw takes --style 24 or 25";
+		return false;
+	}
+	(void)rules;
+	const ctw::CountryDef& A = g.def->countries[size_t(link.from)];
+	const ctw::CountryDef& D = g.def->countries[size_t(link.to)];
+	char buf[512];
+	std::snprintf(buf, sizeof buf, "%s: %s (%s) attacks %s (%s)%s, conquest map style %d, %zu seats, %d barbarians, %zu supporters, image %dx%d",
+	              g.def->file.c_str(), A.id.c_str(), g.tribe_name(link.attacker).c_str(), D.id.c_str(),
+	              link.defender >= 0 ? g.tribe_name(link.defender).c_str() : "barbarians", link.sea ? " by sea" : "", c.battle.map_style,
+	              c.battle.seats.size(), c.input.barbarians, c.input.supporters.size(), c.input.side, c.input.side);
+	c.desc = buf;
+	if (custom_ignored) c.desc += " [the style's custom map is ignored]";
+	return true;
+}
+
+// FROM>TO, auto or auto:N
+bool pick_ctw_link(ctw::ConquestGame& g, const std::vector<ctw::LinkChoice>& links, const std::string& spec, ctw::LinkChoice* out, std::string* err) {
+	if (links.empty()) {
+		if (err) *err = "the player has no attack available";
+		return false;
+	}
+	if (spec.empty() || spec.compare(0, 4, "auto") == 0) {
+		const size_t n = spec.size() > 5 ? size_t(std::atoi(spec.c_str() + 5)) : 0;
+		*out = links[std::min(n, links.size() - 1)];
+		return true;
+	}
+	const size_t gt = spec.find('>');
+	const int from = gt == std::string::npos ? -1 : g.find_node(spec.substr(0, gt));
+	const int to = gt == std::string::npos ? -1 : g.find_node(spec.substr(gt + 1));
+	for (const ctw::LinkChoice& l : links) {
+		if (l.from == from && l.to == to) {
+			*out = l;
+			return true;
+		}
+	}
+	if (err) *err = "link must be auto, auto:N or FROM>TO (territory ids available to the player)";
+	return false;
+}
 
 // ---------------------------------------------------------------- --all
 
@@ -955,6 +1099,19 @@ int run_compare(const GameFiles& files, const Rules& rules, const char* save_pat
 		}
 		print_layer(lw);
 	}
+	if (const char* wf = arg_value(argc, argv, "--wfull")) {  // --wfull file: text, one line per cell: x y save_land save_flags gen_land gen_flags (differing cells only)
+		if (FILE* f = std::fopen(wf, "w")) {
+			for (int y = 0; y < E.ys; y++) {
+				for (int x = 0; x < E.xs; x++) {
+					const WData& a = E.w(x, y);
+					const WData& b = G.w(x, y);
+					if (a.land != b.land || a.flags != b.flags || a.land_sub != b.land_sub)
+						std::fprintf(f, "%d %d %d %u %d %u %d %d\n", x, y, int(a.land), unsigned(a.flags), int(b.land), unsigned(b.flags), int(a.land_sub), int(b.land_sub));
+				}
+			}
+			std::fclose(f);
+		}
+	}
 	std::printf("\nWData.flags bit by bit (cells: save, generated, both, differing -only save +only generated):\n");
 	bit_layers("flags", 16, E, G, [](const World& w, int x, int y) { return unsigned(w.w(x, y).flags); }, false);
 	std::printf("\nTData.mask bit by bit:\n");
@@ -1001,6 +1158,23 @@ int run_compare(const GameFiles& files, const Rules& rules, const char* save_pat
 				}
 				std::fclose(f);
 			}
+		}
+		if (const char* hf = arg_value(argc, argv, "--hfull")) {
+			// --hfull file: every vertex, binary: int32 vxs, vys, then float32 save heights and float32 generated heights (x fastest)
+			if (FILE* f = std::fopen(hf, "wb")) {
+				const int32_t dims[2] = {g.res.height_vxs, g.res.height_vys};
+				std::fwrite(dims, 4, 2, f);
+				std::fwrite(eg->heights.h.data(), 4, eg->heights.h.size(), f);
+				std::fwrite(g.res.heights.data(), 4, g.res.heights.size(), f);
+				std::fclose(f);
+			}
+		}
+		{
+			double aq = 0;  // the sum of |generated - save| over the aquatic and shore vertices (save < 60)
+			for (size_t i = 0; i < eg->heights.h.size(); i++) {
+				if (eg->heights.h[i] < 60.0f) aq += std::fabs(double(eg->heights.h[i]) - double(g.res.heights[i]));
+			}
+			std::printf("  aquatic |error| sum (save < 60): %.2f\n", aq);
 		}
 		for (const Cls& c : cl) {
 			std::printf("  %-22s %7ld vertices  bit-exact %7ld  within 0.01 %7ld  max |d| %9.3f  first (%d,%d)\n", c.name, c.n, c.exact, c.near, c.maxd, c.fx, c.fy);
@@ -1079,6 +1253,189 @@ int run_compare(const GameFiles& files, const Rules& rules, const char* save_pat
 
 }  // namespace
 
+// ---------------------------------------------------------------- --png-check
+
+int run_png_check(const GameFiles& files, const char* dir_arg, bool quiet) {
+	namespace fs = std::filesystem;
+	std::string dir = dir_arg ? dir_arg : files.root() + "/conquest/RenderMaps/MapPieces";
+	if (dir.empty() || !fs::is_directory(dir)) {
+		std::fprintf(stderr, "no directory %s\n", dir.c_str());
+		return 2;
+	}
+	std::vector<std::string> paths;
+	for (const auto& e : fs::recursive_directory_iterator(dir)) {
+		if (!e.is_regular_file()) continue;
+		std::string ext = e.path().extension().string();
+		for (char& ch : ext) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+		if (ext == ".png") paths.push_back(e.path().string());
+	}
+	std::sort(paths.begin(), paths.end());
+	int ok = 0, bad = 0;
+	uint64_t pixels = 0, opaque = 0;
+	std::map<std::string, int> sizes;
+	std::map<std::string, std::pair<int, int>> dims;  // file name (lower) -> w, h
+	for (const std::string& path : paths) {
+		Image img;
+		std::string err;
+		if (!load_png(path, img, &err)) {
+			bad++;
+			std::printf("FAIL %s\n", err.c_str());
+			continue;
+		}
+		ok++;
+		pixels += uint64_t(img.width) * uint64_t(img.height);
+		for (size_t i = 3; i < img.rgba.size(); i += 4) opaque += img.rgba[i] != 0;
+		if (!quiet) std::printf("%5d x %-5d %s\n", img.width, img.height, path.substr(dir.size() + (dir.back() == '/' ? 0 : 1)).c_str());
+		sizes[std::to_string(img.width) + "x" + std::to_string(img.height)]++;
+		std::string name = fs::path(path).filename().string();
+		for (char& ch : name) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+		dims[name] = {img.width, img.height};
+	}
+	std::printf("png-check: %d files decoded, %d failed, %llu pixels (%llu with alpha != 0), %zu distinct sizes\n", ok, bad,
+	            (unsigned long long)pixels, (unsigned long long)opaque, sizes.size());
+	// the country silhouettes must be right-left+1 x bottom-top+1 pixels, one per COUNTRY
+	Rules rules = load_rules(files);
+	int checked = 0, mismatch = 0, missing = 0;
+	for (const std::string& stem : ctw::list_campaigns(files)) {
+		std::shared_ptr<const ctw::CampaignDef> def;
+		try {
+			def = ctw::load_campaign(files, rules, stem);
+		} catch (const std::exception&) {
+			continue;
+		}
+		for (size_t i = 0; i < def->countries.size(); i++) {
+			std::string name = "xpack_temp_country" + std::to_string(i) + def->file + ".png";
+			for (char& ch : name) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+			const auto it = dims.find(name);
+			if (it == dims.end()) {
+				missing++;
+				continue;
+			}
+			const ctw::CountryDef& c = def->countries[i];
+			checked++;
+			if (it->second.first != c.right - c.left + 1 || it->second.second != c.bottom - c.top + 1) {
+				mismatch++;
+				std::printf("size mismatch %s: png %dx%d, COUNTRY %s rect %dx%d\n", name.c_str(), it->second.first, it->second.second,
+				            c.id.c_str(), c.right - c.left + 1, c.bottom - c.top + 1);
+			}
+		}
+	}
+	std::printf("silhouettes vs COUNTRY rectangles: %d checked, %d mismatched, %d without a file\n", checked, mismatch, missing);
+	return bad || mismatch ? 1 : 0;
+}
+
+// ---------------------------------------------------------------- --all: the conquest styles
+
+struct ConquestCase {
+	std::string campaign, link;
+	int style = 24;  // 24 / 25
+	bool ok = false, nondeterministic = false, unplaced = false, gaps = false, custom = false;
+	int seats = 0, starts = 0;
+	double seconds = 0;
+	std::string error;
+};
+
+int run_conquest_matrix(const GameFiles& files, const Rules& rules, uint32_t base_seed, int jobs, bool quiet, int per_campaign) {
+	struct Job {
+		std::string stem;
+		int link_index;  // into ctw_links
+		int style;       // -1 = the link's own, 24 / 25 forced
+	};
+	std::vector<Job> jobs_list;
+	std::vector<ConquestCase> cases;
+	for (const std::string& stem : ctw::list_campaigns(files)) {
+		std::unique_ptr<ctw::ConquestGame> g;
+		std::string err;
+		const std::vector<ctw::LinkChoice> links = ctw_links(files, rules, stem, 2, base_seed, g, &err);
+		if (links.empty()) continue;
+		// a few links: the first, the middle, the last, the first sea link, and a sea variant forced on the first land link
+		std::set<size_t> pick = {0, links.size() / 2, links.size() - 1};
+		size_t sea = links.size(), land = links.size();
+		for (size_t i = 0; i < links.size(); i++) {
+			if (links[i].sea && sea == links.size()) sea = i;
+			if (!links[i].sea && land == links.size()) land = i;
+		}
+		if (sea < links.size()) pick.insert(sea);
+		std::vector<size_t> order(pick.begin(), pick.end());
+		if (int(order.size()) > per_campaign) order.resize(size_t(per_campaign));
+		for (size_t i : order) jobs_list.push_back({stem, int(i), -1});
+		if (land < links.size()) jobs_list.push_back({stem, int(land), kStyleConquestSea});
+		if (sea < links.size()) jobs_list.push_back({stem, int(sea), kStyleConquest});
+	}
+	cases.resize(jobs_list.size());
+	std::atomic<size_t> next{0};
+	std::mutex out_mutex;
+	auto worker = [&]() {
+		for (;;) {
+			const size_t i = next.fetch_add(1);
+			if (i >= jobs_list.size()) return;
+			ConquestCase& c = cases[i];
+			const Job& j = jobs_list[i];
+			c.campaign = j.stem;
+			try {
+				CtwCase cc;
+				std::string err;
+				const std::vector<ctw::LinkChoice> links = ctw_links(files, rules, j.stem, 2, base_seed, cc.game, &err);
+				if (links.empty()) throw std::runtime_error(err.empty() ? "no links" : err);
+				const ctw::LinkChoice& l = links[size_t(j.link_index)];
+				c.link = cc.game->node_name(l.from) + ">" + cc.game->node_name(l.to);
+				if (!build_ctw_case(files, rules, cc, l, j.style, 0, &err)) {
+					c.custom = err.find("custom map") != std::string::npos;
+					throw std::runtime_error(err);
+				}
+				c.seats = cc.p.nations;
+				Generated a, b;
+				run_one(files, rules, cc.p, a, &cc.input);
+				run_one(files, rules, cc.p, b, &cc.input);
+				c.style = a.res.picked_style;
+				c.seconds = std::max(a.seconds, b.seconds);
+				c.ok = a.res.ok && b.res.ok;
+				c.error = a.res.error.empty() ? b.res.error : a.res.error;
+				if (c.ok) {
+					c.starts = int(a.res.starts.size());
+					c.nondeterministic = dump_text(files, rules, cc.p, a) != dump_text(files, rules, cc.p, b);
+					c.gaps = water_gaps(a.world) != 0;
+					for (const std::string& n : a.res.notes) c.unplaced |= n.find("nable to place") != std::string::npos || n.find("had no start") != std::string::npos;
+					// every seat has its own start
+					std::set<int> who;
+					for (const ConquestStart& s : a.res.conquest_starts) who.insert(s.who);
+					// the seat of a main country outside the square (map styles 4-7) has no start by design
+					std::set<int> exempt;
+					auto inside = [&](int node) { return std::find(cc.input.ids.begin(), cc.input.ids.end(), node) != cc.input.ids.end(); };
+					if (!inside(cc.input.node_b)) exempt.insert(cc.input.swap ? cc.input.who_a : cc.input.who_b);
+					if (!inside(cc.input.node_a)) exempt.insert(cc.input.swap ? cc.input.who_b : cc.input.who_a);
+					for (int k = 0; k < cc.p.nations; k++) c.unplaced |= who.count(k) == 0 && exempt.count(k) == 0;
+				}
+			} catch (const std::exception& e) {
+				c.error = e.what();
+			}
+			if (!quiet) {
+				std::lock_guard<std::mutex> lock(out_mutex);
+				std::printf("conquest %-22s %-28s style %d seats %d starts %d: %s%s%s%s%s %.2fs %s\n", c.campaign.c_str(), c.link.c_str(), c.style, c.seats,
+				            c.starts, c.ok ? "ok" : "ERROR", c.nondeterministic ? " NONDETERMINISTIC" : "", c.unplaced ? " UNPLACED" : "",
+				            c.gaps ? " WATER-GAPS" : "", c.custom ? " (custom map)" : "", c.seconds, c.error.c_str());
+			}
+		}
+	};
+	std::vector<std::thread> threads;
+	for (int t = 0; t < jobs; t++) threads.emplace_back(worker);
+	for (std::thread& t : threads) t.join();
+	int ok = 0, bad = 0, nondet = 0, unplaced = 0, gaps = 0;
+	double worst = 0;
+	for (const ConquestCase& c : cases) {
+		if (c.ok) ok++;
+		else if (!c.custom) bad++;
+		nondet += c.nondeterministic;
+		unplaced += c.unplaced;
+		gaps += c.gaps;
+		worst = std::max(worst, c.seconds);
+	}
+	std::printf("\nconquest styles 24-25: %zu cases (%d links per campaign + forced variants, seed base %u): ok %d, error %d, nondeterministic %d, seats without a start %d, "
+	            "ocean tcoord gaps %d; slowest %.2fs\n",
+	            cases.size(), per_campaign, base_seed, ok, bad, nondet, unplaced, gaps, worst);
+	return (bad || nondet || unplaced || gaps) ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
 	if (argc < 2) {
 		std::fprintf(stderr,
@@ -1098,6 +1455,76 @@ int main(int argc, char** argv) {
 
 		if (const char* cmp = arg_value(argc, argv, "--compare")) return run_compare(files, rules, cmp, argc, argv);
 		if (const char* rc = arg_value(argc, argv, "--play189")) return run_play189(files, rules, rc, argc, argv);
+
+		if (has_flag(argc, argv, "--png-check")) {
+			const char* d = arg_value(argc, argv, "--png-check");
+			return run_png_check(files, d && std::strncmp(d, "--", 2) != 0 ? d : nullptr, quiet);
+		}
+
+		if (const char* ctw_spec = arg_value(argc, argv, "--ctw")) {
+			const std::string spec = ctw_spec;
+			const size_t colon = spec.find(':');
+			const std::string stem = resolve_campaign_stem(files, spec.substr(0, colon));
+			if (stem.empty()) {
+				std::fprintf(stderr, "no campaign '%s'\n", spec.substr(0, colon).c_str());
+				return 2;
+			}
+			const char* da = arg_value(argc, argv, "--difficulty");
+			std::string err;
+			CtwCase cc;
+			const std::vector<ctw::LinkChoice> links = ctw_links(files, rules, stem, da ? std::atoi(da) : 2, base_seed, cc.game, &err);
+			ctw::LinkChoice link;
+			if (!pick_ctw_link(*cc.game, links, colon == std::string::npos ? "auto" : spec.substr(colon + 1), &link, &err)) {
+				std::fprintf(stderr, "--ctw: %s\n", err.c_str());
+				return 2;
+			}
+			const char* st = arg_value(argc, argv, "--style");
+			int style_override = -1;
+			if (st) style_override = style_from_name(rules, st);
+			if (!build_ctw_case(files, rules, cc, link, style_override, 0, &err)) {
+				std::fprintf(stderr, "--ctw: %s\n", err.c_str());
+				return 1;
+			}
+			if (!quiet) std::printf("%s\n", cc.desc.c_str());
+			Generated g;
+			run_one(files, rules, cc.p, g, &cc.input);
+			if (!g.res.ok) {
+				std::fprintf(stderr, "generation failed: %s\n", g.res.error.c_str());
+				return 1;
+			}
+			if (!quiet) {
+				std::printf("%s size %d %dx%d seed %u nations %d: %.3fs, %llu game_random draws, %zu goods, %zu goodies, %zu rivers, %zu starts\n",
+				            style_name(rules, g.res.picked_style).c_str(), cc.p.size, g.res.xs, g.res.ys, cc.p.seed, cc.p.nations, g.seconds,
+				            (unsigned long long)g.res.draws, g.goods.size(), g.items.size(), g.res.rivers.size(), g.res.starts.size());
+				for (const ConquestStart& s : g.res.conquest_starts)
+					std::printf("  start who=%d node=%d armies=%d at %d,%d\n", s.who, s.node, s.armies, s.x, s.y);
+				for (const std::string& n : g.res.notes) std::printf("  note: %s\n", n.c_str());
+			}
+			if (const char* im = arg_value(argc, argv, "--image")) {  // the square draw_scenario_area drew: land black, water white, country centres red
+				const ConquestInput& ci = cc.input;
+				Png png(ci.side, ci.side);
+				for (int y = 0; y < ci.side; y++) {
+					for (int x = 0; x < ci.side; x++) {
+						const uint8_t v = ci.land[size_t(y) * size_t(ci.side) + size_t(x)] ? 40 : 235;
+						png.put(x, y, v, v, v);
+					}
+				}
+				for (size_t i = 0; i < ci.ids.size(); i++) png.rect(ci.xs[i] - 1, ci.ys[i] - 1, ci.xs[i] + 2, ci.ys[i] + 2, 220, 30, 30);
+				if (!png.save(im)) throw std::runtime_error(std::string("cannot write ") + im);
+			}
+			if (const char* d = arg_value(argc, argv, "--dump")) {
+				FILE* f = std::fopen(d, "wb");
+				if (!f) throw std::runtime_error(std::string("cannot write ") + d);
+				const std::string t = dump_text(files, rules, cc.p, g);
+				std::fwrite(t.data(), 1, t.size(), f);
+				std::fclose(f);
+			}
+			if (const char* pn = arg_value(argc, argv, "--png")) {
+				const char* sc = arg_value(argc, argv, "--scale");
+				if (!write_png(pn, rules, g, sc ? std::max(1, std::atoi(sc)) : 8)) throw std::runtime_error(std::string("cannot write ") + pn);
+			}
+			return 0;
+		}
 
 		if (has_flag(argc, argv, "--all")) {
 			int s_lo = 6, s_hi = 23, z_lo = 0, z_hi = 6, n_lo = 2, n_hi = 8;
@@ -1190,7 +1617,13 @@ int main(int argc, char** argv) {
 				}
 				std::printf("  %2d %-22s %3d/%3d  fallback %3d  slowest %.2fs\n", s, style_name(rules, s).c_str(), good, tot, fbs, w2);
 			}
-			return (crash || err || nondet || slow || gaps) ? 1 : 0;
+			int conquest_rc = 0;
+			if (!has_flag(argc, argv, "--no-conquest")) {
+				std::printf("\n");
+				const char* pc = arg_value(argc, argv, "--conquest-links");
+				conquest_rc = run_conquest_matrix(files, rules, base_seed, jobs, quiet, pc ? std::max(1, std::atoi(pc)) : 4);
+			}
+			return (crash || err || nondet || slow || gaps || conquest_rc) ? 1 : 0;
 		}
 
 		Params p;

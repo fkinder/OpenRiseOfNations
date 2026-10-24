@@ -228,6 +228,16 @@ public:
 	int attempts = 0;
 	bool give_up() { return ++attempts > 400; }
 
+	// ---- mapgen_conquest.cpp (styles 24 / 25)
+	bool mc_conquest();
+	void conquest_import(const ConquestInput& ci, int percent);
+	void force_continent_spacing();
+	bool cq_check_starting_loc(int x, int y, int mindist, int r, bool want_land, int skip_player);
+	void cq_push_start(int x, int y, int who, int node, int armies);
+	void cq_add_additional_players(const ConquestInput& ci, int region_b, int region_a);
+	void cq_check_sea_map();
+	std::vector<ConquestStart> conq_starts;   // the conquest start lists, in the order of `starts`
+
 	// ---- mapgen_terrain.cpp
 	struct Shape {
 		std::vector<int> ox, oy;

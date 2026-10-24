@@ -466,17 +466,23 @@ struct TerrainInit {
 			CoastInfo* owner = cur;
 			int prev_wx = -1, prev_wy = -1;
 			for (int line = 0; line < 2; line++) {
-				if (cur->connected_out == 1 && line == 1) break;
+				// The original keeps the CoastInfo pointer in EBX: `cur` for the first line, but the point loop below leaves the CURRENT OWNER
+				// in EBX (68fd7 / 68fdf), and the loop's head (68e80) reads connected_out and to[] through EBX again. So the second line is
+				// chosen by the owner cell the first line ended in: a line whose owner never switched (the owner switches only on a step that
+				// changes both wx and wy, i.e. mostly diagonal links) sees the generator's own data, any other sees its neighbour's -- the
+				// diagonal-first-link residue of the lake-corner shelf heights (docs/randommap-spec.md, fourth pass).
+				const CoastInfo* src = line == 0 ? cur : owner;
+				if (src->connected_out == 1 && line == 1) break;
 				int tx, ty;
-				if (cur->connected_out == 0) {
+				if (src->connected_out == 0) {
 					tx = x;
 					ty = y;
 				} else if (line == 0) {
-					tx = cur->to[0][0];
-					ty = cur->to[0][1];
+					tx = src->to[0][0];
+					ty = src->to[0][1];
 				} else {
-					tx = cur->to[1][0];
-					ty = cur->to[1][1];
+					tx = src->to[1][0];
+					ty = src->to[1][1];
 				}
 				LineState ls;
 				ls.init((jc & 3) + x * 4, (jc >> 2) + y * 4, (jn & 3) + tx * 4, (jn >> 2) + ty * 4);

@@ -393,6 +393,8 @@ Result of the third pass on the seven worlds (`ron-mapgen --compare`, differing 
 
 ### Still different on `current 2.SVX`
 
+(The shelf / half-land part of this list is solved: see the fourth pass below. The text is kept as the record of what was verified.)
+
 - `land` 10 and half-land 30, `land_sub` 76, `val` 756, `blocked` / `bad` / `solid` 51 / 87 / 51, one rock flag: all follow from the lake-shore heights.
   Shelf: 7592 of 15381 vertices bit-exact (49 percent), mean error 2.4; sea floor 30397 of 30701. What was verified and is NOT the cause:
   `mark_valid_coastal_influencers`, `mark_coast_vert_influence`, `adjust_aquatic_height`, `relax_aquatic_verts` (5 passes: 3, 4, 6, 8 are all
@@ -404,3 +406,87 @@ Result of the third pass on the seven worlds (`ron-mapgen --compare`, differing 
   a shared jitter are each much worse. The rule that selects them is not found.
 - `Cliffs::init` and `TerrainOut::adjust_for_mountains` are not ported (mountain height faces, `has_plus_slope`): the remaining land-height
   differences (11105 of 82104 vertices) and the 51 `blocked` cells.
+
+### Fourth pass (2026-10-24): the conquest map styles (24 / 25), the PNG reader, the lake-corner heights
+
+**Conquest styles.** `MapConquest` (24, `CONQUESTMAP.xml`) and `MapConquestSea` (25, `CONQUESTMAPSEA.xml`) share one `make_continents` @68dba0;
+the sea variant only has another style file and `world.map_style` 0x19 (`MapConquestSea::MapConquestSea` @47b300 sets the type and nothing else). Style 26
+(`MapScenario`) is the campaign's custom `.scx`, loaded as a scenario by `ctw_battle.cpp` (`Game::load`), not generated. Ported in
+`engine/sim/mapgen_conquest.cpp` (`Gen::mc_conquest`); the CtW layer (`ctw_battle.cpp: conquest_battle_input`) supplies the silhouettes:
+
+- **Inputs** (`ConquestInput`, `mapgen.hpp`): the CtW layer draws the square (`conquest_draw_scenario_area`), the link's two nodes, `start_who`, the extra
+  opponents and the style's `no_rare` / tileset, and keeps them alive in a `mapgen::ConquestScope` around `new_random_game`. `RandomGameSetup` clamps
+  `map_style` to the shipped styles (0..23), so the battle setup keeps the pickers 1 / 2 and the scope upgrades them to 24 / 25 (`Gen::Gen`);
+  `ron-mapgen --ctw` sets the style itself. Without a scope styles 24 / 25 fail with "No conquest map data available." (the original's own error).
+- `get_scenario_map_rect` @75c3b0 (texture-pixel branch, read from the asm, all single precision): `dx = x1 - x2`, `dy = y1 - y2`, `wrap = (tex_width - max(x1, x2)) +
+  min(x1, x2)` negated when `dx > 0`; styles 0-3 and 8 centre the square on the midpoint (`x1 - dx / 2`, or `x1 - wrap / 2` (minus `tex_width` when `x1 > x2`) when
+  `|dx| > |wrap|`) with side `max(|dx or wrap|, |dy|) * 1.3f`; styles 4, 6, 7 centre on node 2 (the defended node) and 5 on node 1, side `max(...)` without the 1.3.
+  The call is `get_scenario_map_rect(param_1 = link.from (the attacker's node), param_2 = link.to (the defended node))`.
+- `draw_scenario_area` @761310: each COUNTRY's rectangle is `(float(attr) * map_scale) / map_scale` (init_countries stores `attr * scale` as a float in `+0x178 left /
+  +0x17c right / +0x180 top / +0x184 bottom`; the `x` / `y` are `starting_coords_x / y` ints). The square's side is the larger of `(int)(bottom - top)` and
+  `(int)(right - left)` (the smaller extent gets `+1.0` on its far edge). A country overlaps when none of `L > right`, `left > R`, `T > bottom`, `top > B`
+  holds; otherwise it is tried again shifted by `-tex_width` (the wrap) and skipped when it still does not. Every pixel of the piece with alpha != 0
+  inside the square becomes land. A country is returned (id, centre minus the square's origin) when its centre lies inside `[clip_left, clip_right) x
+  [clip_top, clip_bottom)`. The pieces are 8-bit RGBA PNGs of exactly `right - left + 1` x `bottom - top + 1` pixels (all 215 files agree).
+- `import_image` @9a3f30 with **percent 50** (`MOV EDX,0x32` at the call): the box of every wcoord is `[(int)(x / xs * side), (int)((x + 1) / xs * side)]` (both ends inclusive,
+  float arithmetic), a pixel adds `rgb24 / 16777215`, the cell is water (`land` 2) when `sum / count >= 0.5`, else land 0, `flags &= 0xffc3`. `Buffer::get_pixel` leaves its output untouched
+  outside the image, so the last box row / column re-reads the previous pixel. The start of a country is `(int)(float(cx) / side * xs)` (the world is square). Then `Regions::clear_all /
+  find_all`, **`Map::force_continent_spacing` @68e6a0** and `Map::make_coastlines` (it was not in the port: land regions in ascending size, a new entry before the first of at least
+  its size; every edge cell (`is_edge_of_region`: a neighbour in another region) with a land / half-land cell of another region among `move_x / y[1..48]` becomes water and leaves its
+  region's list; the size drops once per offending neighbour and the next list index is skipped after a removal).
+- `make_continents` then `clear_all / find_all` again, the starts, `add_additional_players`, `check_sea_map`:
+  - starts: the country of `link.from` (b) first, then of `link.to` (a) (only when they are in the square and a != b): `start_who(b) = (seat 0's nation == link.opponents[0] = the defender) ? 1 : 0`,
+    `start_who(a)` the other one, both swapped for conquest map styles 6 and 7; `start_capital` 1, `start_node` the node, `start_add_armies` 0. Styles 4-7 centre the square on one country, so
+    the other country has **no start** (its seat gets no city; its armies enter by reinforcement).
+  - `add_additional_players(link @ECX, region_b @EDX, region_a [ebp+8], a [ebp+0xc], b [ebp+0x10])` @68d260: `m = additional_opponents[difficulty] + link.supporters.count`;
+    `r_near = first_city_near_coast / 4`, `r_far = city_spacing * 2 / 4`. Seat `index` (start_who = `(a != b) + 1 + index`): an index below the supporters' count is a **supporting nation**: it surrounds the
+    start of the side it is allied to (start 1 = a's when its stance toward a's owner is ally, else start 0), taking the first point of circle indices `[circle_radius[r_far], circle_radius[64])` that passes
+    `check_starting_loc(x, y, mindist = r_far, r = r_near, want_land, skip -1)`, `start_add_armies = link.add_supporter_armies[index]`; the others are **barbarians**: the regions under the starts
+    (`[region_b, region_a]`, or `[region_a, 0]` when `region_b == 0`; -1 skipped), one `rnd(size)` draw (`Random::get(0, 0xffff) % size`, none for a region of one cell), then the
+    region's cells from that index cyclically, `check_starting_loc(x, y, mindist = city_spacing, r = r_near, ...)`, armies 0. Failure only reports an error ("Unable to place ...").
+  - `check_starting_loc(x, y, p3, p4, p5, p6)` @68d7e0 with the register arguments **ECX = the minimum start distance, EDX = the radius** (capped at 0x40): `want_land` (`p3` = number of sea regions != 0) rejects water
+    (land 1 / 2 without 0x100) on circle indices `1 .. circle_radius[r] - 1`; `x, y >= r` and `< size - r`; `vector_dist` to every start (`p5 < 0`) or one start `>= mindist`. `p4` (rough terrain) and `p6` (a list) are 0.
+  - `check_sea_map` @68d1a0: `sea_map` 0 without sea regions, else 3 when the starts are not all in one region, else 2.
+- `Map::make` afterwards is the generic pipeline: `no_rare` styles skip `place_resources`, the tileset is the defended node's (the attacker's for style 5), `Setup::build_game` places seat `who` at the start with `start_who == who`.
+- Only `game_random` draw of the whole path: the barbarian walk start (the tileset / `base_edge` draws of `Map::make` are the generic ones). No original recording of a conquest battle exists here: the map is
+  checked by reading (`ron-mapgen --ctw CAMPAIGN:LINK --png / --image`, `re/previews/mapgen4_*.png`), not against a save.
+
+**PNG reader** (`engine/assets/png.hpp / .cpp`): zlib `inflate`, the five filters, 1-16 bit grey / grey+alpha / RGB / RGBA / palette (+ tRNS), Adam7; output RGBA8. `ron-mapgen --png-check [DIR]` decodes every
+file under `conquest/RenderMaps/MapPieces` (1564 files, 218 distinct sizes, all 8-bit RGBA non-interlaced) and checks the 215 country silhouettes against their COUNTRY rectangles (0 mismatches); two
+files were also decoded independently in Python (identical RGBA hashes).
+
+**Lake-corner shelf heights: solved.** The residue of the third pass ("a subset of the generators with a diagonal first link behaves as if it took the neighbour's
+jitter") was a register effect in `TerrainOut::mark_coast_vert_influence` @868ca0, not a jitter rule. The function keeps the generator's `CoastInfo` pointer in **EBX**; the loop over the
+line's points reloads EBX with the *current owner* cell (`MOV EBX,[EBP-0xc]` at 68fdf, `LEA EBX,[EAX+ECX*8]` at 68fd7), and the head of the next iteration of the two-line loop (68e80)
+reads `connected_out` and `to[0] / to[1]` through EBX again. So the **second line is selected by the owner cell the first line ended in**, not by the generator:
+
+- `src = (line == 0) ? generator : owner`; `src.connected_out == 1 && line == 1` ends the loop; `src.connected_out == 0` makes the target the generator's own cell (a G -> G line from the jitter `jc` to
+  `jn`), `line == 0` takes `src.to[0]`, `line == 1` takes `src.to[1]`; the start and end offsets stay `jc` / `jn` of the generator and the cell position is the generator's (read from `[EBP-8]`).
+- The owner switches only on a step that changes both `wx` and `wy`, i.e. on diagonal links. After an orthogonal first link the owner is still the generator and everything is as before; after a diagonal one it is
+  the neighbour's cell, whose `connected_out` is 0 when it is a later cell of the scan (so the generator also draws a short line from `jc` to `jn` inside its own cell: the "extra point at the generator cell plus `jn`"
+  of the previous pass) and its own link data when it is an earlier cell (so the second line goes to THAT cell's second neighbour).
+
+How it was found (kept here because the method is reusable): single-generator experiments with the oracle (5656 variants of the start / end jitter source over the 707 generators of `current 2`, then a scan of one extra
+influence point per generator: the best point was `generator * 4 + off(jn)` for 79 of 92 diagonal-first generators and never for orthogonal ones), then a re-read of the asm for what could add a point there.
+`ron-mapgen --compare` got `--hfull FILE` (every height, save and generated), `--wfull FILE` (the differing cells) and a line "aquatic |error| sum" (sum of |generated - save| over the vertices below 60) for such searches.
+
+Result (`ron-mapgen --compare`; differing cells / bit-exact vertices, before -> after; the three old Old World saves have no coast generators that changed):
+
+| | current 2 | current RN | east indies 2 | East indies final surround | DO NOT DELETE | DO NOT DELETE 2 | curent dec 14 |
+|---|---|---|---|---|---|---|---|
+| land | 10 -> 0 | 32 -> 0 | 49 -> 0 | 20 -> 0 | 0 | 0 | 0 |
+| half-land 0x100 | 30 -> 0 | 63 -> 0 | 85 -> 0 | 40 -> 0 | - | - | - |
+| land_sub | 76 -> 59 | 720 -> 668 | 1230 -> 1189 | 636 -> 606 | 2012 | 1938 | 1461 |
+| WData.flags (all bits) | 169 -> 132 | 1700 -> 1628 | 2410 -> 2320 | 1321 -> 1281 | 1357 | 1337 | 1079 |
+| river tiles `tdata 0x800` (saved ones matched) | 1714 -> 1730 of 1730 | - | - | - | - | - | - |
+| sea floor vertices | 30397 -> 30701 / 30701 | 63646 -> 64504 / 64504 | 67358 -> 68292 / 68292 | 45318 -> 45846 / 45846 | - | - | - |
+| shelf vertices | 3145 -> 15384 / 15386 | 6168 -> 29790 / 29797 | 6380 -> 29482 / 29492 | 5531 -> 19710 / 19720 | 2648 / 2661 | 2952 / 2966 | 2138 / 2138 |
+| shore vertices (-30 .. 60) | 9218 -> 32183 / 32610 | 4501 -> 33878 / 36554 | 3828 -> 29701 / 34660 | 3206 -> 18839 / 21883 | 7366 / 7483 | 7810 / 7927 | 6313 / 6375 |
+| land vertices >= 60 | 70999 -> 72103 / 82104 | 15621 -> 15920 / 29946 | 9418 -> 9645 / 28357 | 6003 -> 6218 / 15592 | 71904 / 92897 | 70621 / 92148 | 78715 / 94528 |
+
+Open on the height grid: the 2 shelf vertices of `current 2` that are 0.01 off, the shore vertices under river troughs (max 29, e.g. (283, 91)) and the mountains / cliffs (`Cliffs::init`, `TerrainOut::adjust_for_mountains`,
+still not ported: `val` 756, `blocked` / `bad` / `solid` 51 / 87 / 51 in `current 2` are unchanged). The two remaining rock-flag cells are moved derricks (above).
+
+What remains of the conquest part: no oracle (no recording of a conquest battle on this Mac), so the maps are checked by reading, not against a save; a native battle save (`ronmap` F5) of a CtW battle regenerates
+its map from the setup text, which does not carry the conquest input (a battle resumed from such a save is on a plain random map: the setup text would need the link, or the input itself); style 4-7 battles leave the other
+seat without a city (as the original's start lists do); `Map::force_continent_spacing` is now in the port but only the conquest path calls it (the recipes of the shipped styles do not).

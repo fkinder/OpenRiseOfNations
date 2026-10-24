@@ -1,0 +1,3 @@
+re/decomp/mapgen_fid4/asm
+LineState::init
+LineState::next_element

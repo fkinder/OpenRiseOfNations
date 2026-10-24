@@ -579,7 +579,8 @@ The islands' players get candidate starts from their own island but are handed t
   other start (or just `skip_player`) and every entry of `list` at `vd ≥ r`; no mountain / forest / water / `flags & 0x48` cells within radius `r` when the 4th argument is non-zero.
 - `check_sea_map` @68d1a0: if the map has sea regions (`Regions::get_num_sea ≠ 0`): `sea_map = 3` when the start locations are not all in the same region, else 2 (no sea: unchanged).
 
-Third pass (2026-10-24), the pipeline read against the decompile (`re/decomp/mapgen_fid3/cq/`), NOT ported (no oracle and the inputs live in the CtW layer):
+Third pass (2026-10-24), the pipeline read against the decompile (`re/decomp/mapgen_fid3/cq/`); **ported in the fourth pass** (`engine/sim/mapgen_conquest.cpp`, inputs from `ctw_battle.cpp`; the register
+arguments, the percent (50), `force_continent_spacing`, the start seats and the sea variant are in `randommap-spec.md`, "Fourth pass"):
 - `ConquestCountries::draw_scenario_area(nodeA, nodeB, &image, &ids, &xs, &ys)` @761310: `get_scenario_map_rect` gives the rectangle of the strategic map around the two
   countries; the image is a square of side `max(w, h)` filled with `0xffffffff` (water); for every country whose rectangle (its `left / right / top / bottom` divided by
   the map texture scale, shifted by `-map_tex_width` when the map wraps) overlaps the rectangle, every pixel of the country's own silhouette image
@@ -592,10 +593,10 @@ Third pass (2026-10-24), the pipeline read against the decompile (`re/decomp/map
   The returned start positions are the countries' centres scaled to the world (`int(pos / side * xs)`). Then `Regions::clear_all / find_all`,
   `Map::force_continent_spacing` and `Map::make_coastlines`.
 - `make_continents` then adds the two starts (`add_starting_location`, the conquest lists as in B3.13 above), `add_additional_players` @68d260 (the
-  barbarian / supporting seats: one `rnd(region size)` as the walk start, `check_starting_loc` @68d7e0 per candidate) and `check_sea_map`. The percent and the
-  hidden register arguments of `check_starting_loc` / `add_additional_players` need an asm pass.
-What `ctw_battle.cpp` would have to supply: the two countries' silhouette images and rectangles (the PNG pieces ship in `conquest/RenderMaps/MapPieces/`; the engine has no PNG
-reader), the map-wrap shift and the scale, and `get_scenario_map_rect`'s rectangle rule (not decompiled).
+  barbarian / supporting seats: one `rnd(region size)` as the walk start, `check_starting_loc` @68d7e0 per candidate) and `check_sea_map`. (The asm pass of the fourth pass: percent 50;
+  `check_starting_loc` ECX = minimum start distance, EDX = radius; `add_additional_players` ECX = the link, EDX = the region under the first start, the supporters come before the barbarians.)
+What `ctw_battle.cpp` supplies (`conquest_battle_input`): the countries' silhouette images (`engine/assets/png.*` reads the PNG pieces), the rectangle (`get_scenario_map_rect` is ported for the pixel branch as
+`conquest_scenario_rect`), the wrap shift, the scale, the start seats and the extra opponents.
 
 ### B3.14 `MapScenario::make(a, b, c)` @68c8f0 — style 26 and the campaign's custom maps
 Frees the conquest start lists, then `ScenarioRead::import(game_style.custom_map)` (error "Unable to load custom scenario."); only when `semaphore.ptr[2] & 2` (a conquest game) it continues:
@@ -625,7 +626,7 @@ marks the unit types that become available). That belongs to the conquest campai
 | helpers | `Mountains::randomize_mountains` @89ca70, `get_range` @89cb50, `circle_init` @6817f0, `project` @92d000, `sin_table` @a46a00, `Map::scale_number` @6a0320, `scale_by_area` @6a0910, `scale_land_area` @68b1e0, `get_player_overage` @68b280 |
 | primitives | `World::wipe` @6b2c00, `Map::make_region` @69d3f0, `point` @69d5a0, `stamp` @69cf80, `large_stamp` @69cb20, `grow_region` @69c600, `grow_valid` @69d000, `land_dist` @69d970, `invert_land` @69d880, `fix_lakes` @69c470, `MapGreatSahara::fix_lakes` @41c150 |
 | recipes | OldWorld @69c0e0, Sahara @69bf70, Amazon @69be00, Himalayas @69bc90, SouthwestMesa @69bb20, AfricanWateringHole @69b650, AustralianOutback @69a650, GreatLakes @699e40, WarringStates @698b60, NewWorld @6984d0, ColonialPowers @697dd0, EastIndies @697540, EastMeetsWest @696640, SeaPower @696080, NileDelta @695bf0, BritishIsles @695130 |
-| conquest / scenario | `MapConquest::make_continents` @68dba0, `check_sea_map` @68d1a0, `add_additional_players` @68d260, `check_starting_loc` @68d7e0, `MapScenario::make` @68c8f0, `Map::run_map_script` @68c870, `MapScript::run_map_script` @68c860 |
+| conquest / scenario | `MapConquest::make_continents` @68dba0, `check_sea_map` @68d1a0, `add_additional_players` @68d260, `check_starting_loc` @68d7e0, `ScenarioEditor::import_image` @9a3f30, `Map::force_continent_spacing` @68e6a0, `ConquestCountries::draw_scenario_area` @761310, `get_scenario_map_rect` @75c3b0, `init_countries` @75f3a0, `MapScenario::make` @68c8f0, `Map::run_map_script` @68c870, `MapScript::run_map_script` @68c860 |
 | data | `mapstyles/*.xml` (`default.xml` groups and `TILESET_DATA`), `Data/tilesets.xml` (`TERRAINGROUP`), PDB types `Map` (0x2f0: `start_mode` +0x24, `start_dist` +0x28, `avoid_center` +0x2c, `avoid_continent` +0x30, `avoid_edge` +0x34, `base_edge` +0x44, `sea_map` +0x48, `avoid_modify` +0x64), `TerrainGroup` (0x9c), `TileSetGroupData` (0x40) |
 
 ## Oracle: current 2.SVX (2026-10-24)

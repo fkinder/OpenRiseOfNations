@@ -92,6 +92,8 @@ bool Gen::make_continents() {
 	case kStyleNileDelta: return mc_nile_delta();
 	case kStyleBritishIsles: return mc_british_isles();
 	case kStyleBlank: return mc_grass();
+	case kStyleConquest:
+	case kStyleConquestSea: return mc_conquest();
 	default: return false;
 	}
 }

@@ -144,6 +144,14 @@ void Gen::choose_tileset() {
 	};
 	pass(def_root);
 	pass(style_root);
+	// a CtW battle plays on the tileset of the defended node (the attacker's for style 5); the draws above are made either way
+	if (const ConquestInput* ci = conquest_input()) {
+		if (ci->valid && !ci->tileset.empty() && style >= kStyleConquest) {
+			for (const std::string& a : available_tilesets) {
+				if (iequal(a, ci->tileset)) tileset = a;
+			}
+		}
+	}
 }
 
 void Gen::read_tileset_group_data() {
