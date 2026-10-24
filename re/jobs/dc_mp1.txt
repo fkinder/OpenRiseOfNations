@@ -1,0 +1,7 @@
+re/decomp/multiplayer
+CommandManager::(process_turn|send_local_package|recover_from_oos|process_command_package_data|set_mp_playback|check_mp_playback|start|init|close|issue_turn_data|issue_resign|issue_quit|issue_cannon_time)$
+TurnControl::(do_frame|do_frame_multi|compute_next_turn_multi|check_new_frame_multi|set_new_target_time|end_cannon_time|start_cannon_time|process_pause|process_turn_data|check_cannon_time|set_pause|toggle_pause|init|get_lag_time|walk_data|reset_base_time|is_cannon_time)$
+DropControl::.*
+NetDaemon::.*
+PackageFifo::.*
+CommandPackage::(end_process|begin_process|process_ungraceful_player_drop|process_resign|process_quit|process_turn_data|process_pause|process_cannon_time|process_check_sums|process_next_check_sum|process_mp_log|process_chat|process_ping|process_chat_set|send|clear|init|process_all)$

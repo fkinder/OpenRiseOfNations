@@ -1,0 +1,4 @@
+re/decomp/spells/vt_orders2.txt
+TargetOrder
+AttackOrder
+UnitOrder

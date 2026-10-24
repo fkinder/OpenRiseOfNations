@@ -1,0 +1,4 @@
+re/decomp/spells/vt_types.txt
+UnitType
+BuildType
+SpellType

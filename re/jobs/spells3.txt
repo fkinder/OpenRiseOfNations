@@ -1,0 +1,8 @@
+re/decomp/spells
+Unit::detect_unit_collision
+Unit::detect_boat_collision
+Unit::think_merchant
+Unit::kill_current_order
+Unit::target_opportunity
+Unit::process_cloak
+UnitData::invalid_loc

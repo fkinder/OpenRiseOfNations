@@ -1,0 +1,8 @@
+re/decomp/ctw
+ConquestGame::.*
+ConquestStyle::.*
+ConquestStyles::.*
+ConquestNode::.*
+ConquestLink::.*
+ConquestColony::.*
+ConquestBonusCard::.*

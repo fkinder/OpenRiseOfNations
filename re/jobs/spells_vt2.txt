@@ -1,0 +1,3 @@
+re/decomp/spells/vt_orders.txt
+CastOrder
+SpecialAnimOrder

@@ -1,0 +1,5 @@
+/private/tmp/claude-501/-Users-felipekinder--claude-spares-spare-QTdSTB/27dae01e-1f96-4d6a-9a96-e719212d8840/scratchpad/dc/
+TerrainOut::generate_land_lists
+TerrainList::add_new_coord_info
+TerrainList::.*
+CoordInfo::.*

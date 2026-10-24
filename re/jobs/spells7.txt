@@ -1,0 +1,4 @@
+re/decomp/spells
+Types::unit_key
+UnitTypeData::is.*
+UnitType::is.*

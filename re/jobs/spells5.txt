@@ -1,0 +1,9 @@
+re/decomp/spells
+LeaderData::get_spy_upgrade
+LeaderData::has_wonder
+LeaderData::tribe_can_type
+LeaderData::is_ally
+Game::teams_locked
+Unit::swap_team
+Build::plunder
+Unit::do_job

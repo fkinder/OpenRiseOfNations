@@ -1,0 +1,2 @@
+re/decomp/multiplayer/types.txt
+MPDropOptions|MPDROPOPTIONS.*|NetMsg_.*|NetSys|NetPlayer|DropControl|TurnControl|PackageFifo|CommandManager|NetDaemon|GameInfo|ConnectionData|Setup|GameSetup|TimeSync|SyncPoint|NetMsgType|NetMsg|NetworkMessageType|LocalPlayerConnection.*|Player|CheckSums|DropCommand|TurnDataCommand|ChatCommand|.*Drop.*Command|ResignCommand|QuitCommand|NetSys_u_.*

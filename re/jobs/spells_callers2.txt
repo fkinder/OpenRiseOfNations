@@ -1,0 +1,3 @@
+re/decomp/spells/callers2.txt
+1
+UnitData::get_packer_stance

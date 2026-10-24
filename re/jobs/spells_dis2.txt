@@ -1,0 +1,3 @@
+re/decomp/spells_dis
+SpellTypeData::get_job_time
+SpellType::cast

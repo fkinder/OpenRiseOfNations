@@ -1,0 +1,12 @@
+re/decomp/multiplayer
+SetupWin::(countdown|start_game_success|start_game_fail|validate_start|start_local_countdown|setup_game|process|check_all_ready|check_all_connected|submit_local_game_data_changes|copy_pending_changes_to_game_data|do_scen_script_sync|validate_file_transfer|on_host_migrate|on_player_added|on_player_deleted|cancel_start_game_.*|reset_game)$
+ConnectionData::(send_game|send_player|init|add_player|delete_player)$
+Game::(load_steam_net_lib|unload_net_lib|run|run_playback|loop)$
+CommandManager::(init|start)$
+NetDaemon::(send_sync_signal|send_drop_vote|send_drop_decision)$
+SyncPoint::.*
+TimeSync::.*
+GameInfo::(init|load_from_config|default_setting)$
+Player::(drop|resign|quit|is_connection|is_active_connection|walk_data)$
+Leader::(resign|quit|drop|defeat|action_resign)$
+LeaderData::(resign|quit|drop)$

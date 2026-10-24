@@ -1,0 +1,6 @@
+re/decomp/multiplayer
+Player::(leave_game|is_connection|is_active_connection|nameWithPlatformSymbol)$
+Leader::(resign|quit|leave|defeat|victory|go_ai|become_ai|set_ai|take_over.*)$
+LeaderData::(become_ai|take_over|set_ai|set_human|walk_data)$
+CommandPackage::(process_resign|process_quit|process_ungraceful_player_drop|end_process|process_check_sums|process_next_check_sum|process_check_random|process_marwan|process_mp_log)$
+CommandManager::(recover_from_oos|set_mp_playback|check_mp_playback|log_data|issue_mp_log)$

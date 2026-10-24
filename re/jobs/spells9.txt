@@ -1,0 +1,6 @@
+re/decomp/spells
+Unit::set_type
+Unit::set_new_location
+Unit::update_gpiece
+Unit::set_anim
+Unit::add_move_order

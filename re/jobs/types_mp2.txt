@@ -1,0 +1,2 @@
+re/decomp/multiplayer/types2.txt
+.*PlayerFlag.*|.*PLAYER_FLAG.*|ePlayerFlags|PlayerFlags|.*GAMEINFO.*FLAG.*|eLocalPlayerDisconnect|GameConnectionData.*|PlayerConnectionData|LeaderFlag.*|.*SemaphoreBit.*|GameSemaphore.*|DropPacket|CommandPackage|NetMsg_PlayerStatus.*|Leader_flags.*|LEADER_.*|eLeaderFlags

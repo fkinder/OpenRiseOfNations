@@ -1,0 +1,11 @@
+re/decomp/multiplayer/callers2.txt
+3
+Game::run_oos_recovery
+NetDaemon::process_chat
+NetDaemon::send_chat
+CommandManager::issue_chat
+CommandManager::issue_ping
+CommandPackage::process_ping
+CommandPackage::process_chat
+RecordGame::init_playback
+CommandManager::set_mp_playback

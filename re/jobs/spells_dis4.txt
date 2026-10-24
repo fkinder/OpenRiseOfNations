@@ -1,0 +1,2 @@
+re/decomp/spells_dis
+LeaderData::get_spy_upgrade

@@ -1,0 +1,5 @@
+re/decomp/spells
+Unit::do_guard
+Group::action_garrison
+Group::action_attack
+UnitData::is_entering_or_exiting

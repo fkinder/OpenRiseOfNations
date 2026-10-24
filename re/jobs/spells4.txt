@@ -1,0 +1,8 @@
+re/decomp/spells
+Leader::pay_dow
+LeaderData::afford_dow
+GroupOut::validate_spell
+CommandPackage::process_spell
+Options::do_declare_war
+LeaderOut::warn_resources
+Build::finished

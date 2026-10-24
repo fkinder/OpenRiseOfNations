@@ -1,0 +1,7 @@
+re/decomp/spells
+ObjectData::is
+ObjectData::isnt
+UnitTypeData::is
+UnitType::is
+TypeData::is
+Types::object_key

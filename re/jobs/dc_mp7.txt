@@ -1,0 +1,6 @@
+re/decomp/multiplayer
+CommandManager::(issue_chat|issue_ping|issue_chat_set|issue_spline|issue_mp_log)$
+RecordGame::(init_playback|write_header|write_save_game|init_record|fill_game_info|init_file|select_file|flush)$
+CommandManager::(set_mp_playback|check_mp_playback)$
+Game::(init_rules_data|init_rules_and_teams)$
+AutoSave::.*

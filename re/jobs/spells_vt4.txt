@@ -1,0 +1,4 @@
+re/decomp/spells/vt_ut.txt
+UnitTypeData
+UnitType
+TypeData

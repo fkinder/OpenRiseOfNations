@@ -1,0 +1,11 @@
+re/decomp/ui_tips
+Options::describe
+Options::get_hotkey_string
+Scene::prepare_mouseover_text
+Scene::set_good_required
+Scene::add_info.*
+Scene::load_help_key
+Scene::set_help_type
+MouseOver::set_option
+MouseOver::set_help
+MouseOver::describe

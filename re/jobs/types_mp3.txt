@@ -1,0 +1,2 @@
+re/decomp/multiplayer/types3.txt
+.*[Pp]layerKey.*|.*PLAYERKEY.*|.*LobbyKey.*|.*LOBBYKEY.*|ePlayerKey|eLobbyKey|eSteamLobby.*|ESTEAM.*|GameFlags|GameInfoFlags|eGameFlags|.*GAMEINFO.*|GameType|GAMETYPE.*|GameSpyType|GameSpyResult|ICrossPlayService|Platform.*|ePlatform|SlotType|ESlotType|SLOT.*|MPSTAT.*

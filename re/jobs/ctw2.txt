@@ -1,0 +1,14 @@
+re/decomp/ctw
+ConquestLeader::.*
+ConquestLeaders::.*
+ConquestPieces::.*
+ConquestPiece::.*
+ConquestDiploOffer::.*
+ConquestNews::.*
+MapConquest::.*
+ConquestLoadGame::.*
+ConquestSaveGame::.*
+WalkDataConquestGame::.*
+ConquestCountries::load_country_data
+ConquestCountries::init_countries
+ConquestBonusCardTypes::.*

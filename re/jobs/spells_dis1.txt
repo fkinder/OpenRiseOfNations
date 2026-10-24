@@ -1,0 +1,4 @@
+re/decomp/spells_dis
+SpellTypeData::is_castable
+SpellTypeData::get_range
+SpellTypeData::is_valid_target

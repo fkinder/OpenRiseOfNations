@@ -1,0 +1,4 @@
+re/decomp/multiplayer
+NetSys::.*
+CrossplayNetLibSession::.*
+GameSpy::(host_game|join_game|start_game|create_game|on_.*|launch.*|send_game.*|start_.*)$

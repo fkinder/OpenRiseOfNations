@@ -1,0 +1,17 @@
+re/decomp/spells
+UnitData::is_special
+UnitData::is_hero
+Heroes::init_hero
+Unit::init
+UnitData::order_type
+Unit::kill_current_order
+UnitData::mana
+UnitData::mana_left
+UnitData::is_busy
+TypeData::is_pack
+TypeData::is_unpack
+Specials::.*
+Object::disband
+CityData::is_disbanding
+CityData::depop_can_queue
+Cities::capture_city
