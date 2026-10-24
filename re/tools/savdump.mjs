@@ -9,6 +9,8 @@
 //   node re/tools/savdump.mjs --doc docs/state-walk.md         readable listing with PDB field names
 //   node re/tools/savdump.mjs --synth | --synth-fill [--mode checksum]   run WalkDataGame over a synthetic stream (consistency)
 //   node re/tools/savdump.mjs <file.sav>                       decode a save (gzip or plain): magic, version, WalkDataGame
+//   node re/tools/savdump.mjs <file.sav> --summary            decode a save and print its header, world, leaders, object counts and
+//                                                              world-grid completeness (no player names)
 //   node re/tools/savdump.mjs <file.rcx|.bin> --replay         decode a replay's header walk; if it embeds a save, the save too;
 //                                                              otherwise also the rules block (Game::walk_rules_data)
 //   node re/tools/savdump.mjs <file> --fn "Game::walk_data" --at N [--obj game]   decode one function at byte offset N
@@ -160,6 +162,14 @@ function compile(src) {
 
 class Stop extends Error {}
 
+// Values the loader takes from game data or memory rather than from the stream (the `rt("...")` expressions of the description).
+// They are constants of one game build: validated by decoding every save (docs/state-spec.md section 8).
+export const RUNTIME_VALUES = {
+	// GraphicEvents.events.length = graphic_pieces->first_ammo_piece + ammo_names.length (GraphicEvents::init @8e5390), the
+	// number of EventGroup slots; not in the stream, one presence byte per slot. Found by decoding: 60415 in every save.
+	'GraphicEvents.events.length': 60415,
+};
+
 // ------------------------------------------------------------------------------------------------ records
 
 // A record is one object's memory image, filled by raw walks at their offsets (like the loader's memory).
@@ -207,6 +217,7 @@ export class Decoder {
 		this.P = opts.pdb || null;
 		this.layoutCache = new Map();
 		this.depth = 0;
+		this.lengths = {};   // container length by global name (the last container walked on that global), for LEN("name")
 		this.saveVersion = opts.saveVersion ?? 0x10;
 	}
 	layout(cls) {
@@ -258,7 +269,12 @@ export class Decoder {
 			up: ctx.parent ? acc(ctx.parent) : null,
 			G: name => acc({ rec: this.global(name), base: 0 }),
 			save_version: this.saveVersion,
-			rt: t => { throw new Error(`runtime value needed by the loader: ${t}`); },
+			LEN: name => this.lengths[name] ?? 0,
+			rt: t => {
+				if (this.opts.rtValues && t in this.opts.rtValues) return this.opts.rtValues[t];
+				if (t in RUNTIME_VALUES) return this.opts.synth ? 1 : RUNTIME_VALUES[t];
+				throw new Error(`runtime value needed by the loader: ${t}`);
+			},
 		};
 		return e;
 	}
@@ -330,7 +346,7 @@ export class Decoder {
 			case 'buf': {
 				const len = this.ev(ctx, s.len);
 				const data = this.take(len, `buf in ${node.fn}`);
-				node.items.push({ buf: s.ptr, elem: s.elem, len, value: fmtBuf(data, s.elem) });
+				node.items.push({ buf: s.ptr, elem: s.elem, len, pos: this.p - len, value: fmtBuf(data, s.elem) });
 				this.trace(ctx, `buf *${s.ptr} (${len})`);
 				return;
 			}
@@ -404,6 +420,7 @@ export class Decoder {
 		const header = () => {
 			const length = i32(`${kind} length`);
 			out.length = length;
+			if (ctx.rec.label && !ctx.base) this.lengths[ctx.rec.label] = length;
 			if (!length) return 0;
 			out.size = i32(`${kind} size`);
 			out.increment = this.take(2, 'increment').readInt16LE(0);
@@ -648,6 +665,9 @@ export function docgen(outFile) {
 				case 'deref': lines.push(`${pad}*${on}${fieldAt(ccls, num(s.ptr)) || v(s.ptr)}${s.index ? '[' + s.index + ']' : ''} (${s.class || '?'}):${why}`); emit(s.body, s.class, ind + 1); break;
 				case 'container': {
 					lines.push(`${pad}${s.kind}<${s.class || s.elemType || ''}>${s.stride ? ' stride ' + v(s.stride) : ''}${s.alloc ? ', load allocates ' + s.alloc : ''}${why}`);
+					if (s.count !== undefined) lines.push(`${pad}  count: ${s.count}`);
+					if (s.header) { lines.push(`${pad}  header:`); emit(s.header, s.class, ind + 2); }
+					if (s.node) { lines.push(`${pad}  node:`); emit(s.node, s.class, ind + 2); }
 					if (s.elem) { lines.push(`${pad}  element:`); emit(s.elem, s.class, ind + 2); }
 					if (s.body) emit(s.body, cls, ind + 1);
 					if (s.dispatch) for (const [t, d] of Object.entries(s.dispatch)) lines.push(`${pad}  type ${t} → ${typeof d === 'string' ? d : JSON.stringify(d)}`);
@@ -674,6 +694,102 @@ export function docgen(outFile) {
 	if (outFile) { fs.writeFileSync(outFile, text); console.log(`wrote ${outFile} (${names.length} functions)`); } else console.log(text);
 }
 
+
+// ------------------------------------------------------------------------------------------------ save summary
+
+// Facts about a decoded save, read from the decoded records with PDB field names (no player names are printed).
+export function summarizeSave(dec, node, verifyNode, buf) {
+	const P = dec.P;
+	const offs = cls => { const m = {}; for (const f of P.flat(P.layout(cls))) if (!(f.name in m) && f.type !== 'vfptr') m[f.name] = { o: f.offset, s: f.size }; return m; };
+	const GI = offs('GameInfo'), G = offs('Game'), W = offs('World'), LD = offs('LeaderData'), PL = offs('Player');
+	const rd = (rec, base, F, name) => { const f = F[name]; const b = rec.bytes, o = base + f.o + rec.origin; return f.s >= 4 ? b.readInt32LE(o) : f.s >= 2 ? b.readUInt16LE(o) : b[o]; };
+	const find = (n, name, out = []) => {
+		for (const it of n.items) {
+			if (it.call) { if (it.call.fn === name) out.push(it.call); find(it.call, name, out); }
+			else if (it.deref) find(it.deref, name, out);
+			else if (it.container) for (const e of it.elements) if (e) find(e, name, out);
+		}
+		return out;
+	};
+	const game = dec.globals.game, world = dec.globals.world, leaders = dec.globals.leaders;
+	const out = {};
+	const gi = find(node, 'GameInfo::walk_data')[0];
+	out.gameVersion = (gi.items.find(i => i.string !== undefined) || {}).string;
+	out.setup = {};
+	for (const n of ['version', 'seed', 'checksum_deep', 'checksum_window_size', 'checksum_failure_threshold', 'flags', 'team_style', 'map_style', 'map_size', 'players', 'max_observers', 'game_speed', 'game_rules', 'difficulty', 'starting_town', 'starting_resources', 'starting_resources2', 'tech_cost', 'reveal_map', 'pop_limit', 'rush_rules', 'cannon_times', 'starting_technology', 'starting_technology2', 'ending_technology', 'elimination', 'victory', 'wonderwin', 'score_goal', 'popwin', 'time_limit', 'chairs', 'econwin', 'scenario_type', 'script_type', 'mods'])
+		out.setup[n] = rd(game, G.info.o, GI, n);
+	out.game = {};
+	for (const n of ['frame', 'tick', 'market_tick', 'num_players', 'num_nations', 'num_sides', 'num_goods', 'num_items', 'num_objects', 'total_units', 'world_pop', 'world_cities', 'world_villages', 'musical_chairs']) out.game[n] = rd(game, 0, G, n);
+	out.game.semaphore = game.slice(G.semaphore.o, 16).toString('hex');
+	out.game.random_seed = dec.globals.game_random.slice(0, 4).readUInt32LE(0);
+	out.world = {};
+	for (const n of ['xs', 'ys', 'size', 'fog_size', 'tile_size', 'reg_xs', 'reg_ys', 'reg_size', 'map', 'sea_map', 'forest_size', 'mountain_size', 'rock_size', 'total_metal', 'total_oil', 'goodies', 'land_resources', 'sea_resources', 'land_size', 'seed'])
+		out.world[n] = n === 'xs' ? world.slice(0, 4).readInt32LE(0) : n === 'ys' ? world.slice(4, 4).readInt32LE(0) : rd(world, 0, W, n);
+	// players (names are never printed)
+	out.players = [];
+	for (let k = 0; k < 8; k++) {
+		const base = G.info.o + GI.player.o + k * 0x8c;
+		const fl = rd(game, base, PL, 'flags');
+		if (fl & 1) out.players.push({ slot: k, flags: '0x' + fl.toString(16), tribe: rd(game, base, PL, 'tribe'), who: rd(game, base, PL, 'who'), team: rd(game, base, PL, 'team'), play: rd(game, base, PL, 'play'), diff: rd(game, base, PL, 'diff') });
+	}
+	out.leaders = [];
+	for (let k = 0; k < 9; k++) {
+		const base = k * 0x6eec;
+		if (!(leaders.slice(base, 4).readInt32LE(0) & 1)) continue;
+		out.leaders.push({ who: k, tribe: rd(leaders, base, LD, 'tribe'), gov: rd(leaders, base, LD, 'gov'), score: rd(leaders, base, LD, 'score'), cities: rd(leaders, base, LD, 'city_num'), villages: rd(leaders, base, LD, 'village_num') });
+	}
+	// objects: per list (player slot) alive and dead slots by class
+	const on = find(node, 'Objects::walk_data')[0];
+	const names = ['units', 'builds', 'walls', 'animals'];
+	out.objects = {};
+	on.items.filter(i => i.call).forEach((l, who) => {
+		const c = l.call.items.find(i => i.container);
+		const cnt = { units: 0, builds: 0, walls: 0, animals: 0, empty_or_dead_slots: 0 };
+		if (c) for (const e of c.elements) {
+			if (!e) { cnt.empty_or_dead_slots++; continue; }
+			const t = +(/type (\d+)/.exec(e.fn) || [])[1];
+			let alive = null;
+			(function dfs(n) { for (const it of n.items) { if (alive !== null) return; if (it.call) { if (it.call.fn === 'SubObject::walk_data') { const r = it.call.items.find(x => x.raw && x.raw[1] === 1); if (r) alive = buf[r.pos] & 1; } else dfs(it.call); } } })(e);
+			if (alive) cnt[names[t]]++; else cnt.empty_or_dead_slots++;
+		}
+		if (cnt.units + cnt.builds + cnt.walls + cnt.animals) out.objects[who === 8 ? 'gaia(8)' : 'player ' + who] = cnt;
+	});
+	// world grid completeness
+	const wn = find(node, 'World::walk_data')[0];
+	const cells = [];
+	(function coll(n) { for (const it of n.items) { if (it.deref) { const d = it.deref; if (d.fn.includes('WData')) { const r = d.items.find(x => x.raw && x.raw[1] === 0x15); if (r) cells.push(r.pos); } } else if (it.call) coll(it.call); } })(wn);
+	const g = { wdata_cells: cells.length, size: out.world.size, land_values: {}, cells_without_region: 0 };
+	const regs = new Map();
+	let shore = 0;
+	for (const p of cells) {
+		const land = buf.readInt8(p + 2), reg = buf.readInt16LE(p + 4);
+		g.land_values[land] = (g.land_values[land] || 0) + 1;
+		if (reg < 0) g.cells_without_region++; else regs.set(reg, (regs.get(reg) || 0) + 1);
+		if (buf.readUInt16LE(p) & 0x100) shore++;
+	}
+	g.land_size_check = `land==0 cells ${g.land_values[0] || 0} + flag 0x100 cells ${shore} = ${(g.land_values[0] || 0) + shore} (World.land_size ${out.world.land_size})`;
+	const tdata = wn.items.find(x => x.buf !== undefined && x.len === out.world.tile_size * 2);
+	g.tdata_tiles = tdata ? tdata.len / 2 : 0;
+	if (tdata) { let nz = 0; for (let i = 0; i < tdata.len; i += 2) if (buf.readUInt16LE(tdata.pos + i)) nz++; g.tdata_nonzero = nz; }
+	let rl = null;
+	(function f2(n) { for (const it of n.items) { if (it.container && it.class === 'Region') rl = it; else if (it.call) f2(it.call); } })(node);
+	if (rl) {
+		const used = [];
+		rl.elements.forEach((e, i) => { if (e && regs.has(i)) used.push([i, e.rec.bytes.readInt32LE(0x14), regs.get(i)]); });
+		g.region_list = rl.length;
+		g.regions_used = used.length;
+		g.region_size_equals_cell_count = used.every(u => u[1] === u[2]);
+		g.regions_sea_land = [dec.globals.regions.slice(0x18, 4).readInt32LE(0), dec.globals.regions.slice(0x1c, 4).readInt32LE(0)];
+	}
+	out.grid = g;
+	if (verifyNode) {
+		const vals = [];
+		(function w(n) { for (const it of n.items) { if (it.local !== undefined) vals.push(it.value); else if (it.call) w(it.call); } })(verifyNode);
+		out.verify_entries = vals.length;
+	}
+	return out;
+}
+
 // ------------------------------------------------------------------------------------------------ files
 
 function loadBytes(file) {
@@ -689,6 +805,12 @@ function decodeAt(desc, buf, pos, fn, obj, opts) {
 	let result, error = null;
 	try {
 		result = dec.invoke(fn, { rec: ctxRec, base: 0, parent: null }).node;
+		// Further functions on the same decoder (a save is followed by SaveGame::verify_save's checksum list).
+		for (const next of opts.then || []) {
+			if (!desc.functions[next]) continue;
+			const n2 = dec.invoke(next, { rec: new Rec(desc.functions[next].this, 0, next), base: 0, parent: null }).node;
+			result = { fn: result.fn + ' + ' + next, cls: result.cls, base: 0, items: [{ call: result }, { call: n2 }], rec: result.rec };
+		}
 	} catch (e) {
 		if (!(e instanceof Stop) && opts.strict) throw e;
 		error = e.message;
@@ -713,6 +835,7 @@ function main(argv) {
 		else if (k === '--at') opt.at = Number(a[++i]);
 		else if (k === '--obj') opt.obj = a[++i];
 		else if (k === '--replay') opt.replay = true;
+			else if (k === '--summary') opt.summary = true;
 		else if (k === '--synth') opt.synth = true;
 		else if (k === '--synth-fill') { opt.synth = true; opt.synthFill = true; }
 		else if (k === '--version') opt.version = Number(a[++i]);
@@ -761,8 +884,8 @@ function main(argv) {
 				const [magic, q] = readStr(buf, pos);
 				const ver = buf.readUInt32LE(q);
 				console.log(`embedded save @${pos}: magic=${JSON.stringify(magic)} version=${hex(ver)}`);
-				const s = decodeAt(desc, buf, q + 4, 'WalkDataGame::walk_data', null, { ...common, saveVersion: ver });
-				report('embedded save (WalkDataGame::walk_data)', s, q + 4);
+				const s = decodeAt(desc, buf, q + 4, 'WalkDataGame::walk_data', null, { ...common, saveVersion: ver, then: ['SaveGame::verify_save'] });
+				report('embedded save (WalkDataGame::walk_data + SaveGame::verify_save)', s, q + 4);
 			} else {
 				// Random game info: 5 bytes per active player (flags&1, who<8) + 4; then the rules block.
 				// Count the active players from the decoded header (Game.info.player[k].flags / .who).
@@ -773,8 +896,11 @@ function main(argv) {
 					const flags = info.bytes.readUInt16LE(base + 0x30), who = info.bytes[base + 0x33];
 					if ((flags & 1) && who < 8) active++;
 				}
-				const rpos = pos + 5 * active + 4;
-				console.log(`random game info: ${active} players → rules block @${rpos}`);
+				// The block can have more entries than the header has players (lobby / scenario games): probe for the rules tag.
+				let nEntries = active;
+				for (const n of [active, ...[...Array(9).keys()].filter(n => n !== active)]) if (pos + 5 * n + 4 < buf.length && buf[pos + 5 * n + 4] === 0x92) { nEntries = n; break; }
+				const rpos = pos + 5 * nEntries + 4;
+				console.log(`random game info: ${nEntries} entries (${active} header players) → rules block @${rpos}`);
 				const s = decodeAt(desc, buf, rpos, 'Game::walk_rules_data', 'game', common);
 				report('rules (Game::walk_rules_data)', s, rpos);
 			}
@@ -784,8 +910,13 @@ function main(argv) {
 		const ver = buf.readUInt32LE(q);
 		console.log(`save: magic=${JSON.stringify(magic)} version=${hex(ver)}`);
 		if (!/^RoN(Multi|CTW)?Save$/.test(magic)) console.log('warning: unexpected magic');
-		const s = decodeAt(desc, buf, q + 4, 'WalkDataGame::walk_data', null, { ...common, saveVersion: ver });
-		report('save (WalkDataGame::walk_data)', s, q + 4);
+		const s = decodeAt(desc, buf, q + 4, 'WalkDataGame::walk_data', null, { ...common, saveVersion: ver, then: ['SaveGame::verify_save'] });
+		report('save (WalkDataGame::walk_data + SaveGame::verify_save)', s, q + 4);
+		if (opt.summary && !s.error) {
+			const sum = summarizeSave(s.dec, s.node, s.node.items[1].call, buf);
+			console.log('\nsummary:\n' + JSON.stringify(sum, null, 1));
+			results.push({ title: 'summary', summary: sum });
+		}
 		if (!s.error && s.end !== buf.length) console.log(`note: ${buf.length - s.end} bytes after the walk`);
 	}
 	if (opt.json) { fs.writeFileSync(opt.json, JSON.stringify(results, null, 1)); console.log(`wrote ${opt.json}`); }

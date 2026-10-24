@@ -1259,9 +1259,11 @@ else:
 
 Addresses the global `graphic_events` directly. The events PtrArray header is NOT walked: only per-slot presence bytes and the EventGroup chains.
 
+Validated on real saves: the slot count 60415 is a constant of the game data (RUNTIME_VALUES in re/tools/savdump.mjs); the stream holds one presence byte per slot plus the EventGroup chains of the present slots, about 70 KB per save. Found by trying every count until the Scene tag followed the last array.
+
 ```
 tag "GraphicEvents" (0x7c)
-for i in 0..(i32(0x8))-1:   // events.length: NOT in the stream; the EventGroup table size is fixed by game data (built at startup)
+for i in 0..(rt("GraphicEvents.events.length"))-1:   // events.length = first_ammo_piece + ammo_names.length (GraphicEvents::init): NOT in the stream, a game-data constant (60415 in this build)
   *0x14[i] (?):   // slot events.list[i]
     u8 has_group   (writer stores: rt("events.list[i] != null"))
     if (L.has_group):
@@ -1652,6 +1654,7 @@ Node order head to tail. Context of elem = the node.
 i32 count   (writer stores: i32(0x10))   // length
 // on load: count 0 -> clear(); otherwise every node is removed then count nodes are add()ed (appended)
 LinkList<>
+  count: L.count
   element:
     raw [0x10, 0x12) 2 bytes   // metric (u16)
     raw [0x8, 0xd) 5 bytes   // BreakInfo.address, opcode (5 bytes)
@@ -1665,6 +1668,7 @@ LinkList<>
 i32 count   (writer stores: i32(0xc))   // length
 // on load: count 0 -> clear(); else all nodes removed, then count nodes add()ed
 LinkList<>
+  count: L.count
   element:
     raw [0xc, 0xe) 2 bytes   // metric (i16)
     raw [0x8, 0xc) 4 bytes   // data (i32)
@@ -1680,6 +1684,7 @@ Hard-wired to the static ScenarioData::involved_objects (ignores this).
 i32 count   (writer stores: i32(0xc))   // length
 // on load: count 0 -> clear(); else all nodes removed, then count nodes add()ed
 LinkList<>
+  count: L.count
   element:
     raw [0xc, 0xd) 1 bytes   // metric (u8)
     raw [0x8, 0xc) 4 bytes   // data (i32)
@@ -1695,6 +1700,7 @@ Hard-wired to the static ScenarioData::messages (ignores this).
 i32 count   (writer stores: i32(0x2c))   // length
 // on load: count 0 -> clear(); else all nodes removed, then count nodes add()ed
 LinkList<>
+  count: L.count
   element:
     raw [0x2c, 0x30) 4 bytes   // metric (i32)
     ScenarioMessage::walk_data on this.0x8   // data vfunc slot 0
@@ -1710,6 +1716,7 @@ Hard-wired to the static ScenarioData::timers (ScriptTimers) - ignores this.
 i32 count   (writer stores: i32(0x1c))   // length
 // on load: count 0 -> clear(); else all nodes removed, then count nodes add()ed
 LinkList<>
+  count: L.count
   element:
     raw [0x1c, 0x20) 4 bytes   // metric (i32)
     String 0x8   // data
@@ -2543,9 +2550,13 @@ PtrArray<Wonder>, load allocates Wonder (0x18, vbase ctor)
 
 Save also moves the iterator fields (current_node/data/metric) as it walks; no stream effect.
 
+Validated on real saves: each node is i32 data type, u8 metric, then the 9-byte GatherPoint (the earlier listing showed only the last part, which desynchronised the first Build with a gather point).
+
 ```
 PtrLinkListAbstract<GatherPoint>
   element:
+    i32 dtype   (writer stores: 0)   // data type of the node (get_data_type); GatherPoint lists always write a vfunc result
+    raw [0xc, 0xd) 1 bytes: action   // metric (u8)
     GatherPoint::walk_data on this   // devirtualized: inlined raw [4,0xd) when vtable == GatherPoint::vftable, else virtual slot 0
 ```
 
@@ -2574,6 +2585,7 @@ Open: get_data_type is the identical-COMDAT-folded body at 0041e580 (shared with
 i32 count   (writer stores: i32(0x10))   // length
 // on load: the list is cleared first; each node comes from Recycler<LLNode> and is inserted BEFORE the head and made the new head
 PtrLinkListAbstract<>
+  count: L.count
   element:
     i32 dtype   (writer stores: 0)   // data type: this vfunc slot 0 get_data_type(data); folded trivial body returning 0 for PtrLinkList<ScenarioObjective,int>
     // on load: data := this vfunc slot 1 get_new_data(dtype) = new ScenarioObjective (0x54)
@@ -2652,6 +2664,82 @@ for i in 0..(L.count)-1:
   *ScriptFile::script_files.list[i] (?):   // script_files.list[i] (never null on save)
     *0x0[0] (ScriptFile):
       ScriptFile::walk_data on this
+```
+
+## SaveGame::verify_save
+
+@005a76b0 · this: (globals) · confidence: high · source: fix_verify.json
+
+The debug round-trip block that SaveGame::do_save appends after WalkDataGame::walk_data (vtable +0x10) and LoadGame::do_load checks after loading (vtable +0x18, verify_load @5a39f0). One u32 per entry; the entries are the CHECK_SUMS-style Adler-32 values of the subsystems, an oracle for the checksum walk. Decoded together with the save: savdump runs it on the same decoder (LEN("goods") is the length of the goods container, G("world") the world scalars).
+
+```
+u32 game   (writer stores: adler32(CheckSum walk of Game::walk_data); accum starts at 1)
+u32 tileset   (writer stores: adler32(CheckSum walk of TileSet::walk_data); accum starts at 1)
+u32 mountains   (writer stores: adler32(CheckSum walk of Mountains::walk_data); accum starts at 1)
+u32 empty_1   (writer stores: adler32(CheckSum walk of nothing (the decompile shows no walk between Mountains and Constants: accum stays 1)); accum starts at 1)
+u32 constants   (writer stores: adler32(CheckSum walk of Constants[0, curr_element) + Constants[+0x804, +0x808)); accum starts at 1)
+u32 game_daemon   (writer stores: adler32(CheckSum walk of game_daemon[0, busy)); accum starts at 1)
+u32 armies   (writer stores: adler32(CheckSum walk of Armies::walk_data); accum starts at 1)
+u32 cities   (writer stores: adler32(CheckSum walk of Cities::walk_data); accum starts at 1)
+u32 forms   (writer stores: adler32(CheckSum walk of tag Forms + ObjectArray<Form>::walk_data); accum starts at 1)
+for i in 0..(LEN("goods"))-1:   // one per Good in goods (PtrArray<Good> length)
+  u32 good   (writer stores: adler32(CheckSum walk of goods.list[i] vtable +0x7c walk); accum starts at 1)
+u32 goods_array   (writer stores: adler32(CheckSum walk of PtrArray<Good>::walk_data); accum starts at 1)
+u32 items_array   (writer stores: adler32(CheckSum walk of PtrArray<Item>::walk_data); accum starts at 1)
+u32 regions   (writer stores: adler32(CheckSum walk of Regions: sea, land, ObjectArray<Region>, Array<WCoordData>); accum starts at 1)
+u32 heroes   (writer stores: adler32(CheckSum walk of Heroes::walk_data); accum starts at 1)
+u32 herds   (writer stores: adler32(CheckSum walk of tag Herds + PtrArray<Herd>::walk_data); accum starts at 1)
+u32 specials   (writer stores: adler32(CheckSum walk of Specials::walk_data); accum starts at 1)
+u32 wonders   (writer stores: adler32(CheckSum walk of Wonders::walk_data); accum starts at 1)
+u32 forts   (writer stores: adler32(CheckSum walk of Forts::walk_data); accum starts at 1)
+u32 docks   (writer stores: adler32(CheckSum walk of Docks::walk_data); accum starts at 1)
+u32 oil_wells   (writer stores: adler32(CheckSum walk of OilWells::walk_data); accum starts at 1)
+u32 supplies   (writer stores: adler32(CheckSum walk of Supplies::walk_data); accum starts at 1)
+u32 caravans   (writer stores: adler32(CheckSum walk of Caravans::walk_data); accum starts at 1)
+u32 lands   (writer stores: adler32(CheckSum walk of tag Lands + ObjectArray<Land>::walk_data); accum starts at 1)
+for k in 0..(9)-1:   // leaders 0..8 (loop ends at 0xe789dc)
+  u32 leader   (writer stores: adler32(CheckSum walk of LeaderData::walk_data of leaders.list[k]); accum starts at 1)
+u32 leaders_all   (writer stores: adler32(CheckSum walk of prod_script_path + LeaderData for leaders 0..8); accum starts at 1)
+u32 techtypes   (writer stores: adler32(CheckSum walk of TechType::leader_off of the 85 tech types); accum starts at 1)
+u32 leader_options   (writer stores: adler32(CheckSum walk of LeaderOptions::walk_data); accum starts at 1)
+u32 tribes   (writer stores: adler32(CheckSum walk of tag Tribes + ObjectArray<Tribe>::walk_data); accum starts at 1)
+u32 option_info   (writer stores: adler32(CheckSum walk of OptionInfo::walk_data); accum starts at 1)
+u32 pathfinder   (writer stores: adler32(CheckSum walk of pathfinder[0x58, 0xc4)); accum starts at 1)
+u32 groups   (writer stores: adler32(CheckSum walk of Array<Group>, tag Groups, last_group, proc_group); accum starts at 1)
+u32 hotkey_groups   (writer stores: adler32(CheckSum walk of tag HotKeyGroups + Array<HotKeyGroup>); accum starts at 1)
+for k in 0..(9)-1:   // the 9 per-player object lists (0xfc / 0x1c)
+  u32 object_list   (writer stores: adler32(CheckSum walk of MultiPtrArray<Object> objects.lists[k]); accum starts at 1)
+u32 objects   (writer stores: adler32(CheckSum walk of Objects::walk_data); accum starts at 1)
+for i in 0..(G("world").i32(0x8))-1:   // world.size cells
+  u32 wdata_cell   (writer stores: adler32(CheckSum walk of WData[i] bytes [0, 0x15)); accum starts at 1)
+for i in 0..(G("world").i32(0x20))-1:   // world.tile_size tiles
+  u32 tdata_tile   (writer stores: adler32(CheckSum walk of tdata[i] (u16)); accum starts at 1)
+for i in 0..(G("world").i32(0x14))-1:   // world.fog_size fog cells
+  u32 seen_cell   (writer stores: adler32(CheckSum walk of CheckSums::check_seen(i)); accum starts at 1)
+u32 world   (writer stores: adler32(CheckSum walk of World::walk_data(part = -1)); accum starts at 1)
+u32 roads   (writer stores: adler32(CheckSum walk of Terrain::walk_roads); accum starts at 1)
+u32 graphic_events   (writer stores: adler32(CheckSum walk of GraphicEvents::walk_data); accum starts at 1)
+u32 empty_2   (writer stores: adler32(CheckSum walk of nothing (accum stays 1)); accum starts at 1)
+u32 scene   (writer stores: adler32(CheckSum walk of Scene::walk_data); accum starts at 1)
+u32 message_win   (writer stores: adler32(CheckSum walk of MessageWin::walk_data); accum starts at 1)
+u32 doober   (writer stores: adler32(CheckSum walk of Doober::walk_data); accum starts at 1)
+u32 farms   (writer stores: adler32(CheckSum walk of tag Farms, colours and heights, Array<FarmStruct>); accum starts at 1)
+u32 unbuilt_wonders   (writer stores: adler32(CheckSum walk of UnbuiltWonders::walk_data); accum starts at 1)
+u32 unbuilt_cities   (writer stores: adler32(CheckSum walk of UnbuiltCities::walk_data); accum starts at 1)
+u32 unbuilt_forts   (writer stores: adler32(CheckSum walk of UnbuiltForts::walk_data); accum starts at 1)
+u32 turn_control   (writer stores: adler32(CheckSum walk of tag TurnControl + semaphore + TurnControl[0x14, 0x169)); accum starts at 1)
+u32 units   (writer stores: adler32(CheckSum walk of CheckSums::check_units); accum starts at 1)
+u32 builds   (writer stores: adler32(CheckSum walk of CheckSums::check_builds); accum starts at 1)
+u32 walls   (writer stores: adler32(CheckSum walk of CheckSums::check_walls); accum starts at 1)
+u32 guys   (writer stores: adler32(CheckSum walk of CheckSums::check_guys); accum starts at 1)
+u32 ammo   (writer stores: adler32(CheckSum walk of AmmoData::walk_data of every Ammo with flags & 3); accum starts at 1)
+u32 check_groups   (writer stores: adler32(CheckSum walk of CheckSums::check_groups); accum starts at 1)
+u32 check_leaders   (writer stores: adler32(CheckSum walk of LeaderData::walk_data for leaders 0..7); accum starts at 1)
+u32 check_world   (writer stores: adler32(CheckSum walk of World::walk_data(-1) if world.cells); accum starts at 1)
+u32 check_cities   (writer stores: adler32(CheckSum walk of CheckSums::check_cities); accum starts at 1)
+u32 check_goods   (writer stores: adler32(CheckSum walk of CheckSums::check_goods); accum starts at 1)
+u32 check_items   (writer stores: adler32(CheckSum walk of CheckSums::check_items); accum starts at 1)
+u32 script_run_time   (writer stores: adler32(CheckSum walk of RunTimeEnv::walk_data); accum starts at 1)
 ```
 
 ## ScenarioComponent::walk_data
@@ -3280,11 +3368,11 @@ if (checksum == 0):
 
 ## Terrain::walk_coord_data
 
-@00850ef0 · this: Terrain · confidence: medium · source: C.json
+@00850ef0 · this: Terrain · confidence: high · source: C.json
 
 Writes the u16 CoordInfo.flags of every terrain coord (normally xs*ys values) in terrainlist order. Uses MiscAccess::terrain and GameAccess::world directly.
 
-Open: Node order inside each TerrainList depends on TerrainList::add_new_coord_info (not decompiled here); a loader must reproduce generate_land_lists exactly.
+Node order resolved from TerrainOut::generate_land_lists @85f6a0 and validated on real saves, see TerrainList::walk_data.
 
 ```
 // on load: TerrainOut::generate_land_lists() first rebuilds terrainlist (xs+ys-1 diagonal TerrainLists covering every world cell; per-list order from TerrainList::add_new_coord_info, using WData.land/land_sub) so the loader knows the node sequence
@@ -3330,10 +3418,11 @@ for x in 0..(G("world").i32(0x0))-1:
 
 @0084b9e0 · this: TerrainList · params: d · confidence: high · source: C.json
 
-Open: Per-list node count is not stored; savdump assumes the cells of anti-diagonal d. The node ORDER inside a list (TerrainList::add_new_coord_info) is not reproduced.
+Validated on real saves (80x80 and 100x100 worlds): the walk visits lists 0 .. xs+ys-2 and the stream holds xs*ys-1 u16 in total (list 0 is empty, the corner cell (0,0) is in the unwalked last list). Within a list the nodes are in insertion order of generate_land_lists: for list d >= xs (r = xs+ys-1-d) the cells (0,r), (1,r-1) .. (r,0); for d < xs (c = xs-d) the cells (c,ys-1), (c+1,ys-2) .. (xs-1,ys-c). CoordInfo.flags bit 2 (value 4) equals WData.flags bit 2 of the cell for all 6399 / 9999 nodes of each of the 10 saves (0 mismatches), which confirms the cell mapping.
 
 ```
-LinkList<CoordInfo>
+LinkList<CoordInfo>   // node count of list d: 0, 1, 2 .. xs-1, then xs+ys-d (see generate_land_lists); not stored
+  count: d === 0 ? 0 : (d < G("world").i32(0x0) ? d : G("world").i32(0x0) + G("world").i32(0x4) - d)
   element:
     raw [0x1c, 0x1e) 2 bytes: flags   // CoordInfo.flags (u16)
 ```
@@ -3435,7 +3524,7 @@ Walks only TechType::leader_off for the 85 tech types (indices 544..628); this i
 
 ```
 for t in 0..(85)-1:
-  *techtypes.list[544 + t] (?):   // techtypes list slot 544+t (byte offsets 0x880..0x9d0)
+  *techtypes.0x0[544 + t] (?):   // techtypes list slot 544+t (byte offsets 0x880..0x9d0)
     *0x0 (TechType):
       raw [0x1e2, 0x1e3) 1 bytes: leader_off   // leader_off (u8)
 ```
@@ -3599,6 +3688,8 @@ ConquestGame::walk_data on conquest_game   // on *GameAccess::conquest_game
 @005a2360 · this: (globals) · confidence: high · source: core.json
 
 Top of a save: everything after the magic string and u32 save version. Game::playing is forced to 0 around most of the walk. On load (input=1) many systems are closed first and rebuilt after their data (see notes).
+
+In a save file (SaveGame::do_save @5a81f0) this is followed by SaveGame::verify_save: one Adler-32 per subsystem (see that function). Validated by decoding the 10 original saves and the saves embedded in 59 replays to the last byte.
 
 ```
 GameInfo::walk_data on game.info   // GameAccess::game->info (Game+0xc); written again inside Game::walk_data

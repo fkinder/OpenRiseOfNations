@@ -1,14 +1,18 @@
 # Simulation state model: the DataWalk and the save format
 
 Status: ✅ visitor mechanics, primitives, tag bytes (hash reimplemented, all observed tags reproduced), save container,
-top-level walk order (`WalkDataGame::walk_data`), checksum-part mapping · 🟡 per-class walks (machine-readable in
-`re/iface/datawalk.json`; validated on data only where data exists, see §8) · ❓ no `.sav` file exists on this Mac, and the
-only replay (`re/analysis/sample_replay.bin`) has no embedded save, so the full save walk is reconstructed from code only.
+top-level walk order (`WalkDataGame::walk_data`), checksum-part mapping · ✅ per-class walks (machine-readable in
+`re/iface/datawalk.json`), **validated on real data**: the 10 `.SVX` saves of the original game and the saves embedded in 59
+`.rcx` replays all decode to the last byte with every section tag matching (§8). The description was reconstructed from this
+listing's own generated copy (`docs/state-walk.md`, via `re/tools/statewalk-to-json.mjs`) and corrected in four places by the
+real data (§8). · 🟡 reimplementation-side questions in §9.
 
 Deliverables:
 - `re/iface/datawalk.json`: every walk function as a list of steps (machine-readable; built by `node re/tools/savdump.mjs --build`
   from the fragments in `re/iface/datawalk/*.json`). The step language is in §3.
 - `docs/state-walk.md`: the same, rendered as readable pseudo-code with PDB field names (`node re/tools/savdump.mjs --doc docs/state-walk.md`).
+  It is **lossless**: `node re/tools/statewalk-to-json.mjs` rebuilds the fragments from it (`re/iface` is gitignored, so on a fresh
+  checkout the listing is the only committed copy of the description), and `--doc` of the rebuilt description gives the listing back byte for byte.
 - `re/tools/savdump.mjs`: a generic decoder that interprets the JSON (saves, the save embedded in a replay, the replay header,
   the rules block, or any single walk function at an offset).
 - Helpers: `re/tools/pdbtypes.mjs` (class layouts straight from `rise.pdb`'s type stream, base classes included; Ghidra's
@@ -81,12 +85,14 @@ Steps (offsets are relative to the step's context: `this`, or the global named b
 | `if {cond, then, else}`, `loop {var, count, body}` | control flow; conditions are JavaScript over the context |
 | `deref {ptr, index, stride, class, body}` | switch to a heap object reached through a pointer member (the pointer itself is not stored) |
 | `buf {ptr, len, elem}` | a heap buffer of `len` bytes |
-| `container {kind, class, stride, elem / dispatch}` | the template families of §2 |
+| `container {kind, class, stride, elem / dispatch, count, header, node}` | the template families of §2. Linked lists (`LinkList`, `PtrLinkListAbstract`, `OrderList`) take their node `count` from a `count:` expression (or a `count`/`length` local walked before), per-node `node:` steps and `element:` steps |
 | `note {text}` | a load-time side effect worth knowing; no bytes |
 
 Expressions see `input`, `checksum`, `flags`, the function's params, loop variables, `L.<local>`,
 `i8/u8/i16/u16/i32/u32/f32(off)` (the current context's already-walked bytes), `up.*(off)` (enclosing context),
-`G("global").*(off)`, `save_version`. **Conditions are written in the loader's view**: every branch that changes the
+`G("global").*(off)`, `LEN("global")` (length of the last container walked on that global), `save_version`, and
+`rt("name")` for the few values the loader takes from game data instead of the stream (`RUNTIME_VALUES` in `savdump.mjs`:
+`GraphicEvents.events.length` = 60415). **Conditions are written in the loader's view**: every branch that changes the
 stream layout depends only on bytes already in the stream, walker fields, params or earlier globals. Where save and load
 code differ but produce the same bytes, the JSON has one sequence. `checksum` and `flags` conditions are kept: they
 select what a checksum hashes versus what a file contains.
@@ -99,7 +105,9 @@ select what a checksum hashes versus what a file contains.
 gzip stream (File::open mode 3 = write + gz; loaders accept plain files too)
   String magic        u32 n + UTF-16: "RoNSave" (single player), "RoNMultiSave" (semaphore byte0 & 4), "RoNCTWSave" (Conquer the World)
   u32 sGameSaveVersion   0x10 in this build (LoadGame::check_version accepts > 0xe; also "RonCTWMapSave")
-  WalkDataGame::walk_data   (§5)  — no length, no trailer
+  WalkDataGame::walk_data   (§5)  — no length
+  SaveGame::verify_save     one u32 Adler-32 per subsystem and per world cell / tile / fog cell (§5, item 19); 4 x (size + tile_size
+                            + fog_size + 73 + goods.length) bytes; the file ends with it
 ```
 
 `LoadGame::get_header` reads only the magic. A playback reads the embedded save from the replay stream itself
@@ -108,7 +116,13 @@ are a debug round-trip that compares per-subsystem checksums.
 
 **In a replay** (docs/replay-spec.md §1, §4): after the header (`Game::walk_data` + `String save_name`) and an optional
 CTW header, a non-empty `save_name` is followed by the save file **decompressed**, byte for byte (magic, version, walk).
-`savdump --replay` decodes it with the generic engine; the sample replay has `save_name = ""`, so it has none.
+`savdump --replay` decodes it with the generic engine. The embedded save is complete, verify block included, and is followed by the
+random-game-info block (`5 x N + 4` bytes: per entry `i8 team, i32 leader value`, then `World+0x30`; N = 2, 3 or 5 in the corpus) and the
+command stream; in all 59 replays that embed a save the walk ends exactly there (docs/replay-spec.md §4). A replay without a save
+(`save_name = ""`) has the random-game-info block and then the rules block; N can exceed the header's player count in lobby and
+scenario games, so `savdump` probes for the rules tag like `rcxdump`.
+
+The file is a gzip of about 15 % the size: the 10 saves of the corpus are 4.2 - 7.9 MB decompressed (0.6 - 1.2 MB stored).
 
 ## 5. Top level: `WalkDataGame::walk_data` @5a2360
 
@@ -135,6 +149,24 @@ The order of the whole save (each line is a call or raw range; full detail in `d
 17. tag TurnControl + `semaphore` BitMask + `TurnControl[0x14, 0x169)`
 18. **`Game::walk_rules_data`**: the complete rules image (docs/replay-spec.md §6, docs/rules-spec.md). A save therefore
     carries its own rules, like a replay.
+
+19. **`SaveGame::verify_save`** (not part of `WalkDataGame::walk_data`; `SaveGame::do_save` calls it through vtable +0x10 after the
+    walk, `LoadGame::do_load` checks it through +0x18): the debug round-trip block, 61 named entries, one `u32` each, the Adler-32
+    (start value 1) of the same walk in checksum mode: Game, TileSet, Mountains, [empty], Constants, game_daemon, Armies, Cities, Forms,
+    **one per Good**, the goods and items arrays, Regions, Heroes, Herds, Specials, Wonders, Forts, Docks, OilWells, Supplies, Caravans,
+    Lands, **one per Leader 0..8**, all leaders, techtypes, LeaderOptions, Tribes, OptionInfo, pathfinder, Groups, HotKeyGroups, **one
+    per object list** (9), Objects, **one per world cell** (`WData[0, 0x15)`), **one per tile** (`tdata` u16), **one per fog cell**
+    (`seen`, `seen2`, `seen3` bytes), World, roads, GraphicEvents, [empty], Scene, MessageWin, Doober, Farms, the three Unbuilt lists,
+    TurnControl, then the CHECK_SUMS-style parts units, builds, walls, guys, ammo, groups, leaders, world, cities, goods, items and
+    the script run time. An independent oracle: the bytes of the per-cell families are the stream bytes, and all of them match
+    (§8).
+
+Three facts about the stream that the byte ranges alone do not show:
+- `GraphicEvents::walk_data` writes **one presence byte per `EventGroup` slot** (`events.length` = `first_ammo_piece + ammo_names.length`,
+  60415 in this build; not in the stream) and the group chains of the present slots; about 70 KB per save.
+- `Terrain::walk_coord_data` writes `xs*ys - 1` u16 in total: list 0 is empty and the corner cell (0,0) sits in the last list, which is
+  never walked (§8, correction 3).
+- A `PtrLinkListAbstract` node is `i32 data type, u8/i32 metric, data`; for `GatherPoint` lists that is 5 + 9 bytes (§8, correction 1).
 
 On load the walk is interleaved with rebuilds that are not stored: Objects are closed first, the per-player `units`
 index is rebuilt after `Objects`, `Terrain::init`, crater and doober regeneration, per-type flag lists, the gaia leader
@@ -242,49 +274,107 @@ Achieve, MessageWin. The other `CheckSums::check_*` functions (`check_armies`, `
 ## 7. Tools
 
 ```
+node re/tools/statewalk-to-json.mjs                    docs/state-walk.md → re/iface/datawalk/*.json (A,B,C,D,core,fix_verify,globals)
 node re/tools/savdump.mjs --build                      merge fragments → re/iface/datawalk.json; prints coverage and problems
-node re/tools/savdump.mjs --doc docs/state-walk.md     readable listing
-node re/tools/savdump.mjs <save.sav>                   decode a save (gzip or plain)
-node re/tools/savdump.mjs <replay> --replay            header walk; then the embedded save, or the rules block
+node re/tools/savdump.mjs --check                      validate the description only (exit code 1 on any problem)
+node re/tools/savdump.mjs --doc docs/state-walk.md     readable listing (lossless, see the head of this file)
+node re/tools/savdump.mjs <save.SVX>                   decode a save (gzip or plain): walk + verify block, to the last byte
+node re/tools/savdump.mjs <save.SVX> --summary         the same plus a summary of the decoded state (header, world, leaders,
+                                                       objects, world-grid completeness); never prints player names
+node re/tools/savdump.mjs <replay> --replay            header walk; then the embedded save, or the random-game-info and rules blocks
 node re/tools/savdump.mjs <file> --fn "X::walk_data" --at N [--obj global]   one function at an offset
-   options: --json out.json  --trace  --max-depth N
+   options: --json out.json  --trace  --max-depth N  --mode load|checksum  --version V
 node re/tools/pdbtypes.mjs <Class> [--tree]            layout with base classes from rise.pdb
 node re/tools/walklabel.mjs 0x4f24 | --hash "Game"     label offset → string and tag byte
 ```
 
+On a fresh checkout: `node re/tools/statewalk-to-json.mjs && node re/tools/savdump.mjs --build && node re/tools/savdump.mjs --check`.
+
 `savdump` decodes in the loader's view and verifies every tag byte; it names raw bytes with the PDB layout of the
 context class. A tag mismatch or an implausible container length stops the decode and reports the byte offset and the
-function, which is how a wrong step shows up.
+function, which is how a wrong step shows up. `--trace` prints every step with its stream offset; locating the failing
+object in a trace and comparing the bytes with the walk is the whole debugging method used in §8.
 
 ## 8. Validation
 
+Corpus (gitignored, personal, never committed): 10 `.SVX` saves in `re/oracle/Saves` and 95 `.rcx` replays in
+`re/oracle/Recorded Games`, all from build `(Version: 00.2024.06.2000)`, `GameInfo.version` 0x06ac012c, save version 0x10, magic
+`RoNSave`, `GameInfo.flags` 0x121.
+
 | Check | Result |
 |---|---|
-| Description consistency (`savdump --build`) | 284 functions (268 distinct walk-function addresses in the symbol index, all described, plus 16 entries for code that exists only inlined), 0 problems: every call and dispatch target resolves, every tag label resolves to a string and byte, every expression compiles |
-| Replay header, `re/analysis/sample_replay.bin` (`savdump --replay`) | `Game::walk_data` consumes bytes 0..1110 with tags Game/GameInfo/Player all matching; the decoded fields equal `rcxdump` (version, seed 2343319, setup, 8 players, frame 0, semaphore 0x08); then `save_name` = "" ends the header at 1114, as rcxdump says |
-| Rules block of the same replay | `Game::walk_rules_data` from 1158 consumes **exactly 1,024,221 bytes** (806 types, constants, balance, 24 tribes; every tag matches) and ends where rcxdump finds the command stream (1,025,379) |
-| Embedded save | the sample replay has none (`save_name` = ""); no `.sav` or other replay exists on this Mac (searched the home directory and the install) |
-| Whole-save walk on synthetic streams (`savdump --synth`, `--synth-fill`) | `WalkDataGame::walk_data` runs to the end on an all-empty stream (1,015,363 bytes, almost all rules) and on a stream where every count, presence flag and local is 1 down to depth 14 (exercises every object type, every order type, lists, script values), in load and checksum modes. This proves the description is executable, not that it matches real saves |
-| Byte ranges | translated from the decompiled C and checked against the disassembly where Ghidra lost arguments (`re/decomp/state_*`); 277 functions high confidence, 7 medium (abstract order bases, `Terrain::walk_coord_data`) |
+| Description consistency (`savdump --build`, `--check`) | **285 functions** (268 distinct walk-function addresses in the symbol index, all described, 16 entries for code that exists only inlined, plus `SaveGame::verify_save`), 123 globals, 0 problems: every call and dispatch target resolves, every tag label resolves to a string and byte, every expression compiles |
+| Listing round trip | `statewalk-to-json` rebuilds the 285 functions from `docs/state-walk.md` with no problem; `savdump --doc` on the result reproduces the listing byte for byte |
+| **10 original saves** (`savdump <file>`) | all 10 decode to the **last byte** (table below), every section tag matching (10,268 tags in the smallest save); the walk plus `SaveGame::verify_save` consume exactly the decompressed size |
+| **Saves embedded in replays** (`savdump --replay`) | all 59 replays with a non-empty `save_name` decode to the last byte; the end of every embedded save equals the position `rcxdump` finds for the command stream minus the random-game-info block (14, 19 or 29 bytes for 2, 3 or 5 entries: `5 x N + 4`); the other 36 replays give header + rules block of exactly 1,024,221 bytes |
+| Verify block as an oracle | the number of entries of every save is `size + tile_size + fog_size + 73 + goods.length` (table below); the per-cell families were recomputed from the decoded stream bytes and match in every save: **all** `WData[0, 0x15)` Adler-32 (6400 or 10000 per save), **all** `tdata` u16 (102400 / 160000), **all** fog cells as `adler32(seen[i], seen2[i], seen3[i])` (25600 / 40000) |
+| Terrain coordinate flags | the cell mapping derived from `TerrainOut::generate_land_lists` (see `TerrainList::walk_data`) puts CoordInfo.flags bit 2 equal to WData.flags bit 2 for every node of every save (0 mismatches in 6399 / 9999 nodes x 10 saves) |
+| Replay header and rules block (sample replay) | `Game::walk_data` consumes bytes 0..1110 with tags Game/GameInfo/Player all matching; decoded fields equal `rcxdump`; `Game::walk_rules_data` consumes exactly 1,024,221 bytes (806 types, constants, balance, 24 tribes) and ends where rcxdump finds the command stream |
+| Whole-save walk on synthetic streams (`--synth`, `--synth-fill`) | still runs to the end (1,015,364 bytes on the empty stream) in load and checksum modes: executability of the description |
 
-The first real save or save-embedding replay should be run through `node re/tools/savdump.mjs <file>`: any wrong step
-shows up as a tag mismatch or an implausible container length at a reported byte offset.
+The 10 saves, ordered by frame (all random maps: `scenario_type` 0, no script, no mod):
+
+| Frame | World | Decompressed | Walk bytes | Verify block (entries) | Goods | Result |
+|---|---|---|---|---|---|---|
+| 189 | 100x100 | 4,232,994 | 3,392,360 | 840,612 (210,153) | 80 | EOF |
+| 113,264 | 80x80 | 4,347,405 | 3,809,387 | 537,996 (134,499) | 26 | EOF |
+| 180,904 | 80x80 | 4,835,387 | 4,297,369 | 537,996 (134,499) | 26 | EOF |
+| 194,797 | 80x80 | 5,142,161 | 4,604,143 | 537,996 (134,499) | 26 | EOF |
+| 209,278 | 80x80 | 5,208,116 | 4,670,098 | 537,996 (134,499) | 26 | EOF |
+| 221,518 | 100x100 | 6,059,032 | 5,218,174 | 840,836 (210,209) | 136 | EOF |
+| 256,648 | 80x80 | 5,025,034 | 4,487,016 | 537,996 (134,499) | 26 | EOF |
+| 353,231 | 80x80 | 5,615,574 | 5,077,212 | 538,340 (134,585) | 112 | EOF |
+| 375,834 | 80x80 | 5,825,003 | 5,286,641 | 538,340 (134,585) | 112 | EOF |
+| 383,396 | 100x100 | 7,857,479 | 7,016,737 | 840,720 (210,180) | 107 | EOF |
+
+(Walk bytes exclude the 22-byte file header: `String "RoNSave"` 4 + 14, `u32` version 4.)
+
+### Correction log
+
+The description was rebuilt from the listing (no source fragment survived), so the first decode of the real saves is also a test of
+the rebuild. Four things were wrong or missing; each is visible as a tag mismatch or an implausible length at a precise offset.
+All other ~280 functions decoded without change.
+
+| # | Where | Evidence (save, offset, symptom) | Cause | Fix |
+|---|---|---|---|---|
+| 1 | `PtrLinkListAbstract<GatherPoint,unsigned char>::walk_data` (the `gather` list of a `Build`, `BuildData::walk_data`) | 9 of the 10 saves stopped inside `Objects::walk_data` with `tag "SubObject" mismatch ... 0x1 != 0x5e` at the first `Build` after one with a non-empty gather list (decompressed offsets 476,141 - 988,513; e.g. 953,535 in the frame-180,904 save, where the bytes were `01 bf 01 00 00 00 07 5e`: the expected tag sits 5 bytes later). Only the frame-189 save, which has no gather point yet, passed | the listing showed only the `GatherPoint` body | per node `i32 data type`, `u8 metric`, then 9 bytes `x, y, action` (decompile @4708a0: `walk_function(&dtype, ..)`, `walk_function(node+0xc, node+0xd)`, then the data) |
+| 2 | `GraphicEvents::walk_data` | after fix 1 all 10 stopped at the first array after the GraphicEvents tag (`implausible SimpleArray length 1 size 0` at 1,310,989 in the frame-189 save). The loop bound `i32(0x8)` read the never-walked `events.length` as 0, so the per-slot presence bytes and the EventGroup chains were skipped | the slot count is not in the stream (`GraphicEvents::init` @8e5390 sets it to `first_ammo_piece + ammo_names.length`) | `rt("GraphicEvents.events.length")` = **60415**, found by trying every count until the `Scene` tag (0xb7, `bits` 32, `size` 4) followed the last array (frame-189 save: Scene tag at 1,383,952 = 1,310,978 + 72,974); the same value decodes all 10 saves. It is a constant of this build's game data (`RUNTIME_VALUES` in `savdump.mjs`) |
+| 3 | `TerrainList::walk_data` / `Terrain::walk_coord_data` | the node count per list was an assumption of the old `savdump`; with anti-diagonal sizes all 10 saves ran 2 bytes too far (`implausible PtrLinkListAbstract count 25886720` in `MessageWin`, offset 1,459,796 in the frame-189 save) | `generate_land_lists` @85f6a0 fills list `xs-c` (c = 1..xs-1) with `xs-c` cells and list `xs+ys-1-r` (r = 0..ys-1) with `r+1`; list 0 stays empty and the last list (cell (0,0)) is not walked | count of list d = `0` for d = 0, `d` for d < xs, `xs+ys-d` otherwise: **`xs*ys - 1` u16** in total; cell order inside a list fixed (see the function note) |
+| 4 | end of the file: `SaveGame::verify_save` (new function, @5a76b0) | with 1-3 fixed all 10 saves ended with `note: N bytes after the walk`, N = 537,996 (80x80), 538,340, 840,612, 840,720 or 840,836 (100x100); the bytes are high-entropy `u32` | `SaveGame::do_save` appends the debug round-trip block of `verify_save` (vtable +0x10 after the walk) | 61 named `u32` entries as listed in §5 item 19; decoded on the same decoder (`LEN("goods")`, `G("world")`); EOF is then exact in all 10 saves, and the entry count equals `4 x (size + tile_size + fog_size + 73 + goods)` |
+
+Tooling changes made along the way (all in `re/tools/savdump.mjs`): `rt()` values, `LEN()`, `count:`/`header:`/`node:` in the
+listing, `then:` chaining of `verify_save` after the walk, `pos` on `buf` items, `--summary`, and probing of the random-game-info
+entry count for scenario replays (the old header-player count failed on 2 of the 95 replays).
+
+### What the saves are
+
+All ten are single-player-slot random-map games against AI (no scenario, no script, no mod). Setup block, values common to all ten:
+team_style 1, game_rules 1, starting_resources 1, tech_cost 3, reveal_map 3, pop_limit 5, victory 2 (game_speed 2 or 3, difficulty,
+elimination and ending_technology vary). World grids: 80x80 (map size 4) and 100x100 (map size 6); map styles 6, 18 (both sizes) and 1 (shown as style 14 in
+`World.map` after the random pick; `sea_map` 1). The world grid of every save is **complete**: `size` WData cells (21 stored bytes
+each), `tile_size = 16 x size` tdata u16, `fog_size = 4 x size` fog cells (`seen`, `seen2`, `seen3` byte arrays), a `region` on every
+cell, a `Region` list of 128 slots of which only the used ones carry data, and `Region.size` equals the cell count of that region in
+every used region (e.g. frame 189: land region 1 with 7573 cells, sea regions 65..73). `World.land_size` = cells with `land == 0` plus
+cells with `WData.flags & 0x100` (shore shallows), verified in all ten. The frame-189 save (5 players, 12 + 12 objects each) is a freshly
+generated map and therefore the cleanest oracle for the random-map generator; the other nine keep the same generated terrain (saves of one game share `World.seed` and
+`GameInfo.seed`: three of the style-6 saves, two of the style-18 80x80 saves), so they validate it too.
 
 ## 9. Open questions
 
-1. **Real data.** Validate on actual saves (`Documents\My Games\Rise of Nations\Saves` on the Windows machine) and on a
-   replay that starts from a save. Until then everything past the replay header and rules block is code-derived.
-2. **`Terrain::walk_coord_data` has no count.** A loader needs the exact node lists from
-   `TerrainOut::generate_land_lists` / `TerrainList::add_new_coord_info` (not decompiled). `savdump` assumes one node per
-   cell of each anti-diagonal, which gives the right byte count if the lists cover every cell exactly once (to confirm), but
-   not the cell each `u16` belongs to.
+1. ~~Real data.~~ **Closed** (§8): 10 saves and 59 embedded saves decode to the last byte. Still untested: Conquer-the-World saves
+   (`RoNCTWSave`), multiplayer saves (`RoNMultiSave`) and saves of versions below 0x10: none in the corpus.
+2. ~~`Terrain::walk_coord_data` has no count.~~ **Closed** (§8 correction 3): counts and cell order follow from
+   `generate_land_lists`; nodes are the cells in insertion order; the (0,0) corner is not stored.
 3. **Checksum bit-exactness needs memory-identical layouts.** CHECK_SUMS hash raw struct ranges including padding and
    members that are presentation or pointers inside the walked ranges (e.g. `Guy` 0x9b bytes, `LeaderData` raw
    blocks). A reimplementation must either keep these exact layouts (and zeroed padding) as a "checksum image", or
-   accept that only the per-turn command replay, not CHECK_SUMS, is the oracle. Which in-range fields hold pointers
-   was not audited.
+   accept that only the per-turn command replay, not CHECK_SUMS, is the oracle. **New:** every save carries 134,499 - 210,209
+   reference Adler-32 values (§5 item 19) for the engine's state at the save frame: three families (world cell, tile, fog cell, 99.9 %
+   of the entries) are plain stream bytes and match; the ~60 subsystem entries (Game, Constants, Leaders, Objects, ...) are the real test
+   of a checksum image and were *not* recomputed yet. The stream bytes of a raw range equal the hashed bytes whenever the range has no
+   `checksum == 0` / `flags` condition around it, so a loader that keeps the loaded `[a, b)` images can be compared directly.
 4. **Abstract order bases** (`AirOrder`, `GroupOrder`, `PatrolOrder`) are described with offsets as if most-derived;
-   only the derived orders are ever created, so this should not matter.
+   only the derived orders are ever created, so this should not matter (all order types present in the corpus decode).
 5. **Conquer the World**: `WalkDataConquestGame::walk_data` (tag ConquestWalk, used for CTW campaign saves) and the CTW
    replay header are described but untested; `ConquestGame` saves `invade_win` from UI state.
 6. **Load-time rebuilds** (notes in the JSON) define state that is *not* stored: unit index tables, Terrain::init
@@ -293,6 +383,15 @@ shows up as a tag mismatch or an implausible container length at a reported byte
 7. **`GameInfo` older versions** (save version < 0x10) are summarised only; `LoadGame::check_version` accepts ≥ 0xf.
 8. Partial-struct walks (`Color` 10 of 12 bytes, `Option` 0x12 of 0x14, `Constants` +0x804 twice, Camera blocks out of
    order) are faithful to the code; nothing suggests they are bugs to fix, but a writer must reproduce them.
+9. **`GraphicEvents.events.length` = 60415** is a game-data constant found by decoding, not derived: a loader needs
+   `graphic_pieces->first_ammo_piece + ammo_names.length` from the install's graphics XML (`GraphicEvents::init` @8e5390), or can keep the constant
+   for this build (`GameInfo.version` 0x06ac012c). It is the only value of the walk that comes from outside the stream.
+10. **The two `empty` entries of the verify block** (between Mountains and Constants, and after GraphicEvents) are 1 (Adler-32 of no
+    bytes) in every save: the decompile shows no walk there (the walk was compiled out of this build or dropped by the decompiler).
+    `walls` is 1 in all ten saves (no walls), `ammo` in the two saves without ammo in flight, and `world` equals the later
+    `check_world` entry in every save.
+11. **Region-grid and tile mapping** of `World` (`reg_xs`, `tile_xs` = 4 x `xs`, `fog_xs` = 2 x `xs`) is stored as plain scalars; the
+    meaning of each `tdata` u16 (a 16-bit terrain mask per tile) and of `WData.land_sub` is not spec'd here (docs/terrain-spec.md).
 
 ## Evidence
 
