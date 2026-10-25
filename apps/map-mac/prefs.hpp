@@ -32,6 +32,8 @@ struct Prefs {
 	bool fullscreen = false;
 	// Player pane: the interface language ("en", "de", "es", "fr", "it"; "" = not chosen), used by the next start (uistr::choose).
 	std::string language;
+	// The Rise of Nations folder the app remembers (the first-run picker of the .app bundle writes it; launcher.mm). Not an Options setting.
+	std::string game_dir;
 	// Hotkeys pane: the entries whose key was changed, "name|mode|ctx|param" -> key string ("" = unbound).
 	std::map<std::string, std::string> hotkeys;
 	// Keys present in the file (the others keep the window's own value).
@@ -48,6 +50,8 @@ void reset_pane(Prefs& p, int pane);
 std::string path();
 bool load();
 bool save();
+// Writes only the game_dir line of the file (the other lines, and the `present` set, stay as they are), creating the file when absent.
+bool save_game_dir(const std::string& dir);
 // speed_option: the camera scroll multiplier of a profile setting 0..12 (0.33, 0.5, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 3, 4, 5).
 float scroll_factor(int setting);
 // Parses / writes the text form (used by load / save, and by the self-test).

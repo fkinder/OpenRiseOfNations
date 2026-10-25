@@ -82,6 +82,7 @@
 // remaining frames and compare digest by digest (and the full saved state of the last frame); it prints
 // `save round-trip: OK` or the first differing frame, after the determinism self-check.
 #include <algorithm>
+#include <chrono>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -1898,6 +1899,10 @@ void print_event(const Game& g, const GameEvent& e) {
 	}
 }
 
+// --perf: time Game::do_frame alone (no per-frame digest, no event / AI / economy printing) and print ms per frame (docs/ui-port.md section 16).
+bool g_perf = false;
+double g_perf_total_ms = 0, g_perf_max_ms = 0;
+
 RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules& rules, const AnimSource* anims,
               uint32_t seed, int32_t frames, const std::vector<Script>& scripts, int32_t dump_every,
               int32_t digest_every, bool print, const FogOpts& fo, int32_t combat_every = 0, int32_t prod_every = 0) {
@@ -2184,13 +2189,20 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 			}
 			cm.process_turn(*g);
 		}
-		g->do_frame();
-		if (print) {
+		if (g_perf) {
+			const auto t0 = std::chrono::steady_clock::now();
+			g->do_frame();
+			const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+			g_perf_total_ms += ms, g_perf_max_ms = std::max(g_perf_max_ms, ms);
+		} else {
+			g->do_frame();
+		}
+		if (print && !g_perf) {
 			for (; ev_seen < g->events.size(); ev_seen++) print_event(*g, g->events[ev_seen]);
 			if (fo.script_log) print_script_events(*g, script_seq, objectives_seen, objectives_done);
 		}
 		if (fo.fog_check) fog_check_frame(*g, fc, print);
-		const uint64_t d = digest(*g);
+		const uint64_t d = g_perf && g->frame < end_frame ? 0 : digest(*g);  // --perf: only the last frame's digest
 		rr.digests.push_back(d);
 		for (Tracked& t : rr.tracked) {
 			const Unit* u = g->unit(t.who, t.o);
@@ -2202,7 +2214,7 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 			t.py = u->y;
 			if (t.arrive < 0 && g->frame > t.cmd_frame && u->orders.empty()) t.arrive = g->frame;
 		}
-		if (print && digest_every > 0 && (g->frame % digest_every == 0 || g->frame == end_frame))
+		if (print && !g_perf && digest_every > 0 && (g->frame % digest_every == 0 || g->frame == end_frame))
 			std::printf("frame %5d digest %016llx rng %08x\n", g->frame, (unsigned long long)d, g->rng.seed());
 		if (print && combat_every > 0 && g->frame % combat_every == 0) {
 			std::printf("  f%-5d", g->frame);
@@ -2262,6 +2274,11 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 				            (b->build_masks & bmask::kEjecting) ? " EJECTING" : "");
 			}
 		}
+	}
+	if (g_perf) {
+		const double n = double(std::max<int32_t>(1, g->frame - (end_frame - frames)));
+		std::printf("perf: %d frames of Game::do_frame: %.3f ms/frame average, %.3f ms worst, %.1f s total (frame %d at the end)\n", int(n),
+		            g_perf_total_ms / n, g_perf_max_ms, g_perf_total_ms / 1000.0, g->frame);
 	}
 	write_saves();
 	if (fo.capture_final) rr.final_state = save_game_bytes(*g, fo.save_scenario, fo.save_seed);
@@ -2597,6 +2614,10 @@ int main(int argc, char** argv) {
 		if (const char* sr = arg_value(argc, argv, "--starting-resources"))
 			fo.starting_resources = int32_t(std::strtol(sr, nullptr, 0));
 		if (const char* df = arg_value(argc, argv, "--difficulty")) fo.difficulty = int32_t(std::strtol(df, nullptr, 0));
+		if (has_flag(argc, argv, "--perf")) {  // time do_frame alone: no per-frame digest and none of the --*-every printouts
+			g_perf = true;
+			fo.econ_every = fo.ai_every = fo.air_every = fo.heroes_every = fo.spells_every = 0;
+		}
 		fo.scripts = !has_flag(argc, argv, "--no-scripts");
 		fo.script_log = has_flag(argc, argv, "--script-log");
 		fo.scenario_path = std::filesystem::absolute(file).string();

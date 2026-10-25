@@ -68,6 +68,8 @@ public:
 	bool next_event(float& x, float& y);
 	// The minimap ping styles (default, attack, wonder, citylost, citywon, waypoint, resource) with their art paths.
 	std::vector<hud::PingStyle>& ping_styles() { return ping_styles_; }
+	// SoundGlobal::play's lookup: soundglobals.xml KEY (without the S_) -> a random entry's soundfiles.xml file (absolute path, "" if unknown).
+	std::string sound_file(const std::string& key);
 	// Game over from the simulation's event log (victory / defeat of the local leader): the AnimNotice, YOU_WIN /
 	// YOU_LOSE and the game-over line.
 	void game_over(bool won, const std::string& message, const Env& env, const Callbacks& cb);
@@ -135,7 +137,6 @@ private:
 	void draw_popup(ron::metal::UiRenderer& ui, const Env& env);
 	void draw_goal_dialog(ron::metal::UiRenderer& ui, const Env& env);
 	void draw_game_over(ron::metal::UiRenderer& ui, const Env& env);
-	std::string sound_file(const std::string& key);  // soundglobals.xml KEY -> soundfiles.xml file (absolute)
 	uint32_t neon(const Env& env, int who) const;
 	uint32_t text_color(const Env& env, int who) const;
 

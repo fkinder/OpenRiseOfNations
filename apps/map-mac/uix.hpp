@@ -41,6 +41,7 @@ struct Ctx {
 	std::function<std::string(int index, const char* fallback)> loc;  // translated_strings.xml entry (the install's language)
 	std::function<bool(int32_t who, int32_t o, bool building)> on_screen;  // is_on_screen
 	std::function<void(float x, float y)> look_at;                    // centre the camera
+	std::function<void(const char* key)> sound;                       // SoundGlobal::play of a soundglobals.xml KEY (no S_): the card's acknowledgements
 };
 
 // OptionIndex values (rise.pdb enum) the card uses here, beyond hud.hpp's.

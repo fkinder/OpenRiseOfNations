@@ -94,3 +94,8 @@ echo "  ./build/ron-net replay \"re/oracle/Recorded Games/Multi/<file>.rcx\"    
 echo "  ./build/ron-net selftest    # lockstep acceptance tests on a toy simulation: stall, pause, speed, resign, drops, desync"
 echo "  ./build/ron-net timing \"re/oracle/Recorded Games/Multi\"    # the turn clock reproduces the frame column of every recorded package"
 echo "  ./build/ron-net host 7777 --random 18,0,1,2 --frames 600 & ./build/ron-net join 7777 --frames 600    # a LAN game of two processes"
+
+# --app: also assemble build/OpenRiseOfNations.app from this build (ad-hoc signed; package-mac.sh --sign / --notarize / .dmg for releases).
+if [[ "${1:-}" == "--app" ]]; then
+	SKIP_BUILD=1 bash package-mac.sh --app-only
+fi

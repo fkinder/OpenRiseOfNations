@@ -1023,3 +1023,79 @@ done, "Toggle Help" flagged as sharing it), `_filter.png`, `_mouse.png`, `_graph
 - Options: the unwired settings of the table above, profiles / player names, a mouse-button capture in the Hotkeys pane, `Host::sound` in a game.
 - The clicks of the game menu's "Options" item could not be driven by the `--mouse` harness (it does not reach the menu); the page itself was exercised through
   `RON_GAME_MENU=3`, the front end's scripted run and by reading each pane.
+
+## 16. Phase 6 finish: the app bundle, performance with 8 players, the card toggles' sounds (2026-10-24)
+
+### 16.1 The app bundle
+
+`bash build-mac.sh --app` builds for this Mac and then runs `package-mac.sh --app-only`, which writes `build/OpenRiseOfNations.app` (the ronmap binary as
+`Contents/MacOS/OpenRiseOfNations`, `Contents/Resources` = `AppIcon.icns` + the front end's `menu-logo.png` / `group-icon.tga` + LICENSE / README). `bash
+package-mac.sh` alone is the release path: a universal (arm64 + x86_64) build, the app and a `.dmg`.
+
+- `Info.plist`: id `org.openriseofnations.app`, `CFBundleShortVersionString` = `git describe --tags --always` (without the `v`; the VERSION file when there
+  is no git), `CFBundleVersion` = the VERSION file (dotted numbers), `LSMinimumSystemVersion` 12.0 (= `-mmacosx-version-min`), `NSHighResolutionCapable`, no
+  `CFBundleDocumentTypes`. The icon is `tools/AppIcon.png` (the 1024 px master; `apps/map-mac/resources/menu-logo.png` when it is missing) scaled by `sips`
+  into an `.iconset` and `iconutil -c icns`.
+- Signing: ad-hoc by default (`codesign --options runtime --sign -`); `--sign "Developer ID Application: Name (TEAMID)"` (or `CODESIGN_ID=`) signs with that
+  identity and a secure timestamp. `--notarize` (needs `--sign`) zips the app, runs `xcrun notarytool submit --wait --keychain-profile "$NOTARY_PROFILE"`
+  (default profile `ron-notary`, created once with `xcrun notarytool store-credentials`) and `xcrun stapler staple` on the app (and the `.dmg`). It uploads to
+  Apple with the user's own credentials, so nothing runs it unless asked: **not run here**.
+- First launch (no argument): `launcher::saved_or_guessed_install()` reads `game_dir` from the preferences file (`~/Library/Application Support/OpenRiseOfNations/
+  preferences.txt`, `RON_PREFS` overrides), then the NSUserDefaults key of earlier builds, then the usual guesses (`~/Games/RiseOfNations`, a Steam library, CrossOver
+  bottles); with none, `ask_for_install` shows an alert and an NSOpenPanel until the folder looks like an install (`Data` plus `scenario` **or** `riseofnations.exe`).
+  `remember_install` writes `game_dir` with `prefs::save_game_dir`, which rewrites only that line (the other preferences, and their "present" state, stay as
+  they are). The menu's "Change..." button goes through the same call.
+- Checked: `RON_PREFS=file build/OpenRiseOfNations.app/Contents/MacOS/OpenRiseOfNations --menu main --snapshot m.png` shows the prefs' `game_dir` in the Game
+  Folder box; `open -n --env RON_PREFS=... build/OpenRiseOfNations.app` (LaunchServices, as Finder does) stayed up, found the install and wrote
+  `game_dir = ...` into the new file; quit after the check.
+
+### 16.2 Performance with 8 players
+
+Tools: `ronmap ... --perf N` (after `--frames`) runs N headless frames, each one `stepSimulation:1` plus one rendered frame into a reused 1440x900 target, and
+prints avg / p50 / p95 / max of the sim step, the CPU encode, the GPU wait and the render total, then an estimated display rate (render + half a sim step: the window
+steps the sim once per 66 ms). `ron-sim ... --perf` times `Game::do_frame` alone: without it the harness computes `digest(*g)` for **every** frame (66 % of a
+`ron-sim` run, and with `--ai-every 1` it prints each AI line each frame), so the brief's `time ron-sim ... --ai-every 1` measures the harness: europe, 3000 frames,
+4.04 s = 1.35 ms per frame; `--perf` says 0.34 - 0.37 ms per frame (worst frame 8 ms in the first 3000, 40 ms in 30000).
+
+8 AI seats: `ronmap <game> --random 12,4,1,8 --all-ai --frames 12000 --zoom 0 --perf 1000 --size 1440x900` (Mediterranean, 80x80, 8 nations, AI against AI;
+`ron-sim` has no random-map option, and europe has only two AI seats).
+
+| | sim step | render CPU encode | render GPU wait | render total | est. display rate |
+|---|---|---|---|---|---|
+| before | 0.554 ms | 2.872 ms (p95 3.41) | 1.757 ms | 4.629 ms | 204 fps |
+| after | 0.498 ms | 2.575 ms (p95 2.84) | 1.738 ms | 4.313 ms | 219 fps |
+
+Other points: zoom 5 3.9 ms total, zoom 3 4.0 ms, europe (zoom 0, frame 4000) 5.9 ms + 1.0 ms sim. Offscreen, so no vsync; the target (8 AI at 30 fps or more at 1440x900)
+is met by a factor of 6 or more, and the AI-vs-AI game at 12000 frames is still in ages 0 - 1 (about 20 - 40 units per seat), so a late-game test is still to do.
+
+Profile (`sample`, 5 s of the perf loop): the main thread spends 84 % of the encode in `encodeUnits` -> `UnitDrawer::draw` (platform/metal/unit_draw.*, not touched
+here): `pose_model` / `pose_node` (engine/assets) is 53 % of the draw and builds strings per node (`std::to_string`, `string::insert`, `tolower`: about 40 % of
+`pose_node`); caching the pose per (model, animation, frame) or per-node ids would be the next win. Next: `encodeBuildings` 21 %, the HUD 12 % (`iface_find_rect` /
+`iface_layout_children` re-walk the layout XML every frame in `draw_bar`, `draw_minilib`, `draw_top_strip`: cache the rects at layout time), `updateFog` 4 %.
+Fixed in `main.mm`: the buildings' hull was re-uploaded as two new MTLBuffers per building per frame (now cached in the `BuildAsset`), the add-ons did the same
+(index buffer cached, vertices through `setVertexBytes` when they fit 4 KB, vertex vector reused), and `updateFog` made three `getenv` calls and copied the level
+vector each frame (now a compare against the uploaded levels).
+
+Hot spots in engine/sim (not touched; `ron-sim --perf`, europe, 90000 frames, share of the samples by self time): `astar_path` 13.7 %, `valid_ucoord` 12.2 %,
+`constant_offset(const char*)` ~19 % (a `strcmp` table lookup by name, called per frame: precompute the offsets), `std::map` insertion in the path search
+(`__tree_balance_after_insert` 3.3 %, `SavedSearch::insert_open` 3.0 %, `first_open_node` 1.4 %), `collide_here` 3.1 %, malloc / free ~3 %.
+
+### 16.3 The card toggles' acknowledgement sounds
+
+From the decompiles (`Options::do_auto_explore`, `set_air_repeat`, `do_transport`, `do_stance`, `do_formation`, `do_halt`, `do_eject_all`, `do_back_to_work`,
+`recall_aircraft`, `scramble_aircraft`; `Group::action_buildmask` for the infinite queue); the soundglobals.xml KEYs map through soundfiles.xml:
+
+| Card command | Global played | File |
+|---|---|---|
+| AUTO_EXPLORE turned on / off (`get_auto_explore` read before the command: off -> ACK, on -> OFF) | `AUTO_EXPLORE_ACK` / `AUTO_EXPLORE_OFF` | `toggleon.wav` / `toggleoff.wav` |
+| REPEAT (carrier unit mask, airbase building mask; off -> ON_ACK, on -> OFF_ACK) | `REPEAT_ORDERS_ON_ACK` / `_OFF_ACK` | `toggleon.wav` / `toggleoff.wav` |
+| Infinite queue (building mask 0x40; the original plays it from the action, here from the click) | `INFINITE_QUEUE` / `INFINITE_QUEUE_OFF` | `infinitequeue.wav` / `infinitequeueoff.wav` |
+| Stance / formation | `CHANGE_STANCE` / `CHANGE_FORMATION` | `but_diplomat-sendmessagebuttons.wav` |
+| HALT / EJECT ALL | `HALT_ACK` / `EJECT_ACK` | `targetack.wav` / the install's entry |
+
+`uix::Ctx::sound` (set by `main.mm` from `MapRenderer playGlobal:`, which asks `scriptview::View::sound_file`, now public: a random entry of the key, as `SoundGlobal::play`)
+plays them on the effects channel when the command was accepted. The state is read before the command because the command runs later in a lockstep game.
+`RON_UIX_TRACE=1` prints `[uix] sound S_KEY -> file` (also headless, where nothing plays). Checked: europe seat 0, `--key Ctrl+E@5 --key Ctrl+E@12 --key H@20`:
+`AUTO_EXPLORE_ACK` -> toggleon, `AUTO_EXPLORE_OFF` -> toggleoff, `HALT_ACK`; with `RON_CARRIER_TEST=0:0` and `E@5 / E@12`: `REPEAT_ORDERS_ON_ACK` then `_OFF_ACK`.
+Not wired: `TRANSPORT_ON_ACK` / `_OFF_ACK` (the port has no transport toggle on the card), `BACK_TO_WORK_ACK`, `SCRAMBLE_ACK`, `RECALL_AIRCRAFT_ACK` /
+`RETURN_TO_BASE_ACK` (the card buttons exist but the sounds were not added in this pass), the `S_PREF_CHANGE` of the Options toggles.

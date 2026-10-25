@@ -61,6 +61,7 @@
 #include <simd/simd.h>
 
 #include <algorithm>
+#include <chrono>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -332,11 +333,14 @@ struct BuildAsset {
 	int sprite_w = 0, sprite_h = 0;
 	std::vector<ron::ColorVertex> hull;  // building space: (-3y, -3x, 3z) of the BH3 rest pose
 	std::vector<uint16_t> hull_indices;
+	id<MTLBuffer> hull_vb, hull_ib;  // the hull's buffers, made on first draw (the mesh never changes; it used to be re-uploaded every frame)
 	struct Addon {
 		std::unique_ptr<ron::BH3Model> model;
 		std::unique_ptr<ron::Animation> anim;
 		id<MTLTexture> texture;
 		const ron::RenderState* state = nullptr;
+		id<MTLBuffer> ib;  // the model's index buffer, made on first draw
+		std::vector<ron::ColorVertex> verts;  // the posed vertices, reused every frame
 	};
 	std::vector<Addon> addons;  // BUILD_DEFAULT events, in file order
 };
@@ -445,6 +449,8 @@ static bool debug_skip(const char* pass) {
 - (BOOL)placeBuilding:(const std::string&)name x:(float)x y:(float)y team:(int)team;
 - (BOOL)placeUnit:(const std::string&)name x:(float)x y:(float)y angle:(float)deg team:(int)team;
 - (BOOL)snapshotTo:(NSString*)path width:(int)w height:(int)h scale:(float)scale;
+// --perf N: N headless frames, each one simulation step then one rendered frame (a reused offscreen target), timed separately; prints the averages.
+- (void)perfRun:(int)frames width:(int)w height:(int)h scale:(float)scale;
 - (void)advanceFarmsTo:(uint32_t)frame;
 - (void)scrollByPixelsX:(float)dx y:(float)dy;
 // Selection, in drawable pixels with a top-left origin. A rectangle of zero size picks the nearest unit.
@@ -1890,11 +1896,21 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 // units), RON_FOG_LEVEL=N (all cells at N) or =MN (a checker of levels M and N).
 - (void)updateFog {
 	if (!_fogVB) return;
-	std::vector<uint8_t> levels(_fogLevels.size(), 3);
-	if (_game && _fogOn && !getenv("RON_FOG_TEST") && !getenv("RON_FOG_LEVEL")) {
+	static const bool fogEnv = getenv("RON_FOG_TEST") || getenv("RON_FOG_LEVEL");  // test hooks, read once (not per frame)
+	if (_game && _fogOn && !fogEnv) {  // the normal path: no per-frame copy, only a compare against the uploaded levels
 		ron::sim::make_fog_view(*_game, _game->local_play, _fogView);
-		if (_fogView.fog_xs == _fog.fxs && _fogView.fog_ys == _fog.fys) levels = _fogView.level;
-	} else if (getenv("RON_FOG_LEVEL")) {
+		if (_fogView.fog_xs == _fog.fxs && _fogView.fog_ys == _fog.fys) {
+			if (_fogUploaded && _fogView.level == _fogLevels) return;
+			_fogLevels = _fogView.level;
+			ron::update_fog_overlay(_fog, _fogLevels.data());
+			std::memcpy(_fogVB.contents, _fog.vertices.data(), _fog.vertices.size() * sizeof(ron::ColorVertex));
+			_fogUploaded = true;
+			[self applyFogToTrees];
+			return;
+		}
+	}
+	std::vector<uint8_t> levels(_fogLevels.size(), 3);
+	if (getenv("RON_FOG_LEVEL")) {
 		// "N": every cell at level N; "MN": a checker of 6-cell squares at levels M and N.
 		const char* v = getenv("RON_FOG_LEVEL");
 		for (int fy = 0; fy < _fog.fys; fy++) {
@@ -2334,18 +2350,23 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		if (!a.hull_indices.empty()) {
 			rm::DrawUniforms du = rm::draw_uniforms(hull_rs, at);
 			_states.bind(enc, hull_rs, rm::VertexKind::Colored);
-			id<MTLBuffer> vb = [_device newBufferWithBytes:a.hull.data() length:a.hull.size() * sizeof(ron::ColorVertex) options:MTLResourceStorageModeShared];
-			id<MTLBuffer> ib = [_device newBufferWithBytes:a.hull_indices.data() length:a.hull_indices.size() * 2 options:MTLResourceStorageModeShared];
+			BuildAsset& ma = *b.asset;  // `a` is const: the buffers are a lazy cache of the asset
+			if (!ma.hull_vb) {
+				ma.hull_vb = [_device newBufferWithBytes:a.hull.data() length:a.hull.size() * sizeof(ron::ColorVertex) options:MTLResourceStorageModeShared];
+				ma.hull_ib = [_device newBufferWithBytes:a.hull_indices.data() length:a.hull_indices.size() * 2 options:MTLResourceStorageModeShared];
+			}
+			id<MTLBuffer> vb = ma.hull_vb, ib = ma.hull_ib;
 			[enc setVertexBuffer:vb offset:0 atIndex:0];
 			[enc setVertexBytes:&du length:sizeof du atIndex:1];
 			[enc setFragmentBytes:&du length:sizeof du atIndex:1];
 			[enc setFragmentTexture:_white atIndex:0];
 			[enc drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:a.hull_indices.size() indexType:MTLIndexTypeUInt16 indexBuffer:ib indexBufferOffset:0];
 		}
-		for (const BuildAsset::Addon& ad : a.addons) {
+		for (BuildAsset::Addon& ad : b.asset->addons) {
 			const uint32_t t = uint32_t(_timeMs);
 			ron::pose_model(*ad.model, ad.anim.get(), t, posed);
-			std::vector<ron::ColorVertex> verts;
+			std::vector<ron::ColorVertex>& verts = ad.verts;
+			verts.clear();
 			verts.reserve(posed.size());
 			for (const ron::PosedVertex& p : posed) verts.push_back({-3 * p.py, -3 * p.px, 3 * p.pz, -p.ny, -p.nx, p.nz, p.u, p.v, 255, 255, 255, 255});
 			const auto& ix = ad.model->meshes[0].indices;
@@ -2354,9 +2375,14 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 			du.tfactor = simd_make_float4(1, 1, 1, 1);
 			_states.bind(enc, *ad.state, rm::VertexKind::Colored);
 			[enc setCullMode:MTLCullModeNone];
-			id<MTLBuffer> vb = [_device newBufferWithBytes:verts.data() length:verts.size() * sizeof(ron::ColorVertex) options:MTLResourceStorageModeShared];
-			id<MTLBuffer> ib = [_device newBufferWithBytes:ix.data() length:ix.size() * 2 options:MTLResourceStorageModeShared];
-			[enc setVertexBuffer:vb offset:0 atIndex:0];
+			if (!ad.ib) ad.ib = [_device newBufferWithBytes:ix.data() length:ix.size() * 2 options:MTLResourceStorageModeShared];
+			const size_t vbytes = verts.size() * sizeof(ron::ColorVertex);
+			if (vbytes <= 4096) {  // Metal's setVertexBytes limit: small models go inline, with no buffer allocated per frame
+				[enc setVertexBytes:verts.data() length:vbytes atIndex:0];
+			} else {
+				[enc setVertexBuffer:[_device newBufferWithBytes:verts.data() length:vbytes options:MTLResourceStorageModeShared] offset:0 atIndex:0];
+			}
+			id<MTLBuffer> ib = ad.ib;
 			[enc setVertexBytes:&du length:sizeof du atIndex:1];
 			[enc setFragmentBytes:&du length:sizeof du atIndex:1];
 			[enc setFragmentTexture:ad.texture atIndex:0];
@@ -3004,6 +3030,48 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	}
 	std::printf("wrote %s (%dx%d, zoom %d)\n", path.UTF8String, w, h, _zoom);
 	return YES;
+}
+
+- (void)perfRun:(int)frames width:(int)w height:(int)h scale:(float)scale {
+	using Clock = std::chrono::steady_clock;
+	auto ms = [](Clock::time_point a, Clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+	id<MTLTexture> out = rm::make_readback_target(_device, w, h);
+	_uiScale = scale > 0 ? scale : 1;
+	std::vector<double> sim, enc, gpu;
+	for (int f = 0; f < frames; f++) {
+		const auto t0 = Clock::now();
+		if (_game && !_mp) [self stepSimulation:1];
+		const auto t1 = Clock::now();
+		@autoreleasepool {
+			id<MTLCommandBuffer> cb = [_queue commandBuffer];
+			[self renderInto:out commandBuffer:cb];
+			const auto t2 = Clock::now();
+			[cb commit];
+			[cb waitUntilCompleted];
+			const auto t3 = Clock::now();
+			sim.push_back(ms(t0, t1)), enc.push_back(ms(t1, t2)), gpu.push_back(ms(t2, t3));
+		}
+	}
+	auto stat = [&](const char* name, std::vector<double> v) {
+		if (v.empty()) return;
+		double sum = 0;
+		for (double x : v) sum += x;
+		std::sort(v.begin(), v.end());
+		std::printf("  %-22s avg %7.3f ms  p50 %7.3f  p95 %7.3f  max %7.3f\n", name, sum / double(v.size()), v[v.size() / 2], v[size_t(double(v.size() - 1) * 0.95)], v.back());
+	};
+	std::printf("perf: %d frames at %dx%d (frame %d of the game)\n", frames, w, h, _game ? _game->frame : 0);
+	stat("sim step", sim);
+	stat("render (CPU encode)", enc);
+	stat("render (GPU wait)", gpu);
+	std::vector<double> render(enc.size());
+	for (size_t i = 0; i < enc.size(); i++) render[i] = enc[i] + gpu[i];
+	stat("render total", render);
+	double sa = 0, ra = 0;
+	for (double x : sim) sa += x;
+	for (double x : render) ra += x;
+	const double n = std::max<double>(1, double(frames));
+	// The window runs one simulation step per 66 ms at normal speed and draws at the display rate: a 30 fps frame carries about half a step.
+	std::printf("  estimated display rate: %.1f fps (render %.2f ms + half a sim step %.2f ms)\n", 1000.0 / (ra / n + sa / n / 2), ra / n, sa / n / 2);
 }
 
 // ---------------------------------------------------------------- interface (docs/ui-port.md)
@@ -4753,6 +4821,14 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	if (issue()) _cm.process_turn(*_game);
 }
 
+// SoundGlobal::play of a soundglobals.xml KEY (no S_) on the effects channel.
+- (void)playGlobal:(const char*)key {
+	if (!_audio && !getenv("RON_UIX_TRACE")) return;  // headless runs have no audio; RON_UIX_TRACE=1 still prints the sound that would play
+	const std::string f = _sview.sound_file(key);
+	if (getenv("RON_UIX_TRACE")) std::fprintf(stderr, "[uix] sound S_%s -> %s\n", key, f.empty() ? "(none)" : f.c_str());
+	if (_audio && !f.empty()) _audio->play_effect(f);
+}
+
 // What uix.* (the third HUD pass: air, advanced orders, selection rules) needs from this window.
 - (uix::Ctx)uixCtx {
 	uix::Ctx c;
@@ -4765,6 +4841,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	c.say = [self](const std::string& t) { [self say:t]; };
 	c.loc = [self](int i, const char* fallback) { return [self locString:i fallback:fallback]; };
 	c.look_at = [self](float x, float y) { [self lookAtX:x y:y]; };
+	c.sound = [self](const char* key) { [self playGlobal:key]; };  // the card's acknowledgement sounds (docs/ui-port.md section 16)
 	c.on_screen = [self](int32_t who, int32_t o, bool building) {
 		const float bottom = float(_hud.bar_top());
 		auto inside = [&](simd_float2 sp) { return sp.x >= 0 && sp.y >= 0 && sp.x < _uiW && sp.y < (_hudOn ? bottom : _uiH); };
@@ -4807,6 +4884,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		case hud::kOptHalt: {
 			const std::vector<int32_t> objs = [self ownSelectedUnits];
 			[self issueAs:me block:^bool { return _cm.issue_halt(*_game, objs); }];
+			if (!objs.empty()) [self playGlobal:"HALT_ACK"];  // Options::do_halt
 			break;
 		}
 		case hud::kOptBuild: case hud::kOptBuildMilitary: case hud::kOptBuildWonder: _buildPage = option; break;
@@ -4829,6 +4907,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 			// OPTION_EJECT_ALL: EJECTALL for the selected buildings (their garrison comes out).
 			const std::vector<int32_t> objs = [self ownSelectedBuilds];
 			[self issueAs:me block:^bool { return _cm.issue_eject_all(*_game, objs); }];
+			if (!objs.empty()) [self playGlobal:"EJECT_ACK"];  // Options::do_eject_all
 			break;
 		}
 		case hud::kOptTrain: case hud::kOptResearch: {
@@ -7356,6 +7435,7 @@ int main(int argc, const char* argv[]) {
 		float place_x = 0, place_y = 0;
 		uint32_t seed = 12345;
 		int sim_frames = 0;
+		int perf_frames = 0;
 		struct MoveArg {
 			int who = 0, frame = 0;
 			std::vector<int32_t> objs;
@@ -7471,6 +7551,8 @@ int main(int argc, const char* argv[]) {
 				simulate = false;
 			} else if (a == "--seed" && more) {
 				seed = uint32_t(std::strtoul(argv[++i], nullptr, 0));
+			} else if (a == "--perf" && more) {
+				perf_frames = std::atoi(argv[++i]);  // N more headless frames, timed: simulation step and rendered frame (after --frames)
 			} else if (a == "--frames" && more) {
 				sim_frames = std::atoi(argv[++i]);
 			} else if (a == "--move" && more) {
@@ -8219,6 +8301,12 @@ int main(int argc, const char* argv[]) {
 		if (save_game && ![r saveGameTo:save_game]) {
 			std::fprintf(stderr, "--save-game failed\n");
 			return 1;
+		}
+		if (perf_frames > 0) {  // headless: print and exit (a --snapshot after it is not taken)
+			[r perfRun:perf_frames width:w height:h scale:ui_scale];
+			std::fflush(stdout);
+			[r mpClose];
+			return 0;
 		}
 		if (snapshot) {
 			const BOOL shot = [r snapshotTo:snapshot width:w height:h scale:ui_scale];

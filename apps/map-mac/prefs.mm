@@ -88,6 +88,7 @@ void parse(const std::string& text, Prefs& out) {
 		else if (k == "streamlined") out.streamlined = to_bool(v, out.streamlined);
 		else if (k == "fullscreen") out.fullscreen = to_bool(v, out.fullscreen);
 		else if (k == "language") out.language = v;
+		else if (k == "game_dir") out.game_dir = v;
 		else known = false;
 		if (known) out.present.insert(k);
 	}
@@ -110,6 +111,7 @@ std::string serialize(const Prefs& p) {
 	o << "streamlined = " << (p.streamlined ? 1 : 0) << "\n";
 	o << "fullscreen = " << (p.fullscreen ? 1 : 0) << "\n";
 	if (!p.language.empty()) o << "language = " << p.language << "\n";
+	if (!p.game_dir.empty()) o << "game_dir = " << p.game_dir << "\n";
 	for (const auto& [sig, keys] : p.hotkeys) o << "hotkey." << sig << " = " << keys << "\n";
 	return o.str();
 }
@@ -146,6 +148,23 @@ bool save() {
 		g_prefs.present = again.present;
 		NSString* text = @(body.c_str());
 		return [text writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
+	}
+}
+
+bool save_game_dir(const std::string& dir) {
+	@autoreleasepool {
+		NSString* p = @(path().c_str());
+		[[NSFileManager defaultManager] createDirectoryAtPath:[p stringByDeletingLastPathComponent] withIntermediateDirectories:YES attributes:nil error:nil];
+		NSString* old = [NSString stringWithContentsOfFile:p encoding:NSUTF8StringEncoding error:nil] ?: @"";
+		NSMutableArray<NSString*>* lines = [NSMutableArray array];
+		for (NSString* l in [old componentsSeparatedByString:@"\n"]) {
+			NSString* t = [l stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+			if ([t hasPrefix:@"game_dir"] && [[t substringFromIndex:8] stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet].UTF8String[0] == '=') continue;
+			if (l.length) [lines addObject:l];
+		}
+		[lines addObject:[NSString stringWithFormat:@"game_dir = %s", dir.c_str()]];
+		g_prefs.game_dir = dir;
+		return [[[lines componentsJoinedByString:@"\n"] stringByAppendingString:@"\n"] writeToFile:p atomically:YES encoding:NSUTF8StringEncoding error:nil];
 	}
 }
 

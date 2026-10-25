@@ -2,6 +2,8 @@
 // drawn in the game window (frontend.mm); only the first-run folder picker is a native panel.
 #import "launcher.h"
 
+#include "prefs.hpp"
+
 namespace launcher {
 
 NSString* const kDefGameDir = @"GameDirectory";
@@ -13,12 +15,13 @@ bool looks_like_install(NSString* dir) {
 	NSFileManager* fm = NSFileManager.defaultManager;
 	BOOL isDir = NO;
 	if (![fm fileExistsAtPath:dir isDirectory:&isDir] || !isDir) return false;
-	bool data = false, scen = false;
+	bool data = false, scen = false, exe = false;
 	for (NSString* e in [fm contentsOfDirectoryAtPath:dir error:nil]) {
 		if ([e caseInsensitiveCompare:@"Data"] == NSOrderedSame) data = true;
 		if ([e caseInsensitiveCompare:@"scenario"] == NSOrderedSame) scen = true;
+		if ([e caseInsensitiveCompare:@"riseofnations.exe"] == NSOrderedSame) exe = true;  // the exe next to a Data folder is enough
 	}
-	return data && scen;
+	return data && (scen || exe);
 }
 
 NSString* guess_install() {
@@ -38,12 +41,17 @@ NSString* guess_install() {
 }
 
 NSString* saved_or_guessed_install() {
+	// The preferences file's game_dir (written by the first-run picker), then the NSUserDefaults profile of older builds, then a guess.
+	const std::string& fromPrefs = prefs::get().game_dir;
+	if (!fromPrefs.empty() && looks_like_install(@(fromPrefs.c_str()))) return @(fromPrefs.c_str());
 	NSString* dir = [NSUserDefaults.standardUserDefaults stringForKey:kDefGameDir];
 	return looks_like_install(dir) ? dir : guess_install();
 }
 
 void remember_install(NSString* dir) {
-	if (looks_like_install(dir)) [NSUserDefaults.standardUserDefaults setObject:dir forKey:kDefGameDir];
+	if (!looks_like_install(dir)) return;
+	[NSUserDefaults.standardUserDefaults setObject:dir forKey:kDefGameDir];
+	if (prefs::get().game_dir != dir.UTF8String) prefs::save_game_dir(dir.UTF8String);
 }
 
 static NSOpenPanel* folder_panel(NSString* start) {

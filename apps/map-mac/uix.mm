@@ -59,6 +59,11 @@ bool issue(Ctx& c, const char* what, const std::function<bool()>& fn) {
 	return true;
 }
 
+// SoundGlobal::play (section 16): the acknowledgement of a card command, when the host gave the context a sound hook.
+void play(const Ctx& c, const char* key) {
+	if (c.sound) c.sound(key);
+}
+
 // The objects a group command applies to: the units when some are selected, else the buildings.
 std::vector<int32_t> group_objs(const Ctx& c) {
 	if (c.units && !c.units->empty()) return own(c, *c.units);
@@ -411,14 +416,14 @@ int run_option(Ctx& c, int option, int object, Mods m) {
 		case hud::kOptStance: case kOptStanceBack: {
 			if (units.empty()) return 1;
 			const int s = option == kOptStanceBack ? -2 : object;
-			issue(c, "stance", [&] { return c.cm->issue_stance(*c.game, units, s); });
+			if (issue(c, "stance", [&] { return c.cm->issue_stance(*c.game, units, s); })) play(c, "CHANGE_STANCE");  // Options::do_stance
 			return 1;
 		}
 		case hud::kOptForm: case kOptFormBack: {
 			if (units.empty()) return 1;
 			const int f = option == kOptFormBack ? -3 : object;
 			const QueuePos q = queue_of(m);
-			issue(c, "form", [&] { return c.cm->issue_form(*c.game, units, f, 0, q); });
+			if (issue(c, "form", [&] { return c.cm->issue_form(*c.game, units, f, 0, q); })) play(c, "CHANGE_FORMATION");  // Options::do_formation
 			return 1;
 		}
 		case hud::kOptDisband: case kOptDisbandAll: {
@@ -433,21 +438,40 @@ int run_option(Ctx& c, int option, int object, Mods m) {
 			if (!objs.empty()) issue(c, "recall", [&] { return c.cm->issue_recall(*c.game, objs); });
 			return 1;
 		case kOptRepeat: {
-			// Options::set_air_repeat: buildings take BUILDMASK 0x80, a carrier (units) UNITMASK 0x200000.
+			// Options::set_air_repeat: buildings take BUILDMASK 0x80, a carrier (units) UNITMASK 0x200000. The sound is chosen from the
+			// state before the command (it runs later in a lockstep game): REPEAT_ORDERS_ON_ACK when it was off, else _OFF_ACK.
+			const Object* lead = nullptr;
+			if (!units.empty()) lead = c.game->unit(c.me, units.front());
+			else if (!builds.empty()) lead = c.game->build(c.me, builds.front());
+			const bool was = lead && has_repeat_air(*lead);
+			bool ok;
 			if (builds.empty()) {
-				if (!units.empty()) issue(c, "unitmask", [&] { return c.cm->issue_unitmask(*c.game, units, 0x200000, 1); });
-				return 1;
+				if (units.empty()) return 1;
+				ok = issue(c, "unitmask", [&] { return c.cm->issue_unitmask(*c.game, units, 0x200000, 1); });
+			} else {
+				ok = issue(c, "buildmask", [&] { return c.cm->issue_buildmask(*c.game, builds, 0x80, true); });
 			}
-			issue(c, "buildmask", [&] { return c.cm->issue_buildmask(*c.game, builds, 0x80, true); });
+			if (ok && lead) play(c, was ? "REPEAT_ORDERS_OFF_ACK" : "REPEAT_ORDERS_ON_ACK");
 			return 1;
 		}
 		case hud::kOptAutoExplore: {  // Options::do_auto_explore: UNITMASK 0x100 (the sim skips planes and toggles)
-			if (!units.empty()) issue(c, "unitmask", [&] { return c.cm->issue_unitmask(*c.game, units, 0x100, 1); });
+			if (units.empty()) return 1;
+			// GroupData::get_auto_explore before the command (the one unit's mask, else the majority): off -> AUTO_EXPLORE_ACK, on -> _OFF.
+			int on = 0, off = 0;
+			for (int32_t o : units) {
+				const Unit* u = c.game->unit(c.me, o);
+				if (u && u->alive()) ((u->unit_masks & 0x100u) ? on : off)++;
+			}
+			const bool was = on > 0 && off <= on;
+			if (issue(c, "unitmask", [&] { return c.cm->issue_unitmask(*c.game, units, 0x100, 1); })) play(c, was ? "AUTO_EXPLORE_OFF" : "AUTO_EXPLORE_ACK");
 			return 1;
 		}
 		case kOptInfinite: {
 			if (builds.empty()) return 1;
-			issue(c, "buildmask", [&] { return c.cm->issue_buildmask(*c.game, builds, 0x40, true); });
+			// GroupAction buildmask 0x40: INFINITE_QUEUE when the queue becomes endless, INFINITE_QUEUE_OFF when it stops (state before the command).
+			const Build* b = c.game->build(c.me, builds.front());
+			const bool was = b && (b->build_masks & 0x40u);
+			if (issue(c, "buildmask", [&] { return c.cm->issue_buildmask(*c.game, builds, 0x40, true); })) play(c, was ? "INFINITE_QUEUE_OFF" : "INFINITE_QUEUE");
 			return 1;
 		}
 		case kOptQueue: {
