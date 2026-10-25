@@ -1,0 +1,6 @@
+re/decomp/fid9/callers_collblock.txt
+2
+CollBlock::operator_new
+CollBlock::operator_delete
+World::new_coll_block
+CollBlock::CollBlock

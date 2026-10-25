@@ -103,6 +103,9 @@ const ClassMap& map_leader() {
 		b.f("gov_hero_frame", &Leader::gov_hero_frame).f("flock_stamp", &Leader::flock_stamp);
 		b.f("deaths_current_frame", &Leader::deaths_current_frame).f("kills_current_frame", &Leader::kills_current_frame);
 		b.f("hits_current_frame", &Leader::hits_current_frame);
+		b.f("damage_current_frame", &Leader::damage_current_frame).f("deaths_fifteen_seconds", &Leader::deaths_fifteen).f("kills_fifteen_seconds", &Leader::kills_fifteen);
+		b.f("hits_fifteen_seconds", &Leader::hits_fifteen).f("damage_fifteen_seconds", &Leader::damage_fifteen).f("average_death_rate", &Leader::avg_death);
+		b.f("average_kill_rate", &Leader::avg_kill).f("average_damage_rate", &Leader::avg_damage).f("average_hit_rate", &Leader::avg_hit).f("frame_battle", &Leader::frame_battle);
 		b.f("strategy", &Leader::strategy).f("reg_active", &Leader::reg_active).f("reg_combat", &Leader::reg_combat);
 		b.f("reg_defense", &Leader::reg_defense).f("reg_attack", &Leader::reg_attack).f("reg_pop", &Leader::reg_pop);
 		b.f("reg_naval", &Leader::reg_naval).f("reg_transports", &Leader::reg_transports).f("reg_peasants", &Leader::reg_peasants);

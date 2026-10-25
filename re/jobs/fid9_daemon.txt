@@ -1,0 +1,5 @@
+re/decomp/fid9/daemon
+GameDaemon::process_all
+GameDaemon::process
+Game::do_frame
+Game::process_frame.*

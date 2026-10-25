@@ -1,0 +1,2 @@
+re/decomp/fid9/grep_dip.txt
+0x69[2-9a-f][0-9a-f]\]

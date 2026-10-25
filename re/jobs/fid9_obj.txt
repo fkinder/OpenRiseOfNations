@@ -1,0 +1,4 @@
+re/decomp/fid9/obj
+Object::add_to_world
+Object::remove_from_world
+SubObject::set_new_location

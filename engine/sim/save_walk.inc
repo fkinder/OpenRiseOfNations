@@ -18,6 +18,7 @@ template <class Ar> void walk(Ar& ar, Leader& v) {
 	FIELDS(ar, v.reg_cities, v.reg_forts, v.num_units, v.oil_patches, v.new_rares, v.explored, v.production_ai, v.prod_script_on);
 	FIELDS(ar, v.prod_step, v.prod_script, v.score_combat, v.units_killed, v.units_lost, v.buildings_razed, v.buildings_lost);
 	FIELDS(ar, v.frame_attacked, v.retarget_budget, v.deaths_current_frame, v.kills_current_frame, v.hits_current_frame);
+	FIELDS(ar, v.damage_current_frame, v.deaths_fifteen, v.kills_fifteen, v.hits_fifteen, v.damage_fifteen, v.avg_death, v.avg_kill, v.avg_damage, v.avg_hit, v.frame_battle);
 	FIELDS(ar, v.attack_stamp, v.raid_stamp, v.capital_stamp, v.ally_stamp, v.bucket, v.escrow, v.epochs, v.discovered, v.epoch, v.tech_at_start, v.obs_flags);
 	FIELDS(ar, v.age_stamp, v.gov, v.gov_hero_frame, v.misery, v.heroes, v.specials, v.num_heroes, v.num_specials, v.plunder_scale);
 	FIELDS(ar, v.num_queued, v.num_buildings, v.high_buildings, v.reg_buildings, v.last_unit_finished, v.last_building_finished);
@@ -344,7 +345,7 @@ template <class Ar> void walk(Ar& ar, LandMake& v) {
 #if defined(__LP64__) && defined(_LIBCPP_VERSION)
 static_assert(sizeof(ActiveSpell) == 12, "ActiveSpell changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Caster) == 32, "Caster changed: update its walk() in save_walk.inc");
-static_assert(sizeof(Leader) == 28112, "Leader changed: update its walk() in save_walk.inc");
+static_assert(sizeof(Leader) == 28136, "Leader changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Leader::Deal) == 92, "Leader::Deal changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Personality) == 96, "Personality changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Site) == 24, "Site changed: update its walk() in save_walk.inc");

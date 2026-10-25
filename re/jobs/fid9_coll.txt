@@ -1,0 +1,8 @@
+re/decomp/fid9/coll
+World::new_coll_block
+CollBlock::.*
+CollCheck::.*
+WorldData::get_coll_block
+GameDaemon::process_coll_blocks
+WorldData::.*coll.*
+World::.*coll.*

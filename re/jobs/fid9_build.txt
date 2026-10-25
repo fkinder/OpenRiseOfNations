@@ -1,0 +1,8 @@
+re/decomp/fid9/build
+Unit::add_build_order
+Unit::check_build_order
+Unit::do_build
+Unit::work_build.*
+CommandManager::process_build.*
+BuildOrder::.*
+Unit::do_construct.*

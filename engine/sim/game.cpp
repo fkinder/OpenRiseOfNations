@@ -538,6 +538,48 @@ void game_daemon_process_all(Game& g) {
 
 }  // namespace
 
+namespace {
+// Leader::process_event_frame @6ec180: every 50 frames the per-period counters (x100) become the rates and the 15-second sums; the
+// jukebox mood and the achievement events of the original are presentation. A big battle (rates above the age's threshold, 1,800
+// frames after the last one) sets both rates to 0xfc18 and frame_battle (Achieve::add_event: not simulated state).
+void leader_process_event_frame(Game& g, Leader& l) {
+	if (g.frame % 0x32 != 0) return;
+	l.deaths_fifteen = uint16_t(l.deaths_fifteen + uint16_t(l.deaths_current_frame));
+	l.damage_fifteen = uint16_t(l.damage_fifteen + l.damage_current_frame);
+	l.kills_fifteen = uint16_t(l.kills_fifteen + uint16_t(l.kills_current_frame));
+	l.hits_fifteen = uint16_t(l.hits_fifteen + uint16_t(l.hits_current_frame));
+	const uint16_t d = uint16_t(uint16_t(l.deaths_current_frame) * 100), dm = uint16_t(l.damage_current_frame * 100);
+	const uint16_t k = uint16_t(uint16_t(l.kills_current_frame) * 100), h = uint16_t(uint16_t(l.hits_current_frame) * 100);
+	l.deaths_current_frame = int16_t(d);
+	l.damage_current_frame = dm;
+	l.kills_current_frame = int16_t(k);
+	l.hits_current_frame = int16_t(h);
+	l.avg_death = uint16_t(d == 0 ? (uint32_t(l.avg_death) * 7) >> 3 : (uint32_t(d) + l.avg_death) >> 1);
+	l.avg_kill = uint16_t(k == 0 ? (uint32_t(l.avg_kill) * 7) >> 3 : (uint32_t(k) + l.avg_kill) >> 1);
+	l.avg_hit = uint16_t(h == 0 ? (uint32_t(l.avg_hit) * 7) >> 3 : (uint32_t(h) + l.avg_hit) >> 1);
+	l.avg_damage = uint16_t(dm == 0 ? (uint32_t(l.avg_damage) * 7) >> 3 : (uint32_t(dm) + l.avg_damage) >> 1);
+	const int32_t age = l.age;
+	const int32_t sum = int32_t(l.avg_death) + int32_t(l.avg_kill);
+	if ((age + 1) * 0x7d <= sum && (l.frame_battle == 0 || g.frame - l.frame_battle > 0x707)) {
+		bool event = false;
+		if (int32_t(l.avg_death) < age * 10 + 0x14 + int32_t(l.avg_kill)) {
+			if (int32_t(l.avg_kill) >= age * 10 + 0x14 + int32_t(l.avg_death)) event = true;  // BATTLE_VICTORY
+		} else {
+			event = true;  // BATTLE_DEFEAT
+		}
+		if (event) {
+			l.avg_death = 0xfc18;
+			l.avg_kill = 0xfc18;
+			l.frame_battle = g.frame;
+		}
+	}
+	l.deaths_current_frame = 0;
+	l.kills_current_frame = 0;
+	l.hits_current_frame = 0;
+	l.damage_current_frame = 0;
+}
+}  // namespace
+
 void Game::do_frame() {
 	// TurnControl::do_frame returns 0 once Game::check_victory has ended the game (semaphore byte0 & 0x40).
 	if (game_over) return;
@@ -576,6 +618,8 @@ void Game::do_frame() {
 	objects_process_all(*this);  // 13
 	objects_inc_time(*this);     // 14
 	// 15-18 TODO: GraphicEvents::process, Leaders::end_process_all, Achieve::capture_data, process_event_frame.
+	for (int32_t who = 0; who < 8; who++)  // 17: Leader::process_event_frame (after Achieve::capture_data), every VALID leader
+		if (leaders[size_t(who)].flags & leaderflag::kValid) leader_process_event_frame(*this, leaders[size_t(who)]);
 	frame++;  // 19
 	// 20 OrdersMemManager::cycle: nothing to do (orders are values here).
 	// 21 TODO: Roads::scan_and_kill_stray_roads.

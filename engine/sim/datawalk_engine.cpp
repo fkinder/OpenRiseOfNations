@@ -87,7 +87,15 @@ dw::Obj EngineProvider::child(dw::Obj o, const dw::Site& site, int64_t index) {
 				if (e.type == 1 && std::strcmp(d.local_name(e.step), cs.reuse_local) == 0) { reuse = e.value == cs.reuse_value; break; }
 		}
 		if (!reuse) r = sh_.fresh_rec(static_cast<const dw::Rec*>(o), site.step, site.base, index, d.step_class(site.step));
-		if (cs.map) sh_.rebind(r, *cs.map, cs.id);
+		if (cs.map) {
+			// A body image has one layout: a cached image reused for another order class must not keep the old class's segment
+			// (it would overlay the old members' defaults on the new order's bytes).
+			if (cs.reuse_local) {
+				std::vector<omap::Segment>& sv = sh_.segs[r];
+				sv.erase(std::remove_if(sv.begin(), sv.end(), [&](const omap::Segment& x) { return x.map != cs.map; }), sv.end());
+			}
+			sh_.rebind(r, *cs.map, cs.id);
+		}
 		return r;
 	}
 	return c;

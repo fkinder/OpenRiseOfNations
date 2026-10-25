@@ -774,6 +774,8 @@ struct PartTrace {
 	std::vector<R> ranges;
 };
 
+PartTrace g_rb_snap;  // RON_REVERT_BYTES: the part's stream at the first boundary
+
 // Runs part `part` (units 0, builds 1, groups 5, guys 6, leaders 7, goods 10, world 11) with a hook that records every hashed range.
 bool trace_part(dw::Provider& p, int part, PartTrace& out) {
 	const dw::Description& d = dw::Description::get();
@@ -1789,6 +1791,10 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 	try {
 		for (int64_t f = start; f <= last_boundary; ++f) {
 			if (game->frame != f) { step_error = "frame counter " + std::to_string(game->frame) + " != " + std::to_string(f); break; }
+			if (const char* rb0 = std::getenv("RON_REVERT_BYTES")) {  // snapshot of the part's stream at F0 (see below); F0 may be any frame
+				int rp = 0, r0 = 0, r1 = 0;
+				if (std::sscanf(rb0, "%d:%d:%d", &rp, &r0, &r1) == 3 && f == r0) { sim::EngineProvider e0(*game); g_rb_snap = PartTrace(); trace_part(e0, rp, g_rb_snap); }
+			}
 			auto it = expect.find(f);
 			if (it != expect.end()) {
 				if (baseline && f == start + 1) std::printf("  (reverted %lld member values)\n", (long long)sim::revert_members(*game, *baseline, revert));
@@ -2385,6 +2391,118 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 						}
 					}
 				}
+				if (const char* wx = std::getenv("RON_WD_REVERT")) {  // RON_WD_REVERT=F0:F1: WData of the cells changed between boundaries F0 and F1 put back (all, then per field and per cell) -> does `world` at F1 match?
+					int w0 = 0, w1 = 0;
+					static std::vector<sim::WData> wd_snap;
+					if (std::sscanf(wx, "%d:%d", &w0, &w1) == 2) {
+						if (f == w0) wd_snap = game->world.wdata;
+						if (f == w1 && wd_snap.size() == game->world.wdata.size()) {
+							const std::vector<sim::WData> cur = game->world.wdata;
+							auto test = [&](const char* what, const std::function<void(sim::WData&, const sim::WData&)>& rv, size_t only) {
+								game->world.wdata = cur;
+								size_t nch = 0;
+								for (size_t i = 0; i < cur.size(); ++i) {
+									if (only != SIZE_MAX && i != only) continue;
+									const sim::WData before = game->world.wdata[i];
+									rv(game->world.wdata[i], wd_snap[i]);
+									if (std::memcmp(&before, &game->world.wdata[i], sizeof(sim::WData)) != 0) ++nch;
+								}
+								if (!nch) { game->world.wdata = cur; return; }
+								sim::EngineProvider ew(*game);
+								PartTrace tw;
+								const bool ok = trace_part(ew, 11, tw) && adler_of(tw.bytes) == it->second[11];
+								if (ok || only == SIZE_MAX) std::printf("  WD_REVERT %s%s: %zu cells changed, world %s\n", what, only == SIZE_MAX ? "" : " (one cell)", nch, ok ? "MATCHES" : "differs");
+								if (ok && only != SIZE_MAX) std::printf("    cell %zu (%zu,%zu)\n", only, only % size_t(game->world.xs), only / size_t(game->world.xs));
+								game->world.wdata = cur;
+							};
+							const std::vector<std::pair<const char*, std::function<void(sim::WData&, const sim::WData&)>>> fields = {
+								{"all", [](sim::WData& a, const sim::WData& b) { const int32_t bl = a.block; a = b; a.block = bl; }},
+								{"bad", [](sim::WData& a, const sim::WData& b) { a.bad = b.bad; }},
+								{"blocked", [](sim::WData& a, const sim::WData& b) { a.blocked = b.blocked; }},
+								{"solid", [](sim::WData& a, const sim::WData& b) { a.solid = b.solid; }},
+								{"flags", [](sim::WData& a, const sim::WData& b) { a.flags = b.flags; }},
+								{"bad+blocked+solid", [](sim::WData& a, const sim::WData& b) { a.bad = b.bad; a.blocked = b.blocked; a.solid = b.solid; }},
+								{"was_seen", [](sim::WData& a, const sim::WData& b) { a.was_seen = b.was_seen; }},
+								{"down", [](sim::WData& a, const sim::WData& b) { a.down = b.down; a.down_who = b.down_who; }}};
+							for (const auto& fl : fields) {
+								test(fl.first, fl.second, SIZE_MAX);
+								for (size_t i = 0; i < cur.size(); ++i) if (std::memcmp(&cur[i], &wd_snap[i], sizeof(sim::WData)) != 0) test(fl.first, fl.second, i);
+							}
+						}
+					}
+				}
+				if (const char* ca = std::getenv("RON_CURSOR_ADD")) {  // RON_CURSOR_ADD=d: the collision-block sweep cursor starts d wcoords further (experiment)
+					static bool cursor_done = false;
+					if (!cursor_done) {
+						cursor_done = true;
+						const int32_t sz = game->world.size;
+						if (sz > 0) game->world.empty_colls = int32_t(((int64_t(game->world.empty_colls) + std::atoll(ca)) % sz + sz) % sz);
+					}
+				}
+				if (const char* rb = std::getenv("RON_REVERT_BYTES")) {  // RON_REVERT_BYTES=part:F0:F1: of the stream bytes the engine changed between boundaries F0 and F1, which 1 to 4 put back make the part match at F1?
+					int rp = 0, r0 = 0, r1 = 0;
+										if (std::sscanf(rb, "%d:%d:%d", &rp, &r0, &r1) == 3) {
+						if (f == r1 && !g_rb_snap.bytes.empty()) {
+							sim::EngineProvider e1(*game);
+							PartTrace t1;
+							trace_part(e1, rp, t1);
+							const int64_t M = 65521;
+							if (t1.bytes.size() != g_rb_snap.bytes.size()) {
+								std::printf("  revert-bytes: stream length changed (%zu -> %zu)\n", g_rb_snap.bytes.size(), t1.bytes.size());
+							} else {
+								const int64_t N = int64_t(t1.bytes.size());
+								const uint32_t h1 = adler_of(t1.bytes), want = it->second[size_t(rp)];
+								const int64_t ta = ((int64_t(want & 0xffff) - (h1 & 0xffff)) % M + M) % M, tb = ((int64_t(want >> 16) - (h1 >> 16)) % M + M) % M;
+								struct E { int64_t i, a, b; };
+								std::vector<E> pool;
+								for (int64_t i = 0; i < N; ++i) if (g_rb_snap.bytes[size_t(i)] != t1.bytes[size_t(i)]) {
+									const int64_t e = int64_t(g_rb_snap.bytes[size_t(i)]) - int64_t(t1.bytes[size_t(i)]);
+									pool.push_back({i, ((e % M) + M) % M, (((e * (N - i)) % M) + M) % M});
+								}
+								std::printf("  revert-bytes part %d: %zu bytes changed between %d and %d; target (a=%lld b=%lld)\n", rp, pool.size(), r0, r1, (long long)ta, (long long)tb);
+								auto k2 = [](int64_t a, int64_t b) { return uint64_t(a) << 32 | uint64_t(b); };
+								std::unordered_map<uint64_t, std::vector<std::pair<size_t, size_t>>> pairs;
+								int shown = 0;
+								for (size_t i = 0; i < pool.size(); ++i) {
+									if (pool[i].a == ta && pool[i].b == tb && shown++ < 20) std::printf("    REVERT HIT (1): byte %lld\n", (long long)pool[i].i);
+									for (size_t j = i + 1; j < pool.size(); ++j) pairs[k2((pool[i].a + pool[j].a) % M, (pool[i].b + pool[j].b) % M)].push_back({i, j});
+								}
+								auto label = [&](int64_t at) {
+									static char buf[96];
+									buf[0] = 0;
+									for (const auto& r : t1.ranges) if (size_t(at) >= r.begin && size_t(at) < r.begin + r.len) { std::snprintf(buf, sizeof buf, "%d/%d+%zu", r.who, r.o, size_t(at) - r.begin); break; }
+									return std::string(buf);
+								};
+								auto f2 = pairs.find(k2(ta, tb));
+								if (f2 != pairs.end()) for (auto& pq : f2->second) if (shown++ < 40) std::printf("    REVERT HIT (2): bytes %lld [%s] + %lld [%s]\n", (long long)pool[pq.first].i, label(pool[pq.first].i).c_str(), (long long)pool[pq.second].i, label(pool[pq.second].i).c_str());
+								for (size_t i = 0; i < pool.size(); ++i) {
+									auto f3 = pairs.find(k2(((ta - pool[i].a) % M + M) % M, ((tb - pool[i].b) % M + M) % M));
+									if (f3 == pairs.end()) continue;
+									for (auto& pq : f3->second) if (pq.first > i && shown++ < 40) std::printf("    REVERT HIT (3): bytes %lld + %lld + %lld\n", (long long)pool[i].i, (long long)pool[pq.first].i, (long long)pool[pq.second].i);
+								}
+								std::printf("  revert-bytes: %d hits shown\n", shown);
+							}
+						}
+					}
+				}
+				if (const char* bd = std::getenv("RON_BLOCK_DUMP")) {  // RON_BLOCK_DUMP=F0:F1: the cells holding a CollBlock at those boundaries (bits set, flags), the sweep cursor
+					int b0 = 0, b1 = 0;
+					static std::map<size_t, std::pair<int, int>> bsnap;
+					if (std::sscanf(bd, "%d:%d", &b0, &b1) >= 1 && (f == b0 || f == b1)) {
+						std::map<size_t, std::pair<int, int>> cur;
+						for (size_t i = 0; i < game->world.wdata.size(); ++i) {
+							const int32_t bi = game->world.wdata[i].block;
+							if (bi < 0) continue;
+							int bits = 0;
+							for (uint8_t by : game->world.coll_blocks[size_t(bi)].bytes) bits += __builtin_popcount(by);
+							cur[i] = {bits, game->world.coll_blocks[size_t(bi)].flags};
+						}
+						std::printf("  BLOCKS at %lld: %zu blocks, cursor %d\n", (long long)f, cur.size(), game->world.empty_colls);
+						if (f == b0) bsnap = cur;
+						else for (const auto& kv : cur) { auto o = bsnap.find(kv.first); if (o == bsnap.end() || o->second != kv.second) std::printf("    block cell %zu (%zu,%zu): bits %d flags %d%s\n", kv.first, kv.first % size_t(game->world.xs), kv.first / size_t(game->world.xs), kv.second.first, kv.second.second, o == bsnap.end() ? "  NEW" : ""); }
+						if (f == b1) for (const auto& kv : bsnap) if (!cur.count(kv.first)) std::printf("    block cell %zu (%zu,%zu) FREED (bits were %d flags %d)\n", kv.first, kv.first % size_t(game->world.xs), kv.first / size_t(game->world.xs), kv.second.first, kv.second.second);
+					}
+				}
 				sim::EngineProvider ep(*game);
 				dw::CheckSumParts got = dw::compute_check_sums(ep);
 				if (!got.ok) { step_error = "check sums: " + got.error; break; }
@@ -2415,8 +2533,153 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 								const int fnc = dd.step_function(r.step);
 								std::printf("      layout %s step %d (%s) kind %d a %lld b %lld len %zu:", fnc >= 0 ? dd.function_name(fnc) : "?", r.step, dd.step_kind(r.step) == dw::StepKind::Local ? dd.local_name(r.step) : "", int(dd.step_kind(r.step)),
 									(long long)dd.step_const(r.step, 0), (long long)dd.step_const(r.step, 1), r.len);
-								for (size_t q = 0; q < r.len && q < 40; ++q) std::printf(" %02x", tr.bytes[r.begin + q]);
+								for (size_t q = 0; q < r.len && q < (std::getenv("RON_LAYOUT_LEN") ? size_t(std::atoi(std::getenv("RON_LAYOUT_LEN"))) : size_t(40)); ++q) std::printf(" %02x", tr.bytes[r.begin + q]);
 								std::printf("\n");
+							}
+						}
+						if (const char* ls = std::getenv("RON_LIST_PERM")) {  // RON_LIST_PERM=1 (with --solve-at): every wcoord's object list with one element moved to another position, until the part matches
+							const size_t cells = game->world.wdata.size();
+							auto relink = [&](size_t c, const std::vector<std::pair<int, int>>& ord) {
+								sim::WData& wd = game->world.wdata[c];
+								wd.down = ord.empty() ? int16_t(-1) : int16_t(ord[0].second);
+								wd.down_who = ord.empty() ? int16_t(0) : int16_t(ord[0].first);
+								for (size_t i = 0; i < ord.size(); ++i) {
+									sim::Object* ob = game->object(ord[i].first, ord[i].second);
+									if (!ob) continue;
+									if (i == 0) ob->up = -1;
+									else { ob->up = int16_t(ord[i - 1].second); ob->up_who = int8_t(ord[i - 1].first); }
+									if (i + 1 < ord.size()) { ob->down = int16_t(ord[i + 1].second); ob->down_who = int16_t(ord[i + 1].first); }
+									else ob->down = -1;
+								}
+							};
+							(void)ls;
+							int hits = 0, tried = 0;
+							for (size_t c = 0; c < cells && hits < 20; ++c) {
+								std::vector<std::pair<int, int>> ord;
+								for (int w0 = game->world.wdata[c].down_who, o0 = game->world.wdata[c].down; o0 >= 0 && ord.size() < 64;) {
+									ord.push_back({w0, o0});
+									const sim::Object* ob = game->object(w0, o0);
+									if (!ob) break;
+									w0 = ob->down_who;
+									o0 = ob->down;
+								}
+								if (ord.size() < 2) continue;
+								const std::vector<std::pair<int, int>> orig = ord;
+								struct Saved { sim::Object* ob; int16_t up, down, down_who; int8_t up_who; };
+								std::vector<Saved> sv;
+								for (auto& e : orig) if (sim::Object* ob = game->object(e.first, e.second)) sv.push_back({ob, ob->up, ob->down, ob->down_who, ob->up_who});
+								const int16_t h0 = game->world.wdata[c].down, hw0 = game->world.wdata[c].down_who;
+								for (size_t a = 0; a < orig.size(); ++a)
+									for (size_t b = 0; b < orig.size(); ++b) {
+										if (a == b) continue;
+										std::vector<std::pair<int, int>> t = orig;
+										const auto el = t[a];
+										t.erase(t.begin() + ptrdiff_t(a));
+										t.insert(t.begin() + ptrdiff_t(b), el);
+										relink(c, t);
+										sim::EngineProvider epl(*game);
+										PartTrace tl;
+										++tried;
+										if (trace_part(epl, k, tl) && adler_of(tl.bytes) == it->second[size_t(k)]) {
+											std::printf("      LIST HIT part %s: cell %zu (%zu,%zu): move element %zu (%d/%d) to position %zu of %zu\n", dw::kCheckPartNames[k], c, c % size_t(game->world.xs), c / size_t(game->world.xs), a, el.first, el.second, b, orig.size());
+											++hits;
+										}
+									}
+								for (auto& e : sv) { e.ob->up = e.up; e.ob->down = e.down; e.ob->down_who = e.down_who; e.ob->up_who = e.up_who; }
+								game->world.wdata[c].down = h0;
+								game->world.wdata[c].down_who = hw0;
+							}
+							std::printf("      list permutations tried: %d, hits %d\n", tried, hits);
+						}
+						if (k == 11 && std::getenv("RON_BLOCK_SEARCH")) {  // RON_BLOCK_SEARCH=1 (with --solve-at): the world stream with CollBlocks added (empty) / removed (the engine's empty ones): which set matches?
+							const std::vector<uint8_t>& by = tr.bytes;
+							const sim::World& wd = game->world;
+							const size_t cells = wd.wdata.size();
+							auto has = [&](size_t c) { return wd.wdata[c].block >= 0; };
+							auto rd4 = [&](size_t at) { return by.size() >= at + 4 ? uint32_t(by[at] | by[at + 1] << 8 | by[at + 2] << 16 | uint32_t(by[at + 3]) << 24) : 0xffffffffu; };
+							size_t P = SIZE_MAX;
+							for (size_t at = 0; at + 4 <= by.size() && P == SIZE_MAX; ++at) {
+								size_t q = at;
+								bool ok = true;
+								for (size_t c = 0; c < std::min<size_t>(cells, 400) && ok; ++c) {
+									const uint32_t hb = rd4(q);
+									if (hb != (has(c) ? 1u : 0u)) { ok = false; break; }
+									q += 4;
+									if (hb) q += 8 + 96;
+								}
+								if (ok) P = at;
+							}
+							std::printf("      block search: part 9 starts at %zd (stream %zu, %zu cells)\n", P == SIZE_MAX ? ptrdiff_t(-1) : ptrdiff_t(P), by.size(), cells);
+							if (P != SIZE_MAX) {
+								const int64_t M = 65521;
+								// prefix Adler states of the whole stream
+								std::vector<uint32_t> pa(by.size() + 1), pb(by.size() + 1);
+								{ uint32_t A = 1, B = 0; pa[0] = A; pb[0] = B; for (size_t i = 0; i < by.size(); ++i) { A = (A + by[i]) % 65521; B = (B + A) % 65521; pa[i + 1] = A; pb[i + 1] = B; } }
+								struct Seg { int64_t a, b, len; };
+								auto seg = [&](size_t x, size_t y) -> Seg {  // standalone Adler pieces of by[x, y)
+									const int64_t len = int64_t(y - x);
+									const int64_t S = ((int64_t(pa[y]) - pa[x]) % M + M) % M;
+									const int64_t T = (((int64_t(pb[y]) - pb[x] - len % M * ((int64_t(pa[x]) - 1 + M) % M)) % M) + M) % M;
+									return {(1 + S) % M, T, len};
+								};
+								auto cat = [&](const Seg& s1, const Seg& s2) -> Seg { return {(s1.a + s2.a - 1 + M) % M, (s1.b + s2.b + (s2.len % M) * ((s1.a - 1 + M) % M)) % M, s1.len + s2.len}; };
+								auto raw = [&](const uint8_t* d, size_t n) -> Seg { int64_t A = 1, B = 0; for (size_t i = 0; i < n; ++i) { A = (A + d[i]) % M; B = (B + A) % M; } return {A, B, int64_t(n)}; };
+								std::vector<size_t> pos(cells + 1);
+								size_t q = P;
+								for (size_t c = 0; c < cells; ++c) { pos[c] = q; q += 4; if (rd4(q - 4)) q += 104; }
+								pos[cells] = q;
+								const uint32_t want = it->second[11];
+								const uint8_t zero0[4] = {0, 0, 0, 0}, one0[4] = {1, 0, 0, 0};
+								std::vector<uint8_t> emptyblk;
+								emptyblk.insert(emptyblk.end(), one0, one0 + 4);
+								{ const uint8_t hdr[8] = {0, 3, 0, 0, 0x60, 0, 0, 0}; emptyblk.insert(emptyblk.end(), hdr, hdr + 8); emptyblk.insert(emptyblk.end(), 96, 0); }
+								const Seg segEmptyAdd = raw(emptyblk.data(), emptyblk.size()), segNone = raw(zero0, 4);
+								// removable: engine blocks whose 96 bytes are zero
+								std::vector<size_t> rem, add;
+								for (size_t c = 0; c < cells; ++c) {
+									if (has(c)) { bool z = true; for (size_t i = 0; i < 96; ++i) if (by[pos[c] + 12 + i]) { z = false; break; } if (z) rem.push_back(c); }
+									else add.push_back(c);
+								}
+								std::printf("      removable empty blocks: %zu, addable cells: %zu\n", rem.size(), add.size());
+								// a modification list sorted by cell: (cell, isAdd)
+								auto eval = [&](std::vector<std::pair<size_t, bool>> mods) -> uint32_t {
+									std::sort(mods.begin(), mods.end());
+									Seg cur = seg(0, pos[0]);
+									size_t at = pos[0];
+									for (const auto& m : mods) {
+										cur = cat(cur, seg(at, pos[m.first]));
+										cur = cat(cur, m.second ? segEmptyAdd : segNone);
+										at = pos[m.first + 1];
+									}
+									cur = cat(cur, seg(at, by.size()));
+									return uint32_t(cur.b << 16 | cur.a);
+								};
+								int hits = 0;
+								std::printf("      sanity: eval({}) %08x engine %08x\n", eval({}), adler_of(by));
+								auto test = [&](const std::vector<std::pair<size_t, bool>>& mods) {
+									if (eval(mods) == want && hits++ < 20) {
+										std::printf("      BLOCK HIT:");
+										for (auto& m : mods) std::printf(" %s (%zu,%zu)", m.second ? "add" : "remove", m.first % size_t(wd.xs), m.first / size_t(wd.xs));
+										std::printf("\n");
+									}
+								};
+								const size_t R = rem.size();
+								std::vector<std::vector<std::pair<size_t, bool>>> subsets;  // subsets of rem up to size 3
+								subsets.push_back({});
+								for (size_t i = 0; i < R; ++i) {
+									subsets.push_back({{rem[i], false}});
+									for (size_t j = i + 1; j < R; ++j) {
+										subsets.push_back({{rem[i], false}, {rem[j], false}});
+										for (size_t l = j + 1; l < R; ++l) subsets.push_back({{rem[i], false}, {rem[j], false}, {rem[l], false}});
+									}
+								}
+								for (const auto& sb : subsets) {
+									if (!sb.empty()) test(sb);
+									for (size_t c : add) { auto m = sb; m.push_back({c, true}); test(m); }
+									for (size_t ci = 0; ci < add.size() && sb.size() <= 1; ++ci)
+										if (sb.size() <= 1) for (size_t cj = ci + 1; cj < add.size() && cj < ci + 40; ++cj) { auto m = sb; m.push_back({add[ci], true}); m.push_back({add[cj], true}); test(m); }
+								}
+								std::printf("      block search done (%d hits, %zu subsets)\n", hits, subsets.size());
 							}
 						}
 						if (const char* tl = std::getenv("RON_TAIL")) {  // the labelled ranges within the last N bytes of the part's stream
@@ -3048,6 +3311,34 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 				for (auto& kv : hb) std::printf(" %d:%d", kv.first, kv.second);
 				std::printf("\n");
 			}
+		}
+		if (const char* lw = std::getenv("RON_LIST_WDATA")) {  // RON_LIST_WDATA=field (bad blocked solid land_sub flags land region val goods light was_seen): every wcoord where the engine differs from the next save: engine -> original
+			const std::string fname = lw;
+			auto val = [&](const sim::WData& d) -> int64_t {
+				if (fname == "bad") return d.bad;
+				if (fname == "blocked") return d.blocked;
+				if (fname == "solid") return d.solid;
+				if (fname == "land_sub") return d.land_sub;
+				if (fname == "flags") return d.flags;
+				if (fname == "land") return d.land;
+				if (fname == "region") return d.region;
+				if (fname == "region2") return d.region2;
+				if (fname == "val") return d.val;
+				if (fname == "goods") return d.goods;
+				if (fname == "light") return d.light;
+				if (fname == "was_seen") return d.was_seen;
+				if (fname == "who") return d.who;
+				if (fname == "who2") return d.who2;
+				return 0;
+			};
+			int n = 0;
+			for (size_t i = 0; i < game->world.wdata.size() && i < truth->world.wdata.size(); ++i) {
+				const sim::WData& a = game->world.wdata[i];
+				const sim::WData& b = truth->world.wdata[i];
+				if (val(a) == val(b)) continue;
+				if (n++ < 120) std::printf("    wdata %zu (%zu,%zu) %s: engine %lld original %lld   [land %d/%d flags %04x/%04x blocked %d/%d solid %d/%d bad %d/%d who %d/%d]\n", i, i % size_t(game->world.xs), i / size_t(game->world.xs), fname.c_str(), (long long)val(a), (long long)val(b), a.land, b.land, a.flags, b.flags, a.blocked, b.blocked, a.solid, b.solid, a.bad, b.bad, a.who, b.who);
+			}
+			std::printf("  %d wcoords differ in %s\n", n, fname.c_str());
 		}
 		if (const char* lm = std::getenv("RON_LIST_UNIT_DIFF")) {  // every unit whose member `lm` (los_x los_y idle tolerance group uid collide unit_masks ...) differs: engine -> original
 			const std::string mname = lm;

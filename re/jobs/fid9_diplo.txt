@@ -1,0 +1,16 @@
+re/decomp/fid9/diplo
+Leader::consider_tribute
+Leader::action_tribute
+Leader::action_offer
+Leader::action_demand_tribute
+Leader::action_clear_tributes
+Leader::action_treaty
+Leader::action_respond
+Leader::action_agree
+Leader::clear_agree
+Diplomacy::.*
+Leader::diplomacy
+Leader::ally_diplo
+Leader::treaty_off
+Leader::treaty_on
+Leader::set_diplo

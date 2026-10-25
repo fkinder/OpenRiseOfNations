@@ -100,6 +100,12 @@ struct Leader {
 	int32_t score_combat = 0, units_killed = 0, units_lost = 0, buildings_razed = 0, buildings_lost = 0;
 	int32_t frame_attacked = 0, retarget_budget = 0;
 	int16_t deaths_current_frame = 0, kills_current_frame = 0, hits_current_frame = 0;
+	// Leader::process_event_frame @6ec180 (every 50 frames, after the frame's processing): the per-50-frame counters above (x100) feed
+	// the 15-second sums (+0xa60 deaths, +0xa62 kills, +0xa64 hits, +0xa66 damage) and the smoothed rates (+0xa50 death, +0xa52 kill,
+	// +0xa54 damage, +0xa56 hit); frame_battle +0xa4c is the frame of the last battle achievement. damage_current_frame +0xa5e.
+	uint16_t damage_current_frame = 0, deaths_fifteen = 0, kills_fifteen = 0, hits_fifteen = 0, damage_fifteen = 0;
+	uint16_t avg_death = 0, avg_kill = 0, avg_damage = 0, avg_hit = 0;
+	int32_t frame_battle = 0;
 	int16_t units_bribed = 0;  // LeaderData +0x8f4 (cast_bribe counts every converted unit; spells-spec 4.1). Fills the padding after the three counters above; not in the save walk
 	// Per attacking leader k: the frame of the last attack / raid / capital / ally warning on this leader's property by k
 	// (LeaderData +0xf4 / +0x114 / +0x134 / +0x154, written by Object::do_damage with 300-frame throttles; combat-spec 5.3).

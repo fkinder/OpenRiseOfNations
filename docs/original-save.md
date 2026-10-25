@@ -433,6 +433,17 @@ The detail is in sim-implementation "eighth pass", items 35-38; what the hashes 
 *Diagnostics added* (`apps/sav`): `RON_FRAME_DIFF`, `RON_CMD_TRACE`, `RON_RAW_BUILDS`, `RON_POS_SEARCH` / `RON_POS_W`, `RON_TARGET_SEARCH` / `RON_TARGET_W` / `RON_TARGET_STEP`, `RON_PAIR_VALUES` / `RON_PAIR_STEP` / `RON_PAIR_DEBUG`, `RON_TRY_PATH` with allocations;
 `RON_PAIR_SEARCH` now runs at the `--solve-at` point (after the boundary's commands).
 
+### 6.9 Ninth pass (2026-10-24): a hash-provider bug, the combat statistics
+
+First differing boundary of `21'23'34`, before -> after: units 1,514 -> **1,622**; the others unchanged; all 15 parts equal at 264 boundaries (was 252). Detail: sim-implementation "ninth pass", items 39-42.
+
+1. **A wrong hash is not always a wrong simulation.** `units` 1,514 (a static delta for 54 boundaries, equal again for 6, different again) was the engine's *hash provider*: a shadow image keeps the segment of every class ever bound to it, so a unit whose order at index 0
+   changed from a gather order (load) to a move order carried the gather order's members over the move order's `y` / `angle` / `dest`. Sign of such a bug: a static delta that vanishes exactly when the object's state is replaced. Print the object's hashed bytes (`RON_OBJ_LAYOUT` with
+   `RON_LAYOUT_LEN`) and its members (`RON_DUMP_MEMBERS`) and compare field by field before touching the simulation.
+2. **A single-byte solution is nearly free** when the stream is shorter than 65,521 bytes (one candidate position per delta): `leaders` 1,628 "Diplomacy offers[4]" was such a reading and was not the same byte one boundary later. Only believe a reading that survives a second boundary or a second part.
+3. **Missing state that mature saves need**: `Leader::process_event_frame` (the `*_current_frame` counters, the 15-second sums and the smoothed rates every 50 frames) is ported; the one-frame mismatch of every mature save (`units` / `guys` / `leaders` / `world` at the first row, even though nothing is
+   in the first 50) has another cause, not found.
+
 ## 7. What blocks exact checksums
 
 State of the fidelity work (2026-10-24; the log of each fix is in docs/sim-implementation.md "Fidelity log"). **Fixed** since the first table:

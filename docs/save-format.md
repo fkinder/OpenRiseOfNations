@@ -52,6 +52,7 @@ the build that wrote it, and only against the same rules tables: the hash in `ME
 
 Version 7: `Build::gpiece` (WallData +0x58, the graphics piece of the building's art: `Wall::update_gpiece` / `GraphicPieces::get_build_gpiece`, part of the `builds` checksum; sim-implementation.md fidelity log, eighth pass, item 36).
 
+Version 8: `Leader` combat statistics: `damage_current_frame`, `deaths/kills/hits/damage_fifteen`, `avg_death/kill/damage/hit` and `frame_battle` (LeaderData +0xa4c..+0xa66, updated by `Leader::process_event_frame` every 50 frames).
 Version 6: `Leader::flock_stamp` (LeaderData +0x7b8, the frame of the leader's last bird flock; `Objects::add_flock` allows one per 225 frames, docs/aircraft-spec.md 15). The debris of crashed
 aircraft is ordinary `Ammo` state (`gpiece = -2`, `bank_dx` / `bank_dy` were already walked).
 

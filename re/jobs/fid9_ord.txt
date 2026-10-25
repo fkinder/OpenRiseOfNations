@@ -1,0 +1,8 @@
+re/decomp/fid9/ord
+OrdersMemManager::.*
+MoveOrder::clear
+MoveOrder::MoveOrder
+AttackToOrder::AttackToOrder
+BuildOrder::BuildOrder
+TargetOrder::.*
+UnitOrder::UnitOrder
