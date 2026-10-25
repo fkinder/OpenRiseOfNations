@@ -1,0 +1,2 @@
+re/decomp/victory
+ScenarioFuncSet::is_victory_.*
