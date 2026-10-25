@@ -1,0 +1,7 @@
+re/decomp/mapgen_p6
+RiverSection::init
+RiverSectionOut::create_water_plane
+RiverSectionOut::compute_vert_height
+RiverSectionOut::create_doobers
+RiverSectionOut::update_wake_polys
+RiverSection::.*

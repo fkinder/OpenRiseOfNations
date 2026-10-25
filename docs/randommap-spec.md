@@ -555,6 +555,7 @@ What is left on the land vertices of `current 2` (1468 of 82104): 1257 lie withi
 `Build::init`, a game-time step the generator does not run), 211 up to 14 wcoords away (roads); the rest of the table is the same kind (the late games'
 towns). Shelf: every vertex is exact on three of the East Indies worlds and `curent dec 14` (the ten off in the final surround and the seven in current RN
 were mountain vertices over the shelf); the 2 shelf vertices of `current 2` that are 0.01 off and the shore vertices under river troughs (max 22) remain.
+(Sixth pass below: the shore vertices under river troughs are exact on `DO NOT DELETE` and `DO NOT DELETE 2`; the 2 "shelf" vertices of `current 2` are trough vertices of its lake-shore river.)
 The generator's draw counts are unchanged on all seven worlds (mountains, the oil terraform and `Cliffs::init` draw nothing; the styles of the seven worlds
 have no cliff group), so the 189-frame check of `current 2` (`--play189`) is unaffected.
 
@@ -606,3 +607,62 @@ and that the same text without the conquest input regenerates a different map. S
 link a native save never writes), so a resumed battle reports its outcome to no campaign; custom-map (`.scx`) battles. `ronmap`'s F9 compares the
 save's scenario slot with `_scenarioPath` (`ctw:battle`) before loading and would refuse such a save: `main.mm` should store
 `random_setup_string(extras.setup)`-style text (or `battle_setup_text()`) in `_scenarioPath` for a battle.
+
+### Sixth pass (2026-10-24): the generator's heights reach the game; river mouths on the map border; the towns' terraform counted
+
+**`new_random_game` now draws and simulates on the generator's grid.** `synthesize_terrain` (newgame.cpp) takes `mapgen::Result::heights` (land, coast
+pass and shelf, oil plateaus, river troughs, `adjust_for_mountains(0)`, cliffs) as `Terrain::heights` and `Game::heights`; the old blurred-indicator
+synthesis is only the fallback for a `Result` without a grid. What stays synthesized: the wcoord / tcoord flag copies the mesh builder reads, the
+mountain stamps (`MountainStamp` from `Result::mountains`), the river polylines and the cosmetic doobers. The start towns' `Build::init` terraform
+(`terraform_for_building` in build.cpp) flattens `Game::heights` while the empires are created, so the finished grid is copied back into
+`RandomExtras::scenario.terrain.heights` at the end of `new_random_game` and the renderer draws the ground the simulation reads. Checked with
+`ronmap --random 6,3,5,4 --no-fog --no-hud --zoom 1 --snapshot` (rivers with banks, mountains, a smooth shelf instead of the old rounded shoreline).
+`ron-mapgen --compare ... --game` now compares the **game's** grid (generator + the towns' terraform) in the height rows and prints a
+`differing vertices < 60 by cause` line (river trough = a tile of the save with tdata 0x800 within 3 tcoords; town = a WData flag 0x80 / 0x4000
+within 3 wcoords; other); `--hother FILE` lists the "other" vertices.
+
+**River mouths on the map border** (`RiverSection::create_trough_edge` @889660). A sample whose tile is off the map is not terraformed, but the
+original clamps the *running* sample position in that branch (y < 0 -> 0, x < 0 -> 0, then both to `xs * 768`) and steps on from the clamped
+point; the rest of the nine samples of that row therefore start on tile row / column 0 and are terraformed (the first, off-map sample is lost).
+A river that ends on the border (the spline's extra outside point makes the last sections lie off the map) so digs the edge row and column of its
+mouth many times: the saved vertices at the mouth sit at the trough bottom (-45.0, -40.1) where the port left (h + z) / 2 of one application.
+Ported in `mapgen_terrain_init.cpp` (`trough_edge`, the `else` of `t_inb`). The marking and `move_goody` of those samples stay skipped, as in the
+asm (they are inside the in-bounds branch), and no draw is involved (`--compare` draw counts unchanged on all seven worlds).
+
+Result (`ron-mapgen --compare`, generator only; bit-exact vertices / total; before = the fifth pass):
+
+| | current 2 | current RN | east indies 2 | East indies final surround | DO NOT DELETE | DO NOT DELETE 2 | curent dec 14 |
+|---|---|---|---|---|---|---|---|
+| shelf vertices (-250 .. -30) | 15384 / 15386 | 29797 / 29797 | 29492 / 29492 | 19720 / 19720 | 2653 -> **2661 / 2661** | 2954 -> **2966 / 2966** | 2138 / 2138 |
+| shore vertices (-30 .. 60) | 32504 / 32610 | 34175 / 36554 | 30216 / 34660 | 19281 / 21883 | 7432 -> **7483 / 7483** | 7862 -> **7927 / 7927** | 6375 / 6375 |
+| land vertices >= 60 | 80636 / 82104 | 19329 / 29946 | 13531 / 28357 | 8458 / 15592 | 76676 -> 76967 / 92897 | 74038 -> 74455 / 92148 | 83691 / 94528 |
+| vertices < 60 off, by cause (river / town / other) | 41 / 34 / 12 | 0 / 2378 / 0 | 0 / 4350 / 88 | 0 / 2554 / 47 | 54 -> **0 / 0 / 0** | 65 -> **0 / 0 / 0** | 0 / 0 / 0 |
+
+Every vertex under 60 is now exact on `DO NOT DELETE`, `DO NOT DELETE 2` (two mouths on the map border each, max error 39 / 35 before) and `curent dec 14`;
+all layers of `--compare` are otherwise unchanged. What is left under 60 on the other worlds is the saved towns (the "town" column: farms, roads and
+buildings of 100 000+ frames of play) plus, on `current 2`, the river that runs along a lake shore.
+
+**Not solved: `current 2`'s lake-shore river (41 trough vertices, max 8.8; 82 extra tdata 0x800 tiles, 11 extra WData 0x1000 cells).** The river
+(path (3, 68) -> (22, 81)) runs along the shelf of a lake for about 12 wcoords; most of its samples are skipped by the neighbour test of
+`terraform_from_river_vert`. Ours differs from the save in two smooth lobes of the land beside it (the land NW of (46, 319) 3 to 9 higher in the
+save, the land S of (49, 323) up to 11 lower) and in the shore cells (67, 35 .. 36): they get tdata 0x800 / WData 0x1000 from the marking pass in
+ours and not in the save. The one marking condition that could separate them is the CoordInfo coastal bit (`& 4`): in ours it is clear there (it is
+cleared by `check_and_set_halfland_wcoord`, as in the asm, and nothing sets it again before the rivers), and no other writer of that bit was found. What was tried and does not explain it: leaving one applied sample out (159 samples in the area),
+forcing one skipped sample in, the neighbour test on 4 instead of 8 neighbours, without the half-land bit, the river order reversed (the three rivers
+do not interact), `(f & 0x400)` as an extra marking blocker (loses 137 saved marks). The two "shelf" vertices that were 0.01 off in `current 2`
+are not shelf vertices at all: `(53, 319)` and `(53, 320)` are trough vertices of this same river (-43.755 / -39.318 against -43.761 / -39.328 ours), so
+they are one more symptom of the open lake-shore question, not a float-order difference (the smoothing sums are in the asm's order). Left for a
+pass that has the CoordInfo flags of a game at the time of the rivers (e.g. a save taken at frame 0 of such a map).
+
+**The start towns count as matched in `--game`.** Per world, vertices that differ in the generator's grid and match in the game's (fixed by
+`Build::init`'s terraform) against vertices that match in the generator's grid and differ in the game's (the save's town is not ours: after 189 frames
+to 180 000 frames the AI has built other things):
+
+| | current 2 | current RN | east indies 2 | East indies final surround | DO NOT DELETE | DO NOT DELETE 2 | curent dec 14 |
+|---|---|---|---|---|---|---|---|
+| differ: generator / game | 1480 / 1730 | 12991 / 12955 | 19263 / 19106 | 9731 / 9604 | 15929 / 15854 | 17690 / 17557 | 10835 / 10787 |
+| fixed by the towns | 353 | 195 | 238 | 168 | 116 | 133 | 80 |
+| new differences | 603 | 159 | 81 | 41 | 41 | 0 | 32 |
+
+`current 2` is a 189-frame game: the save's second-stage buildings (the AI's) stand where ours have not been built yet, which is where the 603 new
+differences are (4-wide blocks around the start towns); the first building of each start (the city centre) is among the 353 fixed.

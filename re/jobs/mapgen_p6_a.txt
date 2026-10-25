@@ -1,0 +1,9 @@
+re/decomp/mapgen_p6
+RiverSection::create_trough_edge
+RiverSection::create_trough_and_water
+RiverSectionOut::terraform_from_river_vert
+RiverOut::create_sections
+RiversOut::calculate_all
+TerrainOut::ensure_45_deg_slope
+TerrainOut::smooth_tcoord
+Terrain::spot_update_land_batch

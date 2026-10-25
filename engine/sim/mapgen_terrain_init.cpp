@@ -1202,6 +1202,15 @@ struct TerrainInit {
 				mark_trough_tiles(tx, ty);
 				const int cx = wcoord_of(int(x)), cy = wcoord_of(int(y));
 				if (inb(cx, cy)) move_goody(cx, cy, false);
+			} else {
+				// A sample off the map is not terraformed, but the original clamps the RUNNING position (create_trough_edge @889660, the off-map branch before @889dd6: y < 0 -> 0, x < 0 -> 0, then
+				// both to the map width xs * 768) before stepping on: the following samples of the row start from the clamped point, so those that
+				// then fall on tile row / column 0 are terraformed (a river mouth on the map border digs its edge row; the first sample is lost).
+				const float lim = float(xs * 768);
+				if (y < 0.0f) y = 0.0f;
+				if (x < 0.0f) x = 0.0f;
+				if (lim < y) y = lim;
+				if (lim < x) x = lim;
 			}
 			x += sx;
 			y += sy;

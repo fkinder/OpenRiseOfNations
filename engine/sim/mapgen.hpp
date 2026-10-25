@@ -159,9 +159,10 @@ struct Result {
 	std::vector<RiverPath> rivers;
 	int32_t river_beds = 0;
 	int32_t doobers = 0;
-	// TerrainOut's height grid after Terrain::init's coast pass (master_land_heights): (4 xs + 1) x (4 ys + 1) floats, x fastest.
+	// TerrainOut's height grid at the end of Terrain::init (master_land_heights): (4 xs + 1) x (4 ys + 1) floats, x fastest.
 	// Land is the fractal height blended towards the coast, the sea is -273, the shelf follows the coast generators' influence
-	// lines; mountains and river troughs are not in it (adjust_for_mountains and RiversOut are later passes).
+	// lines; then the oil-site plateaus, the river troughs (RiversOut), adjust_for_mountains(0) and Cliffs::init. A game's start towns
+	// (Build::init's terraform) are not in it: new_random_game's Game::heights add them.
 	std::vector<float> heights;
 	int32_t height_vxs = 0, height_vys = 0;
 	int32_t retries = 0;           // restarts of the continent recipe

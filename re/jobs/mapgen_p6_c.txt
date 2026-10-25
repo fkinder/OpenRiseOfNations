@@ -1,0 +1,3 @@
+re/decomp/mapgen_p6
+init_coord_lookup_array
+close_coord_lookup_array

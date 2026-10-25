@@ -1164,10 +1164,14 @@ and a `Scenario` snapshot (terrain + the finished objects as scenario records) t
   `adjust_for_blocking`, which therefore saw dry tcoords (their map-edge-water BAD_PATH rim is missing), and it is idempotent, so it
   can move into the generator. `TData` COASTAL (0x400) is not set either (on stock files it marks water tcoords, by a rule not
   decoded) and the generator makes no shelf (land 1) or half-water cells.
-- Terrain heights are synthesised (`synthesize_terrain`): land 250 +- noise, rivers carved, the template z of each mountain
-  added (adjust_for_mountains(0) rule), and the shoreline made from a blurred water indicator because the generator's coastlines
-  follow wcoord edges (no shelf / half-water cells yet). `TerrainOut` heights were never decoded. The land doobers are
-  placed by a hash (the generator only counts them). The generator's own height grid (`Result::heights`: land, shelf, river troughs, mountain z, oil-site plateaus, cliffs, randommap-spec.md fifth pass) is not used here yet. The sim reads these heights for z only.
+- **Terrain heights are the generator's own** (sixth map-generator pass): `synthesize_terrain` takes `Result::heights` (the original's
+  `TerrainOut` grid after `Terrain::init`: land fractals, coast pass and shelf, oil-site plateaus, river troughs, `adjust_for_mountains(0)`,
+  cliffs; randommap-spec.md sixth pass) for the scenario's terrain and `Game::heights`, and keeps only the tcoord / wcoord flags, the
+  mountain stamps and the doober placement of the old synthesis. The start towns' `Build::init` terraform (build.cpp) then flattens
+  `Game::heights` as the buildings are created, and `new_random_game` copies the finished grid back into `RandomExtras::scenario.terrain` so the
+  renderer draws the same ground the simulation reads. The old approximation (land 250 +- noise, blurred water indicator, template z)
+  stays as the fallback for a `Result` without a height grid. `ron-mapgen --compare ... --game` compares the game's grid with a save's.
+  The land doobers are still placed by a hash (the generator only counts them).
 - Not ported: `Herds::process` (herd animals stand still), `Setup::mark_forest`, `Leader::reset_score`, `game.start_index`, the
   Spanish `EXPLORE_MAP` flag and the `info.flags & 4` farm / granary build flags of `build_empire`, the 8-seat "team 8" special
   case of team style 7, CtW maps, `BLANK_MAP` / `SCENARIO_MAP` / `CONQUEST` styles (`new_random_game` takes 0..23).

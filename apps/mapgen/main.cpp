@@ -885,6 +885,9 @@ int run_compare(const GameFiles& files, const Rules& rules, const char* save_pat
 			return 1;
 		}
 		g.world = ng->world;
+		g.res.heights = ng->heights.h;  // the height rows below then compare the game's grid (generator + the start towns' Build::init terraform)
+		g.res.height_vxs = ng->heights.vxs;
+		g.res.height_vys = ng->heights.vys;
 		std::printf("(--game: the world of new_random_game, frame %d)\n", ng->frame);
 	}
 	const World& E = eg->world;
@@ -1146,7 +1149,7 @@ int run_compare(const GameFiles& files, const Rules& rules, const char* save_pat
 	bit_layers("tdata", 16, E, G, [](const World& w, int x, int y) { return unsigned(w.t(x, y)); }, true);
 
 	if (!g.res.heights.empty() && eg->heights.h.size() == g.res.heights.size()) {
-		// the height grid: the generator has the land fractals, the coast generators and the sea, not mountains or river troughs
+		// the height grid: the generator's grid: land fractals, coast generators, sea, river troughs, mountains, oil plateaus, cliffs (--game: plus the towns' terraform)
 		std::printf("\nheights (%d x %d vertices; class = the save's height):\n", g.res.height_vxs, g.res.height_vys);
 		struct Cls {
 			const char* name;
@@ -1196,6 +1199,51 @@ int run_compare(const GameFiles& files, const Rules& rules, const char* save_pat
 				std::fwrite(g.res.heights.data(), 4, g.res.heights.size(), f);
 				std::fclose(f);
 			}
+		}
+		{
+			// Where do the differing vertices (save height < 60, |d| > 0.01) lie: under a river trough (a tile of the save with tdata 0x800 within
+			// 3 tcoords), near the save's town (WData flag 0x80 / 0x4000 within 3 wcoords), or elsewhere (--hother file lists the others)?
+			long n_riv = 0, n_town = 0, n_other = 0, n_both = 0;
+			double m_riv = 0, m_other = 0;
+			FILE* fo = arg_value(argc, argv, "--hother") ? std::fopen(arg_value(argc, argv, "--hother"), "w") : nullptr;
+			const int txs_ = E.xs * 4, tys_ = E.ys * 4;
+			for (int vy = 0; vy < g.res.height_vys; vy++) {
+				for (int vx = 0; vx < g.res.height_vxs; vx++) {
+					const size_t i = size_t(vy) * size_t(g.res.height_vxs) + size_t(vx);
+					const float a = eg->heights.h[i], b = g.res.heights[i];
+					const double d = std::fabs(double(a) - double(b));
+					if (a >= 60.0f || d <= 0.01) continue;
+					bool riv = false, town = false;
+					for (int dy = -3; dy <= 3 && !riv; dy++) {
+						for (int dx = -3; dx <= 3; dx++) {
+							const int tx = vx + dx, ty = vy + dy;
+							if (tx >= 0 && ty >= 0 && tx < txs_ && ty < tys_ && (E.t(tx, ty) & 0x800)) {
+								riv = true;
+								break;
+							}
+						}
+					}
+					for (int dy = -3; dy <= 3 && !town; dy++) {
+						for (int dx = -3; dx <= 3; dx++) {
+							const int wx = vx / 4 + dx, wy = vy / 4 + dy;
+							if (wx >= 0 && wy >= 0 && wx < E.xs && wy < E.ys && (E.w(wx, wy).flags & 0x4080)) {
+								town = true;
+								break;
+							}
+						}
+					}
+					if (riv && town) n_both++;
+					else if (riv) n_riv++, m_riv = std::max(m_riv, d);
+					else if (town) n_town++;
+					else {
+						n_other++;
+						m_other = std::max(m_other, d);
+						if (fo) std::fprintf(fo, "%d %d %.3f %.3f\n", vx, vy, double(a), double(b));
+					}
+				}
+			}
+			if (fo) std::fclose(fo);
+			std::printf("  differing vertices < 60 by cause: river trough %ld (max %.2f), town %ld, both %ld, other %ld (max %.2f)\n", n_riv, m_riv, n_town, n_both, n_other, m_other);
 		}
 		{
 			double aq = 0;  // the sum of |generated - save| over the aquatic and shore vertices (save < 60)

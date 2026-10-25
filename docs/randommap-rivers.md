@@ -291,7 +291,11 @@ per `River` object in creation order (`make_riverlist` makes one River per path 
    `land_sub = riverbase` (`<TILESET riverbase=...>`, 2 for `early_autumn`) and `land = 0` on every queued wcoord and then runs `verify_land` on each.
 
 The heights live in the same `master_land_heights` grid that `Terrain::init`'s coast pass left (`Result::heights`); `adjust_for_mountains` and `Cliffs::init`
-(next in `Terrain::init`) are not ported yet.
+(next in `Terrain::init`) are ported (randommap-spec.md fifth pass).
+
+**Samples off the map** (sixth pass): in `create_trough_edge` @889660 a sample whose tile is outside the grid is not terraformed or marked, but the branch
+clamps the running position (y < 0 -> 0, x < 0 -> 0, then both to `xs * 768`) and the next sample of the nine starts from the clamped point, so a river
+that ends on the map border digs its edge row / column (the saved mouth vertices are at the trough bottom). `trough_edge` in `mapgen_terrain_init.cpp`.
 
 ## What the port needs
 

@@ -371,76 +371,83 @@ Terrain synthesize_terrain(const Game& g, const GameFiles& files, const mapgen::
 	// blurred water indicator are blended: the shoreline is the 0.5 contour of the blur (rounded corners), the water depth
 	// goes from the shelf (-214) to the deep ocean (-273) with the distance from the coast.
 	const uint32_t seed = res.world_seed;
-	std::vector<float> ltarget(size_t(txs) * size_t(tys), -1e9f);  // land tcoords only
-	std::vector<float> ind(size_t(vxs) * size_t(vys), 0.0f);        // water indicator at the vertices
-	for (int ty = 0; ty < tys; ty++) {
-		for (int tx = 0; tx < txs; tx++) {
-			const uint16_t m = w.t(tx, ty);
-			if ((m & tmask::kMedium) == tmask::kWater) continue;
-			float h = 250.0f + 70.0f * value_noise(seed, tx, ty, 6, 1) + 55.0f * value_noise(seed, tx, ty, 17, 2);
-			if (m & tmask::kRiverB) h = std::min(h, 130.0f);
-			if ((m & tmask::kLowField) == tmask::kMountain) h = std::max(h, 300.0f);
-			ltarget[size_t(ty) * size_t(txs) + size_t(tx)] = h;
-		}
-	}
-	t.heights.assign(size_t(vxs) * size_t(vys), 0.0f);
-	std::vector<float> hl(size_t(vxs) * size_t(vys), 250.0f);
-	for (int vy = 0; vy < vys; vy++) {
-		for (int vx = 0; vx < vxs; vx++) {
-			float wsum = 0, lsum = 0;
-			int nw = 0, n = 0;
-			for (int dy = -1; dy <= 0; dy++) {
-				for (int dx = -1; dx <= 0; dx++) {
-					const int tx = vx + dx, ty = vy + dy;
-					if (tx < 0 || ty < 0 || tx >= txs || ty >= tys) continue;
-					n++;
-					const float lt = ltarget[size_t(ty) * size_t(txs) + size_t(tx)];
-					if (lt < -1e8f) nw++;
-					else lsum += lt, wsum += 1.0f;
-				}
+	// The generator's own height grid (Terrain::init: land fractals, coast pass, shelf, river troughs, adjust_for_mountains(0), oil plateaus,
+	// cliffs) is the original's TerrainOut; the approximation below stays only for a Result without one.
+	const bool gen_h = res.height_vxs == vxs && res.height_vys == vys && res.heights.size() == size_t(vxs) * size_t(vys);
+	if (gen_h) {
+		t.heights = res.heights;
+	} else {
+		std::vector<float> ltarget(size_t(txs) * size_t(tys), -1e9f);  // land tcoords only
+		std::vector<float> ind(size_t(vxs) * size_t(vys), 0.0f);        // water indicator at the vertices
+		for (int ty = 0; ty < tys; ty++) {
+			for (int tx = 0; tx < txs; tx++) {
+				const uint16_t m = w.t(tx, ty);
+				if ((m & tmask::kMedium) == tmask::kWater) continue;
+				float h = 250.0f + 70.0f * value_noise(seed, tx, ty, 6, 1) + 55.0f * value_noise(seed, tx, ty, 17, 2);
+				if (m & tmask::kRiverB) h = std::min(h, 130.0f);
+				if ((m & tmask::kLowField) == tmask::kMountain) h = std::max(h, 300.0f);
+				ltarget[size_t(ty) * size_t(txs) + size_t(tx)] = h;
 			}
-			ind[size_t(vy) * size_t(vxs) + size_t(vx)] = n ? float(nw) / float(n) : 0.0f;
-			if (wsum > 0) hl[size_t(vy) * size_t(vxs) + size_t(vx)] = lsum / wsum;
 		}
-	}
-	// Three separable box blurs (radius 3) of the indicator: about a Gaussian of sigma 3.5 tcoords.
-	{
-		std::vector<float> blur(ind.size());
-		auto box = [&](std::vector<float>& v, bool horizontal) {
-			const int R = 3;
-			for (int vy = 0; vy < vys; vy++) {
-				for (int vx = 0; vx < vxs; vx++) {
-					float sum = 0;
-					int n = 0;
-					for (int k = -R; k <= R; k++) {
-						const int x = horizontal ? vx + k : vx, y = horizontal ? vy : vy + k;
-						if (x < 0 || y < 0 || x >= vxs || y >= vys) continue;
-						sum += v[size_t(y) * size_t(vxs) + size_t(x)];
+		t.heights.assign(size_t(vxs) * size_t(vys), 0.0f);
+		std::vector<float> hl(size_t(vxs) * size_t(vys), 250.0f);
+		for (int vy = 0; vy < vys; vy++) {
+			for (int vx = 0; vx < vxs; vx++) {
+				float wsum = 0, lsum = 0;
+				int nw = 0, n = 0;
+				for (int dy = -1; dy <= 0; dy++) {
+					for (int dx = -1; dx <= 0; dx++) {
+						const int tx = vx + dx, ty = vy + dy;
+						if (tx < 0 || ty < 0 || tx >= txs || ty >= tys) continue;
 						n++;
+						const float lt = ltarget[size_t(ty) * size_t(txs) + size_t(tx)];
+						if (lt < -1e8f) nw++;
+						else lsum += lt, wsum += 1.0f;
 					}
-					blur[size_t(vy) * size_t(vxs) + size_t(vx)] = sum / float(n);
 				}
+				ind[size_t(vy) * size_t(vxs) + size_t(vx)] = n ? float(nw) / float(n) : 0.0f;
+				if (wsum > 0) hl[size_t(vy) * size_t(vxs) + size_t(vx)] = lsum / wsum;
 			}
-			v = blur;
-		};
-		for (int pass = 0; pass < 3; pass++) {
-			box(ind, true);
-			box(ind, false);
 		}
-	}
-	auto smooth = [](float a, float b, float x) {
-		const float u = std::max(0.0f, std::min(1.0f, (x - a) / (b - a)));
-		return u * u * (3 - 2 * u);
-	};
-	for (size_t i = 0; i < t.heights.size(); i++) {
-		const float s = smooth(0.2f, 0.8f, ind[i]);
-		const float hw = -214.0f - 59.0f * smooth(0.75f, 1.0f, ind[i]);
-		t.heights[i] = hl[i] * (1.0f - s) + hw * s;
+		// Three separable box blurs (radius 3) of the indicator: about a Gaussian of sigma 3.5 tcoords.
+		{
+			std::vector<float> blur(ind.size());
+			auto box = [&](std::vector<float>& v, bool horizontal) {
+				const int R = 3;
+				for (int vy = 0; vy < vys; vy++) {
+					for (int vx = 0; vx < vxs; vx++) {
+						float sum = 0;
+						int n = 0;
+						for (int k = -R; k <= R; k++) {
+							const int x = horizontal ? vx + k : vx, y = horizontal ? vy : vy + k;
+							if (x < 0 || y < 0 || x >= vxs || y >= vys) continue;
+							sum += v[size_t(y) * size_t(vxs) + size_t(x)];
+							n++;
+						}
+						blur[size_t(vy) * size_t(vxs) + size_t(vx)] = sum / float(n);
+					}
+				}
+				v = blur;
+			};
+			for (int pass = 0; pass < 3; pass++) {
+				box(ind, true);
+				box(ind, false);
+			}
+		}
+		auto smooth = [](float a, float b, float x) {
+			const float u = std::max(0.0f, std::min(1.0f, (x - a) / (b - a)));
+			return u * u * (3 - 2 * u);
+		};
+		for (size_t i = 0; i < t.heights.size(); i++) {
+			const float s = smooth(0.2f, 0.8f, ind[i]);
+			const float hw = -214.0f - 59.0f * smooth(0.75f, 1.0f, ind[i]);
+			t.heights[i] = hl[i] * (1.0f - s) + hw * s;
+		}
 	}
 	// Mountains: the stamps, and the templates' z added to the vertices they cover.
 	std::map<int, Template> templates;
 	std::vector<Template> list;
-	{
+	if (!gen_h) {
 		try {
 			ron::for_each_element(ron::parse_xml(files.read_text("Data/effects_graphics.xml")), "MOUNTAINS", [&](const XmlElement& sec) {
 				if (!list.empty()) return;
@@ -470,7 +477,7 @@ Terrain synthesize_terrain(const Game& g, const GameFiles& files, const mapgen::
 		st.range_index = pm.range;
 		st.num_coords = uint8_t(mr ? mr->face_wcoords : int32_t(pm.wcoords.size()));
 		t.mountains.push_back(st);
-		if (pm.range < 0 || size_t(pm.range) >= list.size() || !list[size_t(pm.range)].ok) continue;
+		if (gen_h || pm.range < 0 || size_t(pm.range) >= list.size() || !list[size_t(pm.range)].ok) continue;
 		const Template& tp = list[size_t(pm.range)];
 		const int W = tp.tex.width, H = tp.tex.height;
 		const int ox = (W >> 1) % 16, oy = (H >> 1) % 16;
@@ -947,6 +954,7 @@ std::unique_ptr<Game> new_random_game(const GameFiles& files, const Rules& rules
 	X.scenario.reveal_map = S.reveal_map;
 	X.scenario.has_settings = true;
 	snapshot_objects(g, S, X.scenario);
+	X.scenario.terrain.heights = g.heights.h;  // the start towns' Build::init terraform is in the grid the renderer draws
 	Scenario no_scripts;
 	script_host_load(g, files, std::string(), no_scripts);
 	if (g.scripts && (!S.battle_runtime.empty() || !S.battle_setup.empty())) {

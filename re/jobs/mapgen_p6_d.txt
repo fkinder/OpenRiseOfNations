@@ -1,0 +1,3 @@
+re/decomp/mapgen_p6
+TerrainOut::rebuild_terrain_lists
+TerrainList::add_new_coord_info
