@@ -8,6 +8,7 @@
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
 #include "sim/fog.hpp"
+#include "sim/victory.hpp"
 
 namespace ron::sim {
 
@@ -165,8 +166,9 @@ void leader_set_diplo(Game& g, int32_t who, int32_t t, int32_t d) {
 		int32_t outside = 0;
 		for (int32_t k = 0; k < 8; k++)
 			if (k != who && k != t && va(g, k) && !is_ally(g, k, who) && !is_ally(g, k, t)) outside++;
-		// TODO(victory): Leader::victory(who) and semaphore bit 0x16 (game over) when everyone is allied.
-		(void)outside;
+		// Nobody left outside the new alliance: Leader::victory(who, 0, 0) and semaphore bit 0x16 (the end-game screen),
+		// victory-spec 6.
+		if (outside == 0) leader_allied_victory(g, who);
 	}
 	armies_diplo_change(g, who);
 	// (scene.recalc_borders: presentation)
@@ -318,7 +320,8 @@ void leader_action_attack(Game& g, int32_t who, int32_t b, int32_t k, int32_t v)
 
 void leader_diplomacy(Game& g, int32_t who) {
 	Leader& L = LD(g, who);
-	// 10.1.1: co-op seats (flags & 4 | 8) included. TODO(victory): semaphore byte1 & 2 (not modelled).
+	// 10.1.1: co-op seats (flags & 4 | 8) included. (Balance mode, semaphore byte1 & 2: the developers' UnitBalance
+	// test harness, not reachable from the game: victory-spec 9.)
 	if ((L.flags & leaderflag::kHuman) || g.ai_off) return;
 	int32_t topScorer = -1, best = 0, nAbove = 0, nNonAllied = 0;
 	for (int32_t k = 0; k < 8; k++) {

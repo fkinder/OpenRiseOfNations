@@ -1,0 +1,4 @@
+re/decomp/victory
+CommandPackage::process_quit
+CommandManager::issue_quit
+CommandManager::issue_resign

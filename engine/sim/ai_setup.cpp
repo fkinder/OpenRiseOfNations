@@ -357,6 +357,8 @@ int32_t wonder_net(const Game& g, int32_t who) {  // @6ebb10
 }
 }  // namespace
 
+int32_t get_wonder_net(const Game& g, int32_t who) { return wonder_net(g, who); }
+
 int32_t get_team_wonder_value(const Game& g, int32_t who) {
 	int32_t v = 0;
 	for (int32_t j = 0; j < 8; j++) {

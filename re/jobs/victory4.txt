@@ -1,0 +1,6 @@
+re/decomp/victory
+LeaderData::get_team
+LeaderData::get_player
+LeaderData::get_wonder_net
+LeaderData::get_wonder_value
+Game::war_allowed

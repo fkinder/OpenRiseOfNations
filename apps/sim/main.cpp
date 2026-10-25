@@ -123,6 +123,15 @@
 #include "sim/view.hpp"
 
 namespace {
+#include "sim/capture.hpp"
+#include "sim/fog.hpp"
+#include "sim/victory.hpp"
+
+// cities.cpp: Wonders::init_wonder / close_wonder, used by the --victory fixtures.
+namespace ron::sim {
+int32_t wonders_init_wonder(Game& g, int32_t who, int32_t o);
+void wonders_close_wonder(Game& g, int32_t who, int32_t idx);
+}  // namespace ron::sim
 
 using namespace ron::sim;
 
@@ -1951,13 +1960,23 @@ void print_event(const Game& g, const GameEvent& e) {
 	}
 	case 2: std::printf("  f%-5d LEADER DEFEATED L%d by %d (type %d)\n", e.frame, e.who, e.other, e.value); break;
 	case 3: std::printf("  f%-5d VICTORY L%d (type %d)\n", e.frame, e.who, e.value); break;
-	case 4: std::printf("  f%-5d GAME OVER\n", e.frame); break;
+	case 4: std::printf("  f%-5d GAME OVER%s\n", e.frame, e.value == 1 ? " (allied victory: end-game screen pending)" : ""); break;
 	case 5: std::printf("  f%-5d CAPITAL LOST L%d (held by L%d)\n", e.frame, e.who, e.other); break;
 	case 6: std::printf("  f%-5d CAPITAL RECAPTURED L%d\n", e.frame, e.who); break;
 	case 7: std::printf("  f%-5d BUILDING CAPTURED L%d:%d -> L%d:%d\n", e.frame, e.other, e.o, e.who, e.o2); break;
 	default: break;
 	}
 }
+	case 17: std::printf("  f%-5d WONDER VICTORY CLOCK L%d: %d frames to go (wonder net %d)\n", e.frame, e.who, e.value, e.other); break;
+	case 18: std::printf("  f%-5d WONDER VICTORY IN %d frames (L%d)\n", e.frame, e.value, e.who); break;
+	case 19: std::printf("  f%-5d WONDER VICTORY CLOCK STOPPED (L%d)\n", e.frame, e.who); break;
+	case 20: std::printf("  f%-5d TERRITORY CLOCK L%d: %d frames to go (%d%% needed)\n", e.frame, e.who, e.value, e.other); break;
+	case 21: std::printf("  f%-5d TERRITORY VICTORY IN %d frames (L%d)\n", e.frame, e.value, e.who); break;
+	case 22: std::printf("  f%-5d TERRITORY CLOCK STOPPED (L%d)\n", e.frame, e.who); break;
+	case 23: std::printf("  f%-5d TIME LIMIT in %d ticks\n", e.frame, e.value); break;
+	case 24: std::printf("  f%-5d MUSICAL CHAIRS ROUND (%d min): %d defeated\n", e.frame, e.value, e.other); break;
+	case 25: std::printf("  f%-5d L%d %s\n", e.frame, e.who, e.value == 0 ? "RESIGNED" : e.value == 1 ? "QUIT" : "DROPPED"); break;
+	case 26: std::printf("  f%-5d NUKE COUNT %d\n", e.frame, e.value); break;
 
 // --perf: time Game::do_frame alone (no per-frame digest, no event / AI / economy printing) and print ms per frame (docs/ui-port.md section 16).
 bool g_perf = false;
@@ -2430,6 +2449,620 @@ int main(int argc, char** argv) {
 	if (argc >= 3 && std::strcmp(argv[1], "--dump") == 0) return dump_tables(argv[2]);
 	if (argc < 3) {
 		std::fprintf(stderr,
+// --victory MODE (docs/victory-spec.md section 10): each victory mode of the lobby driven to its end on the loaded scenario,
+// asserting the winner and the game-over state. MODE: all, teams, conquest, capital, sudden, time, score, wonder, territory,
+// economic, chairs, armageddon, allied, tech, resign, reset. The fixtures that need more than two leaders say "skip".
+struct VictoryRig {
+	const ron::GameFiles& files;
+	const ron::Scenario& sc;
+	const Rules& rules;
+	uint32_t seed;
+	const AnimSource* art;
+	int32_t reveal;
+	bool verbose;
+	int fails = 0, total = 0;
+
+	std::unique_ptr<Game> make() const {
+		auto g = std::make_unique<Game>();
+		g->anims = art;
+		g->info.reveal_map = uint8_t(reveal);
+		g->load(files, sc, rules, seed);
+		return g;
+	}
+	void check(const char* what, int64_t got, int64_t want) {
+		total++;
+		if (got != want) fails++;
+		if (got != want || verbose) std::printf("  %s %-64s got %lld, want %lld\n", got == want ? "ok  " : "FAIL", what, (long long)got, (long long)want);
+	}
+};
+
+static std::vector<int32_t> victory_leaders(const Game& g) {
+	std::vector<int32_t> v;
+	for (int32_t w = 0; w < 8; w++)
+		if (g.leaders[size_t(w)].flags & leaderflag::kValid) v.push_back(w);
+	return v;
+}
+static bool v_defeated(const Game& g, int32_t w) { return (g.leaders[size_t(w)].flags & leaderflag::kDefeated) != 0; }
+static bool v_won(const Game& g, int32_t w) { return (g.leaders[size_t(w)].flags & leaderflag::kVictory) != 0; }
+// A rules list entry / constant rewritten for one game (Game::mut_rules copies the shared tables first).
+static void v_set_list(Game& g, const char* list, int32_t idx, int32_t value) {
+	Rules& R = g.mut_rules();
+	CategoryList* cl = const_cast<CategoryList*>(R.category_list(list));
+	if (cl && idx >= 0 && size_t(idx) < cl->items.size()) cl->items[size_t(idx)].data[0] = value;
+}
+static void v_set_constant(Game& g, const char* name, int32_t value) {
+	const int off = constant_offset(name);
+	if (off >= 0) g.mut_rules().constants.v[size_t(off) / 4] = value;
+}
+static int32_t v_constant(const Game& g, const char* name) {
+	const int off = constant_offset(name);
+	return off < 0 ? -1 : g.rules->constants.at(uint32_t(off));
+}
+// The constant that makes a map-scaled clock (Game::wonder_timer / popwin_timer: (35 + width * k) / 70) last `frames`.
+static int32_t v_clock_constant(const Game& g, int32_t frames) { return (frames * 70 + g.world.xs - 1) / std::max(1, g.world.xs); }
+static int32_t v_count_events(const Game& g, int32_t kind, int32_t value = INT32_MIN) {
+	int32_t n = 0;
+	for (const GameEvent& e : g.events)
+		if (e.kind == kind && (value == INT32_MIN || e.value == value)) n++;
+	return n;
+}
+static int32_t v_first_event_frame(const Game& g, int32_t kind, int32_t value = INT32_MIN) {
+	for (const GameEvent& e : g.events)
+		if (e.kind == kind && (value == INT32_MIN || e.value == value)) return e.frame;
+	return -1;
+}
+static void v_kill_units(Game& g, int32_t who) {
+	for (int32_t o = 0; o < g.objects[size_t(who)].unit_mark; o++) {
+		Unit* u = g.unit(who, o);
+		if (u && u->alive()) object_die(g, *u, 0, -1, 0.0f);
+	}
+}
+static std::vector<int32_t> v_cities(const Game& g, int32_t who) {
+	std::vector<int32_t> v;
+	for (int32_t c = 0; c < g.leaders[size_t(who)].city_mark && size_t(c) < g.cities[size_t(who)].size(); c++)
+		if (g.cities[size_t(who)][size_t(c)].valid()) v.push_back(c);
+	return v;
+}
+static int32_t v_capital(const Game& g, int32_t who) {
+	for (int32_t c : v_cities(g, who))
+		if (g.cities[size_t(who)][size_t(c)].city_flags & cityflag::kCapital) return c;
+	return -1;
+}
+static int32_t v_best_score(const Game& g, const std::vector<int32_t>& L) {
+	int32_t best = L[0];
+	for (int32_t w : L)
+		if (g.leaders[size_t(w)].score > g.leaders[size_t(best)].score) best = w;
+	return best;
+}
+// Frames of Game::do_frame until `stop` or `limit` frames; returns the frames run.
+template <class F>
+static int32_t v_run(Game& g, int32_t limit, F stop) {
+	int32_t n = 0;
+	while (n < limit && !stop()) {
+		g.do_frame();
+		n++;
+	}
+	return n;
+}
+
+static void victory_teams(VictoryRig& r) {
+	std::printf(" teams / num_sides / Game::get_armageddon\n");
+	auto g = r.make();
+	const std::vector<int32_t> L = victory_leaders(*g);
+	const int32_t n = int32_t(L.size());
+	r.check("num_players = num_nations = the seats (GameInfo.players + 1)", g->info.num_nations * 100 + g->info.num_players, n * 100 + n);
+	g->info.team.fill(-1);
+	game_init_teams(*g);
+	r.check("no teams: every seat is a side", g->info.num_sides, n);
+	if (n >= 2) {
+		g->info.team[size_t(L[0])] = 0;
+		g->info.team[size_t(L[1])] = 0;
+		game_init_teams(*g);
+		const TeamCounts tc = game_team_counts(*g);
+		r.check("one team of two: on_team[0]", tc.on_team[0], 2);
+		r.check("one team of two: num_teams", tc.num_teams, 1);
+		r.check("one team of two: num_sides = teams + loose seats", g->info.num_sides, 1 + (n - 2));
+		r.check("get_armageddon = per_team * sides + per_nation * nations + base",
+		        get_armageddon(*g),
+		        v_constant(*g, "armageddon_per_team") * g->info.num_sides + v_constant(*g, "armageddon_per_nation") * g->info.num_nations +
+		            v_constant(*g, "armageddon"));
+		r.check("leader_get_team of a member", leader_get_team(*g, L[0]), 0);
+		for (int32_t w = 0; w < 8; w++) {
+			if (g->leaders[size_t(w)].flags & leaderflag::kValid) continue;
+			r.check("leader_get_team without a seat is 8", leader_get_team(*g, w), 8);
+			break;
+		}
+	}
+	if (n >= 3) {
+		g->info.team[size_t(L[2])] = 5;  // random team: counted by the lobby later
+		game_init_teams(*g);
+		r.check("a team-5 seat waits for the lobby", g->info.num_sides, 1 + (n - 3));
+	}
+}
+
+static void victory_conquest(VictoryRig& r) {
+	std::printf(" conquest (elimination 0): the last unit and the last city of every rival\n");
+	auto g = r.make();
+	g->info.victory = 0;
+	g->info.elimination = 0;
+	const std::vector<int32_t> L = victory_leaders(*g);
+	if (L.size() < 2) return std::printf("  skip: needs two leaders\n"), void();
+	const int32_t a = L[0];
+	for (size_t i = 1; i < L.size(); i++) {
+		const int32_t b = L[i];
+		const std::vector<int32_t> cs = v_cities(*g, b);
+		bool had_units = false;
+		for (int32_t o = 0; o < g->objects[size_t(b)].unit_mark; o++) {
+			const Unit* u = g->unit(b, o);
+			had_units = had_units || (u && u->alive());
+		}
+		v_kill_units(*g, b);
+		if (!cs.empty() && had_units) {
+			r.check("units gone, a city left: not defeated", v_defeated(*g, b), 0);
+			for (int32_t c : cs) cities_capture_city(*g, a, c, b);
+		} else if (!cs.empty()) {
+			for (int32_t c : cs) cities_capture_city(*g, a, c, b);
+		}
+		if (cs.empty() && !had_units) {
+			// A seat that starts with nothing has no unit to lose and no city to capture: nothing ever triggers its defeat.
+			r.check("an empty seat is not defeated by itself", v_defeated(*g, b), 0);
+			leader_defeat(*g, b, 0, a, 0);
+		}
+		r.check("rival without units or cities is defeated by conquest", v_defeated(*g, b) ? g->leaders[size_t(b)].defeat_type : -1, 0);
+		if (i + 1 < L.size()) r.check("game still on while rivals remain", g->game_over, 0);
+	}
+	r.check("game over once one side is left", g->game_over, 1);
+	r.check("the survivor has the victory (type 0)", v_won(*g, a) ? g->leaders[size_t(a)].victory_type : -1, 0);
+	const int32_t f = g->frame;
+	g->do_frame();
+	r.check("Game::do_frame returns at once after game over", g->frame, f);
+}
+
+static void victory_capital(VictoryRig& r) {
+	std::printf(" capital (elimination 1): the capital clock\n");
+	{
+		auto g = r.make();
+		g->info.victory = 0;
+		g->info.elimination = 1;
+		const std::vector<int32_t> L = victory_leaders(*g);
+		if (L.size() < 2) return std::printf("  skip: needs two leaders\n"), void();
+		const int32_t a = L[0], b = L[1];
+		if (v_capital(*g, b) < 0) return std::printf("  skip: the second leader has no capital\n"), void();
+		leader_lost_capital(*g, b, a);
+		r.check("lost_capital starts the clock", g->leaders[size_t(b)].lost_capital_timer, 1);
+		const int32_t t0 = g->frame, need = game_retake_capital(*g, b);
+		v_run(*g, 200, [&] { return false; });
+		leader_recapture_capital(*g, b);
+		r.check("recapture stops the clock", g->leaders[size_t(b)].lost_capital_timer, 0);
+		v_run(*g, need + 100, [&] { return v_defeated(*g, b); });
+		r.check("a stopped clock does not eliminate", v_defeated(*g, b), 0);
+		leader_lost_capital(*g, b, a);
+		const int32_t t1 = g->frame;
+		const int32_t ran = v_run(*g, need * 2 + 600, [&] { return v_defeated(*g, b); });
+		r.check("the clock eliminates by capital (type 1)", v_defeated(*g, b) ? g->leaders[size_t(b)].defeat_type : -1, 1);
+		r.check("... not before the retake time", ran >= need ? 1 : 0, 1);
+		(void)t0, (void)t1;
+	}
+	{
+		auto g = r.make();
+		g->info.elimination = 2;
+		const std::vector<int32_t> L = victory_leaders(*g);
+		// The Persians (tribe bonus 0x17) survive a lost capital while they keep another one: pick a victim without it.
+		int32_t a = -1, b = -1, cap = -1;
+		for (int32_t w : L) {
+			if (v_capital(*g, w) < 0 || has_tribe_bonus(*g, w, 0x17)) continue;
+			b = w, cap = v_capital(*g, w);
+			break;
+		}
+		for (int32_t w : L)
+			if (w != b) a = w;
+		if (b < 0 || a < 0) return std::printf("  skip: no non-Persian leader with a capital\n"), void();
+		const size_t ncities = v_cities(*g, b).size();
+		cities_capture_city(*g, a, cap, b);
+		r.check("capital sudden death: the lost capital defeats at once", v_defeated(*g, b), 1);
+		// The type is recorded by the first Leader::defeat to finish: defeat(2) hands the other cities over first (defeat_by), and the
+		// nested lost_a_city of the last one defeats by conquest (type 0) before the outer call returns (capture-spec 6.4).
+		r.check("... its type: 2 with a lone capital, else the nested conquest defeat 0", g->leaders[size_t(b)].defeat_type, ncities == 1 ? 2 : 0);
+	}
+}
+
+static void victory_sudden(VictoryRig& r) {
+	std::printf(" sudden death (elimination 3)\n");
+	auto g = r.make();
+	g->info.elimination = 3;
+	const std::vector<int32_t> L = victory_leaders(*g);
+	if (L.size() < 2) return std::printf("  skip: needs two leaders\n"), void();
+	const int32_t a = L[0], b = L[1];
+	const std::vector<int32_t> cs = v_cities(*g, b);
+	if (cs.empty()) return std::printf("  skip: no city\n"), void();
+	cities_capture_city(*g, a, cs[0], b);
+	r.check("one lost city of their own defeats (type 3)", v_defeated(*g, b) ? g->leaders[size_t(b)].defeat_type : -1, 3);
+	r.check("game over exactly when two sides remain", g->game_over, L.size() == 2 ? 1 : 0);
+}
+
+static void victory_time(VictoryRig& r) {
+	std::printf(" time limit (victory 4): the custom limit of the scenario slot, 3 minutes\n");
+	auto g = r.make();
+	g->info.victory = 4;
+	g->info.time_limit = 8;
+	g->scen.custom_time_limit = 3;
+	const std::vector<int32_t> L = victory_leaders(*g);
+	if (L.size() < 2) return std::printf("  skip: needs two leaders\n"), void();
+	v_run(*g, 3000, [&] { return g->game_over; });
+	r.check("the game ends at tick 180 (frame 2700)", g->frame, 2701);
+	r.check("two-minute warning at frame 900", v_first_event_frame(*g, victoryevent::kTimeWarning, 120), 900);
+	r.check("no five-minute warning in a three-minute game", v_count_events(*g, victoryevent::kTimeWarning, 300), 0);
+	const int32_t best = v_best_score(*g, L);
+	int32_t winner = -1;
+	for (int32_t w : L)
+		if (v_won(*g, w) && g->leaders[size_t(w)].victory_type == 6) winner = w;
+	r.check("the best score wins (type 6)", winner, best);
+	r.check("game over", g->game_over, 1);
+}
+
+static void victory_score(VictoryRig& r) {
+	std::printf(" score victory (victory 3)\n");
+	auto g = r.make();
+	g->info.victory = 3;
+	const std::vector<int32_t> L = victory_leaders(*g);
+	if (L.size() < 2) return std::printf("  skip: needs two leaders\n"), void();
+	v_set_list(*g, "scores", g->info.score_goal, 500);
+	for (int32_t w : L) g->leaders[size_t(w)].score = 100;
+	game_daemon_process_victory(*g);
+	r.check("below the goal: no victory", v_won(*g, L[0]) || v_won(*g, L[1]), 0);
+	g->leaders[size_t(L[1])].score = 500;
+	g->leaders[size_t(L[0])].score = 500;  // a tie keeps the lower index
+	game_daemon_process_victory(*g);
+	r.check("a tie at the goal: the lower index wins (type 4)", v_won(*g, L[0]) ? g->leaders[size_t(L[0])].victory_type : -1, 4);
+	r.check("the rivals are defeated (type 5)", v_defeated(*g, L[1]) ? g->leaders[size_t(L[1])].defeat_type : -1, 5);
+	r.check("game over (every rival defeated by type 5)", g->game_over, 1);
+}
+
+static void victory_wonder(VictoryRig& r) {
+	std::printf(" wonder victory (victory 0): the clock, its warnings and its stop\n");
+	auto g = r.make();
+	g->info.victory = 0;
+	const std::vector<int32_t> L = victory_leaders(*g);
+	if (L.size() < 2) return std::printf("  skip: needs two leaders\n"), void();
+	const int32_t a = L[0];
+	const int32_t T = 4600;
+	v_set_constant(*g, "wonder_timer", v_clock_constant(*g, T));
+	const std::vector<int32_t> cs = v_cities(*g, a);
+	int32_t x = cs.empty() ? 3000 : g->cities[size_t(a)][size_t(cs[0])].x, y = cs.empty() ? 3000 : g->cities[size_t(a)][size_t(cs[0])].y;
+	std::vector<int32_t> made;
+	for (int32_t k = 0; k < 17 && wonder_winning(*g) != a; k++) {
+		const int32_t o = init_build_site(*g, a, 526 + k, x + 400 * (k + 1), y, true, -1);
+		if (o < 0) continue;
+		wonders_init_wonder(*g, a, o);
+		made.push_back(o);
+	}
+	r.check("enough wonders: Game::wonder_winning names the leader", wonder_winning(*g), a);
+	g->frame = 100;
+	game_daemon_process_victory(*g);
+	r.check("the clock starts", g->leaders[size_t(a)].wonderwin_timer, 1);
+	r.check("Game::is_victory_timer sees the running clock", game_is_victory_timer(*g), 1);
+	r.check("start event carries the countdown", v_count_events(*g, victoryevent::kWonderStart), 1);
+	const int32_t T0 = g->frame, total = [&] {
+		for (const GameEvent& e : g->events)
+			if (e.kind == victoryevent::kWonderStart) return e.value;
+		return 0;
+	}();
+	for (int32_t left : {4500, 1800, 900}) {
+		g->frame = T0 + total - left;
+		game_daemon_process_victory(*g);
+		if (left < total) r.check("warning at this many frames left", v_count_events(*g, victoryevent::kWonderWarning, left), 1);
+	}
+	// stop: the wonders fall (records closed), the clock halts holding the elapsed time
+	g->frame = T0 + 1000;
+	const std::vector<Wonder> keep = g->wonder_records[size_t(a)];
+	for (size_t i = 0; i < keep.size(); i++) wonders_close_wonder(*g, a, int32_t(i));
+	game_daemon_process_victory(*g);
+	r.check("the lost lead stops the clock", g->leaders[size_t(a)].wonderwin_timer, 0);
+	r.check("stop event", v_count_events(*g, victoryevent::kWonderStop), 1);
+	r.check("Game::is_victory_timer after the stop", game_is_victory_timer(*g), 0);
+	g->wonder_records[size_t(a)] = keep;
+	g->leaders[size_t(a)].wonder_mark = int32_t(keep.size());
+	g->frame += 200;
+	game_daemon_process_victory(*g);
+	r.check("regained: the clock restarts where it stopped", g->leaders[size_t(a)].wonderwin_timer, 1);
+	const int32_t vs = g->leaders[size_t(a)].wonderwin_stamp;  // the shifted start frame
+	g->frame = vs + total - 1;
+	game_daemon_process_victory(*g);
+	r.check("one frame early: no victory", v_won(*g, a), 0);
+	g->frame = vs + total;
+	game_daemon_process_victory(*g);
+	r.check("the countdown reaches zero: wonder victory (type 1)", v_won(*g, a) ? g->leaders[size_t(a)].victory_type : -1, 1);
+	r.check("game over (every rival defeated by type 5)", g->game_over, 1);
+	(void)made;
+}
+
+static void victory_territory(VictoryRig& r) {
+	std::printf(" territory victory (victory 0): the share of the land and its clock\n");
+	auto g = r.make();
+	g->info.victory = 0;
+	const std::vector<int32_t> L = victory_leaders(*g);
+	if (L.size() < 2) return std::printf("  skip: needs two leaders\n"), void();
+	const int32_t a = L[0];
+	const int32_t T = 4600, land = g->world_total_land;
+	v_set_constant(*g, "popwin_timer", v_clock_constant(*g, T));
+	v_set_list(*g, "popwins", g->info.popwin, 10);
+	for (int32_t w : L) g->leaders[size_t(w)].territory = 0;
+	g->leaders[size_t(a)].territory = land / 2;
+	for (int32_t w : L)
+		if (w != a) g->leaders[size_t(w)].territory = land / 20;  // 5%: below the 10% needed
+	g->frame = 200;
+	game_daemon_process_victory(*g);
+	r.check("the clock starts", g->leaders[size_t(a)].popwin_timer, 1);
+	int32_t total = 0;
+	for (const GameEvent& e : g->events)
+		if (e.kind == victoryevent::kPopStart) total = e.value;
+	r.check("start event carries the countdown", total > 0 ? 1 : 0, 1);
+	const int32_t T0 = g->frame;
+	for (int32_t left : {4500, 1800, 900}) {
+		g->frame = T0 + total - left;
+		game_daemon_process_victory(*g);
+		if (left < total) r.check("warning at this many frames left", v_count_events(*g, victoryevent::kPopWarning, left), 1);
+	}
+	// a rival at the share stops the clock; dropping it restarts
+	g->leaders[size_t(L[1])].territory = land / 5;
+	g->frame = T0 + total - 500;
+	game_daemon_process_victory(*g);
+	r.check("a rival at the share stops the clock", g->leaders[size_t(a)].popwin_timer, 0);
+	r.check("halted event", v_count_events(*g, victoryevent::kPopStop), 1);
+	g->leaders[size_t(L[1])].territory = land / 20;
+	g->frame += 10;
+	game_daemon_process_victory(*g);
+	r.check("the clock restarts", g->leaders[size_t(a)].popwin_timer, 1);
+	const int32_t vs = g->leaders[size_t(a)].popwin_stamp;  // the shifted start frame
+	g->frame = vs + total - 1;
+	game_daemon_process_victory(*g);
+	r.check("one frame early: no victory", v_won(*g, a), 0);
+	g->frame = vs + total;
+	game_daemon_process_victory(*g);
+	r.check("territory victory (type 2)", v_won(*g, a) ? g->leaders[size_t(a)].victory_type : -1, 2);
+	r.check("game over", g->game_over, 1);
+}
+
+static void victory_economic(VictoryRig& r) {
+	std::printf(" economic victory (victory 8)\n");
+	auto g = r.make();
+	g->info.victory = 8;
+	const std::vector<int32_t> L = victory_leaders(*g);
+	if (L.size() < 2) return std::printf("  skip: needs two leaders\n"), void();
+	v_set_list(*g, "econwins", g->info.econwin, 10);
+	for (int32_t w : L) g->leaders[size_t(w)].income.fill(0);
+	int32_t good = -1;
+	for (int32_t k = 0; k < 6 && good < 0; k++)
+		if (k != ptype::kKnowledge && type_avail(*g, L[1], k, 1)) good = k;
+	if (good < 0) return std::printf("  skip: the leader can use no good\n"), void();
+	g->leaders[size_t(L[1])].income[size_t(good)] = 16 * 40;  // 40 per good-rate unit: (40 + 4) / 5 = 8
+	game_daemon_process_victory(*g);
+	r.check("get_economic = mean of the five income rates, rounded up", leader_get_economic(*g, L[1]), (40 + 4) / 5);
+	r.check("below the goal: no victory", v_won(*g, L[1]), 0);
+	g->leaders[size_t(L[1])].income[size_t(good)] = 16 * 100;
+	game_daemon_process_victory(*g);
+	r.check("at the goal: economic victory (type 5)", v_won(*g, L[1]) ? g->leaders[size_t(L[1])].victory_type : -1, 5);
+	r.check("the rivals are defeated (type 5)", v_defeated(*g, L[0]) ? g->leaders[size_t(L[0])].defeat_type : -1, 5);
+	r.check("game over", g->game_over, 1);
+}
+
+static void victory_chairs(VictoryRig& r) {
+	std::printf(" musical chairs (victory 5)\n");
+	auto g = r.make();
+	g->info.victory = 5;
+	g->info.team_style = 0;
+	const std::vector<int32_t> L = victory_leaders(*g);
+	if (L.size() < 2) return std::printf("  skip: needs two leaders\n"), void();
+	v_set_list(*g, "chairs", g->info.chairs, 1);  // a round every minute: 900 frames
+	for (size_t i = 0; i < L.size(); i++) g->leaders[size_t(L[i])].score = 100 + int32_t(i) * 10;
+	g->musical_chairs = 0;
+	g->frame = 0;
+	game_daemon_process_victory(*g);
+	r.check("frame 0: no round", v_defeated(*g, L[0]), 0);
+	g->frame = 899;
+	game_daemon_process_victory(*g);
+	r.check("one frame early: no round", v_defeated(*g, L[0]), 0);
+	// a tie for the lowest spares everyone, and the round still counts
+	g->leaders[size_t(L[1])].score = g->leaders[size_t(L[0])].score;
+	g->frame = 900;
+	game_daemon_process_victory(*g);
+	r.check("tie for the lowest score: nobody is defeated", v_defeated(*g, L[0]) || v_defeated(*g, L[1]), 0);
+	r.check("... but the round moved the stamp", g->musical_chairs, 900);
+	g->leaders[size_t(L[1])].score = g->leaders[size_t(L[0])].score + 5;
+	g->frame = 1799;
+	game_daemon_process_victory(*g);
+	r.check("the stamp restarts the wait", v_defeated(*g, L[0]), 0);
+	g->frame = 1800;
+	game_daemon_process_victory(*g);
+	r.check("the lowest score is defeated (type 4)", v_defeated(*g, L[0]) ? g->leaders[size_t(L[0])].defeat_type : -1, 4);
+	r.check("round event", v_count_events(*g, victoryevent::kChairsRound) >= 2 ? 1 : 0, 1);
+	// keep going until one leader is left
+	for (int32_t round = 3; round < 12 && !g->game_over; round++) {
+		g->frame = round * 900;
+		game_daemon_process_victory(*g);
+	}
+	r.check("game over when one leader is left", g->game_over, 1);
+	{
+		// Game::check_victory ends the game at once when every human seat is out (no winner), or when the leaders left are
+		// all allies (they share the victory).
+		bool humans = false, human_live = false;
+		int live = 0, won = 0;
+		for (int32_t w : L) {
+			const bool human = (g->leaders[size_t(w)].flags & leaderflag::kHuman) != 0;
+			humans = humans || human;
+			if (v_defeated(*g, w)) continue;
+			human_live = human_live || human;
+			live++;
+			won += v_won(*g, w) ? 1 : 0;
+		}
+		r.check("the survivors share the victory (unless the humans are all out)", (humans && !human_live) || (live > 0 && won == live), 1);
+	}
+	if (L.size() >= 4) {
+		auto t = r.make();
+		t->info.victory = 5;
+		t->info.team_style = 12;
+		t->info.team.fill(-1);
+		t->info.team[size_t(L[0])] = t->info.team[size_t(L[1])] = 0;
+		t->info.team[size_t(L[2])] = t->info.team[size_t(L[3])] = 1;
+		v_set_list(*t, "chairs", t->info.chairs, 1);
+		const int32_t sc[4] = {10, 20, 30, 40};
+		for (int i = 0; i < 4; i++) t->leaders[size_t(L[size_t(i)])].score = sc[i];
+		t->musical_chairs = 0;
+		t->frame = 900;
+		game_daemon_process_victory(*t);
+		r.check("teams: the weakest of team 0 is defeated", v_defeated(*t, L[0]), 1);
+		r.check("teams: the weakest of team 1 is defeated", v_defeated(*t, L[2]), 1);
+		r.check("teams: the stronger members stay", v_defeated(*t, L[1]) || v_defeated(*t, L[3]), 0);
+	}
+}
+
+static void victory_armageddon(VictoryRig& r) {
+	std::printf(" armageddon (the nuke count)\n");
+	auto g = r.make();
+	const std::vector<int32_t> L = victory_leaders(*g);
+	if (L.size() < 2) return std::printf("  skip: needs two leaders\n"), void();
+	const int32_t lim = get_armageddon(*g);
+	g->info.starting_resources = 8;
+	g->armageddon = 0;
+	armageddon_nuke_detonated(*g);
+	r.check("starting resources 8: nukes are not counted", g->armageddon, 0);
+	g->info.starting_resources = 0;
+	const int32_t lim0 = get_armageddon(*g);
+	g->armageddon = lim0 - 1;
+	game_daemon_process_victory(*g);
+	r.check("one nuke short: nobody is defeated", v_defeated(*g, L[0]) || v_defeated(*g, L[1]), 0);
+	armageddon_nuke_detonated(*g);
+	r.check("the nuke adds one", g->armageddon, lim0);
+	game_daemon_process_victory(*g);
+	bool all = true;
+	for (int32_t w : L) all = all && v_defeated(*g, w) && g->leaders[size_t(w)].defeat_type == 8 && !v_won(*g, w);
+	r.check("at the limit every leader is defeated (type 8), no winner", all, 1);
+	r.check("game over", g->game_over, 1);
+	r.check("scores are zeroed by the Armageddon rule", g->leaders[size_t(L[0])].score, 0);
+	(void)lim;
+}
+
+static void victory_allied(VictoryRig& r) {
+	std::printf(" allied victory (Leader::set_diplo)\n");
+	auto g = r.make();
+	const std::vector<int32_t> L = victory_leaders(*g);
+	if (L.size() < 2) return std::printf("  skip: needs two leaders\n"), void();
+	for (int32_t a : L)
+		for (int32_t b : L)
+			if (a != b) g->leaders[size_t(a)].diplo[size_t(b)] = 1;
+	// A clique, with the last pair set through Leader::set_diplo. (Victory fires when a new alliance leaves no outsider, and then
+	// every ally runs Leader::victory itself and defeats whoever it is not allied with: an incomplete clique loses members.)
+	const size_t n = L.size();
+	if (n >= 3) {
+		leader_set_diplo(*g, L[0], L[1], 2);
+		r.check("an alliance with rivals left outside: no victory", v_won(*g, L[0]) || g->victory_checked, 0);
+	}
+	for (size_t i = 0; i < n; i++)
+		for (size_t j = i + 1; j < n; j++)
+			if (!(i == n - 2 && j == n - 1) && !(i == 0 && j == 1 && n >= 3))
+				g->leaders[size_t(L[i])].diplo[size_t(L[j])] = g->leaders[size_t(L[j])].diplo[size_t(L[i])] = 2;
+	r.check("a clique minus one pair: still no victory", v_won(*g, L[0]) || g->victory_checked, 0);
+	leader_set_diplo(*g, L[n - 2], L[n - 1], 2);
+	r.check("the last alliance leaves nobody outside: victory", v_won(*g, L[n - 2]), 1);
+	r.check("end-game flag (semaphore byte2 & 0x40)", g->victory_checked, 1);
+	bool allies_won = true;
+	for (int32_t w : L) allies_won = allies_won && v_won(*g, w) && g->leaders[size_t(w)].victory_type == 0;
+	r.check("every ally shares the victory (type 0)", allies_won, 1);
+	r.check("the simulation is not stopped by it", g->game_over, 0);
+	r.check("the front end sees the game as ended", game_ended(*g), 1);
+	r.check("game-over event for the allied victory", v_count_events(*g, 4, 1), 1);
+}
+
+static void victory_tech(VictoryRig& r) {
+	std::printf(" tech race (victory 9)\n");
+	auto g = r.make();
+	const std::vector<int32_t> L = victory_leaders(*g);
+	if (L.size() < 2) return std::printf("  skip: needs two leaders\n"), void();
+	g->info.victory = 9;
+	const int32_t a = L[0];
+	int32_t t = kAges;
+	while (t < kEndAges && has_tech(*g, a, t)) t++;
+	if (t >= kEndAges) return std::printf("  skip: every age is known\n"), void();
+	g->info.ending_technology = uint8_t(g->leaders[size_t(a)].age + 2);
+	gain_tech(*g, a, t, 0, 0, false, true);
+	r.check("an age short of the end: no victory", v_won(*g, a), 0);
+	while (t < kEndAges && has_tech(*g, a, t)) t++;
+	if (t >= kEndAges) return std::printf("  skip: no further age\n"), void();
+	gain_tech(*g, a, t, 0, 0, false, true);
+	r.check("the last age: tech-race victory (type 3)", v_won(*g, a) ? g->leaders[size_t(a)].victory_type : -1, 3);
+	r.check("the rivals are defeated (type 5)", v_defeated(*g, L[1]) ? g->leaders[size_t(L[1])].defeat_type : -1, 5);
+	r.check("game over", g->game_over, 1);
+}
+
+static void victory_resign(VictoryRig& r) {
+	std::printf(" resign (Player::resign -> leave_game 6)\n");
+	auto g = r.make();
+	const std::vector<int32_t> L = victory_leaders(*g);
+	if (L.size() < 2) return std::printf("  skip: needs two leaders\n"), void();
+	for (size_t i = 1; i < L.size(); i++) {
+		player_resign(*g, L[i], false);
+		r.check("the resigning leader is defeated (type 6)", v_defeated(*g, L[i]) ? g->leaders[size_t(L[i])].defeat_type : -1, 6);
+	}
+	r.check("one leader left: game over", g->game_over, 1);
+	r.check("the survivor wins (type 0)", v_won(*g, L[0]) ? g->leaders[size_t(L[0])].victory_type : -1, 0);
+	r.check("resign events", v_count_events(*g, victoryevent::kResigned), int64_t(L.size()) - 1);
+	// the command path: CommandManager::issue_resign executes process_resign from the seat
+	auto h = r.make();
+	CommandManager cm;
+	cm.play = L[1];
+	cm.play_who = L[1];
+	cm.issue_resign(false);
+	cm.process_turn(*h);
+	r.check("RESIGN command: the seat's leader is defeated (type 6)", v_defeated(*h, L[1]) ? h->leaders[size_t(L[1])].defeat_type : -1, 6);
+}
+
+static void victory_reset(VictoryRig& r) {
+	std::printf(" Leader::reset_score and the score\n");
+	Leader l;
+	r.check("a fresh leader's age stamps are -1", l.age_stamp[0] == -1 && l.age_stamp[6] == -1, 1);
+	l.score = 99, l.score_units = 5, l.units_killed = 3, l.age_stamp[2] = 400;
+	leader_reset_score(l);
+	r.check("reset_score: score terms zero", l.score + l.score_units + l.units_killed, 0);
+	r.check("reset_score: age stamps back to -1", l.age_stamp[2], -1);
+	auto g = r.make();
+	const std::vector<int32_t> L = victory_leaders(*g);
+	for (int32_t w : L) leader_compute_score(*g, w, 1);
+	for (int32_t w : L) {
+		const Leader& x = g->leaders[size_t(w)];
+		const int32_t sum = x.score_combat + x.score_wonders + x.score_research + x.score_upgrades + x.score_economy + x.score_buildings +
+		                    x.score_units + x.score_territory + x.score_pop + x.score_explored;
+		r.check("score = the sum of its terms", x.score, sum);
+	}
+}
+
+int run_victory_fixtures(const ron::GameFiles& files, const ron::Scenario& sc, const Rules& rules, uint32_t seed, const AnimSource* art,
+                         int32_t reveal, const std::string& mode, bool verbose) {
+	VictoryRig r{files, sc, rules, seed, art, reveal, verbose};
+	struct Entry {
+		const char* name;
+		void (*fn)(VictoryRig&);
+	};
+	static const Entry kModes[] = {{"teams", victory_teams},         {"conquest", victory_conquest},   {"capital", victory_capital},
+	                               {"sudden", victory_sudden},       {"time", victory_time},           {"score", victory_score},
+	                               {"wonder", victory_wonder},       {"territory", victory_territory}, {"economic", victory_economic},
+	                               {"chairs", victory_chairs},       {"armageddon", victory_armageddon}, {"allied", victory_allied},
+	                               {"tech", victory_tech},           {"resign", victory_resign},       {"reset", victory_reset}};
+	bool ran = false;
+	for (const Entry& e : kModes) {
+		if (mode != "all" && mode != e.name) continue;
+		ran = true;
+		const int before = r.fails;
+		e.fn(r);
+		std::printf("%s %s\n", r.fails == before ? "PASS" : "FAIL", e.name);
+	}
+	if (!ran) {
+		std::printf("unknown --victory mode '%s' (all, teams, conquest, capital, sudden, time, score, wonder, territory, economic, chairs, armageddon, allied, tech, resign, reset)\n", mode.c_str());
+		return 2;
+	}
+	std::printf("victory fixtures: %d checks, %d failed\n", r.total, r.fails);
+	return r.fails == 0 ? 0 : 1;
+}
+
 		             "usage: %s <game dir> <scenario.scx> [--frames N] [--seed S] [--list] "
 		             "[--move WHO:o1,o2@X,Y[@FRAME][/form][%%queue]]... [--halt WHO:o1,o2@FRAME]... "
 		             "[--form WHO:o1,o2@FRAME/form[,rotate]]... [--dump-every K] "
@@ -2485,6 +3118,19 @@ int main(int argc, char** argv) {
 			if (std::strcmp(argv[i], "--move") == 0) scripts.push_back(parse_move(argv[i + 1]));
 			else if (std::strcmp(argv[i], "--halt") == 0) scripts.push_back(parse_halt(argv[i + 1]));
 			else if (std::strcmp(argv[i], "--select") == 0) {  // WHO:o1,o2@FRAME (WHO = leader index; empty list clears)
+		ron::sim::RandomGameSetup random_setup;
+		if (random_mode) {
+			const char* spec = arg_value(argc, argv, "--random");
+			if (!spec) throw std::runtime_error("--random needs STYLE,SIZE,SEED,NATIONS");
+			const std::string perr = ron::sim::parse_random_option(rules, spec, random_setup);
+			if (!perr.empty()) throw std::runtime_error(perr);
+			for (ron::sim::NationSetup& n : random_setup.nation) n.human = false;
+			if (const char* v = std::getenv("RON_LONGRUN_VICTORY")) random_setup.victory = std::atoi(v);  // as ronmap: 2 = conquest only, so a wonder win does not end a long run
+			ron::sim::RandomExtras rx;  // the generated scenario records stand in for the file (the first build only gives them)
+			if (!ron::sim::new_random_game(files, rules, nullptr, random_setup, &rx)) throw std::runtime_error("the random map could not be generated: " + rx.error);
+			sc = std::move(rx.scenario);
+			random_setup = rx.setup;
+		}
 				Script s = parse_halt(argv[i + 1]);
 				s.kind = Script::Select;
 				scripts.push_back(s);
@@ -2632,6 +3278,9 @@ int main(int argc, char** argv) {
 			            "wonderwin %d popwin %d econwin %d nations %d\n",
 			            g.info.team_style, g.info.game_rules, g.info.elimination, g.info.victory, g.info.score_goal,
 			            g.info.time_limit, g.info.wonderwin, g.info.popwin, g.info.econwin, g.info.num_nations);
+		if (const char* vm = arg_value(argc, argv, "--victory")) {  // --victory MODE: docs/victory-spec.md section 10
+			return run_victory_fixtures(files, sc, rules, seed, art.get(), reveal, vm, has_flag(argc, argv, "--verbose"));
+		}
 			for (int32_t who = 0; who < kNumLeaders; who++) {
 				const Leader& l = g.leaders[size_t(who)];
 				if (!(l.flags & leaderflag::kValid)) continue;

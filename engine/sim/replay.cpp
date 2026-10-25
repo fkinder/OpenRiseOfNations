@@ -875,6 +875,8 @@ bool engine_to_wire(const Command& c, std::vector<uint8_t>& out) {
 		return true;
 	}
 	case Verb::Pause: out.push_back(76); out.push_back(uint8_t(c.set)); return true;
+	case Verb::Resign: out.push_back(70); i32(c.who); return true;
+	case Verb::Quit: out.push_back(71); i32(c.who); out.push_back(0); out.push_back(0); return true;
 	case Verb::LeaderOptions:
 		out.push_back(73); i32(c.who); i32(c.peasants); i32(c.peasants_wait); i32(c.buildings);
 		i32(32); i32(4); i32(2);  // BitMask<32>: bits, size, and the word the corpus always has as 2; the value follows

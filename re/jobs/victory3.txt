@@ -1,0 +1,10 @@
+re/decomp/victory
+Leaders::strategy_all
+Game::do_frame
+TurnControl::toggle_pause
+Player::quit
+Player::drop
+CommandPackage::end_process
+ScenarioFuncSet::victory
+ScenarioFuncSet::defeat
+Game::determine_end_of_game_stats_and_achievements

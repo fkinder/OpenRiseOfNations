@@ -12,6 +12,7 @@
 #include "sim/garrison.hpp"
 #include "sim/groups.hpp"
 #include "sim/guys.hpp"
+#include "sim/victory.hpp"
 #include "sim/movement.hpp"
 #include "sim/orders.hpp"
 #include "sim/production_internal.hpp"
@@ -277,7 +278,13 @@ int32_t build_queue_up(Game& g, Build& b0, int32_t t, int32_t use_escrow) {
 		const int32_t lib = get_first_library(g, who);
 		if (lib < 0) return 1;
 		if (lib != b0.o) return build_queue_up(g, *g.build(who, lib), t, use_escrow);
-		// (tech-race shortcut: victory 9 is not modelled, TODO(victory))
+		// Tech-race rules: the last age is granted at once (no queue entry) once the rush peace is over.
+		if (is_age_type(t) && g.info.victory == 9) {
+			if (LD(g, who).age + 1 == int32_t(g.info.ending_technology) && !war_allowed(g)) {
+				gain_tech(g, who, t, -1, -1, true, true);
+				return 0;
+			}
+		}
 	}
 	Build& b = *bp;
 	if (!can_pay_cost(g, t, who, -1, b.o, 1)) {

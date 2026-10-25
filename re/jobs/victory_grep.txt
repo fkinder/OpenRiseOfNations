@@ -1,0 +1,2 @@
+re/decomp/victory/armageddon_writes.txt
+^(INC|ADD|MOV|SUB) .*\[[A-Z]{3} \+ 0x6e0\]

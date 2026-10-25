@@ -1,0 +1,2 @@
+re/decomp/victory
+LeaderData::holds_capital

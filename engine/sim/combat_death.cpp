@@ -4,6 +4,7 @@
 #include <algorithm>
 
 #include "sim/aircraft.hpp"
+#include "sim/capture.hpp"
 #include "sim/combat_internal.hpp"
 #include "sim/economy.hpp"
 #include "sim/garrison.hpp"
@@ -13,6 +14,7 @@
 #include "sim/pathfinder.hpp"
 #include "sim/production.hpp"
 #include "sim/spells.hpp"
+#include "sim/victory.hpp"
 
 namespace ron::sim {
 
@@ -171,14 +173,19 @@ void unit_close(Game& g, Unit& u, int32_t death, int32_t gpiece, float deg) {
 			}
 		} else {
 			// The last member of the chain: the leader's counters drop (production-spec 6.10: control, active,
-			// track_unit_type for counted units; caravans), then every member's links are released. TODO(victory):
-			// Leader::defeat when nothing is left; Conquer the World seeds.
+			// track_unit_type for counted units; caravans), then every member's links are released. A leader left with no
+			// unit and no city is defeated by conquest (victory-spec 7). TODO: Conquer the World seeds.
 			if (unit_counted_type(g, u)) {
 				if (!(u.unit_masks & umask::kDecoy)) {
 					g.leaders[size_t(who)].control -= u.ptype->control_cost;
 					g.leaders[size_t(who)].active--;
 					track_unit_type(g, who, u.type, -1, u.o);
 				}
+				// Unit::close @60ee50: who < 8, no active unit and no city, not the editor / free mode (semaphore byte1 & 8),
+				// and flags2 bit 0 clear (NO_CITY_DEFEAT).
+				if (who < 8 && g.leaders[size_t(who)].active == 0 && g.leaders[size_t(who)].city_num == 0 && !g.editor &&
+				    !(g.leaders[size_t(who)].flags2 & leaderflag2::kNoCityDefeat))
+					leader_defeat(g, who, 0, -1, 0);
 			}
 			if (u.ptype->unit_flags2 & 8) g.leaders[size_t(who)].caras--;
 			for (int32_t n = u.o_down, guard = 0; n >= 0 && guard < kUnitLimit; guard++) {

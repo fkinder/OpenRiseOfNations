@@ -20,6 +20,7 @@
 #include "sim/pathfinder.hpp"
 #include "sim/production_internal.hpp"
 #include "sim/trig.hpp"
+#include "sim/victory.hpp"
 
 namespace ron::sim {
 
@@ -973,6 +974,9 @@ void game_daemon_process_victory(Game& g) {
 				if (I.wonderwin_timer != 0) {
 					I.wonderwin_timer = 0;
 					I.wonderwin_stamp -= g.frame;
+					GameEvent e;  // Achieve TIMER_STOP; S_WONDER_VICTORY_STOP once per pass
+					e.frame = g.frame, e.kind = victoryevent::kWonderStop, e.who = i;
+					log_event(g, e);
 				}
 				continue;
 			}
@@ -981,9 +985,21 @@ void game_daemon_process_victory(Game& g) {
 				if (I.wonderwin_timer == 0) {
 					I.wonderwin_timer = 1;
 					I.wonderwin_stamp += g.frame;
+					if (!handled) {  // the "building wonders" message names the first leader of the pass
+						GameEvent e;
+						e.frame = g.frame, e.kind = victoryevent::kWonderStart, e.who = i;
+						e.value = map_scaled(g, K("wonder_timer")), e.other = get_wonder_net(g, i);
+						log_event(g, e);
+					}
 				} else if (!handled) {
 					const int32_t left = map_scaled(g, K("wonder_timer")) - (g.frame - I.wonderwin_stamp);
-					if (left == 0) leader_victory(g, i, 1, 0);
+					if (left == 0) {
+						leader_victory(g, i, 1, 0);
+					} else if (left == 4500 || left == 1800 || left == 900) {
+						GameEvent e;  // shown unless the console player is an ally of i
+						e.frame = g.frame, e.kind = victoryevent::kWonderWarning, e.who = i, e.value = left, e.other = get_wonder_net(g, i);
+						log_event(g, e);
+					}
 				}
 			} else if (!handled) {
 				leader_victory(g, i, 1, gg ? 1 : 0);
@@ -995,6 +1011,7 @@ void game_daemon_process_victory(Game& g) {
 	if ((vic == 7 || vic == 0 || vic == 1) && contest) {
 		const int32_t need = list_value(g, "popwins", g.info.popwin);
 		const int32_t land = g.world_total_land;
+		bool halted = false;
 		for (int32_t i = 0; i < 8; i++) {
 			Leader& I = LD(g, i);
 			if (!valid_active(I) || land == 0) continue;
@@ -1007,6 +1024,12 @@ void game_daemon_process_victory(Game& g) {
 				if (I.popwin_timer != 0) {
 					I.popwin_timer = 0;
 					I.popwin_stamp -= g.frame;
+					if (!halted) {  // the "territory victory halted" message, once per pass
+						halted = true;
+						GameEvent e;
+						e.frame = g.frame, e.kind = victoryevent::kPopStop, e.who = i, e.other = need;
+						log_event(g, e);
+					}
 				}
 				continue;
 			}
@@ -1015,9 +1038,18 @@ void game_daemon_process_victory(Game& g) {
 				if (I.popwin_timer == 0) {
 					I.popwin_timer = 1;
 					I.popwin_stamp += g.frame;
+					GameEvent e;
+					e.frame = g.frame, e.kind = victoryevent::kPopStart, e.who = i, e.value = map_scaled(g, K("popwin_timer")), e.other = need;
+					log_event(g, e);
 				} else {
 					const int32_t left = map_scaled(g, K("popwin_timer")) - (g.frame - I.popwin_stamp);
-					if (left < 1) leader_victory(g, i, 2, 0);
+					if (left < 1) {
+						leader_victory(g, i, 2, 0);
+					} else if (left == 4500 || left == 1800 || left == 900) {
+						GameEvent e;  // shown unless the console player is on i's team
+						e.frame = g.frame, e.kind = victoryevent::kPopWarning, e.who = i, e.value = left, e.other = need;
+						log_event(g, e);
+					}
 				}
 			} else {
 				leader_victory(g, i, 2, gg ? 1 : 0);
@@ -1025,12 +1057,13 @@ void game_daemon_process_victory(Game& g) {
 		}
 	}
 	// ---- score victory (3): the best (team) score reaching the goal (LeaderData::get_team_score: the team average
-	// needs semaphore byte0 & 0x80, not modelled; the leader's own score).
+	// needs semaphore byte0 & 0x80, which nothing sets; the leader's own score).
 	if (vic == 3) {
 		int32_t best = 0, bv = 0;
 		for (int32_t i = 0; i < 8; i++) {
 			if (!valid_active(LD(g, i))) continue;
-			if (bv < LD(g, i).score) bv = LD(g, i).score, best = i;
+			const int32_t sc = leader_get_team_score(g, i);
+			if (bv < sc) bv = sc, best = i;
 		}
 		if (list_value(g, "scores", g.info.score_goal) <= bv) leader_victory(g, best, 4, 0);
 	}
@@ -1046,7 +1079,7 @@ void game_daemon_process_victory(Game& g) {
 		if (g.tick >= lim * 0x3c) {
 			if (g.info.game_rules == 8) {
 				for (int32_t i = 0; i < 8; i++) {
-					if (valid_active(LD(g, i)) && g.info.team[size_t(i)] == 0) {
+					if (valid_active(LD(g, i)) && leader_get_team(g, i) == 0) {
 						leader_victory(g, i, 6, 0);
 						break;
 					}
@@ -1055,14 +1088,24 @@ void game_daemon_process_victory(Game& g) {
 				int32_t best = 0, bv = 0;
 				for (int32_t i = 0; i < 8; i++) {
 					if (!valid_active(LD(g, i))) continue;
-					if (bv < LD(g, i).score) bv = LD(g, i).score, best = i;
+					const int32_t sc = leader_get_team_score(g, i);
+					if (bv < sc) bv = sc, best = i;
 				}
 				leader_victory(g, best, 6, 0);
 			}
+		} else if (g.frame % 100 == 0) {
+			// The warnings two, five and ten minutes out (S_TIME_LIMIT_WARNING; the two-minute one plays a random sound of
+			// SoundGlobal's own Random, not game_random); game_rules 8 adds the team message.
+			const int32_t left = lim * 0x3c - g.tick;
+			if (left == 0x78 || left == 300 || left == 600) {
+				GameEvent e;
+				e.frame = g.frame, e.kind = victoryevent::kTimeWarning, e.value = left, e.other = g.info.game_rules == 8 ? 1 : 0;
+				log_event(g, e);
+			}
 		}
 	}
-	// ---- musical chairs (5) and economic victory (8): TODO(victory): Game.on_team (Game::init_teams) and
-	// LeaderData::get_economic are not ported.
+	victory_process_chairs(g);    // 5
+	victory_process_economic(g);  // 8
 }
 
 // ---------------------------------------------------------------- Build::process step 4

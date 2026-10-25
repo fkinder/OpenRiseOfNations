@@ -62,7 +62,7 @@ void leaders_strategy_all(Game& g) {
 		if (g.frame == 0 || (who + g.frame) % 10 == 0) leader_compute_score(g, who, 0);
 		leader_diplomacy(g, who);
 	}
-	// TODO(victory): semaphore byte1 & 2 -> Game::check_victory.
+	// (Leaders::strategy_all @6ed430 ends with Game::check_victory under semaphore byte1 & 2, balance mode: victory-spec 9.)
 }
 
 // ---------------------------------------------------------------- Leader::plan_strategy

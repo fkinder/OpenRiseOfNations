@@ -1,0 +1,4 @@
+re/decomp/victory/callers2.txt
+2
+Nuke::add_nuke
+Nuke::do_damage

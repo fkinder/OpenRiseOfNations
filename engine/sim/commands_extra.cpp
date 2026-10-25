@@ -18,6 +18,7 @@
 #include "sim/rules_xml.hpp"
 #include "sim/script_funcs_internal.hpp"
 #include "sim/search.hpp"
+#include "sim/victory.hpp"
 
 namespace ron::sim {
 
@@ -161,6 +162,9 @@ bool command_process_extra(Game& g, CommandPackage& pk, const Command& c, int32_
 		if (g.ctl.chat.size() > kMaxChatLines) g.ctl.chat.erase(g.ctl.chat.begin());
 		return true;
 	}
+	case Verb::Resign: case Verb::Quit:  // process_resign @9438c0 / process_quit @9439a0 -> Player::resign(play)
+		if (c.who == play && valid_who(play_who)) player_resign(g, play_who, c.verb == Verb::Quit);
+		return true;
 	case Verb::RenameCity: {  // process_rename_city @944090: a city building (object flag 0x20) takes the name
 		Object* ob = valid_who(c.who) && c.ox >= kBuildBase && c.ox < kBuildLimit ? g.object(c.who, c.ox) : nullptr;
 		if (ob && ob->alive() && !ob->is_unit && (ob->flags & objflag::kCity)) {
@@ -320,6 +324,14 @@ bool CommandManager::issue_rename_city(const Game& g, int32_t o, const std::u16s
 	c.ox = o;
 	c.text = name.substr(0, 20);  // the wire pads it with zeros to 22 units
 	local_.push_back(std::move(c));
+	return true;
+}
+
+bool CommandManager::issue_resign(bool quit) {
+	Command c;
+	c.verb = quit ? Verb::Quit : Verb::Resign;
+	c.who = play;  // the seat that leaves (ResignCommand.play)
+	local_.push_back(c);
 	return true;
 }
 

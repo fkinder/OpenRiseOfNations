@@ -11,6 +11,7 @@
 #include "sim/production.hpp"
 #include "sim/rules_internal.hpp"
 #include "sim/transport.hpp"
+#include "sim/victory.hpp"
 
 namespace ron::sim {
 
@@ -969,12 +970,14 @@ void gain_tech(Game& g, int32_t who, int32_t t, int32_t x, int32_t y, bool notif
 	if (g.type(ptype::kExploreMapBonus).preq[0] == t) l.flags |= leaderflag::kExploreMap;
 	if (get_preq(g, ptype::kRevealEnemyBonus, 0, who) == t) l.flags |= leaderflag::kRevealEnemy;
 	if (get_preq(g, ptype::kActivePingBonus, 0, who) == t) l.flags |= leaderflag::kActivePing;
-	// 19. World Government: assimilate own captured cities. TODO(victory): Leader::defeat of capital-less leaders.
+	// 19. World Government: assimilate own captured cities, then defeat the leaders whose capital sits with us or an ally
+	// (elimination CAPITAL only).
 	if (get_preq(g, ptype::kGlobalGovernmentBonus, 0, who) == t) {
 		for (int32_t c = 0; c < l.city_mark && size_t(c) < g.cities[size_t(who)].size(); c++) {
 			City& ct = g.cities[size_t(who)][size_t(c)];
 			if (ct.valid() && ct.race != who) city_assimilate(g, who, c);
 		}
+		leader_global_government_defeats(g, who);
 	}
 	// 20.
 	if (get_preq(g, ptype::kArmageddonBonus, 0, who) == t) g.armageddon = std::max(0, g.armageddon - 2);
@@ -1076,7 +1079,9 @@ void gain_tech(Game& g, int32_t who, int32_t t, int32_t x, int32_t y, bool notif
 		l.gov = t;
 		if (is_t(g, t, ptype::kGovCapitalism) && g.frame != 0) bucket_add(g, who, 5, cst(g, "capitalism_oil_gift"));
 	}
-	// 32-33. TODO(victory): tech-race victory.
+	// 32-33. Tech-race victory (victory 9): the last age / all 28 epoch techs under Conquer the World.
+	if (is_age_type(t)) leader_tech_race_age(g, who);
+	if (is_epoch_type(t)) leader_tech_race_epoch(g, who);
 	// 35. GRANARY2..5 (first match).
 	for (int32_t b = 699; b <= 702; b++) {
 		if (get_preq(g, b, 0, who) == t) {

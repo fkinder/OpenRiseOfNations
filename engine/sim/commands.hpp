@@ -32,7 +32,9 @@ enum class Verb : uint8_t {
 	Hotkey = 34, ComeOut = 49, SpeedSet = 52, SpeedUp = 53, SpeedDown = 54,
 	CheatViewAll = 59, CheatGiveTechs = 60, CheatZeroTechs = 61, CheatAiSpeedIncrease = 62, CheatAiSpeedNormal = 63,
 	CheatAiToggle = 64, CheatIncreaseBuckets = 65, CheatZeroBuckets = 66, CheatInitUnit = 67,
-	Chat = 68, RenameCity = 75, Pause = 76
+	Chat = 68, RenameCity = 75, Pause = 76,
+	// leaving (docs/victory-spec.md 7): RESIGN (op 70, i32 play) and QUIT (op 71, i32 play, 2 flag bytes)
+	Resign = 70, Quit = 71
 };
 
 // One decoded command (the package payload of one verb).
@@ -210,6 +212,8 @@ public:
 	// RENAME_CITY (a city building of the local leader; at most 20 characters). PAUSE: state 1 pauses, 0 resumes.
 	bool issue_rename_city(const Game& g, int32_t o, const std::u16string& name);
 	bool issue_pause(bool state);
+	// CommandManager::issue_resign @941170 / issue_quit @941360: the local seat leaves (Player::resign; quit also ends the session).
+	bool issue_resign(bool quit = false);
 	// CHEAT_*: view_all / give_techs / zero_techs / increase_buckets / zero_buckets for the local leader; the AI toggles; init_unit
 	// (who < 0: one per valid leader).
 	bool issue_cheat(Verb v, int32_t who = -1);

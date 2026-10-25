@@ -16,6 +16,7 @@
 #include "sim/script_host.hpp"
 #include "sim/territory.hpp"
 #include "sim/world_load.hpp"
+#include "sim/victory.hpp"
 
 namespace ron::sim {
 
@@ -228,6 +229,10 @@ void Game::load(const GameFiles& files, const Scenario& s, const Rules& r, uint3
 		if (p.is_human) l.flags |= leaderflag::kHuman;
 	}
 	for (const ScenarioPlayer& p : s.players) {
+	// ...and Game::init_rules_and_teams sets num_players = num_nations = GameInfo.players + 1 (one per seat) and
+	// Game::init_teams Game.num_sides (docs/victory-spec.md 3).
+	game_init_players(*this);
+	game_init_teams(*this);
 		if (p.who < 0 || p.who >= 8) continue;
 		Leader& l = leaders[size_t(p.who)];
 		everyone_mask |= 1u << (uint32_t(p.who) & 31);  // ScenarioRead::load_leader_chunk

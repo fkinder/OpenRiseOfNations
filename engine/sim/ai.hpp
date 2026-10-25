@@ -53,6 +53,7 @@ bool war_allowed(const Game& g);                        // Game::war_allowed @59
 int32_t get_armageddon(const Game& g);                  // Game::get_armageddon @594020
 int32_t get_nukes(const Game& g, int32_t who);          // LeaderData::get_nukes
 int32_t wonder_winning(const Game& g);                  // Game::wonder_winning @5948a0
+int32_t get_wonder_net(const Game& g, int32_t who);     // LeaderData::get_wonder_net @6ebb10
 int32_t get_team_wonder_value(const Game& g, int32_t who);   // @6da990
 int32_t get_enemy_wonder_value(const Game& g, int32_t who);  // @6da8f0
 int32_t get_enemy_unbuilt_wonder_value(const Game& g, int32_t who);  // @6d5e40

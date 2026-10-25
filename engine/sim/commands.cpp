@@ -303,7 +303,7 @@ void CommandPackage::process(Game& g, const Command& c, int32_t play, int32_t pl
 	case Verb::Hotkey: case Verb::ComeOut: case Verb::SpeedSet: case Verb::SpeedUp: case Verb::SpeedDown:
 	case Verb::CheatViewAll: case Verb::CheatGiveTechs: case Verb::CheatZeroTechs: case Verb::CheatAiSpeedIncrease:
 	case Verb::CheatAiSpeedNormal: case Verb::CheatAiToggle: case Verb::CheatIncreaseBuckets: case Verb::CheatZeroBuckets:
-	case Verb::CheatInitUnit: case Verb::Chat: case Verb::RenameCity: case Verb::Pause:
+	case Verb::CheatInitUnit: case Verb::Chat: case Verb::RenameCity: case Verb::Pause: case Verb::Resign: case Verb::Quit:
 		command_process_extra(g, *this, c, play, play_who);  // commands_extra.cpp
 		return;
 	}

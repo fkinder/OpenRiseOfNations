@@ -48,6 +48,13 @@ units are drawn from the sim's view (interpolated, per-guy graphic and animation
 moves the selection (P pauses); `--move WHO:o..@X,Y --frames N --snapshot` for headless checks. Details and stubs:
 `docs/sim-implementation.md`.
 
+**Victory conditions (2026-10-25).** Every mode the lobby offers ends the game as the original does (`docs/victory-spec.md`,
+`engine/sim/victory.*`, "Victory" in sim-implementation): conquest incl. the last-unit defeat, capital / sudden-death elimination, time limit,
+score, wonder and territory clocks (with the 4500 / 1800 / 900 warnings as `GameEvent` kinds 17-22), economic, musical chairs, tech race,
+allied victory (the end-game flag), Armageddon's counter, resign / leave_game, World Government defeats; seats now set `num_nations` /
+`num_sides`; `ron-sim --victory MODE` has a fixture per mode. Left: the nuclear blast (nothing raises the Armageddon count yet), balance mode,
+the HUD text for the new events, wiring replay RESIGN / QUIT into `player_resign`.
+
 ## Next steps, in order
 
 Ported since the last checkpoint: fog of war (`fog-spec.md`, `engine/sim/fog.*`, drawn in `ronmap`), combat steps

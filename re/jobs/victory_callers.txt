@@ -1,0 +1,12 @@
+re/decomp/victory/callers.txt
+1
+Game::process_end_game
+Leader::reset_score
+Game::check_victory
+Player::resign
+Player::leave_game
+Leader::victory
+Leader::defeat
+Game::init_teams
+GameDaemon::process_victory
+Game::defeat_all

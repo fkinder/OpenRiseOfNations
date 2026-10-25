@@ -941,9 +941,51 @@ Checks (seed 12345):
   single player; the scenario value of `players` is not known).
 
 Not done (TODO in code): garrisons (the strength scan's num_inside,
-ejection by swap_team, the AI alarm), Unit::swap_team's cargo and the exact GuyData copy, musical-chairs and economic
-victory (Game.on_team, get_economic), CTW retake adjustments, balance mode, scripted `city_lost` bookkeeping, the
-caravan repath of City::close.
+ejection by swap_team, the AI alarm), Unit::swap_team's cargo and the exact GuyData copy, CTW retake adjustments,
+balance mode, scripted `city_lost` bookkeeping, the caravan repath of City::close. (Musical chairs, economic victory, the
+tech race, the allied victory, `Game.on_team` / `num_sides`: see "Victory" below.)
+
+## Victory (engine/sim/victory.{hpp,cpp}, docs/victory-spec.md)
+
+Every victory mode the lobby / scenario setup offers now ends the game as the original does (decompile in `re/decomp/victory/`, spec
+`docs/victory-spec.md`):
+- **Teams** (`Game::init_teams` @58ae70, `init_rules_and_teams` @589bb0): `Game::load` sets `GameInfo.num_players` / `num_nations` to the scenario's
+  seats (the original: `GameInfo.players + 1`) and `num_sides = teams + loose seats` from `GameInfo.team` before the leaders are
+  initialised; `game_team_counts` derives `Game.on_team[]` (no saved state). The lobby's random team 5 is the lobby's.
+- **Musical chairs** (victory 5): every `chairs * 900` frames the lowest score (or the lowest of each team 0..3) is defeated (type 4), ties
+  spare it; **economic** (victory 8): `get_team_economic` reaching `econwins` (`get_economic` = ceil of the mean of the five income rates / 16);
+  **tech race** (victory 9): `Leader::gain_tech` steps 32 / 33 and the `Build::queue_up` shortcut that grants the last age at once once
+  rush peace is over; **allied victory**: `Leader::set_diplo` -> `victory(self)` + the end-game flag (`victory_checked`, semaphore bit 0x16) when
+  an alliance leaves nobody outside; **Armageddon**: the nuke counter rule (`armageddon_nuke_detonated`; the nuclear blast itself is not ported).
+- **Clock events** for the HUD (`GameEvent` kinds 17-26): wonder / territory clocks started, warned (4500 / 1800 / 900 frames left) and stopped, the time-limit
+  warnings (120 / 300 / 600 ticks), musical-chairs rounds, resignations, the nuke count; `game_is_victory_timer` = `Game::is_victory_timer`.
+- **Elimination**: a leader whose last counted unit dies with no city is defeated by conquest (`Unit::close` @60ee50, `combat_death.cpp`);
+  World Government (`gain_tech` step 19) defeats the leaders whose capital sits with the researcher's side (CAPITAL elimination);
+  `Player::resign` / `leave_game` / `drop` (`player_resign`, `Verb::Resign` / `Verb::Quit`, `CommandManager::issue_resign`): defeat type 6 / 7, or type 1
+  while the leader's capital clock runs.
+- **Score**: `compute_score` and its terms were already exact; `Leader::reset_score` is `leader_reset_score` (the seven age stamps start at -1:
+  the AI's human-pacing no longer sees every age "reached at frame 0").
+- Left (spec section 13): the nuclear blast / effect list (nothing produces the Armageddon count yet), balance mode, co-op seats in `leave_game`, the net layer's
+  own resign policy (`engine/net` calls `leader_defeat` directly), the lobby's random teams.
+
+`ron-sim <game> <scenario.scx> --victory MODE [--verbose]` drives each mode to its end and asserts the winner and the game-over state
+(MODE: `all`, `teams`, `conquest`, `capital`, `sudden`, `time`, `score`, `wonder`, `territory`, `economic`, `chairs`, `armageddon`, `allied`,
+`tech`, `resign`, `reset`).
+
+Checks (2026-10-25, seed 12345, scratch build of HEAD + this work):
+- `--victory all` passes on `Tutorial1/tut1`, `Tutorial3/tut3`, `Tutorial5/tut5`, `Custom/italy_mp` (131 checks, 8 leaders) and `Custom/capture`
+  (a mode that needs more leaders or a capital than the scenario has prints `skip`). Notes the fixtures pin down: a defeat by capital sudden death
+  of a leader with other cities reads type 0 (the nested conquest defeat of `defeat_by`'s hand-overs finishes first), a lone capital reads 2; a chain
+  alliance A-B, B-C ends with C defeated by A's `victory` (only a clique shares the victory); the game ends without a winner when every human is out; a
+  seat that starts with no unit and no city is never defeated by itself; a stopped wonder / territory clock restarts holding the elapsed time.
+- 156/156 stock scenarios, 600 frames, `--ai-every 8`: self-check OK. Digests against HEAD, **31 of 156 change, all by one cause**: `num_nations`
+  / `num_sides` now come from the scenario's seats instead of the default 2 (the 31 are exactly the scenarios whose seat count is not 2 *and* that read
+  it in 600 frames: research price scaling, the AI's distance scaling; with the two assignments removed the 156 digests equal HEAD's). `Custom/europe`'s
+  digest additionally depends on the age-stamp default (-1; AI human-pacing). The other 125 are bit-identical, with and without `--ai-every 8`.
+- `tut5.scx --difficulty 4 --frames 20000`: same events as HEAD (territory victory of L1 at frame 18855, final digest equal) plus the new clock events.
+- `ron-check` failures 0; `ron-sim tut1.scx --frames 600 --roundtrip 300` OK; `ron-sav --engine-roundtrip` 10/10 saves;
+  `ron-sav ... Playback - 2026.08.30 21'23'34 (Sun).rcx --replay`: output identical to HEAD (units 1622, world 1592, builds / guys / leaders 1628);
+  `ron-net selftest` 106/106; zero compiler warnings.
 
 ## Resume here (in order)
 

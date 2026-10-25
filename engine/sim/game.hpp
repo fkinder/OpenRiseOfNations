@@ -118,7 +118,7 @@ struct Leader {
 	int32_t epochs = 0, discovered = 0;       // LeaderDataEncrypt +0xe0 / +0xe4
 	std::array<int32_t, 4> epoch{};          // +0xe8: library lines (0 military, 1 civic, 2 commerce, 3 science)
 	std::array<uint8_t, (kNumTypes + 7) / 8> tech_at_start{}, obs_flags{};  // +0x6c80 / +0x6cf4 BitMask<806>
-	std::array<int32_t, 7> age_stamp{};      // +0x8f8
+	std::array<int32_t, 7> age_stamp{-1, -1, -1, -1, -1, -1, -1};  // +0x8f8: the frame an age was reached (-1: not yet; Leader::reset_score)
 	int32_t gov = -1, gov_hero_frame = -1, misery = 0;  // +0x14, +0xa48, +0x7ec
 	// Heroes::lists[who] (20 preallocated records, grown by one; heroes-spec 2) and Specials::lists[who]: the records of
 	// this leader, num_heroes +0x420 / num_specials +0x43c = slots in use below the high mark (sim/heroes.hpp).
@@ -440,7 +440,9 @@ struct Heights {
 // completed (same), 13 tribute offered (who gives to other, value = good, goods[0] = amount), 14 tribute demanded
 // (who asks other), 15 diplomacy changed (who, other, value = new state 0 war / 1 peace / 2 allied, alert = the old
 // state), 16 resource flash (who, goods[k] != 0 for each good the leader lacked for an action: the console's
-// flash_resource_flags).
+// flash_resource_flags), 17-26 the victory clocks and modes (sim/victory.hpp: wonder / territory clocks started, warned and
+// stopped, time-limit warnings, a musical-chairs round, a resignation, the Armageddon count; kind 4 game over with value 1
+// is the allied victory whose end-game screen is pending).
 namespace gamealert {
 constexpr int32_t kNone = 0, kCityAttacked = 1, kCapitalAttacked = 2, kCityRaided = 3, kAllyCityAttacked = 4,
                   kAllyCapitalAttacked = 5, kRaided = 6, kUnitAttacked = 7, kScoutAttacked = 8;
