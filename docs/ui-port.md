@@ -879,8 +879,20 @@ in-game HUD chat box was only checked through `--mp-act chat=` / `team=` (the CH
 | Out-of-sync recovery notice ("Back in sync at frame 157 (recovery 1); the game goes on.") with `--mp-diverge 150` | PASS (`game_host_recovered.png`) |
 | Conquer the World battle hosted from a campaign (`--ctw-mp --ctw-battle alexander:auto`), host and guest end with the same campaign hash | PASS |
 | Synchronized save (`save@6`) writes byte-identical files; the host reloads it (`--mp-load`) and the guest receives it | PASS |
-| Lobby "Conquer the World..." button / Load Saved Game chooser clicked in the window | NOT RUN (needs the app delegate: campaign session, file chooser) |
-| In-game HUD chat box typed into | NOT RUN (see above) |
+| Lobby "Load Saved Game..." clicked through the real app delegate (fifth pass: `RON_MP_APP_TEST`, below): "Saved game mp_host.ronsave, frame 55: it needs 2 players in its human seats", Start Game, the window game continues from frame 55 in lockstep with a headless guest | PASS (`app_load_lobby_loaded.png`, `app_load_game.png`) |
+| Lobby "Conquer the World..." through the delegate: campaign map, Play, the battle in the window with a headless guest (`--ctw-mp --join`), end -> "The battle is over: won." on the campaign map with the room kept, guest receives the campaign; the host's recording is written and replays in lockstep | PASS (`app_ctw_ctw_list.png`, `app_ctw_ctw_map.png`, `app_ctw_battle.png`, `app_ctw_back.png`) |
+| In-game HUD chat box typed into: Return opens it (key map), characters as key events, Return sends; `/t text` to the allies, `/w name text` to one player, 3 machines (host, 2 guests in a team): each machine shows only the lines for it | PASS (`chat_host.png`, `chat_ayla.png`, `chat_marcus.png`) |
+| Join by host name (`localhost:PORT` from `--join`, headless guest "Marcus" in the chat run) | PASS |
+
+Fifth pass (2026-10-24), how the two NOT RUN rows were run. **Chat:** `ronmap ... --mp-type "TEXT@FRAME"` (repeatable) delivers Return, TEXT character by character and Return to
+`handleKey:` as `NSEvent` key-downs at that game frame (headless `--host` / `--join`, with `--snapshot`; every machine prints the lines its console holds with the recipient masks:
+`from 1 to mask 6`, whisper `mask 5`). The in-game box now understands `/t` and `/w NAME` like the lobby's. Results: Marcus (team with Ayla) sees the broadcast, the team line, his own line
+and the whisper to him, not "hi host"; the host sees no team line; Ayla sees no whisper to Marcus. **Delegate:** `RON_MP_APP_TEST=PREFIX RON_MP_APP_SCRIPT="w:MS;c:host;snap:x;c:load;c:start;
+ctw:CAMPAIGN:LINK;ctwplay;ctwend:1;st;quit"` (windowed `ronmap --menu multiplayer`, the host's real `MapAppDelegate`; clicks go to the front end's mouse handlers at the control's centre
+(`mpDemoPoint`); the window is drawn by a timer because a window started from a script is not visible to the display link; the guest is a headless `ronmap --join`).
+Test seams: `RON_MP_PICK=PATH` answers the file chooser, `RON_MP_NAME` / `RON_MP_PORT`, `RON_MP_NO_COUNTDOWN`, `RON_RECORD_DIR`, `RON_MP_SAVE_DIR`. The campaign chosen with `ctw:` stands
+for the campaign list's New / Load clicks (those screens are `ctw_ui`, checked in section 10); Play is the screens' PlayBattle action consumed as `ctwTakeAction` does. Run in the
+fifth pass on the final build (the whole table above PASS; ports 27460+). Found: the connect screen's Host / Join buttons did not work with the mouse (list-row test swallowed ids 2100+): fixed.
 
 Fixed in this pass: `--menu NAME` as the last argument crashed the app at start (`std::strcmp(argv[argc], ...)` in the screens loop, `more` was stale after the match), so
 `ronmap GAME --menu multiplayer` never opened; `Session::lockstep_verb` speed guards (below).

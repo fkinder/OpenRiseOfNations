@@ -50,8 +50,8 @@ bool has_flag(int argc, char** argv, const char* name) {
 
 int cmd_netgame(int argc, char** argv) {
 	if (argc < 3) {
-		std::fprintf(stderr, "usage: ron-net host <port> (--random STYLE,SIZE,SEED,NATIONS[,TRIBES..] | --scenario FILE [--seed S]) [--humans N] [--frames N] [--save F] [--game DIR]\n"
-		                     "       ron-net join <port> [--address A] [--frames N] [--save F] [--game DIR]\n");
+		std::fprintf(stderr, "usage: ron-net host <port> (--random STYLE,SIZE,SEED,NATIONS[,TRIBES..] | --scenario FILE [--seed S]) [--humans N] [--public] [--frames N] [--save F] [--game DIR]\n"
+		                     "       ron-net join <port> [--address HOST[:PORT]] [--frames N] [--save F] [--game DIR]\n");
 		return 64;
 	}
 	const bool host = !std::strcmp(argv[1], "host");
@@ -107,10 +107,16 @@ int cmd_netgame(int argc, char** argv) {
 				                                                 : uint32_t(std::chrono::steady_clock::now().time_since_epoch().count() & 0x7fffffff);
 			}
 			std::printf("[%s] listening on port %u for %d client(s)\n", tag, port, humans - 1);
+			if (has_flag(argc, argv, "--public")) std::printf("[%s] %s\n", tag, net::public_host_note(port).c_str());
 			tcp = net::TcpTransport::host(port, humans - 1, timeout_ms, err);
 		} else {
-			const char* addr = arg_value(argc, argv, "--address") ? arg_value(argc, argv, "--address") : "127.0.0.1";
-			tcp = net::TcpTransport::join(addr, port, timeout_ms, err);
+			// --address HOST, HOST:PORT (an IPv4 address or a host name that DNS resolves; the port after the colon wins over the positional one)
+			net::Endpoint ep;
+			if (!net::parse_endpoint(arg_value(argc, argv, "--address") ? arg_value(argc, argv, "--address") : "127.0.0.1", port, ep, err)) {
+				std::fprintf(stderr, "[%s] --address: %s\n", tag, err.c_str());
+				return 64;
+			}
+			tcp = net::TcpTransport::join(ep.host, ep.port, timeout_ms, err);
 		}
 		if (!tcp) {
 			std::fprintf(stderr, "[%s] %s\n", tag, err.c_str());

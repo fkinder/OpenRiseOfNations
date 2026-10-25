@@ -17,6 +17,7 @@
 #include "net/seat_transport.hpp"
 #include "node.hpp"
 #include "sim/anim_assets.hpp"
+#include "sim/ctw.hpp"
 #include "sim/save.hpp"
 #include "sim/commands.hpp"
 #include "sim/replay.hpp"
@@ -50,6 +51,86 @@ Env& env_for(const std::string& dir) {
 	return *e;
 }
 
+
+// A Conquer the World battle of a fresh campaign, built the way ctw_cli.mm's `--ctw-battle CAMPAIGN:LINK` does (the first attack the player can make for
+// "auto", "auto:N" the N-th, or FROM>TO). Every peer owns its ConquestGame (the battle's scripts keep a pointer to it), as every machine of a real game does.
+struct CtwBattle {
+	std::unique_ptr<sim::ctw::ConquestGame> game;
+	sim::ctw::ConquestGame::BattleDef def;
+};
+
+bool make_ctw_battle(const ron::GameFiles& files, const sim::Rules& rules, const std::string& spec, int humans, CtwBattle& out, std::string& err) {
+	namespace ctw = sim::ctw;
+	const size_t colon = spec.find(':');
+	std::string want = ctw::lower(spec.substr(0, colon));
+	const std::string link_spec = colon == std::string::npos ? "auto" : spec.substr(colon + 1);
+	std::string stem;
+	const std::vector<std::string> all = ctw::list_campaigns(files);
+	for (const std::string& s : all) {
+		std::string core = ctw::lower(s);
+		if (core.compare(0, 4, "ctw_") == 0) core = core.substr(4);
+		if (core.size() > 7 && core.compare(core.size() - 7, 7, "_map_01") == 0) core = core.substr(0, core.size() - 7);
+		if (ctw::lower(s) == want || core == want) {
+			stem = s;
+			break;
+		}
+	}
+	if (stem.empty())
+		for (const std::string& s : all)
+			if (ctw::lower(s).find(want) != std::string::npos) {
+				stem = s;
+				break;
+			}
+	if (stem.empty()) {
+		err = "no campaign '" + want + "'";
+		return false;
+	}
+	out.game = std::make_unique<ctw::ConquestGame>();
+	ctw::ConquestSetup cs;
+	cs.campaign = stem;
+	cs.seed = 1;
+	cs.difficulty = 2;
+	err = out.game->setup(files, rules, cs);
+	if (!err.empty()) return false;
+	ctw::ConquestGame& g = *out.game;
+	std::vector<ctw::LinkChoice> links = g.find_available_links(g.player_tribe);
+	ctw::LinkChoice pick;
+	if (link_spec.compare(0, 4, "auto") == 0) {
+		if (links.empty()) {
+			err = "the player has no attack available";
+			return false;
+		}
+		const size_t n = link_spec.size() > 5 ? size_t(std::atoi(link_spec.c_str() + 5)) : 0;
+		pick = links[std::min(n, links.size() - 1)];
+	} else {
+		const size_t gt = link_spec.find('>');
+		const int from = gt == std::string::npos ? -1 : g.find_node(link_spec.substr(0, gt));
+		const int to = gt == std::string::npos ? -1 : g.find_node(link_spec.substr(gt + 1));
+		bool found = false;
+		for (const ctw::LinkChoice& l : links)
+			if (from >= 0 && l.from == from && l.to == to) pick = l, found = true;
+		if (!found) {
+			err = "that link is not available to the player (use auto, auto:N or FROM>TO)";
+			return false;
+		}
+	}
+	if (pick.needs_war) g.set_war(pick.attacker, pick.defender);
+	g.cur_link = pick;
+	g.cur_style = g.pick_style(pick);
+	out.def = g.make_battle(pick, g.cur_style);
+	out.def.link = pick;
+	const int seats = int(out.def.seats.size());
+	if (humans < 1 || humans > seats) {
+		err = "the battle has " + std::to_string(seats) + " seats: --humans " + std::to_string(humans) + " does not fit";
+		return false;
+	}
+	for (int i = 0; i < seats; ++i) {   // the room's players take the first seats, the computer the others
+		out.def.seats[size_t(i)].human = i < humans;
+		out.def.setup.nation[size_t(i)].human = i < humans;
+	}
+	return true;
+}
+
 }  // namespace
 
 LoopbackResult run_loopback(const LoopbackOptions& o) {
@@ -59,6 +140,8 @@ LoopbackResult run_loopback(const LoopbackOptions& o) {
 		sim::RandomGameSetup setup = sim::default_random_setup(2);
 		// a scenario game: the seats are the scenario's players, the human-flagged ones first (the lobby's order, apps/map-mac/lobby.mm)
 		const bool scen = !o.scenario.empty();
+		const bool ctw = !o.ctw_battle.empty();
+		std::vector<CtwBattle> ctw_games;   // kept alive: the battle's scripts point into them
 		ron::Scenario sc0;
 		std::string scen_file, scen_rel;
 		std::array<int, 8> scen_who{};
@@ -76,6 +159,15 @@ LoopbackResult run_loopback(const LoopbackOptions& o) {
 			std::stable_sort(ps.begin(), ps.end(), [](const ron::ScenarioPlayer* a, const ron::ScenarioPlayer* b) { return (a->is_human != 0) > (b->is_human != 0); });
 			setup = sim::default_random_setup(std::max<int>(2, int(ps.size())));
 			for (int k = 0; k < 8; ++k) scen_who[size_t(k)] = k < int(ps.size()) ? ps[size_t(k)]->who : k;
+		} else if (ctw) {
+			CtwBattle probe;
+			std::string cerr;
+			if (!make_ctw_battle(*env.files, *env.rules, o.ctw_battle, o.humans, probe, cerr)) {
+				res.text = "--ctw-battle: " + cerr;
+				return res;
+			}
+			setup = probe.def.setup;
+			setup.num_nations = int(probe.def.seats.size());
 		} else {
 			const std::string perr = sim::parse_random_option(*env.rules, o.random_spec, setup);
 			if (!perr.empty()) {
@@ -121,7 +213,16 @@ LoopbackResult run_loopback(const LoopbackOptions& o) {
 			const bool watcher = slot >= plan.nations;
 			sim::RandomExtras extras;
 			std::unique_ptr<sim::Game> g;
-			if (scen) {
+			if (ctw) {
+				ctw_games.emplace_back();
+				std::string cerr;
+				if (!make_ctw_battle(*env.files, *env.rules, o.ctw_battle, n, ctw_games.back(), cerr)) {
+					res.text = "--ctw-battle: " + cerr;
+					return res;
+				}
+				g = ctw_games.back().game->build_battle(*env.files, *env.rules, ctw_games.back().def, env.art.get(), &extras, &extras.error);
+				if (g) extras.setup.num_nations = int(ctw_games.back().def.seats.size());
+			} else if (scen) {
 				ron::Scenario sc = sc0;
 				for (ron::ScenarioPlayer& pl : sc.players) {
 					int seat = -1;
@@ -144,7 +245,7 @@ LoopbackResult run_loopback(const LoopbackOptions& o) {
 			}
 			net::apply_mp_seats(*g, who, mpseats);   // a multiplayer game: names, handicaps (the same on every machine)
 			g->local_play = watcher ? who[0] : slot;   // the seat this machine looks from (an observer watches from the first seat)
-			scenario = scen ? scen_rel : sim::random_setup_string(extras.setup);
+			scenario = scen ? scen_rel : ctw ? sim::scenario_rel_path(*env.files, "ctw:battle") : sim::random_setup_string(extras.setup);
 			seed = extras.setup.seed;
 			Peer& pr = peers[size_t(i)];
 			pr.node = std::make_unique<EngineNode>(*env.files, *env.rules, env.art.get(), std::move(g), scenario, seed, who);
@@ -166,10 +267,12 @@ LoopbackResult run_loopback(const LoopbackOptions& o) {
 			if (!o.record_base.empty() && !watcher) {
 				const std::string base = o.record_base + "_peer" + std::to_string(i) + ".rcx";
 				net::RecordInfo info = net::record_info_for_random(extras.setup, seed, i, who, nd->game(), scenario);
+				info.setup[size_t(sim::kSetGameSpeed)] = uint8_t(cfg.speed);   // the header says the speed the session runs at (a battle's own setup may name another)
 				for (int sl = 0; sl < setup.num_nations && sl < 8; ++sl) {
 					info.seats[size_t(sl)].handicap = mpseats.handicap[size_t(sl)];
 					if (info.seats[size_t(sl)].human) info.seats[size_t(sl)].name = mpseats.name[size_t(sl)];
 				}
+				if (ctw || o.record_start_save) info = net::record_info_for_segment(info, pr.node->save_bytes(), pr.node->game().frame);   // a battle is rebuilt from its start state, not from a header
 				std::string err;
 				if (!pr.node->record(base, info, err)) {
 					res.text = err;
@@ -329,6 +432,7 @@ int cmd_loopback(int argc, char** argv) {
 		else if (const char* v9 = val("--hub-seed")) o.hub_seed = uint32_t(std::atoll(v9));
 		else if (const char* v10 = val("--deadlock-rounds")) o.deadlock_rounds = uint64_t(std::atoll(v10));
 		else if (const char* vs = val("--scenario")) o.scenario = vs;
+		else if (const char* vc = val("--ctw-battle")) o.ctw_battle = vc;
 		else if (const char* vo = val("--observers")) o.observers = std::atoi(vo);
 		else if (const char* vh = val("--handicap")) {
 			for (const char* q = vh; *q;) {
@@ -342,8 +446,8 @@ int cmd_loopback(int argc, char** argv) {
 		else if (!std::strcmp(argv[i], "--no-bot")) o.bots = false;
 		else if (!std::strcmp(argv[i], "--verbose")) o.verbose = true;
 	}
-	if (o.random_spec.empty() && o.scenario.empty()) {
-		std::fprintf(stderr, "usage: ron-net loopback --random STYLE,SIZE,SEED,NATIONS[,TRIBES..] [--humans N] [--frames F] [--delay a,b] [--recover]\n"
+	if (o.random_spec.empty() && o.scenario.empty() && o.ctw_battle.empty()) {
+		std::fprintf(stderr, "usage: ron-net loopback (--random STYLE,SIZE,SEED,NATIONS[,TRIBES..] | --scenario FILE | --ctw-battle CAMPAIGN[:LINK]) [--humans N] [--frames F] [--delay a,b] [--recover]\n"
 		                     "         [--diverge FRAME:PEER]... [--record BASE] [--save FILE] [--game DIR] [--verbose]\n");
 		return 64;
 	}

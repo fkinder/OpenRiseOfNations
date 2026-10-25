@@ -526,6 +526,7 @@ static bool debug_skip(const char* pass) {
 - (void)attachMultiplayer:(std::shared_ptr<mp::Runtime>)rt loaded:(std::shared_ptr<std::vector<uint8_t>>)save;  // `save`: the game continues a saved one
 @property(nonatomic, readonly) BOOL multiplayer;
 - (BOOL)mpRunHeadless:(int)frames;
+- (void)mpTypeScript:(const std::vector<std::pair<int, std::string>>&)lines;  // --mp-type: lines typed into the chat box through the key handler
 - (void)mpClose;  // headless: waits for the other machines, then ends the session (closes the recording)
 @end
 
@@ -656,6 +657,7 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	std::unique_ptr<ron::sim::Game> _game;
 	std::string _scenarioPath;  // the scenario file as Game::load got it (a save records it relative to the install); a random game: its setup text
 	BOOL _randomActive;         // a random-map skirmish (sim/newgame.hpp) instead of a scenario file
+	std::vector<std::pair<int, std::string>> _mpTypes;  // --mp-type: (frame, text) typed into the chat box as key events
 	uint64_t _mpFilterSeq;      // multiplayer chat filter: the presentation events below this sequence number were handled
 	BOOL _mpScenarioHumans;     // a multiplayer scenario game: `_mpHuman` says which of the scenario's players are human
 	std::array<bool, 8> _mpHuman;
@@ -1599,6 +1601,7 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	while (!_mpEnded) {
 		const int r = [self mpStepOnce:&turn];
 		if (r == -1) return NO;
+		if (r == 1 && !_mpTypes.empty()) [self mpRunTyped];
 		if (r == 1 && turn && (_game->frame >= frames || _game->game_over)) break;  // the game ended: the frames stop there
 		if (r == 0) {
 			[NSThread sleepForTimeInterval:0.0005];
@@ -1611,7 +1614,36 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	}
 	[self syncSimBuildings];
 	std::printf("multiplayer: frame %d, %u recovery(ies), %d player(s)\n", _game->frame, _mp->epoch(), _mp->humans());
+	for (const auto& ln : _game->ctl.chat)   // what this machine's console holds (every machine queues every line; the display filter hides the ones for others)
+		std::printf("[mp] chat console: from %d to %s: \"%s\"\n", ln.from, ln.bits == 0xFFFFFFFFu ? "everybody" : ("mask " + std::to_string(ln.bits)).c_str(), ln.text.c_str());
 	return !_mpEnded;
+}
+
+- (void)mpTypeScript:(const std::vector<std::pair<int, std::string>>&)lines {
+	_mpTypes = lines;
+}
+
+// One key-down event to the key handler, as the window delivers it.
+- (void)mpKey:(NSString*)chars code:(unsigned short)code {
+	NSEvent* e = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:0 context:nil
+	                            characters:chars charactersIgnoringModifiers:chars isARepeat:NO keyCode:code];
+	[self handleKey:e];
+}
+
+// --mp-type "TEXT@FRAME": at that frame the player presses Return (the key map opens the chat box), types TEXT character by character and presses Return.
+- (void)mpRunTyped {
+	for (auto it = _mpTypes.begin(); it != _mpTypes.end();) {
+		if (!_game || _game->frame < it->first) {
+			++it;
+			continue;
+		}
+		NSString* text = @(it->second.c_str());
+		it = _mpTypes.erase(it);
+		[self mpKey:@"\r" code:36];
+		if (!_hud.chat_active()) std::fprintf(stderr, "--mp-type: Return did not open the chat box\n");
+		for (NSUInteger k = 0; k < text.length; k++) [self mpKey:[text substringWithRange:NSMakeRange(k, 1)] code:0];
+		[self mpKey:@"\r" code:36];
+	}
 }
 
 - (void)mpClose {
@@ -2735,15 +2767,48 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	}
 	const int me = [self localPlayer];
 	int32_t bits = -1;
-	if (mode != 0) {
+	std::u16string line = ron::utf8_to_utf16(text);
+	int lineMode = mode;
+	if (_mp) {  // the chat box's prefixes (as the lobby's): "/t text" to the allies, "/w name text" to one player
+		auto low = [](std::string v) {
+			for (char& c : v) c = char(std::tolower(static_cast<unsigned char>(c)));
+			return v;
+		};
+		auto after = [&](size_t n) {
+			std::string r = text.substr(n);
+			while (!r.empty() && r.front() == ' ') r.erase(r.begin());
+			return r;
+		};
+		if (text.rfind("/t ", 0) == 0 || text.rfind("/team ", 0) == 0) {
+			lineMode = 1;
+			line = ron::utf8_to_utf16(after(text.find(' ')));
+		} else if (text.rfind("/w ", 0) == 0 || text.rfind("/whisper ", 0) == 0) {
+			std::string rest = after(text.find(' '));
+			const size_t sp = rest.find(' ');
+			const std::string name = low(rest.substr(0, sp));
+			const std::string body = sp == std::string::npos ? std::string() : rest.substr(sp + 1);
+			int target = -1;
+			for (int slot = 0; slot < _mp->plan().nations && slot < 8; slot++)
+				if (_mp->plan().peer_of[size_t(slot)] >= 0 && slot != _mp->slot() && low(_mp->seat_name(slot)) == name) target = _mp->who_of(slot);
+			if (target < 0 || body.empty()) {
+				[self say:target < 0 ? "There is no player named \"" + rest.substr(0, sp) + "\"." : std::string("Whisper what? /w NAME text")];
+				return;
+			}
+			lineMode = 3;
+			bits = (1 << me) | (1 << target);
+			line = ron::utf8_to_utf16(body);
+		}
+		if (line.empty()) return;
+	}
+	if (lineMode == 1 || lineMode == 2) {
 		bits = 1 << me;
 		for (int i = 0; i < 8; i++) {
 			if (i == me || !(_game->leaders[size_t(i)].flags & ron::sim::leaderflag::kValid)) continue;
 			const bool ally = _game->leaders[size_t(me)].diplos(i) == 2 && _game->leaders[size_t(i)].diplos(me) == 2;
-			if ((mode == 1) == ally) bits |= 1 << i;
+			if ((lineMode == 1) == ally) bits |= 1 << i;
 		}
 	}
-	const std::u16string tx = ron::utf8_to_utf16(text);
+	const std::u16string tx = line;
 	[self issueAs:me block:^bool { return _cm.issue_chat(tx, bits); }];
 }
 
@@ -6921,6 +6986,7 @@ static int vk_of(NSEvent* e) {
 	[self.window orderFrontRegardless];
 	if (prefs::get().has("fullscreen") && prefs::get().fullscreen) [self.window toggleFullScreen:nil];  // the Options page's Graphics pane
 	if (getenv("RON_FLOW_TEST")) [self flowTest:0];
+	if (getenv("RON_MP_APP_TEST")) [self mpAppTest:0];
 	if (getenv("RON_CTW_FLOW_TEST") && _ctwSession) [self ctwFlowTest:0];
 }
 
@@ -6980,6 +7046,92 @@ static int vk_of(NSEvent* e) {
 			default: [NSApp terminate:nil]; return;
 		}
 		[self flowTest:step + 1];
+	});
+}
+
+// Window test of the multiplayer screens through the real app delegate (docs/ui-port.md 13.7). RON_MP_APP_TEST=PREFIX, RON_MP_APP_SCRIPT = steps separated by ';':
+//   w:MS wait | c:NAME click a control of the front end (host, join, load, scenario, ctw, start, back: FrontEnd mpDemoPoint) through its mouse handlers
+//   snap:NAME snapshot of the window's current content to PREFIX_NAME.png | st print the state | ctw:CAMPAIGN[:LINK] a campaign session for the host, its map open
+//   ctwplay the campaign map's Play button | ctwend:N the battle in the window ends with outcome N (1 won) | quit.
+// Only the host's window is driven; the other machines are headless `ronmap --join` processes.
+- (void)mpAppTest:(NSUInteger)index {
+	static NSArray<NSString*>* steps;
+	if (!steps) {
+		// a window started from a script is not visible to the display link (occluded, other Space): the test draws it itself
+		[NSTimer scheduledTimerWithTimeInterval:0.02 repeats:YES block:^(NSTimer*) { [self.view draw]; }];
+		const char* sc = getenv("RON_MP_APP_SCRIPT");
+		steps = [(sc ? @(sc) : @"st") componentsSeparatedByString:@";"];
+	}
+	if (index >= steps.count) {
+		[NSApp terminate:nil];
+		return;
+	}
+	const std::string step = steps[index].UTF8String;
+	const size_t colon = step.find(':');
+	const std::string cmd = step.substr(0, colon), arg = colon == std::string::npos ? "" : step.substr(colon + 1);
+	double delay = 0.4;
+	const char* prefix = getenv("RON_MP_APP_TEST");
+	const CGSize ds = self.view.drawableSize;
+	const float scale = float(self.window.backingScaleFactor > 0 ? self.window.backingScaleFactor : 1);
+	if (cmd == "w") {
+		delay = std::atoi(arg.c_str()) / 1000.0;
+	} else if (cmd == "c") {
+		FrontEnd* m = self.menu;
+		const CGPoint p = m ? [m mpDemoPoint:@(arg.c_str())] : CGPointZero;
+		if (CGPointEqualToPoint(p, CGPointZero)) {
+			std::printf("[app test] click %s: that control is not on the screen (%s)\n", arg.c_str(), m ? "front end" : "a game is running");
+		} else {
+			[m mouseMoved:p];
+			[m mouseDown:p clicks:1];
+			[m mouseUp:p];
+			std::printf("[app test] clicked %s at %.0f,%.0f\n", arg.c_str(), p.x, p.y);
+		}
+	} else if (cmd == "snap") {
+		NSString* path = [NSString stringWithFormat:@"%s_%s.png", prefix, arg.c_str()];
+		const BOOL ok = self.menu ? [self.menu snapshotTo:path width:int(ds.width) height:int(ds.height) scale:scale]
+		                          : self.renderer ? [self.renderer snapshotTo:path width:int(ds.width) height:int(ds.height) scale:scale] : NO;
+		std::printf("[app test] snapshot %s %s\n", path.UTF8String, ok ? "written" : "FAILED");
+	} else if (cmd == "st") {
+		if (self.menu) {
+			std::printf("[app test] front end: %s\n", [self.menu mpDemoState].UTF8String);
+		} else if (self.renderer) {
+			[self.renderer updateTitle];
+			std::printf("[app test] game window: %s%s\n", self.window.title.UTF8String, self.renderer.multiplayer ? " (multiplayer)" : "");
+		}
+	} else if (cmd == "ctw") {
+		const size_t c2 = arg.find(':');
+		ron::GameFiles files(self.gameDir.UTF8String);
+		ron::sim::ctw::ConquestSetup cs;
+		cs.campaign = ctwcli::resolve_campaign(files, arg.substr(0, c2));
+		cs.seed = 1;
+		std::string err;
+		std::shared_ptr<ctwui::Session> session = cs.campaign.empty() ? nullptr : ctwui::new_session(self.gameDir.UTF8String, cs, &err);
+		ron::sim::ctw::LinkChoice link;
+		if (!session || !ctwcli::pick_link(session->game, c2 == std::string::npos ? "auto" : arg.substr(c2 + 1), &link, &err)) {
+			std::printf("[app test] ctw: %s\n", session ? err.c_str() : "no campaign");
+		} else {
+			ron::sim::ctw::ConquestGame& cg = session->game;
+			cg.cur_link = link;
+			cg.cur_style = cg.pick_style(link);
+			session->battle = cg.make_battle(link, cg.cur_style);
+			session->battle_is_defense = false;
+			session->battle_pending = true;
+			_ctwSession = session;
+			[self.menu ctwShowSession:session sub:@"" select:nil];
+			std::printf("[app test] campaign %s: %s attacks %s; map open\n", cs.campaign.c_str(), cg.tribe_name(link.attacker).c_str(), cg.node_name(link.to).c_str());
+		}
+	} else if (cmd == "ctwplay") {
+		[self.menu mpDemoCtwPlay];
+	} else if (cmd == "ctwend") {
+		if (self.renderer.onCtwEnd) self.renderer.onCtwEnd(std::atoi(arg.c_str()));
+		else std::printf("[app test] ctwend: no campaign battle in the window\n");
+	} else if (cmd == "quit") {
+		[NSApp terminate:nil];
+		return;
+	}
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, int64_t(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+		std::fflush(stdout);
+		[self mpAppTest:index + 1];
 	});
 }
 
@@ -7172,8 +7324,7 @@ static int vk_of(NSEvent* e) {
 		}
 		auto rt = std::make_shared<mp::Runtime>(room);
 		rt->set_recover(false);   // a battle's Game cannot be rebuilt from a save
-		rt->record_to("");
-		[r attachMultiplayer:rt loaded:nullptr];
+		[r attachMultiplayer:rt loaded:nullptr];   // recorded like every multiplayer game (Recorded Games folder) when its map is a generated one
 		__weak MapAppDelegate* weakSelf = self;
 		const bool host = room->is_host();
 		__weak MapRenderer* weakR = r;
@@ -7426,7 +7577,8 @@ int main(int argc, const char* argv[]) {
 		int mpHostPort = 0, mpHumans = 2, mpDiverge = -1;  // --host PORT / --join HOST:PORT: one machine of a lockstep game (lobby.h), headless
 		std::string mpJoin, mpRecord, mpLoad, mpSave;
 		std::vector<std::pair<std::string, uint32_t>> mpActs;  // --mp-act what@turn,...
-		bool mpBot = false;
+		bool mpBot = false, mpPublic = false;                      // --public: the host prints how players outside the LAN can reach it
+		std::vector<std::pair<int, std::string>> mpTypes;            // --mp-type "TEXT@FRAME": typed into the chat box through the key handler
 		int mpObservers = 0, mpMaxObs = 2;          // --mp-observers K: the host waits for K observer machines; --mp-max-observers N
 		bool mpWatch = false, ctwMp = false;        // --mp-watch: this guest asks to be an observer; --ctw-mp: a campaign battle with the room
 		std::string mpName;                         // --mp-name
@@ -7484,6 +7636,12 @@ int main(int argc, const char* argv[]) {
 				mpJoin = argv[++i];
 			} else if (a == "--humans" && more) {
 				mpHumans = std::atoi(argv[++i]);
+			} else if (a == "--public") {
+				mpPublic = true;
+			} else if (a == "--mp-type" && more) {
+				std::string v = argv[++i];
+				const size_t at = v.rfind('@');
+				mpTypes.push_back({at == std::string::npos ? 0 : std::atoi(v.c_str() + at + 1), v.substr(0, at)});
 			} else if (a == "--mp-bot") {
 				mpBot = true;  // a demo player gives this machine's seat something to do
 			} else if (a == "--mp-record" && more) {
@@ -7890,6 +8048,7 @@ int main(int argc, const char* argv[]) {
 					return 2;
 				}
 				std::printf("[host] ctw battle %s attacks %s; listening on port %d for %d player(s)\n", cg.tribe_name(link.attacker).c_str(), cg.node_name(link.to).c_str(), mpHostPort, mpHumans - 1);
+				if (mpPublic) std::printf("[host] %s\n", ron::net::public_host_note(uint16_t(mpHostPort)).c_str());
 				const double t0 = CACurrentMediaTime();
 				while (room->humans() < mpHumans + mpObservers || !room->guests_ready()) {
 					room->pump();
@@ -7909,10 +8068,12 @@ int main(int argc, const char* argv[]) {
 					return 2;
 				}
 			} else {
-				std::string host = mpJoin;
-				int port = 7777;
-				if (const size_t colon = host.rfind(':'); colon != std::string::npos) port = std::atoi(host.c_str() + colon + 1), host.resize(colon);
-				if (!room->join(host, uint16_t(port), mpName.empty() ? "Guest" : mpName, 30000, merr)) {
+				ron::net::Endpoint ep;   // HOST, HOST:PORT: an address or a host name that DNS resolves
+				if (!ron::net::parse_endpoint(mpJoin, 7777, ep, merr)) {
+					std::fprintf(stderr, "--join: %s\n", merr.c_str());
+					return 2;
+				}
+				if (!room->join(ep.host, ep.port, mpName.empty() ? "Guest" : mpName, 30000, merr)) {
 					std::fprintf(stderr, "%s\n", merr.c_str());
 					return 2;
 				}
@@ -7943,7 +8104,7 @@ int main(int argc, const char* argv[]) {
 			if (r) {
 				auto rt = std::make_shared<mp::Runtime>(room);
 				rt->set_recover(false);
-				rt->record_to("");
+				rt->record_to(mpRecord);  // a campaign battle is recorded like any game (generated maps only; none unless asked here)
 				rt->enable_bot(mpBot);
 				for (const auto& act : mpActs) rt->add_act(act.first, act.second);
 				[r attachMultiplayer:rt loaded:nullptr];
@@ -8024,6 +8185,7 @@ int main(int argc, const char* argv[]) {
 				for (const auto& ask : mpAsk)  // the host's own seat (the first player's): handicap only, the rest is the setup's
 					if (ask.first == ron::net::SeatField::Handicap) room->lobby().set("handicap_0", ask.second);
 				std::printf("[host] listening on port %d for %d player(s)%s\n", mpHostPort, mpHumans - 1, mpScenario ? " (scenario)" : "");
+				if (mpPublic) std::printf("[host] %s\n", ron::net::public_host_note(uint16_t(mpHostPort)).c_str());
 				// guests' requests are mirrored into the setup as they arrive, as the lobby screen does
 				auto serve = [&]() {
 					room->pump();
@@ -8102,10 +8264,12 @@ int main(int argc, const char* argv[]) {
 					std::printf("\n");
 				}
 			} else {
-				std::string host = mpJoin;
-				int port = 7777;
-				if (const size_t colon = host.rfind(':'); colon != std::string::npos) port = std::atoi(host.c_str() + colon + 1), host.resize(colon);
-				if (!room->join(host, uint16_t(port), mpName.empty() ? "Guest" : mpName, 30000, merr)) {
+				ron::net::Endpoint ep;   // HOST, HOST:PORT: an address or a host name that DNS resolves
+				if (!ron::net::parse_endpoint(mpJoin, 7777, ep, merr)) {
+					std::fprintf(stderr, "--join: %s\n", merr.c_str());
+					return 2;
+				}
+				if (!room->join(ep.host, ep.port, mpName.empty() ? "Guest" : mpName, 30000, merr)) {
 					std::fprintf(stderr, "%s\n", merr.c_str());
 					return 2;
 				}
@@ -8197,6 +8361,7 @@ int main(int argc, const char* argv[]) {
 			std::fprintf(stderr, "--load-game failed\n");
 			return 1;
 		}
+		if (r.multiplayer && !mpTypes.empty()) [r mpTypeScript:mpTypes];
 		if (r.multiplayer && ![r mpRunHeadless:sim_frames]) {
 			std::fprintf(stderr, "the multiplayer game did not run to frame %d\n", sim_frames);
 			[r mpClose];

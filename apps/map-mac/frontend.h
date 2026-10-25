@@ -63,6 +63,11 @@
 // while the host's front end keeps pumping; `mpDemoState` says which screen it is on and what the room holds (tests read it after each scripted click).
 - (BOOL)mpDemoJoin:(int)port name:(NSString*)name pumping:(FrontEnd*)hostFe;
 - (NSString*)mpDemoState;
+// Window tests through the real app delegate (RON_MP_APP_TEST, main.mm): the centre of a lobby control in view points ("host", "join", "load", "scenario",
+// "ctw", "start", "back"; CGPointZero when it is not on the screen), to click it with mouseMoved / mouseDown / mouseUp; and the campaign map's Play press.
+// RON_MP_PICK=PATH answers the lobby's file chooser (Load Saved Game, Scenario) without the modal panel; RON_MP_NAME / RON_MP_PORT preset the connect screen.
+- (CGPoint)mpDemoPoint:(NSString*)which;
+- (void)mpDemoCtwPlay;
 - (void)ctwShowSession:(std::shared_ptr<ctwui::Session>)session sub:(NSString*)sub select:(NSString*)country;
 // Back from a multiplayer game (a Conquer the World battle): the room is a lobby again. The host (`ctw` YES) returns to the campaign map with the
 // room kept (the next battle can be played with the same players), a guest to the lobby, with `message` as a line in the chat.

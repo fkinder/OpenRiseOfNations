@@ -1,6 +1,8 @@
 #include "net/tcp.hpp"
 
 #include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <errno.h>
 #include <netdb.h>
 #include <fcntl.h>
@@ -10,7 +12,9 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <thread>
 
@@ -35,6 +39,114 @@ uint64_t steady_ms() {
 	return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
+// A TCP connection to `a`, given `ms` to complete (a non-blocking connect: an address nobody answers at must not hold the caller for the system's
+// two minutes). The descriptor is returned non-blocking; -1 when it did not connect.
+int connect_within(const sockaddr_in& a, int ms) {
+	const int fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (fd < 0) return -1;
+	set_nonblocking(fd);
+	int rc = connect(fd, reinterpret_cast<const sockaddr*>(&a), sizeof a);
+	if (rc != 0 && errno == EINPROGRESS) {
+		pollfd pf{fd, POLLOUT, 0};
+		if (::poll(&pf, 1, ms) == 1) {
+			int err = 0;
+			socklen_t len = sizeof err;
+			rc = getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0 ? 0 : -1;
+		}
+	}
+	if (rc != 0) {
+		close(fd);
+		return -1;
+	}
+	return fd;
+}
+
+}  // namespace
+
+std::vector<std::string> resolve_ipv4(const std::string& host, std::string& error) {
+	std::vector<std::string> out;
+	in_addr lit{};
+	if (inet_pton(AF_INET, host.c_str(), &lit) == 1) {
+		out.push_back(host);
+		return out;
+	}
+	addrinfo hints{}, *res = nullptr;
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
+	if (host.empty() || getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || !res) {
+		error = "cannot find the host \"" + host + "\"";
+		return out;
+	}
+	for (addrinfo* p = res; p; p = p->ai_next) {
+		if (p->ai_family != AF_INET) continue;
+		char buf[INET_ADDRSTRLEN];
+		if (!inet_ntop(AF_INET, &reinterpret_cast<sockaddr_in*>(p->ai_addr)->sin_addr, buf, sizeof buf)) continue;
+		if (std::find(out.begin(), out.end(), buf) == out.end()) out.push_back(buf);
+	}
+	freeaddrinfo(res);
+	if (out.empty()) error = "cannot find the host \"" + host + "\"";
+	return out;
+}
+
+bool parse_endpoint(const std::string& text, uint16_t default_port, Endpoint& out, std::string& error) {
+	std::string s = text;
+	while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.erase(s.begin());
+	while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
+	if (s.compare(0, 6, "tcp://") == 0) s.erase(0, 6);
+	out.host = s;
+	out.port = default_port;
+	const size_t colon = s.rfind(':');
+	if (colon != std::string::npos) {
+		const std::string ps = s.substr(colon + 1);
+		int v = 0;
+		bool digits = !ps.empty() && ps.size() <= 5;
+		for (char c : ps) digits = digits && c >= '0' && c <= '9';
+		if (digits) v = std::atoi(ps.c_str());
+		if (!digits || v < 1024 || v > 65535) {
+			error = "the port after the colon must be a number between 1024 and 65535";
+			return false;
+		}
+		out.port = uint16_t(v);
+		out.host = s.substr(0, colon);
+	}
+	while (!out.host.empty() && out.host.back() == ' ') out.host.pop_back();
+	if (out.host.empty()) {
+		error = "type the host's address or name, for example 192.168.0.12:7777 or games.example.org:7777";
+		return false;
+	}
+	for (unsigned char c : out.host)
+		if (c <= ' ' || c == '/' || c == '\\') {
+			error = "that is not an address or a host name";
+			return false;
+		}
+	return true;
+}
+
+std::vector<std::string> local_addresses() {
+	std::vector<std::string> out;
+	ifaddrs* list = nullptr;
+	if (getifaddrs(&list) != 0) return out;
+	for (ifaddrs* a = list; a; a = a->ifa_next) {
+		if (!a->ifa_addr || a->ifa_addr->sa_family != AF_INET || !(a->ifa_flags & IFF_UP) || (a->ifa_flags & IFF_LOOPBACK)) continue;
+		char buf[INET_ADDRSTRLEN];
+		const sockaddr_in* in = reinterpret_cast<const sockaddr_in*>(a->ifa_addr);
+		if (inet_ntop(AF_INET, &in->sin_addr, buf, sizeof buf)) out.push_back(buf);
+	}
+	freeifaddrs(list);
+	return out;
+}
+
+std::string public_host_note(uint16_t port) {
+	const std::vector<std::string> addrs = local_addresses();
+	std::string a;
+	for (const std::string& x : addrs) a += (a.empty() ? "" : ", ") + x;
+	return "This machine listens on every interface, TCP port " + std::to_string(port) + (a.empty() ? "" : "; its LAN address is " + a) +
+	       ". Players on the same network join with that address. Over the internet the game cannot find your router's address or open the port itself "
+	       "(no UPnP / NAT-PMP): forward TCP port " + std::to_string(port) + " on your router to this machine and give the players the router's public address "
+	       "(any \"what is my IP\" page shows it), or a host name that points to it, as ADDRESS:" + std::to_string(port) + ".";
+}
+
+namespace {
 }  // namespace
 
 uint64_t TcpTransport::now_ms() const { return steady_ms(); }
@@ -207,30 +319,23 @@ void TcpTransport::accept_new() {
 std::unique_ptr<TcpTransport> TcpTransport::join(const std::string& address, uint16_t port, int timeout_ms, std::string& error) {
 	std::unique_ptr<TcpTransport> t(new TcpTransport());
 	const uint64_t deadline = steady_ms() + uint64_t(timeout_ms);
+	// the name is resolved once (an address literal needs no lookup); a host with several addresses is tried address by address
+	const std::vector<std::string> addrs = resolve_ipv4(address, error);
+	if (addrs.empty()) return nullptr;
 	int fd = -1;
 	for (;;) {
-		fd = socket(AF_INET, SOCK_STREAM, 0);
-		sockaddr_in a{};
-		a.sin_family = AF_INET;
-		a.sin_port = htons(port);
-		if (inet_pton(AF_INET, address.c_str(), &a.sin_addr) != 1) {
-			// a host name ("localhost", "my-mac.local"): the first IPv4 address it resolves to
-			addrinfo hints{}, *res = nullptr;
-			hints.ai_family = AF_INET;
-			hints.ai_socktype = SOCK_STREAM;
-			if (getaddrinfo(address.c_str(), nullptr, &hints, &res) != 0 || !res) {
-				error = "cannot find the host \"" + address + "\"";
-				close(fd);
-				return nullptr;
-			}
-			a.sin_addr = reinterpret_cast<sockaddr_in*>(res->ai_addr)->sin_addr;
-			freeaddrinfo(res);
+		for (const std::string& ip : addrs) {
+			sockaddr_in a{};
+			a.sin_family = AF_INET;
+			a.sin_port = htons(port);
+			inet_pton(AF_INET, ip.c_str(), &a.sin_addr);
+			const uint64_t now = steady_ms();
+			fd = connect_within(a, int(std::clamp<uint64_t>(now >= deadline ? 1 : deadline - now, 1, 5000)));
+			if (fd >= 0) break;
 		}
-		if (connect(fd, reinterpret_cast<sockaddr*>(&a), sizeof a) == 0) break;
-		close(fd);
-		fd = -1;
+		if (fd >= 0) break;
 		if (steady_ms() >= deadline) {
-			error = "cannot connect to " + address + ":" + std::to_string(port);
+			error = "cannot connect to " + address + ":" + std::to_string(port) + (addrs.size() == 1 && addrs[0] != address ? " (" + addrs[0] + ")" : std::string());
 			return nullptr;
 		}
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));

@@ -167,19 +167,7 @@ void Room::pump() {
 	}
 }
 
-std::vector<std::string> Room::lan_addresses() const {
-	std::vector<std::string> out;
-	ifaddrs* list = nullptr;
-	if (getifaddrs(&list) != 0) return out;
-	for (ifaddrs* a = list; a; a = a->ifa_next) {
-		if (!a->ifa_addr || a->ifa_addr->sa_family != AF_INET || !(a->ifa_flags & IFF_UP) || (a->ifa_flags & IFF_LOOPBACK)) continue;
-		char buf[INET_ADDRSTRLEN];
-		const sockaddr_in* in = reinterpret_cast<const sockaddr_in*>(a->ifa_addr);
-		if (inet_ntop(AF_INET, &in->sin_addr, buf, sizeof buf)) out.push_back(buf);
-	}
-	freeifaddrs(list);
-	return out;
-}
+std::vector<std::string> Room::lan_addresses() const { return net::local_addresses(); }
 
 uint32_t Room::present_mask() const { return transport_ ? transport_->present_mask() : 0; }
 
@@ -600,6 +588,7 @@ std::shared_ptr<ctwui::Session> ctw_battle_session(Room& room, std::shared_ptr<c
 		if (!s) return nullptr;
 	}
 	s->battle = B;
+	if (!B.custom_map.empty()) sim::set_battle_setup_text("");   // a custom map has no setup text: a stale one of an earlier battle must not name this game
 	return s;
 }
 
@@ -717,6 +706,10 @@ bool parse_spec(const std::string& game_dir, const std::string& spec, sim::Rando
 }
 
 std::string default_mp_save_dir() {
+	if (const char* over = getenv("RON_MP_SAVE_DIR")) {   // tests: the saves go elsewhere than the player's folder
+		[[NSFileManager defaultManager] createDirectoryAtPath:@(over) withIntermediateDirectories:YES attributes:nil error:nil];
+		return over;
+	}
 	NSString* base = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
 	NSString* dir = [[[base stringByAppendingPathComponent:@"OpenRiseOfNations"] stringByAppendingPathComponent:@"Saves"] stringByAppendingPathComponent:@"Multiplayer"];
 	[[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
@@ -724,6 +717,10 @@ std::string default_mp_save_dir() {
 }
 
 std::string default_record_dir() {
+	if (const char* over = getenv("RON_RECORD_DIR")) {   // tests: the recordings go elsewhere than the player's folder
+		[[NSFileManager defaultManager] createDirectoryAtPath:@(over) withIntermediateDirectories:YES attributes:nil error:nil];
+		return over;
+	}
 	NSString* base = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
 	NSString* dir = [[[base stringByAppendingPathComponent:@"OpenRiseOfNations"] stringByAppendingPathComponent:@"Recorded Games"] stringByAppendingPathComponent:@"Multi"];
 	[[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES attributes:nil error:nil];
@@ -940,10 +937,18 @@ void Runtime::start_recording() {
 		std::strftime(stamp, sizeof stamp, "%Y.%m.%d %H'%M'%S", &tm);
 		rec_base_ = default_record_dir() + "/" + stamp + ".rcx";
 	}
-	// a game that is not a random map (a scenario) cannot be rebuilt from its header: its start state is embedded as a native save
-	if (start_save_.empty() && !sim::is_random_scenario(scenario_) && hooks_) hooks_->snapshot(start_save_);
+	// a Conquer the World battle on a custom map has no setup text a replay could rebuild (the save of such a battle cannot be loaded either)
+	if (scenario_.rfind("ctw:", 0) == 0) {
+		note("This campaign battle is played on a custom map: it is not recorded.", 0xFFFFE070);
+		rec_on_ = false;
+		return;
+	}
+	// a game that is not a random map (a scenario) cannot be rebuilt from its header: its start state is embedded as a native save. A campaign battle
+	// is built from the campaign (cards, armies, the style's scripts), which a header cannot hold either: the setup text names its map, the save its state
+	if (start_save_.empty() && (!sim::is_random_scenario(scenario_) || setup_.ctw) && hooks_) hooks_->snapshot(start_save_);
 	const net::MpSeats seats = net::lobby_mp_seats(room_->lobby());
 	rec_first_ = net::record_info_for_random(setup_, seed_, slot_, who_, game_(), scenario_);
+	rec_first_.setup[size_t(sim::kSetGameSpeed)] = uint8_t(speed0_);   // the speed the session runs at (a replay's turn clock needs it), whatever the setup said
 	if (!start_save_.empty()) rec_first_ = net::record_info_for_segment(rec_first_, start_save_, game_().frame);  // a continued game: its save is embedded
 	for (int i = 0; i < setup_.num_nations && i < 8; ++i) {
 		if (setup_.nation[size_t(i)].human) rec_first_.seats[size_t(i)].name = seat_name(i);

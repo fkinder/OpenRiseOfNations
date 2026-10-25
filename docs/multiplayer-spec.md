@@ -632,6 +632,33 @@ as co-op partners of several guests (the guests fill the opposing seats first); 
 | Corpus statistics (59 MP replays) | `rcxdump --json`; this session's scripts | gaps = 6, ping = 72, 45 saves, 48 mismatches |
 | The port: reader, lockstep, tests | `engine/sim/replay.*`, `engine/net/*`, `apps/net/*` (`ron-net`) | section 8 |
 
+### 8.7 Fifth pass: campaign battle recordings, internet play groundwork, window tests (2026-10-24)
+
+- **Recording a Conquer the World battle.** `Runtime::start_recording` (lobby.mm) no longer skips campaign battles. A battle on a *generated* map (`battle_setup_text()`:
+  `random:...;ctw=1;conq=...;btrt=...;btsu=...`) is recorded with the header's `scenario_path` = that text and the **start state embedded as a native save** (a battle is built
+  by `ConquestGame::build_battle`: cards, armies, style scripts, none of which a header can hold). A battle on a *custom map* (`.scx`) has no setup text and is not recorded
+  (a note says so; the stale text of an earlier battle is cleared in `ctw_battle_session`). The header's game-speed byte is now the session's real speed (a replay's turn clock
+  needs it; a battle's own setup may name another). `ron-net loopback --ctw-battle CAMPAIGN[:LINK]` (`new_world:auto`, `world:auto`, `napoleon:auto:2`, `FROM>TO`) plays a battle
+  with N human seats over the loopback; `ronmap --ctw-mp --mp-record FILE` records one headless. `ron-net replay` plays the file in lockstep (instances agree at every turn,
+  same frame count as the live game). Single player: the app has no single-player recorder (only the multiplayer runtime writes `.rcx`); a one-human room / loopback
+  (`--humans 1`) is recorded and replayed the same way.
+- **Known limit (engine, not the net layer):** a battle game loaded from a save does **not** step like the live one: one `do_frame` after the load the loaded game's rules diff
+  (`RULE` section, own_rules vs base) grows by about 3 KB (live 2,819,079 bytes, loaded 2,822,113 at frame 1). So the replay of a battle agrees with itself but its final
+  state is not byte-identical to the live game's (random games are: 2/2 checks). Same reason the OOS recovery is off for battles. Also, `--ctw-battle alexander:auto` and
+  `cold_war:auto` are custom-map battles: building the *same* custom-map battle twice in one process gives different games (945,868 differing bytes; separate processes are fine,
+  which is how a real game runs). The selftest therefore uses the generated `new_world:auto`.
+- **Internet play groundwork (no UPnP / NAT-PMP).** `engine/net/tcp.*`: `parse_endpoint` ("HOST", "HOST:PORT", `tcp://`, spaces), `resolve_ipv4` (DNS once, every A record tried),
+  non-blocking connect bounded by the join timeout (an unanswered address used to hold the caller for the system's minutes), `local_addresses`, `public_host_note`. Join by host
+  name works in the Multiplayer screen, `ronmap --join NAME:PORT` and `ron-net join PORT --address NAME[:PORT]`. `--public` on `ron-net host` / `ronmap --host` prints the LAN
+  address and the note; the host's lobby shows the same advice. **NAT limitation:** the host must be reachable: on a home network forward TCP port P on the router to the host's
+  LAN address and give the players the router's public address (or a DNS name) as ADDRESS:P. The game cannot discover the public address (no STUN) or open the port; two players both
+  behind NAT with no forwarding cannot connect (no relay / hole punching; the lockstep star relays through the host, so only the host needs the open port). LAN discovery (UDP)
+  does not cross the internet. There is no authentication or encryption on the wire.
+- **Bug found by the window pass:** on the Multiplayer connect screen the Host / Join buttons, the fields and the LAN rows (ids 2100+) were taken by the Tutorials list's row test
+  (`h >= kRow`) in `mouseDown`, so they did nothing with the mouse. Fixed (frontend.mm).
+- Tests: `ron-net selftest` 91 -> 104 (join address parsing, DNS, join by `localhost`, bounded connect, the `--public` note, a CtW battle with 2 players and with 1: lockstep,
+  header text with `ctw=1` / `conq=`, replay up to the live frame).
+
 ## Open questions (❓)
 
 1. Default `time_out` and pulse period of `CrossplayNetLibSys` (set by the lobby layer).

@@ -1317,6 +1317,10 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		_pressed = h;
 		return;
 	}
+	if (_screen == kMpConnect && !_popup.open) {  // its buttons, fields and list rows are 2100+: not the Tutorials list's rows (kRow..), which would swallow the press
+		_pressed = h;
+		return;
+	}
 	if (_dropOpen && !(h >= kDropItem && h < kDropItem + 6) && h != kDrop) {
 		_dropOpen = NO;
 		return;
@@ -2285,6 +2289,8 @@ static std::string clean_name(std::string s) {
 		_mpName = n.length ? n.UTF8String : "Player";
 		NSString* p = [d stringForKey:@"MpPort"];
 		_mpPort = p.length ? p.UTF8String : "7777";
+		if (const char* e = getenv("RON_MP_NAME")) _mpName = e;   // window tests (docs/ui-port.md 13.7): the name and port the screens start with
+		if (const char* e = getenv("RON_MP_PORT")) _mpPort = e;
 		NSString* a = [d stringForKey:@"MpAddress"];
 		_mpAddr = a.length ? a.UTF8String : "";
 	}
@@ -2326,6 +2332,7 @@ static std::string clean_name(std::string s) {
 		std::string addr;
 		for (const std::string& a : _room->lan_addresses()) addr += (addr.empty() ? "" : ", ") + a;
 		_mpLines.push_back({1, "You are the host. Players on your network find this game in their Multiplayer list, or type " + (addr.empty() ? std::string("your address") : addr) + ":" + std::to_string(_room->port()) + "."});
+		_mpLines.push_back({1, "Over the internet: forward TCP port " + std::to_string(_room->port()) + " on your router to this Mac and give the players its public address (or a host name) with the port; the game cannot open the port for you."});
 	} else if (_room) {
 		_mpLines.push_back({1, "Connected. The host sets the game up; choose your nation, team and colour in your row, then press Ready."});
 	}
@@ -2372,21 +2379,15 @@ static bool parse_port(const std::string& s, int& out) {
 }
 
 - (void)mpJoin {
-	std::string host = _mpAddr;
-	int port = 7777;
-	const size_t colon = host.rfind(':');
-	if (colon != std::string::npos) {
-		if (!parse_port(host.substr(colon + 1), port)) {
-			_mpMessage = "The port after the colon must be a number between 1024 and 65535.";
-			return;
-		}
-		host = host.substr(0, colon);
-	}
-	while (!host.empty() && host.back() == ' ') host.pop_back();
-	if (host.empty()) {
-		_mpMessage = "Type the host's address, for example 192.168.0.12:7777.";
+	// "address", "address:port" or "name.example.org:port" (a host name is looked up by Room::join)
+	ron::net::Endpoint ep;
+	std::string perr;
+	if (!ron::net::parse_endpoint(_mpAddr, 7777, ep, perr)) {
+		_mpMessage = perr.empty() ? "Type the host's address, for example 192.168.0.12:7777." : perr + ".";
 		return;
 	}
+	const std::string host = ep.host;
+	const int port = ep.port;
 	[self mpSaveFields];
 	[self click];
 	[self setBusy:@"Connecting…"];
@@ -2646,6 +2647,17 @@ static bool parse_port(const std::string& s, int& out) {
 	else [self.host frontEndPlayMultiplayer:_room setup:s save:nullptr];
 }
 
+// The file chooser of the lobby's buttons. RON_MP_PICK=PATH answers it without a window (the window tests, docs/ui-port.md 13.7: a modal panel cannot be
+// driven from a script); otherwise the open panel, nil when cancelled.
+- (NSURL*)mpPickFile:(NSString*)title directory:(NSString*)dir {
+	if (const char* pick = getenv("RON_MP_PICK")) return [NSURL fileURLWithPath:@(pick)];
+	NSOpenPanel* panel = [NSOpenPanel openPanel];
+	panel.title = title;
+	panel.directoryURL = [NSURL fileURLWithPath:dir];
+	if ([panel runModal] != NSModalResponseOK || !panel.URL) return nil;
+	return panel.URL;
+}
+
 // The host picks a scenario: its players become the seats (humans first), the rules are the scenario's.
 - (void)mpChooseScenario {
 	if (_mpScenOn) {  // a second click goes back to a random map
@@ -2655,15 +2667,13 @@ static bool parse_port(const std::string& s, int& out) {
 		_mpPublished.clear();
 		return;
 	}
-	NSOpenPanel* panel = [NSOpenPanel openPanel];
-	panel.title = @"Choose a scenario for the room";
-	panel.directoryURL = [NSURL fileURLWithPath:[_dir stringByAppendingPathComponent:@"scenario"]];
-	if ([panel runModal] != NSModalResponseOK || !panel.URL) return;
-	if (![panel.URL.pathExtension.lowercaseString isEqualToString:@"scx"]) {
+	NSURL* url = [self mpPickFile:@"Choose a scenario for the room" directory:[_dir stringByAppendingPathComponent:@"scenario"]];
+	if (!url) return;
+	if (![url.pathExtension.lowercaseString isEqualToString:@"scx"]) {
 		_mpLines.push_back({1, "A scenario file ends in .scx."});
 		return;
 	}
-	[self mpUseScenario:panel.URL.path.UTF8String];
+	[self mpUseScenario:url.path.UTF8String];
 }
 
 - (BOOL)mpUseScenario:(const std::string&)path {
@@ -2753,11 +2763,9 @@ static bool parse_port(const std::string& s, int& out) {
 		_mpLines.push_back({1, "The saved game was forgotten; the setup is yours again."});
 		return;
 	}
-	NSOpenPanel* panel = [NSOpenPanel openPanel];
-	panel.title = @"Load a saved multiplayer game";
-	panel.directoryURL = [NSURL fileURLWithPath:@(mp::default_mp_save_dir().c_str())];
-	if ([panel runModal] != NSModalResponseOK || !panel.URL) return;
-	NSData* data = [NSData dataWithContentsOfURL:panel.URL];
+	NSURL* url = [self mpPickFile:@"Load a saved multiplayer game" directory:@(mp::default_mp_save_dir().c_str())];
+	if (!url) return;
+	NSData* data = [NSData dataWithContentsOfURL:url];
 	if (!data.length) {
 		_mpLines.push_back({1, "That file could not be read."});
 		return;
@@ -2776,7 +2784,7 @@ static bool parse_port(const std::string& s, int& out) {
 		_room->lobby().set("identity", 1);   // the players keep the seats they connected in
 		int humans = 0;
 		for (int i = 0; i < s.num_nations && i < 8; i++) humans += s.nation[size_t(i)].human;
-		_mpSaveText = std::string(panel.URL.lastPathComponent.UTF8String) + ", frame " + std::to_string(info.frame);
+		_mpSaveText = std::string(url.lastPathComponent.UTF8String) + ", frame " + std::to_string(info.frame);
 		_mpLines.push_back({1, "Saved game " + _mpSaveText + ": it needs " + std::to_string(humans) + " players in its human seats."});
 		_mpPublished.clear();
 	} catch (const std::exception& e) {
@@ -3234,9 +3242,34 @@ static bool parse_port(const std::string& s, int& out) {
 	return YES;
 }
 
+// The centre of a lobby / connect control in view points, for a scripted click through the real hit boxes (mouseMoved / mouseDown / mouseUp): "host", "join",
+// "load", "scenario", "ctw", "start" (the Play button), "back". CGPointZero when the control is not on the screen.
+- (CGPoint)mpDemoPoint:(NSString*)which {
+	IfaceRect r{0, 0, 0, 0};
+	if ([which isEqualToString:@"host"]) r = _mpHostBtn;
+	else if ([which isEqualToString:@"join"]) r = _mpJoinBtn;
+	else if ([which isEqualToString:@"load"]) r = _mpLoadRect;
+	else if ([which isEqualToString:@"scenario"]) r = _mpScenRect;
+	else if ([which isEqualToString:@"ctw"]) r = _mpCtwRect;
+	else if ([which isEqualToString:@"start"]) r = [self layout].play;
+	else if ([which isEqualToString:@"back"]) r = [self layout].back;
+	if (r.r <= r.l) return CGPointZero;
+	if (getenv("RON_MP_APP_DEBUG")) std::printf("[app test] %s: rect %d,%d,%d,%d ox %d oy %d fit %.3f hit %d (screen %d)\n", which.UTF8String, r.l, r.r, r.t, r.b, _ox, _oy, _fit, [self hit:CGPointMake(float(r.l + r.r) / 2, float(r.t + r.b) / 2)], int(_screen));
+	return CGPointMake((float(r.l + r.r) / 2 + _ox) * _fit, (float(r.t + r.b) / 2 + _oy) * _fit);
+}
+
+// The Play button of the campaign map, as the screens' PlayBattle action is consumed (ctwTakeAction): with the room open the battle goes to every machine.
+- (void)mpDemoCtwPlay {
+	std::shared_ptr<ctwui::Session> s = _ctw ? _ctw->session() : nullptr;
+	if (s && _room && _mpCtwOn && _room->is_host()) [self mpStartCtw:s];
+}
+
 - (NSString*)mpDemoState {
-	NSString* scr = _screen == kMpLobby ? @"mp-lobby" : _screen == kMpConnect ? @"multiplayer" : @"other";
-	return [NSString stringWithFormat:@"screen=%@ room=%d humans=%d counting=%d message='%s'", scr, _room ? 1 : 0, _room ? _room->humans() : 0, _room && _room->counting() ? _room->countdown_left() : 0, _mpMessage.c_str()];
+	NSString* scr = _screen == kMpLobby ? @"mp-lobby" : _screen == kMpConnect ? @"multiplayer" : _screen == kCtwMap ? @"ctw-map" : _screen == kCtw ? @"ctw" : @"other";
+	std::string lines;   // the lobby's last chat lines (the host's notes to itself too)
+	for (size_t k = _mpLines.size() > 3 ? _mpLines.size() - 3 : 0; k < _mpLines.size(); k++) lines += " | " + _mpLines[k].text;
+	return [NSString stringWithFormat:@"screen=%@ room=%d humans=%d counting=%d save='%s' ctw=%d scen=%d message='%s' lines:%s", scr, _room ? 1 : 0, _room ? _room->humans() : 0,
+	                                  _room && _room->counting() ? _room->countdown_left() : 0, _mpSaveText.c_str(), int(_mpCtwOn), int(_mpScenOn), _mpMessage.c_str(), lines.c_str()];
 }
 
 - (BOOL)mpDemoPort:(int)port guests:(NSArray<NSString*>*)guests {

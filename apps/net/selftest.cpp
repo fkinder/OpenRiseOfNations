@@ -25,7 +25,9 @@
 #include "net/tcp.hpp"
 #include "common.hpp"
 #include "loopback.hpp"
+#include "sim/newgame.hpp"
 #include "sim/replay.hpp"
+#include "sim/save.hpp"
 
 namespace ronnet {
 
@@ -640,6 +642,49 @@ void test_engine(Tally& t, const std::string& dir, uint32_t seed) {
 		t.check(r.ok && r.identical && int(r.fnv.size()) == 2 + variant,
 		        std::string("engine, scenario game (") + (variant ? "Tutorial 1, 2 players + 1 observer" : "italy_mp, 8 seats, 2 players") + "): identical native saves", r.ok ? "frame " + std::to_string(r.frame) : r.text);
 	}
+	// 5. Conquer the World battles (generated map, docs/multiplayer-spec.md 8.7): the recording's header carries the battle's setup text (ctw=1, the conquest
+	//    map input) and the start state; ron-net replay plays it back in lockstep, the instances agree at every turn and end at the frame the game ended at.
+	//    One variant with two players, one with a single player (a battle of the campaign played alone against the computer).
+	for (int players = 2; players >= 1; --players) {
+		LoopbackOptions o;
+		o.game_dir = dir;
+		o.ctw_battle = "new_world:auto";
+		o.humans = players;
+		o.frames = 160;
+		o.record_base = (tmp / ("ctw" + std::to_string(players))).string();
+		o.save_out = (tmp / ("ctw" + std::to_string(players) + ".sav")).string();
+		o.dhi = 3;
+		const LoopbackResult r = run_loopback(o);
+		const std::string what = std::string("engine, Conquer the World battle (new_world:auto, ") + (players == 2 ? "2 players" : "1 player") + ")";
+		t.check(r.ok && r.identical && int(r.fnv.size()) == players, what + ": lockstep, identical native saves", r.ok ? "frame " + std::to_string(r.frame) : r.text);
+		bool header_ok = false, replay_ok = false;
+		std::string why;
+		if (r.ok && r.segments.count(players - 1)) {
+			const std::string file = r.segments.at(players - 1)[0];
+			sim::Replay rp;
+			std::string err;
+			if (!sim::read_replay(file, rp, err)) {
+				why = err;
+			} else {
+				const std::string text = sim::to_utf8(rp.header.scenario_path);
+				sim::RandomGameSetup parsed;
+				header_ok = rp.native_save && rp.header.multiplayer && sim::is_random_scenario(text) && text.find(";ctw=1") != std::string::npos &&
+				            text.find(";conq=") != std::string::npos && sim::parse_random_setup(text, parsed) && parsed.ctw && !parsed.conquest.empty();
+				const std::string out = (tmp / ("ctw" + std::to_string(players) + "_replay.sav")).string();
+				const int rc = replay_native(rp, file, dir, 0, 3, out, false);
+				const std::vector<uint8_t> got = slurp(out);
+				int32_t frame = -1;
+				try {
+					frame = sim::read_save_info(got).frame;
+				} catch (const std::exception&) {
+				}
+				replay_ok = rc == 0 && frame == r.frame;
+				why = "replay frame " + std::to_string(frame) + " of " + std::to_string(r.frame) + ", rc " + std::to_string(rc);
+			}
+		}
+		t.check(header_ok, what + ": the recording's header holds the battle's setup text (ctw=1, conq=) and the start state");
+		t.check(replay_ok, what + ": ron-net replay plays the recording in lockstep (instances agree at every turn) up to the frame the game ended at", why);
+	}
 	fs::remove_all(tmp, ec);
 }
 
@@ -997,6 +1042,50 @@ void test_tcp_room(Tally& t) {
 	t.check(hl.start(5) && hl.plan().players == 2, "room over TCP: START fixes the plan of the machines that remain");
 }
 
+// ---------------------------------------------------------------- internet play groundwork: host names, ports, the host's note (docs/multiplayer-spec.md 8.7)
+
+void test_endpoints(Tally& t) {
+	net::Endpoint ep;
+	std::string err;
+	bool ok = net::parse_endpoint("games.example.org:7790", 7777, ep, err) && ep.host == "games.example.org" && ep.port == 7790;
+	ok = ok && net::parse_endpoint("  192.168.0.12  ", 7777, ep, err) && ep.host == "192.168.0.12" && ep.port == 7777;
+	ok = ok && net::parse_endpoint("tcp://my-mac.local:27461", 7777, ep, err) && ep.host == "my-mac.local" && ep.port == 27461;
+	t.check(ok, "join address: HOST, HOST:PORT, a name with a dash / dots, tcp:// and stray spaces parse; the default port is 7777");
+	bool bad = !net::parse_endpoint("", 7777, ep, err) && !net::parse_endpoint(":7777", 7777, ep, err) && !net::parse_endpoint("host:80", 7777, ep, err) &&
+	           !net::parse_endpoint("host:abc", 7777, ep, err) && !net::parse_endpoint("host:99999", 7777, ep, err) && !net::parse_endpoint("a b:7777", 7777, ep, err);
+	t.check(bad, "join address: an empty host, a missing host, a port outside 1024..65535 or not a number, and a space inside the name are refused with a message", err);
+	const std::vector<std::string> lo = net::resolve_ipv4("localhost", err), lit = net::resolve_ipv4("10.1.2.3", err);
+	t.check(!lo.empty() && std::find(lo.begin(), lo.end(), "127.0.0.1") != lo.end() && lit.size() == 1 && lit[0] == "10.1.2.3", "DNS: localhost resolves to 127.0.0.1, an address literal to itself");
+	std::string e2;
+	const bool none = net::resolve_ipv4("no-such-host.invalid", e2).empty() && e2.find("cannot find the host") == 0;
+	t.check(none, "DNS: an unknown name is reported as \"cannot find the host\" instead of hanging", e2);
+	// a guest joins a room by host name and port; an unreachable address gives up within the timeout
+	const uint16_t port = uint16_t(27460 + (getpid() % 39));
+	std::string herr;
+	std::unique_ptr<net::TcpTransport> host = net::TcpTransport::host_open(port, herr);
+	if (!host) {
+		t.check(false, "join by host name: listen on " + std::to_string(port), herr);
+		return;
+	}
+	std::unique_ptr<net::TcpTransport> guest;
+	std::string jerr;
+	std::thread th([&]() { guest = net::TcpTransport::join("localhost", port, 5000, jerr); });
+	for (int i = 0; i < 300 && !guest; ++i) {
+		host->accept_new();
+		host->idle(10);
+	}
+	th.join();
+	t.check(guest && guest->local_peer() == 1 && host->peers().size() == 1, "join by host name: \"localhost\" + port reaches the room and gets slot 1", jerr);
+	guest.reset();
+	const auto t0 = std::chrono::steady_clock::now();
+	std::string uerr;
+	auto lost = net::TcpTransport::join("203.0.113.7", 27499, 600, uerr);   // TEST-NET-3: nobody answers
+	const long ms = long(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count());
+	t.check(!lost && ms < 3000 && uerr.find("cannot connect") == 0, "join: an address nobody answers at fails inside the timeout with a message (not the system's minutes)", uerr + ", " + std::to_string(ms) + " ms");
+	const std::string note = net::public_host_note(7777);
+	t.check(note.find("7777") != std::string::npos && note.find("forward") != std::string::npos && note.find("UPnP") != std::string::npos, "--public: the host's note names the port to forward and says there is no UPnP");
+}
+
 // ---------------------------------------------------------------- LAN discovery
 
 void test_discovery(Tally& t) {
@@ -1088,6 +1177,7 @@ int cmd_selftest(int argc, char** argv) {
 	test_drop_with_observer(t, seed);
 	test_seat_transport(t, seed);
 	test_tcp_room(t);
+	test_endpoints(t);
 	test_discovery(t);
 	test_chat_set(t);
 	if (engine) test_engine(t, game, seed);

@@ -17,6 +17,20 @@
 
 namespace ron::net {
 
+// "host" or "host:port" (a host name or an IPv4 address, "tcp://" allowed before it) as typed in a join field or given on a command line. The port
+// is 1024..65535 when present, `default_port` otherwise. False with `error` for an empty / malformed text.
+struct Endpoint {
+	std::string host;
+	uint16_t port = 7777;
+};
+bool parse_endpoint(const std::string& text, uint16_t default_port, Endpoint& out, std::string& error);
+// The IPv4 addresses a host name resolves to (an address literal resolves to itself). Empty with `error` when it cannot be found.
+std::vector<std::string> resolve_ipv4(const std::string& host, std::string& error);
+// The non-loopback IPv4 addresses of this machine's interfaces that are up (what a LAN player types), and the text a host shows or prints for
+// internet play: no UPnP, the LAN address, the port to forward and the NAT limitation (docs/multiplayer-spec.md 8.7).
+std::vector<std::string> local_addresses();
+std::string public_host_note(uint16_t port);
+
 class TcpTransport : public Transport {
 public:
 	// Listens on `port` and waits until `clients` peers have connected (or `timeout_ms` passed). Null with `error` on failure.

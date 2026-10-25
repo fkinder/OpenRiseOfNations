@@ -11,6 +11,7 @@ namespace ronnet {
 
 struct LoopbackOptions {
 	std::string game_dir, random_spec;
+	std::string ctw_battle;                    // "CAMPAIGN[:LINK]" (alexander:auto, napoleon:auto:2, world:FROM>TO): a Conquer the World battle on its generated map; the first `humans` seats are players
 	std::string scenario;                      // a scenario file (instead of random_spec): its players are the seats, the human-flagged ones first
 	int humans = 2;
 	int observers = 0;                         // machines that only watch (game slots above the nations; docs/multiplayer-spec.md 8.6)
@@ -22,6 +23,7 @@ struct LoopbackOptions {
 	uint64_t deadlock_rounds = 400000;
 	bool recover = false, bots = true, verbose = false;
 	std::vector<std::pair<int, int>> diverge;  // (frame, peer): a divergence is injected into the peer when its game reaches the frame
+	bool record_start_save = false;            // every recording embeds the start state as a native save (always so for a Conquer the World battle)
 	std::string record_base;                   // records "<base>_peer<i>.rcx" (and "_2", "_3" ... segments after a recovery)
 	std::string save_out;                      // peer 0's final native save
 };

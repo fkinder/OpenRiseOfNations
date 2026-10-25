@@ -12,7 +12,7 @@
 //   ron-net loopback --random STYLE,SIZE,SEED,NATIONS [--humans N] [--frames F] [--recover] [--diverge FRAME:PEER] [--record BASE] [--save F]
 //                                                        N engine instances of one random game in this process; the OOS recovery and the .rcx recording
 //   ron-net host <port> --random STYLE,SIZE,SEED,NATIONS[,TRIBES..] [--humans N] [--frames N] [--save F] [--game DIR]
-//   ron-net join <port> [--address A] [--frames N] [--save F] [--game DIR]
+//   ron-net join <port> [--address HOST[:PORT]] [--frames N] [--save F] [--game DIR]
 //                                                        a real LAN game of two (or more) processes; both end with identical native saves
 #include <algorithm>
 #include <csignal>
