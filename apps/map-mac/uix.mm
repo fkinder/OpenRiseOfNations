@@ -322,7 +322,6 @@ void unit_extra_options(const Ctx& c, std::vector<hud::Option>& out) {
 			if (hud::Option* o = add(out, hud::kOptAutoExplore, 0, 2, true, on > 0 && off <= on)) o->orange = on > 0 && off > 0;
 		}
 	}
-	if (!c.advanced) return;
 	bool own_all = true, attacker = false, ground_attack = false, noncitizen = false;
 	for (const auto& k : *c.units) {
 		const Unit* u = unit_of(c, k);
@@ -333,6 +332,21 @@ void unit_extra_options(const Ctx& c, std::vector<hud::Option>& out) {
 		noncitizen = noncitizen || u->type != ptype::kPeasants;
 	}
 	if (!own_all) return;
+	// The port shows the soldiers' STANCE (2,2) and FORM (3,2) without the Advanced Menu too (docs/ui-port.md section 14): the
+	// original keeps them behind it, where few players find them. Citizens' stances and the other "A" rows stay advanced-only.
+	if (!c.advanced) {
+		const Shown st = selection_stance(c);
+		if (st.kind == 0) {
+			if (hud::Option* o = add(out, hud::kOptStance, 2, 2, true)) o->variant_list = "combat", o->variant = st.option, o->orange = st.mixed;
+		}
+		if (attacker) {
+			if (hud::Option* o = add(out, hud::kOptForm, 3, 2, true)) {
+				const Shown f = selection_form(c);
+				o->variant_list = "form", o->variant = f.option, o->orange = f.mixed;
+			}
+		}
+		return;
+	}
 	const int pending = c.targeting ? *c.targeting : -1;
 	// "A" rows of UnitOut::make_options: GUARD (3,0), PATROL (4,0), ATTACK_GROUND (0,1), STANCE (2,2), FORM (3,2), DISBAND (4,3).
 	if (noncitizen) {

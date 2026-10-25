@@ -931,6 +931,10 @@ the two were unified, so the original's 9 x 18 `hotkey_groups` layout and the re
   outside the original's enum) with the icon `apps/map-mac/resources/group-icon.tga` (61 x 39, found like the menu logo: the bundle's
   Resources, next to a dev build, or this source tree; `UiRenderer::file_texture` accepts such an absolute path), its tooltip
   "Agrupar: ..." (G) or "Reagrupar: ..." (Shift+G) when the selection is a group; without the file it is a text button.
+- **Stance and formation always on the card**: for own soldiers (a combat stance list, attackers for the formation) the card shows
+  STANCE (2, 2) and FORM (3, 2) without the Advanced Menu (`uix::unit_extra_options`); the original keeps them behind it. A click
+  opens the choice as before (the formation's spacing / facing comes from the right-drag). Citizens' stances, guard, patrol, bombard
+  and disband stay advanced-only.
 - **Regroup** (`regroupGroup`, the panel button, the card button or **Shift+G** with the group selected): one `issue_move_to` for the
   whole group to the centroid of its living members. `Group::action_move_near` lays the members out in their formation around that
   point (`docs/movement-spec.md` section 11) and they walk there as one group move. A right-click move of a group is the same group
