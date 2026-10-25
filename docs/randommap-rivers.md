@@ -281,10 +281,14 @@ per `River` object in creation order (`make_riverlist` makes one River per path 
      half-land, or the tile is a water tile / the wcoord is `land == 1` / the tile is a mountain tile (`tdata & 3 == 2`); otherwise the wcoord is queued
      for the land update, the four corner heights of the tile become `(h + z) / 2` and the 121 tcoords `move[0..120]` around it are queued once
      for smoothing;
-   - **marking**: for the 36 tcoords `move[0..35]` around the sample's tile: if any of its four corner heights is `< 0` and its wcoord has no mountain,
+   - **marking**: for the 9 tcoords `move[0..8]` (the 3 x 3 tiles) around the sample's tile (seventh pass: the decompile's `local_18 + 1` on an
+     `undefined4 *` with `(int)local_18 < 0x24` is a byte offset, `ADD ECX,4; CMP ECX,0x24` @889b56 = 9 iterations; it was ported as 36 before): if any of its four corner heights is `< 0` and its wcoord has no mountain,
      forest, rock or oil flag (`0x10 / 0x28 / 0x800`), is not water (unless half-land), has no cliff flag `0x40`, `blocked == 0` and the wcoord's
      CoordInfo flags have no coastal bit (`& 4`), then `World::set_river_at` @6b1f80 sets `tdata |= 0x800` and `WData.flags |= 0x1000`;
-   - `Terrain::move_goody` (land variant, resources section 9) on the sample's wcoord.
+   - `Terrain::move_goody` (land variant, resources section 9) on the sample's wcoord. When it moves an oil derrick it also calls
+     `TerrainOil::add_rocky_patch` on the NEW cell (@84ad29, `Terrain +0x4d7c` = TerrainOil enabled, set by `Terrain::init` @851770): the oil plateau
+     (`terraform_for_building`) is stamped at the new place right then, in the middle of the river's sample loop, on the heights the river has dug so far
+     (seventh pass; `current 2`'s river 0 moves the derrick from (10, 79) to (12, 80) at sample #936, section 34, whose window the river has not reached yet: the second plateau is stamped there and the later sections dig through it).
 6. **Tail of `create_sections`**: `TerrainOut::ensure_45_deg_slope` @869890 on the queue until it is empty (a vertex whose neighbour tile (not mountain,
    not water) is higher than `h + 79.68` is lowered to `h + 79.68 - 4` when that is positive and queued again), then two `smooth_tcoord` passes
    over the ORIGINAL queue (`TerrainOut::smooth_tcoord` @86c3a0), and in `calculate_all` `Terrain::spot_update_land_batch` @84d540 sets
@@ -337,7 +341,9 @@ After the third pass the A* paths are exact: every generated river cell is in ea
 (7510 / 8462 / 6049 before, 0 now). On `current 2.SVX` the cells go 202 save / 129 ours (78 common) -> 212 ours (201 common) and the trough
 tiles 1730 -> 99 differing. The remaining river difference there sat on the lake shore, where the half-land and corner heights still differed;
 the fourth pass fixed those heights (`randommap-spec.md`, "Fourth pass": the second influence line is chosen through the owner cell), after which
-the saved river cells are all matched (202 of 202, 11 extra on lake shores) and so are all 1730 saved trough tiles (82 extra).
+the saved river cells are all matched (202 of 202, 11 extra on lake shores) and so are all 1730 saved trough tiles (82 extra). The "extra" ones were the
+marking neighbourhood (36 offsets instead of the asm's 9, seventh pass): now 202 / 202 cells and 1730 / 1730 tiles, no extras, and every trough vertex of
+`current 2` is exact (the lobes beside river 0 were the missing oil plateau of `move_goody`, see section 5).
 
 What closed it: the `astar_river` tie order (`ordered_insert` @4796f0 sends equal keys left, so the newest equal node pops first), the
 open/closed dedup (closed receives only expanded nodes and dead ends), the ancestor-chain test, and the orthogonal neighbour pinch test

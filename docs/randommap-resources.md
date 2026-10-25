@@ -334,7 +334,9 @@ are read (-1 outside the map). Then, each in this order:
 3. **Derrick**: `World::set_oil_at(x, y, 0)` and rock flag `0x8` off; the first of `move[9..48]` whose `land` equals the source's (a water derrick looks for
    `land` 2 or 1 with mask 8), not half-land, `is_clear_land(mask | 0x80)` @874b60 (no mountain / forest / rock / oil / river / cliff flag unless the mask
    allows it, `blocked == 0`, CoordInfo coastal bit clear) and not south forest gets `set_oil_at(..., 1)`; the rock flag `0x8` is set there (the ocean variant
-   always, the land variant only for a derrick that was on land).
+   always, the land variant only for a derrick that was on land). The LAND variant (`Terrain::move_goody` @84a3d0, the river's and the cliffs') then runs
+   `TerrainOil::add_rocky_patch` on the new cell (@84ad29; the ocean variant does not): the oil plateau `terraform_for_building` at the new place, at that
+   moment of the generation (`Gen::move_goody_at` for the cliffs works on `Result::heights`).
 
 `Objects::init_good` / `init_item` / `World::set_oil_at` reuse the first free slot of their array (also `put_good`, `put_goody`, `Gen::set_oil_at` now).
 

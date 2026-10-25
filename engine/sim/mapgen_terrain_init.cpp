@@ -886,6 +886,10 @@ struct TerrainInit {
 				if (!is_clear_land_oil(cx, cy, mask | 0x80)) continue;
 				if (g.has_south_forest(cx, cy)) continue;
 				g.set_oil_at(cx, cy, true);
+				// Terrain::move_goody (land variant) @84ad29: `if (TerrainOil enabled, Terrain +0x4d7c, set by Terrain::init @851770)
+				// TerrainOil::add_rocky_patch(new cell)` = the oil plateau (terraform_for_building) at the NEW place, run in the middle of the river
+				// sample that moved the derrick; the ocean variant (move_ocean_goody) has no such call.
+				if (!ocean) add_rocky_patch(cx, cy);
 				// the ocean variant always sets the rock flag; the land variant only on land
 				if (ocean || mask != 8) W(cx, cy).flags |= 8;
 				break;
@@ -1135,6 +1139,10 @@ struct TerrainInit {
 	std::vector<int> rv_list;                        // RiverOut +0xac: tcoord indices (x + 4 xs y) queued for smoothing
 	std::vector<std::array<int, 2>> rv_wcoords;      // RiverOut +0x280: wcoords the terraform visited
 
+	// RON_RIVER_TRACE=1: one stderr line per river, per terraform sample (APPLY / SKIP and why) and per tile marked 0x800 (river, section, k, tile, cell state)
+	const bool trace_on = std::getenv("RON_RIVER_TRACE") != nullptr;
+	int tr_river = 0, tr_section = 0, tr_k = 0, tr_sample = 0;
+
 	bool t_inb(int tx, int ty) const { return tx >= 0 && ty >= 0 && tx < txs && ty < ys * 4; }
 
 	void rv_set_river_at(int tx, int ty) {  // World::set_river_at @6b1f80 with param_3 = 1
@@ -1144,6 +1152,7 @@ struct TerrainInit {
 
 	// RiverSectionOut::terraform_from_river_vert @88b360
 	void terraform_from_river_vert(float x, float y, float z) {
+		const int sample_no = tr_sample++;
 		const int tx = tcoord_of(int(x)), ty = tcoord_of(int(y));
 		const int wx = tx >> 2, wy = ty >> 2;
 		const uint16_t tm = w.t(tx, ty);
@@ -1152,9 +1161,16 @@ struct TerrainInit {
 			const int nx = wx + move_x[i], ny = wy + move_y[i];
 			if (!inb(nx, ny)) continue;
 			const WData& n = W(nx, ny);
-			if (n.land == 2 || n.land == 1 || (n.flags & 0x100)) return;
+			if (n.land == 2 || n.land == 1 || (n.flags & 0x100)) {
+				if (trace_on) std::fprintf(stderr, "RIVER_TRACE sample#%d river %d section %d k %d tile (%d,%d) SKIP neighbour %d (%d,%d)\n", sample_no, tr_river, tr_section, tr_k, tx, ty, i, nx, ny);
+				return;
+			}
 		}
-		if (skip_cell || (tm & 3) == 2) return;
+		if (skip_cell || (tm & 3) == 2) {
+			if (trace_on) std::fprintf(stderr, "RIVER_TRACE sample#%d river %d section %d k %d tile (%d,%d) SKIP cell\n", sample_no, tr_river, tr_section, tr_k, tx, ty);
+			return;
+		}
+		if (trace_on) std::fprintf(stderr, "RIVER_TRACE sample#%d river %d section %d k %d tile (%d,%d) APPLY z %.2f\n", sample_no, tr_river, tr_section, tr_k, tx, ty, double(z));
 		rv_wcoords.push_back({wx, wy});
 		h(tx, ty) = (h(tx, ty) + z) * 0.5f;
 		h(tx + 1, ty) = (z + h(tx + 1, ty)) * 0.5f;
@@ -1171,9 +1187,10 @@ struct TerrainInit {
 		}
 	}
 
-	// the 36-offset marking of create_trough_edge (param_6 = param_7 = 0)
+	// the marking of create_trough_edge (param_6 = param_7 = 0): the 3 x 3 tiles around the sample, move_x / move_y[0..8]. The decompile shows
+	// `local_18 + 1` on an `undefined4 *` and `(int)local_18 < 0x24`: a BYTE offset (`ADD ECX,4; CMP ECX,0x24` @889b56 = 9 iterations, not 36).
 	void mark_trough_tiles(int tx, int ty) {
-		for (int i = 0; i < 36; i++) {
+		for (int i = 0; i < 9; i++) {
 			const int nx = tx + move_x[i], ny = ty + move_y[i];
 			if (!t_inb(nx, ny)) continue;
 			if (!(h(nx, ny) < 0.0f || h(nx + 1, ny) < 0.0f || h(nx, ny + 1) < 0.0f || h(nx + 1, ny + 1) < 0.0f)) continue;
@@ -1183,6 +1200,7 @@ struct TerrainInit {
 			if ((f & 0x10) || (f & 0x28) || (f & 0x800)) continue;
 			if (!(f & 0x100) && (c.land == 1 || c.land == 2)) continue;
 			if ((f & 0x40) || c.blocked != 0 || (F(cx, cy) & 4)) continue;
+			if (trace_on) std::fprintf(stderr, "RIVER_TRACE mark river %d section %d k %d tile (%d,%d) wcoord (%d,%d) flags %04x land %d cf %04x\n", tr_river, tr_section, tr_k, nx, ny, cx, cy, f, c.land, F(cx, cy));
 			rv_set_river_at(nx, ny);
 		}
 	}
@@ -1197,6 +1215,7 @@ struct TerrainInit {
 			float z = (kMaxDepth - prof[k] * kMaxDepth) + kMaxDepth * 0.25f * -1.0f;
 			const int tx = tcoord_of(int(x)), ty = tcoord_of(int(y));
 			if (t_inb(tx, ty)) {
+				tr_k = k;
 				if ((w.t(tx, ty) & 0x30) == 0x20 && z < 0.0f && std::abs(k - 4) < 2) z = ((z - 30.0f) + z) * 0.5f;
 				terraform_from_river_vert(x, y, z);
 				mark_trough_tiles(tx, ty);
@@ -1408,7 +1427,10 @@ struct TerrainInit {
 
 	void river_geometry_run(const std::vector<RiverPath>& rivers) {
 		const TFractal frac(50, 50, 2, 2, 0);  // River::one_time_init
+		tr_river = -1;
 		for (const RiverPath& rp : rivers) {
+			tr_river++;
+			if (trace_on && !rp.pts.empty()) std::fprintf(stderr, "RIVER_TRACE river %d path (%d,%d) -> (%d,%d) points %zu edge %d\n", tr_river, rp.pts.front()[0], rp.pts.front()[1], rp.pts.back()[0], rp.pts.back()[1], rp.pts.size(), int(rp.edge));
 			if (rp.pts.empty()) continue;
 			// the control points RiverOut::add_spline_point collects (Map::make_riverlist emission)
 			std::vector<V3> Pc;
@@ -1476,6 +1498,7 @@ struct TerrainInit {
 				}
 				const V3 mid{(A[0] + B[0]) * 0.5f, (A[1] + B[1]) * 0.5f, (A[2] + B[2]) * 0.5f};
 				const V3 n_mid{(nA[0] + nB[0]) * 0.5f, (nA[1] + nB[1]) * 0.5f, (nA[2] + nB[2]) * 0.5f};
+				tr_section = index;
 				trough_edge(A, nA, w0);
 				trough_edge(mid, n_mid, (w0 + wd) * 0.5f);
 				trough_edge(B, nB, wd);
@@ -1640,7 +1663,9 @@ void Gen::terrain_init() {
 void Gen::move_goody_at(int x, int y) {
 	TerrainInit ti(*this);
 	ti.cf = coord_flags;
+	ti.H = res.heights;  // an oil derrick moved here gets its plateau (TerrainOil::add_rocky_patch) on the finished grid
 	ti.move_goody(x, y, false);
+	res.heights = ti.H;
 }
 
 void Gen::river_geometry() {

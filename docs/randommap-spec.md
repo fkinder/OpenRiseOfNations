@@ -642,7 +642,7 @@ Every vertex under 60 is now exact on `DO NOT DELETE`, `DO NOT DELETE 2` (two mo
 all layers of `--compare` are otherwise unchanged. What is left under 60 on the other worlds is the saved towns (the "town" column: farms, roads and
 buildings of 100 000+ frames of play) plus, on `current 2`, the river that runs along a lake shore.
 
-**Not solved: `current 2`'s lake-shore river (41 trough vertices, max 8.8; 82 extra tdata 0x800 tiles, 11 extra WData 0x1000 cells).** The river
+**(Solved in the seventh pass below; the text of the open item is kept.) `current 2`'s lake-shore river (41 trough vertices, max 8.8; 82 extra tdata 0x800 tiles, 11 extra WData 0x1000 cells).** The river
 (path (3, 68) -> (22, 81)) runs along the shelf of a lake for about 12 wcoords; most of its samples are skipped by the neighbour test of
 `terraform_from_river_vert`. Ours differs from the save in two smooth lobes of the land beside it (the land NW of (46, 319) 3 to 9 higher in the
 save, the land S of (49, 323) up to 11 lower) and in the shore cells (67, 35 .. 36): they get tdata 0x800 / WData 0x1000 from the marking pass in
@@ -666,3 +666,43 @@ to 180 000 frames the AI has built other things):
 
 `current 2` is a 189-frame game: the save's second-stage buildings (the AI's) stand where ours have not been built yet, which is where the 603 new
 differences are (4-wide blocks around the start towns); the first building of each start (the city centre) is among the 353 fixed.
+
+### Seventh pass (2026-10-24): the last river defect of `current 2` is two decompile traps, no CoordInfo flag
+
+The sixth pass's open item (lake-shore river of `current 2`) was **not** about the coastal bit. Two independent causes, both found by reading the chain in asm order
+(`RiverSection::create_trough_edge` @889660, `RiverSectionOut::terraform_from_river_vert` @88b360, `Terrain::move_goody` @84a3d0, `TerrainOil::add_rocky_patch` @8a2b30):
+
+1. **The marking neighbourhood is 3 x 3 tiles, not 36.** In `create_trough_edge` the decompile shows `local_18 = local_18 + 1; while ((int)local_18 < 0x24)` on an
+   `undefined4 *` (and `local_18[0x2b72bc]` as the table access): the pointer is a byte offset and `local_18 + 1` is `+4` bytes. The asm (`ADD ECX,4; CMP ECX,0x24;
+   JL 889a20` @889b56) runs **9** iterations, `move_x / move_y[0..8]`; the port had used `[0..35]` (the comparison constant read as an element count). The 82 extra
+   tdata 0x800 tiles and the 11 extra WData 0x1000 cells, among them the shore cells (67, 35) and (67, 36), were the extra 27 offsets marking tiles of the lake shelf
+   (their heights are `< 0`, their cells pass every other test). That is why no flag of the cells separated them from the saved ones: nothing did, the
+   neighbourhood was wrong. (The other loops of the chain were checked against the asm for the same trap and are right: the 8-neighbour test of
+   `terraform_from_river_vert` `ADD ..,4; CMP ..,0x20`, the 121-offset queue `CMP ..,0x1e4` on an `int`, the oil search 40 offsets, the goody ring 16 offsets.)
+2. **`Terrain::move_goody` (land variant) stamps the oil plateau at the derrick's new place.** After `World::set_oil_at(new, 1)` it calls
+   `TerrainOil::add_rocky_patch(new)` when `Terrain +0x4d7c` is non-zero (set to 1 by `Terrain::init` @851770, `CMP [EAX+0x4d7c],0` @84ad29), i.e. `terraform_for_building`
+   at the new cell, right then (the ocean variant `move_ocean_goody` has no such call). A river sample that lands on an oil wcoord moves the derrick, so the
+   second plateau is made in the middle of the river's sample loop, on the heights dug so far, and the river digs through it afterwards. In `current 2` the
+   sample #936 (river 0, section 34) is on the derrick of (10, 79) (plateau of 53.0 from `TerrainOil::create_doobers`, which stays); the derrick goes to (12, 80), whose
+   8 x 8 window is still all positive (the river reaches it in sections 36 to 42), so a second plateau (the window's average on the 5 x 5 vertices, the mean with the old
+   height on the ring) is stamped there before the trough cuts into it. The port had only the first one: the river then smoothed and limited a plain hill instead of a plateau,
+   giving two smooth lobes (NW of (46, 319) 3 to 9 lower in ours, S of (49, 323) up to 11 higher; the two 0.01 "shelf" vertices were their tail). `Gen::move_goody_at`
+   (the cliffs' caller of the same function) now works on `Result::heights` too.
+
+`mapgen_terrain_init.cpp` also got `RON_RIVER_TRACE=1` (stderr: one line per river with its path, per terraform sample `APPLY z` / `SKIP neighbour n (x,y)` / `SKIP cell`
+with a running sample number, and per tile marked 0x800 with the cell's flags, land and CoordInfo flags): the tool that showed the marked tiles came from samples whose
+3 x 3 neighbourhood could not reach them.
+
+Result (`ron-mapgen --compare`, generator only; bit-exact vertices / total; before = the sixth pass; the other six worlds are unchanged, draws unchanged on all seven):
+
+| | current 2 | current RN | east indies 2 | East indies final surround | DO NOT DELETE | DO NOT DELETE 2 | curent dec 14 |
+|---|---|---|---|---|---|---|---|
+| shelf vertices (-250 .. -30) | 15384 -> **15386 / 15386** | 29797 / 29797 | 29492 / 29492 | 19720 / 19720 | 2661 / 2661 | 2966 / 2966 | 2138 / 2138 |
+| shore vertices (-30 .. 60) | 32504 -> **32576** / 32610 | 34175 / 36554 | 30216 / 34660 | 19281 / 21883 | 7483 / 7483 | 7927 / 7927 | 6375 / 6375 |
+| land vertices >= 60 | 80636 -> **80832** / 82104 | 19329 / 29946 | 13531 / 28357 | 8458 / 15592 | 76967 / 92897 | 74455 / 92148 | 83691 / 94528 |
+| vertices < 60 off, by cause (river / town / other) | 41 / 34 / 12 -> **0 / 34 / 0** | 0 / 2378 / 0 | 0 / 4350 / 88 | 0 / 2554 / 47 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 |
+| WData 0x1000 cells / tdata 0x800 tiles differing | 11 / 82 -> **0 / 0** | exact | exact | exact | 0 / 0 | 0 / 0 | 0 / 0 |
+
+With `--game` (the towns' terraform included) `current 2` goes from shore 32495 and land 80395 bit-exact to 32567 and 80591, shelf 15386 / 15386, and the river and
+"other" columns of the < 60 line are 0; the 34 + 9 left under 60 are the saved towns (the AI's second-stage buildings). Every vertex under 60 that belongs to a
+river is now exact on all seven worlds. What is left in the height rows is the saved towns and, on the other three worlds, the same 'town' columns as in the sixth pass.
