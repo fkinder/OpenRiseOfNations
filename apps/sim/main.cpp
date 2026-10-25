@@ -1954,10 +1954,15 @@ void print_ai_brief(const Game& g) {
 		            L.age < 7 ? techs_per_age(g, who, kAges + L.age) : 0);
 		std::printf(" | econ");
 		for (int32_t k = 0; k < 6; k++) std::printf(" %d", L.econ[size_t(k)]);
-		std::printf(" | strat st %d script %s on %d step %d make0 %s/%d | cities %d unitq %d caravans %d merch %d schol %d | research [%s]\n", L.production_ai,
+		int32_t trade = 0, routes = 0;  // caravan income (City::trade_val) and the routes' links of this seat's cities
+		for (int32_t c = 0; c < L.city_mark && size_t(c) < g.cities[size_t(who)].size(); c++) {
+			trade += g.cities[size_t(who)][size_t(c)].trade_val;
+			routes += int32_t(g.cities[size_t(who)][size_t(c)].vans.size());
+		}
+		std::printf(" | strat st %d script %s on %d step %d make0 %s/%d | cities %d unitq %d caravans %d merch %d schol %d trade %d routes %d | research [%s]\n", L.production_ai,
 		            L.prod_script.c_str(), L.prod_script_on, L.prod_step,
 		            L.make_list[0].t >= 0 ? type_name(g, L.make_list[0].t).c_str() : "-", L.make_list[0].val, L.city_num, uq,
-		            L.caras, L.merchants, L.scholars, rq.c_str());
+		            L.caras, L.merchants, L.scholars, trade, routes, rq.c_str());
 	}
 }
 

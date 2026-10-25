@@ -858,11 +858,11 @@ units / captains / standard / attacking, target with its damage, position, muste
 land military units in armies, difficulty and personality, the score parts and the diplomacy state per opponent
 (diplos, met, agendas, aggression / strong / weak). `--difficulty N` sets the GameInfo difficulty (default 2).
 `RON_AI_TRACE=1` traces each production step on stderr (make list, sites, city census, `make_this` calls with their result and
-the stockpile, `produce_building` failures). The digest includes personality, sites, make list, census counters, trainer list
+the stockpile, `produce_building` failures; `RON_AI_MAKE=<seat>` prints `make_stuff`'s item 0 and make list for one seat). The digest includes personality, sites, make list, census counters, trainer list
 and armies. **`--ai-every K` also prints one `aib` line per AI seat** (2026-10-25): age, citizens / military / units, pop
 and cap, stockpiles, income rates per 450 frames (`income / 16`), escrow, the library lines (`lib m/c/c/s tot N need M`:
 epoch techs held against `techs_per_age` of the next age), the `econ` need bits, the production state, script, step and
-make list item 0 (type name), cities, units queued, caravans / merchants / scholars, and the research queue (`*` = the one
+make list item 0 (type name), cities, units queued, caravans / merchants / scholars, the cities' summed `trade_val` and caravan links (`trade N routes M`), and the research queue (`*` = the one
 researching).
 
 **Random skirmishes: the cities' names (2026-10-25).** The production scripts (`economic.bhs`, `defensive.bhs`,
@@ -878,12 +878,25 @@ frames with 7,000 food banked). `ai_production.cpp: name_unnamed_cities` now giv
 before the script runs. Names are outside the digest. With it every seat leaves the Ancient Age by frame 10,000 and the
 leaders reach the Enlightenment Age at ~28,000 and the Industrial Age at ~49,000 (ages at 60,000: 4 3 5 3 4 5 4 4).
 
-What the 60,000-frame game still shows (the decision functions were compared with the decompiles `research_techs`,
-`production_ai_setup`, `found_cities` and found faithful; the rest is the economy under them): wealth is the scarce good
-(+56 per 450 frames against +260 for food and timber, which sit at their commerce cap with 38 gatherers on farms and
-woodcutters), the science line (Chemistry ... 200+ wealth each) is what holds the Industrial Age (`tot 14 need 18`) while 4,500
-knowledge are banked, and the market loop (`use_market` sells a lot of timber at price 1 and `market_speculation` buys it back
-at 20, all eight seats trading the same global levels) drains the little wealth there is.
+What the 60,000-frame game still shows (`--random 12,4,1,8`, conquest only, difficulty 2; per 10,000 frames the ages of seats 0-7:
+before the name fix 11011110 / 22023220 / 33033330 / 33034431 / 53244443 / 54244443, after it 11111111 / 22323222 / 33334333 /
+33434433 / 33534433 / 43534544; seats 2 and 7 sat in age 0 / 1 with 14 and 10 citizens and 5,000+ food banked before, none does now).
+The decision functions were compared with the decompiles (`research_techs` @6c6ba0 line by line including the two time factors, which
+are constant because `tech_frame` / `tech_cat_frame` are stamped when a tech is *queued*, so `min(4, 13 + elapsed)` and
+`min(3, 17 + elapsed)` saturate; `production_ai_setup`, `found_cities`, `make_stuff` / `make_this` / `produce_tech`) and show no
+divergence; the pace is held down by the goods, in this order: (1) **wealth**: a tech of the Gunpowder / Enlightenment line costs
+300 - 400 wealth (and as much metal) and the leaders earn 55 - 130 wealth per 450 frames, while 700 timber and 3,000 knowledge sit
+banked (`RON_AI_MAKE=<seat>` prints `make_stuff`'s item 0 with its cost, the buckets and the make list; the market only turns timber
+into a few wealth at the global price). (2) **No caravan route ever completes**: every `City::trade_val` is 0 although each seat
+holds 2 - 6 caravans linked to routes (`aib ... trade 0 routes N`), because `do_trade` (econ_trade.cpp, not an AI file) tests the
+proximity of B while it walks to A (and the reverse once loaded: the "no road" quirk of `Caravan::build_road`, still TODO), so
+`caravan_flags & 4` is never set. With the two targets swapped in a scratch build (not applied: another owner's file) wealth income
+rises to 240 - 320 per 450 frames at frame 40,000 and the ages at 60,000 become 5 4 5 3 5 5 5 5 (leaders still in age 4 at 40,000, so
+this alone does not reach the Industrial Age by 40,000). (3) The remaining TODO(AI) items outside the AI files: `Build::do_bonus`
+(resource bonuses of finished buildings, build.cpp), `think_civilian_transport` / `think_scout` for citizens (econ_gather.cpp), the AI
+caravans' `go_to_city` (econ_trade.cpp:541). (4) Seats 1 and 3 are beaten down by their neighbours' armies in the late game (citizens
+0 - 6, cities 4 -> 2 between frames 30,000 and 45,000 while the army AI keeps attacking): they train citizens again (`make_stuff`
+item 0 = Citizen, `ok 1`) but lose them; that is the war, not a decision bug.
 
 Result (seed 12345, `scenario/Tutorial5_Trial/tut5.scx`, AI leader 1 at difficulty 2, 12000 frames, self-check OK):
 5 citizens / 1 city / 6 buildings / Ancient at the start; a second city by frame 2000; 29 citizens (28 gathering),

@@ -75,6 +75,23 @@ int32_t owned_w(const Game& g, int32_t who, int32_t w) {  // num_buildings[w] + 
 	return n;
 }
 
+// City::generate_name's string is file-only in cities.cpp, so the cities of a generated game (new_random_game) reach the AI
+// without a name; the production scripts address cities by the string find_city_with_num returns and city_index("") is
+// always the first city (the second city is then "the capital" to economic.bhs, whose farm count never reaches its goal).
+// The original's names come from the tribe's <CITIES> list (not read): "<tribe> City N" stands in. Names are outside the
+// digest and the draws.
+void name_unnamed_cities(Game& g, int32_t who) {
+	const Leader& L = LD(g, who);
+	auto& list = g.cities[size_t(who)];
+	const int32_t n = std::min<int32_t>(L.city_mark, int32_t(list.size()));
+	const auto& tr = g.rules->tribes;
+	const std::string tn = L.tribe >= 0 && size_t(L.tribe) < tr.size() ? bhs::to_utf8(tr[size_t(L.tribe)].eng_name) : std::string("Tribe");
+	for (int32_t c = 0; c < n; c++) {
+		City& ct = list[size_t(c)];
+		if (ct.valid() && ct.name.empty()) ct.name = tn + " City " + std::to_string(c + 1);
+	}
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------- Leader::production_ai
@@ -85,6 +102,7 @@ void leader_production_ai(Game& g, int32_t who) {
 		L.production_ai = 0;
 		return;
 	}
+	name_unnamed_cities(g, who);
 	L.effective_pop = queued_units(g, who) + L.control + 1;
 	static const bool trace = std::getenv("RON_AI_TRACE") != nullptr;  // developer aid (no effect on the simulation)
 	if (trace) {
@@ -798,6 +816,19 @@ int32_t make_stuff(Game& g, int32_t who) {
 	bool ok = can_pay(g, who, 0);
 	int32_t cost0[6];
 	for (int32_t k = 0; k < 6; k++) cost0[k] = cost_of(g, t0, k, who, o0, city0);
+	static const bool mtrace = std::getenv("RON_AI_MAKE") != nullptr;  // developer aid
+	if (mtrace && std::atoi(std::getenv("RON_AI_MAKE")) == who) {
+		std::fprintf(stderr, "make f%d L%d t0 %d val %d ok %d npay %d need %d cost", g.frame, who, t0, M[0].val, int(ok),
+		             can_pay_cost(g, t0, who, city0, o0, M[0].escrow), M[0].num);
+		for (int32_t k = 0; k < 6; k++) std::fprintf(stderr, " %d", cost0[k]);
+		std::fprintf(stderr, " bucket");
+		for (int32_t k = 0; k < 6; k++) std::fprintf(stderr, " %d", L.bucket[size_t(k)]);
+		std::fprintf(stderr, " esc");
+		for (int32_t k = 0; k < 6; k++) std::fprintf(stderr, " %d", L.escrow[size_t(k)]);
+		std::fprintf(stderr, " | M");
+		for (int32_t j = 0; j < 11; j++) std::fprintf(stderr, " %d:%d:c%d", M[size_t(j)].t, M[size_t(j)].val, M[size_t(j)].city);
+		std::fprintf(stderr, "\n");
+	}
 	int32_t bought = 0;
 	bool keep = false, skip_extra = ok;
 	if (!ok) {
