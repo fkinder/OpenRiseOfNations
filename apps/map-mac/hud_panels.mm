@@ -24,9 +24,7 @@ namespace {
 constexpr uint32_t kWhite = 0xFFFFFFFF, kBlack = 0xFF000000, kRed = rgb(255, 0, 0);
 
 IfaceRect rect_in(const ron::XmlElement& win, const char* tag, const std::string& name, int pw, int ph, int nth = 0) {
-	IfaceRect r;
-	ron::iface_find_rect(win, tag, name, pw, ph, r, nth);
-	return r;
+	return cached_iface_rect(win, tag, name, pw, ph, nth);
 }
 
 // IFaceButton icon cell (ui-spec 6.4): (tex_x, tex_y) when both >= 0, else 62 * col, 40 * row; 61 x 39 (30 x 19 small).

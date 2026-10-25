@@ -8,13 +8,39 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "assets/files.hpp"
 #include "assets/iface_layout.hpp"
+#include "assets/xml.hpp"
 #include "ui.hpp"
 
 namespace hud {
+
+// iface_find_rect with the result remembered: the HUD asked it for the same (window, tag, name, size) several hundred times a frame and each call
+// re-resolved the whole layout of the window (docs/ui-port.md 16.2: 12 % of the render CPU). The interface XML is loaded once and never changes, so
+// the window's address plus its child count identify the layout.
+inline ron::IfaceRect cached_iface_rect(const ron::XmlElement& win, const char* tag, const std::string& name, int pw, int ph, int nth) {
+	std::string key;
+	key.reserve(64);
+	key.append(reinterpret_cast<const char*>(&win), sizeof(void*));
+	const size_t kids = win.children.size();
+	key.append(reinterpret_cast<const char*>(&kids), sizeof kids);
+	key.append(reinterpret_cast<const char*>(&pw), sizeof pw);
+	key.append(reinterpret_cast<const char*>(&ph), sizeof ph);
+	key.append(reinterpret_cast<const char*>(&nth), sizeof nth);
+	key += tag;
+	key += '\1';
+	key += name;
+	static std::unordered_map<std::string, ron::IfaceRect> cache;
+	const auto it = cache.find(key);
+	if (it != cache.end()) return it->second;
+	ron::IfaceRect r;
+	ron::iface_find_rect(win, tag, name, pw, ph, r, nth);
+	cache.emplace(std::move(key), r);
+	return r;
+}
 
 // A building's production queue entry (BuildView::queue).
 struct QueueItem {

@@ -27,9 +27,7 @@ constexpr uint32_t kGrey = rgb(160, 160, 160), kRed = rgb(255, 0, 0), kYellow = 
 constexpr uint32_t kPlate = rgb(50, 50, 50);  // IFaceResources::draw_back's normal colour
 
 IfaceRect rect_in(const ron::XmlElement& win, const char* tag, const std::string& name, int pw, int ph, int nth = 0) {
-	IfaceRect r;
-	ron::iface_find_rect(win, tag, name, pw, ph, r, nth);
-	return r;
+	return cached_iface_rect(win, tag, name, pw, ph, nth);
 }
 
 IfaceRect unite(const IfaceRect& a, const IfaceRect& b) {

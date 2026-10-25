@@ -23,9 +23,7 @@ constexpr uint32_t kWhite = 0xFFFFFFFF, kBlack = 0xFF000000, kGrey = rgb(160, 16
 constexpr uint32_t kPlate = rgb(50, 50, 50);
 
 IfaceRect rect_in(const ron::XmlElement& win, const char* tag, const std::string& name, int pw, int ph, int nth = 0) {
-	IfaceRect r;
-	ron::iface_find_rect(win, tag, name, pw, ph, r, nth);
-	return r;
+	return cached_iface_rect(win, tag, name, pw, ph, nth);
 }
 
 // TeamColor::get_border slots: red, blue, pink, green, yellow, cyan, white, orange (ui-spec 6.6).

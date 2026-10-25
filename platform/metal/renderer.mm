@@ -106,10 +106,11 @@ id<MTLRenderPipelineState> StateCache::pipeline(const RenderState& rs, VertexKin
 	const int ints[13] = {stages,
 	                      int(a.color_op), int(a.color_arg1), int(a.color_arg2), int(a.alpha_op), int(a.alpha_arg1), int(a.alpha_arg2),
 	                      int(b.color_op), int(b.color_arg1), int(b.color_arg2), int(b.alpha_op), int(b.alpha_arg1), int(b.alpha_arg2)};
-	char key[160];
-	std::snprintf(key, sizeof key, "%d:%d,%d,%d,%d,%d,%d:%d,%d,%d,%d,%d,%d:%d:%d%d%d%d%d:%d,%d,%d:%d", ints[0], ints[1], ints[2], ints[3],
-	              ints[4], ints[5], ints[6], ints[7], ints[8], ints[9], ints[10], ints[11], ints[12], alpha_func, lighting, tl_fake,
-	              no_hdr, tex0, tex1, blend, int(rs.src_blend), int(rs.dst_blend), int(kind));
+	// Every field is a small enum or a flag: one byte each is a key without the snprintf this used to build per draw (a few percent of the frame).
+	std::array<uint8_t, 24> key{};
+	for (int i = 0; i < 13; i++) key[size_t(i)] = uint8_t(ints[i]);
+	const int rest[11] = {alpha_func, lighting, tl_fake, no_hdr, tex0, tex1, blend, int(rs.src_blend), int(rs.dst_blend), int(kind), 0};
+	for (int i = 0; i < 11; i++) key[size_t(13 + i)] = uint8_t(rest[i]);
 	auto it = pipelines_.find(key);
 	if (it != pipelines_.end()) return it->second;
 

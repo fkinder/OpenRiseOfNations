@@ -16,26 +16,38 @@ bool iequals(const std::string& a, const std::string& b) {
 	return true;
 }
 
-// Slot a node name selects, or -1. Tests i = 0..13 and, for each, the four patterns in the game's order.
+// Parses `name` as prefix + canonical decimal i (what prefix + std::to_string(i) builds), case-insensitively, without allocating
+// (pose_node asked this of every node of every unit every frame; it was a quarter of the draw time). Returns i, or -1.
+int suffix_index(const std::string& name, const char* prefix) {
+	size_t k = 0;
+	for (; prefix[k]; k++) {
+		if (k >= name.size() || std::tolower(static_cast<unsigned char>(name[k])) != prefix[k]) return -1;
+	}
+	const size_t digits = name.size() - k;
+	if (digits == 0 || digits > 2) return -1;
+	if (name[k] < '0' || name[k] > '9') return -1;
+	if (digits == 1) return name[k] - '0';
+	if (name[k] == '0' || name[k + 1] < '0' || name[k + 1] > '9') return -1;  // "05" is not to_string(5)
+	return (name[k] - '0') * 10 + (name[k + 1] - '0');
+}
+
+// Slot a node name selects, or -1. The four patterns of the game's order for i = 0..13 (a name matches at most one, so the order is moot).
 int slot_for_name(const std::string& name) {
 	static const struct {
 		const char* prefix;
 		int offset;
 	} patterns[] = {{"ammo node ", 0}, {"pivot node ", 4}, {"smoke node ", 8}, {"node ", 0}};
-	for (int i = 0; i < kAttachSlots; i++) {
-		for (const auto& p : patterns) {
-			if (iequals(name, p.prefix + std::to_string(i))) return i + p.offset < kAttachSlots ? i + p.offset : -1;
-		}
+	for (const auto& p : patterns) {
+		const int i = suffix_index(name, p.prefix);
+		if (i >= 0 && i < kAttachSlots) return i + p.offset < kAttachSlots ? i + p.offset : -1;
 	}
 	return -1;
 }
 
 // "pivot node i" with a valid slot (i + 4 < 14): BH3Method::load_hier marks these isDeadNode.
 bool is_pivot_node(const std::string& name) {
-	for (int i = 0; i + 4 < kAttachSlots; i++) {
-		if (iequals(name, "pivot node " + std::to_string(i))) return true;
-	}
-	return false;
+	const int i = suffix_index(name, "pivot node ");
+	return i >= 0 && i + 4 < kAttachSlots;
 }
 
 struct PoseContext {

@@ -59,6 +59,7 @@
 #import <MetalKit/MetalKit.h>
 #import <QuartzCore/QuartzCore.h>
 #include <simd/simd.h>
+#include <mach/mach.h>
 
 #include <algorithm>
 #include <chrono>
@@ -406,8 +407,8 @@ static int64_t sim_key(int32_t who, int32_t o, int32_t guy = 0) { return (int64_
 static int g_difficulty = -1;
 // --all-ai: every seat of a --random game is a computer player (AI-versus-AI checks).
 static bool g_randomAllAi = false;
-
 static bool g_noScripts = false;  // --no-scripts: the scenario runs without its scripts (headless checks of orders the tutorials block)
+
 // Debugging aid: RON_SKIP=floor,land,trans,coral,water skips those passes.
 static bool debug_skip(const char* pass) {
 	static const std::string skip = getenv("RON_SKIP") ? std::string(",") + getenv("RON_SKIP") + "," : std::string();
@@ -452,6 +453,10 @@ static bool debug_skip(const char* pass) {
 - (BOOL)snapshotTo:(NSString*)path width:(int)w height:(int)h scale:(float)scale;
 // --perf N: N headless frames, each one simulation step then one rendered frame (a reused offscreen target), timed separately; prints the averages.
 - (void)perfRun:(int)frames width:(int)w height:(int)h scale:(float)scale;
+// --long-run EVERY[,SNAPSHOT_PREFIX]: steps the simulation to `total` frames (or until a nation reaches the Information Age / the game ends), printing sim timing, a 100-frame render sample, census and RSS every EVERY frames.
+// RON_LONGRUN_VICTORY=2 (headless test runs): conquest only, so a wonder / territory win does not end a long AI game early.
+- (void)applyVictoryOverride;
+- (void)longRun:(int)every snapshotPrefix:(NSString*)prefix total:(int)total width:(int)w height:(int)h scale:(float)scale;
 - (void)advanceFarmsTo:(uint32_t)frame;
 - (void)scrollByPixelsX:(float)dx y:(float)dy;
 // Selection, in drawable pixels with a top-left origin. A rectangle of zero size picks the nearest unit.
@@ -1443,6 +1448,8 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 
 // One simulation frame per iteration: execute the commands issued since the last step, then Game::do_frame
 // (docs/frame-spec.md section 2). The renderer only reads the views.
+static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame since the last report
+
 - (void)stepSimulation:(int)frames {
 	if (!_game) return;
 	if (_mp) {  // a multiplayer game: the session decides when a frame runs
@@ -1457,7 +1464,9 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		_cm.process_turn(*_game);
 		_hotkeys.process();
 		[self fillScriptInput];
+		const uint64_t c0 = clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID);
 		_game->do_frame();
+		g_doFrameCpuNs += clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID) - c0;  // --long-run / --perf report it: Game::do_frame alone, without the view and HUD bookkeeping around it
 		[self consumeScript];
 		_prevView = std::move(_curView);
 		[self indexPrevView];
@@ -3100,20 +3109,35 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	return YES;
 }
 
+// phys_footprint (resident + compressed): the plain resident size drops when macOS compresses idle pages of a loaded machine and hides a leak.
+static double footprintMb() {
+	task_vm_info_data_t info;
+	mach_msg_type_number_t n = TASK_VM_INFO_COUNT;
+	return task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &n) == KERN_SUCCESS ? double(info.phys_footprint) / 1048576.0 : 0.0;
+}
+
 - (void)perfRun:(int)frames width:(int)w height:(int)h scale:(float)scale {
+	const double footBefore = footprintMb();
 	using Clock = std::chrono::steady_clock;
 	auto ms = [](Clock::time_point a, Clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+	[self applyVictoryOverride];
 	id<MTLTexture> out = rm::make_readback_target(_device, w, h);
 	_uiScale = scale > 0 ? scale : 1;
-	std::vector<double> sim, enc, gpu;
+	g_doFrameCpuNs = 0;
+	std::vector<double> sim, enc, gpu, simCpu, encCpu;  // *Cpu: this thread's CPU time (steady on a loaded machine, unlike the wall clock)
+	auto cpuMs = [] { return double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)) / 1e6; };
 	for (int f = 0; f < frames; f++) {
 		const auto t0 = Clock::now();
+		const double c0 = cpuMs();
 		if (_game && !_mp) [self stepSimulation:1];
+		const double c1 = cpuMs();
 		const auto t1 = Clock::now();
 		@autoreleasepool {
 			id<MTLCommandBuffer> cb = [_queue commandBuffer];
 			[self renderInto:out commandBuffer:cb];
 			const auto t2 = Clock::now();
+			const double c2 = cpuMs();
+			simCpu.push_back(c1 - c0), encCpu.push_back(c2 - c1);
 			[cb commit];
 			[cb waitUntilCompleted];
 			const auto t3 = Clock::now();
@@ -3127,8 +3151,11 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		std::sort(v.begin(), v.end());
 		std::printf("  %-22s avg %7.3f ms  p50 %7.3f  p95 %7.3f  max %7.3f\n", name, sum / double(v.size()), v[v.size() / 2], v[size_t(double(v.size() - 1) * 0.95)], v.back());
 	};
-	std::printf("perf: %d frames at %dx%d (frame %d of the game)\n", frames, w, h, _game ? _game->frame : 0);
+	std::printf("perf: %d frames at %dx%d (frame %d of the game); footprint %.1f MB before, %.1f MB after\n", frames, w, h, _game ? _game->frame : 0, footBefore, footprintMb());
 	stat("sim step", sim);
+	stat("sim step (thread CPU)", simCpu);
+	std::printf("  do_frame alone (thread CPU) avg %7.3f ms\n", double(g_doFrameCpuNs) / 1e6 / double(std::max(frames, 1)));
+	stat("render (encode CPU time)", encCpu);
 	stat("render (CPU encode)", enc);
 	stat("render (GPU wait)", gpu);
 	std::vector<double> render(enc.size());
@@ -3140,6 +3167,50 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	const double n = std::max<double>(1, double(frames));
 	// The window runs one simulation step per 66 ms at normal speed and draws at the display rate: a 30 fps frame carries about half a step.
 	std::printf("  estimated display rate: %.1f fps (render %.2f ms + half a sim step %.2f ms)\n", 1000.0 / (ra / n + sa / n / 2), ra / n, sa / n / 2);
+}
+
+- (void)applyVictoryOverride {
+	if (const char* v = getenv("RON_LONGRUN_VICTORY"); v && _game) _game->info.victory = uint8_t(std::atoi(v));
+}
+
+- (void)longRun:(int)every snapshotPrefix:(NSString*)prefix total:(int)total width:(int)w height:(int)h scale:(float)scale {
+	using Clock = std::chrono::steady_clock;
+	if (!_game || every <= 0) return;
+	auto rss = [] { return footprintMb(); };
+	std::vector<double> sim, simCpu;
+	int maxAge = 0;
+	while (_game->frame < total && !_game->game_over && maxAge < 7) {
+		const auto t0 = Clock::now();
+		const double c0 = double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)) / 1e6;
+		[self stepSimulation:1];
+		simCpu.push_back(double(clock_gettime_nsec_np(CLOCK_THREAD_CPUTIME_ID)) / 1e6 - c0);
+		sim.push_back(std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
+		if (_game->frame % every != 0) continue;
+		double sum = 0;
+		for (double x : sim) sum += x;
+		std::vector<double> v = sim;
+		std::sort(v.begin(), v.end());
+		double csum = 0;
+		for (double x : simCpu) csum += x;
+		std::sort(simCpu.begin(), simCpu.end());
+		std::printf("== frame %d: sim avg %.3f p95 %.3f max %.3f ms over %zu steps (thread CPU time: avg %.3f p95 %.3f max %.3f); footprint %.1f MB; game_over %d\n", _game->frame, sum / double(v.size()),
+		            v[size_t(double(v.size() - 1) * 0.95)], v.back(), v.size(), csum / double(v.size()), simCpu[size_t(double(v.size() - 1) * 0.95)], simCpu.back(), rss(), int(_game->game_over));
+		std::printf("   do_frame alone (thread CPU): avg %.3f ms\n", double(g_doFrameCpuNs) / 1e6 / double(v.size()));
+		g_doFrameCpuNs = 0;
+		sim.clear(), simCpu.clear();
+		[self printCensus];
+		std::fflush(stdout);
+		if (prefix.length) {
+			const int k = _game->frame / 1000;
+			if (k == 10 || k == 30 || k == 60) [self snapshotTo:[NSString stringWithFormat:@"%@%dk.png", prefix, k] width:w height:h scale:scale];
+		}
+		[self perfRun:100 width:w height:h scale:scale];
+		for (int who = 0; who < 8; who++) maxAge = std::max(maxAge, int(_game->leaders[size_t(who)].age));
+	}
+	std::printf("== end: frame %d, game_over %d, max age %d, footprint %.1f MB\n", _game->frame, int(_game->game_over), maxAge, rss());
+	[self printCensus];
+	if (prefix.length) [self snapshotTo:[NSString stringWithFormat:@"%@end.png", prefix] width:w height:h scale:scale];
+	std::fflush(stdout);
 }
 
 // ---------------------------------------------------------------- interface (docs/ui-port.md)
@@ -7592,7 +7663,8 @@ int main(int argc, const char* argv[]) {
 		float place_x = 0, place_y = 0;
 		uint32_t seed = 12345;
 		int sim_frames = 0;
-		int perf_frames = 0;
+		int perf_frames = 0, long_run = 0;
+		NSString* long_run_prefix = nil;
 		struct MoveArg {
 			int who = 0, frame = 0;
 			std::vector<int32_t> objs;
@@ -7710,12 +7782,18 @@ int main(int argc, const char* argv[]) {
 				farm_time = float(std::atof(argv[++i]));
 			} else if (a == "--select-all") {
 				select_all = true;
+			} else if (a == "--no-scripts") {
+				g_noScripts = true;
 			} else if (a == "--no-sim") {
 				simulate = false;
 			} else if (a == "--seed" && more) {
 				seed = uint32_t(std::strtoul(argv[++i], nullptr, 0));
 			} else if (a == "--perf" && more) {
 				perf_frames = std::atoi(argv[++i]);  // N more headless frames, timed: simulation step and rendered frame (after --frames)
+			} else if (a == "--long-run" && more) {
+				const std::string v = argv[++i];  // EVERY[,SNAPSHOT_PREFIX]
+				long_run = std::atoi(v.c_str());
+				if (v.find(',') != std::string::npos) long_run_prefix = [NSString stringWithUTF8String:v.c_str() + v.find(',') + 1];
 			} else if (a == "--frames" && more) {
 				sim_frames = std::atoi(argv[++i]);
 			} else if (a == "--move" && more) {
@@ -7782,8 +7860,6 @@ int main(int argc, const char* argv[]) {
 				if (at != std::string::npos) t.frame = std::atoi(spec.c_str() + at + 1);
 				timed_options.push_back(t);
 			} else if (a == "--cursor" && more) {
-			} else if (a == "--no-scripts") {
-				g_noScripts = true;
 				TimedCursor t;
 				std::sscanf(argv[++i], "%f,%f@%d", &t.x, &t.y, &t.frame);
 				timed_cursors.push_back(t);
@@ -8407,6 +8483,13 @@ int main(int argc, const char* argv[]) {
 			}
 			return 0;
 		}
+		if (long_run > 0 && r.simulating && !r.multiplayer) {
+			[r longRun:long_run snapshotPrefix:long_run_prefix total:sim_frames width:w height:h scale:ui_scale];
+			std::fflush(stdout);
+			[r mpClose];
+			return 0;  // headless: never opens the window
+		}
+		[r applyVictoryOverride];
 		// Scripted moves, then N simulation frames (headless checks with --snapshot).
 		for (int f = 0; f <= sim_frames && r.simulating && !r.multiplayer; f++) {
 			for (const MoveArg& m : moves) {

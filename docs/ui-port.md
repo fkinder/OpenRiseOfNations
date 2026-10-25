@@ -1099,6 +1099,60 @@ Hot spots in engine/sim (not touched; `ron-sim --perf`, europe, 90000 frames, sh
 `constant_offset(const char*)` ~19 % (a `strcmp` table lookup by name, called per frame: precompute the offsets), `std::map` insertion in the path search
 (`__tree_balance_after_insert` 3.3 %, `SavedSearch::insert_open` 3.0 %, `first_open_node` 1.4 %), `collide_here` 3.1 %, malloc / free ~3 %.
 
+### 16.2b A full-length 8-AI skirmish, 60,000 frames (2026-10-24)
+
+Harness: `ronmap <game> --random 12,4,1,8 --all-ai --frames 60000 --long-run 10000,PREFIX --zoom 0 --size 1440x900` (headless, never opens a window). `--long-run EVERY[,PREFIX]`
+steps the simulation one frame at a time to `--frames`, or until a nation reaches the Information Age or `game_over`, and every EVERY frames prints the step timing (wall and this
+thread's CPU time, avg / p95 / max), `Game::do_frame` alone (thread CPU), the footprint (`phys_footprint`, resident + compressed), the per-seat census, then runs a 100-frame `--perf`
+sample (it advances the game by 100 frames) and writes `PREFIX10k.png / 30k / 60k / end.png`. `--perf` now also prints the thread CPU time of the sim step and of the render encode and the
+footprint before / after (the wall clock of a loaded machine lies: during these runs the Mac had load averages of 50 to 300 from other builds, GPU wait included). `RON_LONGRUN_VICTORY=2`
+(also read by `ron-sim --random`) makes the game conquest-only: with the default rules a Turkish Pyramids wins by wonder at frame 18041 (20 min, ages 1 - 2; "You lost to a wonder victory", a correct
+end), so the late game needs the override. `ron-sim <game> --random STYLE,SIZE,SEED,NATIONS --frames N [--perf]` now exists too (all seats AI; `new_random_game`; the determinism self-check runs as for a scenario).
+
+Result: **no crash, assert, stall or error line in 60,000 frames** (`ronmap`, 3 runs) and `ron-sim --random 12,4,1,8 --frames 60000` (self-check OK: identical digests twice). The game never reaches the Information Age:
+at 60,000 frames (66 min of game time) the nations are in ages 2 / 3 / 4 / 2 / 3 / 3 / 3 / 2 (0 Ancient ... 4 Enlightenment), 542 units and 340 buildings in all.
+
+| frame | ages (seats 0-7) | units | buildings | sim step avg wall / thread CPU | `do_frame` CPU | render encode CPU | render total (wall, loaded Mac) avg / p95 | footprint |
+|---|---|---|---|---|---|---|---|---|
+| 10,000 | 11101111 | 222 | 139 | 2.5 / 0.50 ms | 0.33 ms | 3.99 ms | 17.8 / 36.7 ms | 280 MB |
+| 20,000 | 22212222 | 499 | 242 | 2.7 / 0.78 | 0.46 | 5.78 | 37.6 / 84.0 | 208 |
+| 30,000 | 23313322 | 599 | 305 | 4.5 / 1.75 | 1.29 | 5.55 | 12.4 / 24.1 | 369 |
+| 40,000 | 23423322 | 615 | 338 | 2.2 / 1.71 | 1.29 | 6.51 | 22.6 / 41.1 | 249 |
+| 50,000 | 23423322 | 543 | 340 | 2.8 / 1.94 | 1.46 | 4.75 | 7.1 / 9.6 | 253 |
+| 60,000 | 23423332 | 542 | 340 | 2.3 / 1.70 | 1.25 | 4.95 | 7.9 / 14.7 | 400 |
+
+Snapshots (read): 10k (11:06, Classical Age, the Spanish corner of the Mediterranean map: farms, woodcutters, two cities), 30k (33:20, Medieval, a Siege Factory completed, a clump of soldiers on the road, food
+527 / knowledge 1262 banked), 60k (1:06:40, still Medieval for the viewed seat, food 706 / knowledge 1124 unspent, pop 64/100, a Pyramids-like wonder foundation at the west); the HUD (resources, top strip,
+minimap, timer) intact at every size. Worst single sim step 59 - 144 ms wall (22 ms at most in thread CPU time at frame 10k, 6 - 10 ms later: the wall outliers are the loaded machine).
+
+Memory: the footprint does not grow with the frame count: 274 MB at frame 5000 ... 250 - 270 MB at 40,000 - 55,000 (the plain RSS falls to 76 MB at times because macOS compresses it, hence `phys_footprint`). Each `--perf` / `--snapshot`
+adds a one-off 270 - 360 MB (render targets and in-flight Metal buffers; the same +270 MB after 100 and after 4000 frames, released by the next checkpoint), so there is no per-frame leak in the render path. The
+sim's own growth is the event log (26,671 entries at 60k) and the AI / path data.
+
+Fixes (all outside engine/sim):
+- `StateCache::pipeline` (platform/metal/renderer.mm): built a 160-byte `snprintf` key and looked it up in a `std::map<std::string>` **per draw call**; now a 24-byte array of the render state's enum fields (the
+  `snprintf` was 15 % of the render CPU in the profile, 450 of 2954 samples).
+- `engine/assets/pose.cpp`: `is_pivot_node` / `slot_for_name` allocated and compared up to ~60 strings per node per unit per frame; now an allocation-free parse of "pivot node N" / "ammo node N" / "smoke node N" / "node N"
+  (identical results: `ron-check` 802/802 models, 1823/1826 anims, failures 0).
+- apps/map-mac/hud.hpp + the four `rect_in` helpers (hud.mm, hud_air.mm, hud_extra.mm, hud_panels.mm): `iface_find_rect` re-resolved the whole window layout on every call; `hud::cached_iface_rect` keeps the result per (window, tag, name, size, nth).
+  The HUD is now about 6 % of the encode (190 of 2954 samples; it was 12 %).
+
+Render encode CPU time, same 8-AI game at frame 41,000, both builds running at once on the loaded Mac: before 8.05 - 8.47 ms avg (p50 7.9 - 8.2), after the pose + HUD fixes 5.24 - 6.21 ms, after the pipeline key 4.8 - 6.5 ms in the late game
+(a 25 - 40 % cut). With the Mac quiet (frames 50k and 60k above: GPU wait 1.8 ms) the render total is 7.1 - 7.9 ms (target 8); at the other checkpoints the wall number is inflated by the load (GPU wait up to 12.7 ms), not by the encode.
+The sim step in the app is 1.7 - 1.9 ms of thread CPU late in the game (`do_frame` 1.25 - 1.46 ms + 0.4 ms of view / HUD bookkeeping), under the 2 ms target; `ron-sim --random ... --perf` 60,000 frames, 2.10 ms/frame wall at load 100+.
+
+Remaining hot spots (not touched):
+- `platform/metal/unit_draw.mm`: `draw_mesh` makes a new `MTLBuffer` (`newBufferWithBytes`) per unit per frame: 563 of the 1751 samples under `encodeUnits` (32 %, 19 % of the whole frame, mostly IOGPU resource creation).
+  Use `setVertexBytes` below 4 KB (as the building add-ons do) or one ring buffer per frame, and cache the pose per (model, animation, frame) (units that stand still re-pose the same frame every frame). `pose_model` is still 20 % of the frame
+  (`pose_node` 322 samples + `sample` 279, the quaternion slerp with `acos` / `sin` per node).
+- engine/sim (profile of the sim phase, 18,577 samples at frames 25k - 45k): `do_frame` 62 %, of which `unit_process` -> `work` -> `do_move` -> `find_tpath` 4821 samples (26 % of the main thread, 42 % of `do_frame`; `find_tpath` itself
+  2192 self) with `SavedSearch::insert_open` / `__tree_balance_after_insert` / `__tree_remove` / `first_open_node` (the `std::map` open list, about 1700, 9 %), `calc_cost` 297, `valid_ucoord` 286, `invalid_loc` 318; a `strcmp` table lookup in
+  `constant_offset(const char*)` called from `process_healing` (551) and `leader_calc_resource_caps` (154), 4 % of the thread (precompute the offsets once); `object_is_seen` / `unit_is_detected` 779 + 296 (from the view fill and the
+  fog checks), `get_graft` 243. `find_tpath` is called every frame by units whose move keeps failing or restarting (not proven which); a back-off would be a behaviour change and needs the decompile of `do_move`.
+  Outside the sim: `make_view` per step is 10 % of a headless step (one view per sim step is right for the window: one step per 66 ms tick).
+- AI behaviour seen in the census (not investigated; engine/sim): seat 7 (Koreans) has **0 citizens** from frame 3000 to 60,000 (39 military, 44 units, ages 2) and seat 3 (Greeks) holds 21 units with 2 soldiers after 66 minutes; the
+  viewed Spanish seat banks 700 food / 1100 knowledge unspent in Medieval at 60k, and no nation reaches the Information Age in 60,000 frames.
+
 ### 16.3 The card toggles' acknowledgement sounds
 
 From the decompiles (`Options::do_auto_explore`, `set_air_repeat`, `do_transport`, `do_stance`, `do_formation`, `do_halt`, `do_eject_all`, `do_back_to_work`,

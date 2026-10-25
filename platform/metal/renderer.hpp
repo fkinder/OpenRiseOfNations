@@ -6,6 +6,7 @@
 #import <Metal/Metal.h>
 #include <simd/simd.h>
 
+#include <array>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -82,7 +83,7 @@ private:
 	id<MTLDevice> device_;
 	id<MTLLibrary> library_;
 	MTLPixelFormat color_ = MTLPixelFormatInvalid, depth_ = MTLPixelFormatInvalid;
-	std::map<std::string, id<MTLRenderPipelineState>> pipelines_;
+	std::map<std::array<uint8_t, 24>, id<MTLRenderPipelineState>> pipelines_;  // the render state's pipeline-relevant fields, one byte each
 	std::map<uint32_t, id<MTLDepthStencilState>> depth_states_;
 	std::map<uint32_t, id<MTLSamplerState>> samplers_;
 };

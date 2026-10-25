@@ -92,6 +92,7 @@
 #include <cstring>
 #include <exception>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -116,13 +117,12 @@
 #include "sim/economy.hpp"
 #include "sim/spells.hpp"
 #include "sim/combat_internal.hpp"
+#include "sim/newgame.hpp"
 #include "sim/rules.hpp"
 #include "sim/save.hpp"
 #include "sim/script_host.hpp"
 #include "sim/placement.hpp"
 #include "sim/view.hpp"
-
-namespace {
 #include "sim/capture.hpp"
 #include "sim/fog.hpp"
 #include "sim/victory.hpp"
@@ -132,6 +132,8 @@ namespace ron::sim {
 int32_t wonders_init_wonder(Game& g, int32_t who, int32_t o);
 void wonders_close_wonder(Game& g, int32_t who, int32_t idx);
 }  // namespace ron::sim
+
+namespace {
 
 using namespace ron::sim;
 
@@ -1001,6 +1003,7 @@ struct FogOpts {
 	// Save / load (sim/save.hpp).
 	std::vector<std::pair<int32_t, std::string>> save_at;  // --save-at FRAME:path
 	std::string load_path;            // --load path: start from a save instead of loading the scenario
+	const ron::sim::RandomGameSetup* random_setup = nullptr;  // --random STYLE,SIZE,SEED,NATIONS: a generated game instead of the scenario (all seats AI)
 	std::string save_scenario;        // the scenario path as a save records it (game-relative)
 	uint32_t save_seed = 0;           // the Game::load seed a save records
 	int32_t roundtrip_at = -1;        // the --roundtrip pass: save at this frame to roundtrip_file
@@ -1065,18 +1068,6 @@ void print_script_events(const Game& g, uint64_t& seen, size_t& objectives_seen,
 	}
 }
 
-// Script summary at the end of a run: what was compiled, runs, failures, unported builtins.
-void print_scripts(const Game& g, const ScriptLoadReport& rep, bool log) {
-	const ScriptHost* h = g.scripts.get();
-	if (!h) return;
-	std::printf("scripts: scenario '%s' general powers '%s' production", rep.scenario_script.c_str(),
-	            rep.general_powers_script.c_str());
-	for (const std::string& p : rep.production_scripts) std::printf(" %s", p.c_str());
-	std::printf("; %lld runs, %lld failed\n", (long long)h->runs, (long long)h->run_errors);
-	for (const std::string& e : rep.errors) std::printf("  script load: %s\n", e.c_str());
-	for (const auto& f : h->run_failures) std::printf("  script failures: %s x%d\n", f.first.c_str(), f.second);
-	const auto un = h->unported();
-	if (!un.empty()) {
 // What a save must carry of the scripts (docs/save-format.md 6): the ScenarioData switches, the timers, the objectives, the trigger bits
 // and the static variables of every compiled script, as counts and one hash (the --roundtrip check compares the game that was saved
 // with the game that was loaded).
@@ -1134,6 +1125,18 @@ std::string script_state_summary(const Game& g) {
 	return buf;
 }
 
+// Script summary at the end of a run: what was compiled, runs, failures, unported builtins.
+void print_scripts(const Game& g, const ScriptLoadReport& rep, bool log) {
+	const ScriptHost* h = g.scripts.get();
+	if (!h) return;
+	std::printf("scripts: scenario '%s' general powers '%s' production", rep.scenario_script.c_str(),
+	            rep.general_powers_script.c_str());
+	for (const std::string& p : rep.production_scripts) std::printf(" %s", p.c_str());
+	std::printf("; %lld runs, %lld failed\n", (long long)h->runs, (long long)h->run_errors);
+	for (const std::string& e : rep.errors) std::printf("  script load: %s\n", e.c_str());
+	for (const auto& f : h->run_failures) std::printf("  script failures: %s x%d\n", f.first.c_str(), f.second);
+	const auto un = h->unported();
+	if (!un.empty()) {
 		std::printf("  unported builtins called:");
 		for (const auto& u : un) std::printf(" %s x%d", u.first.c_str(), u.second);
 		std::printf("\n");
@@ -1398,6 +1401,7 @@ struct RunResult {
 	bool roundtrip_saved = false;
 	int32_t roundtrip_frame = 0;  // the frame it was taken at
 	size_t roundtrip_iter = 0;    // loop iterations (digests) done before it
+	std::string script_at_save, script_after_load;  // script_state_summary of the game when it was saved / right after it was loaded
 	std::array<uint16_t, kNumLeaders> initial_uids{};  // obj_ctr after loading (objects created later have higher uids)
 };
 
@@ -1410,7 +1414,6 @@ void print_anim_table(const Game& g, const AssetAnimSource& art) {
 	                                 "UNPACK", "CHOP", "W_WOOD", "DUMPWOOD", "WTO_WOOD", "MINE", "W_ORE", "DUMPORE",
 	                                 "WTO_ORE", "BUILD", "REPAIR", "SOW", "REAP", "FARM"};
 	std::vector<int32_t> seen;
-	std::string script_at_save, script_after_load;  // script_state_summary of the game when it was saved / right after it was loaded
 	std::printf("animation frames per graphics piece (frames at 15/s; * = looping, ! = .bha missing):\n");
 	for (int32_t who = 0; who < kNumLeaders; who++) {
 		for (int32_t o = 0; o < g.objects[size_t(who)].unit_mark; o++) {
@@ -1964,9 +1967,6 @@ void print_event(const Game& g, const GameEvent& e) {
 	case 5: std::printf("  f%-5d CAPITAL LOST L%d (held by L%d)\n", e.frame, e.who, e.other); break;
 	case 6: std::printf("  f%-5d CAPITAL RECAPTURED L%d\n", e.frame, e.who); break;
 	case 7: std::printf("  f%-5d BUILDING CAPTURED L%d:%d -> L%d:%d\n", e.frame, e.other, e.o, e.who, e.o2); break;
-	default: break;
-	}
-}
 	case 17: std::printf("  f%-5d WONDER VICTORY CLOCK L%d: %d frames to go (wonder net %d)\n", e.frame, e.who, e.value, e.other); break;
 	case 18: std::printf("  f%-5d WONDER VICTORY IN %d frames (L%d)\n", e.frame, e.value, e.who); break;
 	case 19: std::printf("  f%-5d WONDER VICTORY CLOCK STOPPED (L%d)\n", e.frame, e.who); break;
@@ -1977,6 +1977,9 @@ void print_event(const Game& g, const GameEvent& e) {
 	case 24: std::printf("  f%-5d MUSICAL CHAIRS ROUND (%d min): %d defeated\n", e.frame, e.value, e.other); break;
 	case 25: std::printf("  f%-5d L%d %s\n", e.frame, e.who, e.value == 0 ? "RESIGNED" : e.value == 1 ? "QUIT" : "DROPPED"); break;
 	case 26: std::printf("  f%-5d NUKE COUNT %d\n", e.frame, e.value); break;
+	default: break;
+	}
+}
 
 // --perf: time Game::do_frame alone (no per-frame digest, no event / AI / economy printing) and print ms per frame (docs/ui-port.md section 16).
 bool g_perf = false;
@@ -1998,6 +2001,9 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 		}
 		if (print) std::printf("loaded %s: scenario %s, seed %u, frame %d tick %d\n", fo.load_path.c_str(), sinfo.scenario.c_str(),
 		                       sinfo.seed, g->frame, g->tick);
+	} else if (fo.random_setup) {
+		g = ron::sim::new_random_game(files, rules, anims, *fo.random_setup);
+		if (!g) throw std::runtime_error("the random map could not be generated");
 	} else {
 		g = std::make_unique<Game>();
 		g->anims = anims;
@@ -2014,6 +2020,7 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 	FogCheck fc;
 	CommandManager cm;
 	RunResult rr;
+	if (!fo.load_path.empty()) rr.script_after_load = script_state_summary(*g);
 	uint64_t script_seq = 0;
 	size_t objectives_seen = 0;
 	std::vector<std::pair<std::string, int32_t>> objectives_done;
@@ -2035,11 +2042,11 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 			rr.roundtrip_saved = true;
 			rr.roundtrip_frame = g->frame;
 			rr.roundtrip_iter = rr.digests.size();
+			rr.script_at_save = script_state_summary(*g);
 			save_game(*g, fo.save_scenario, fo.save_seed, fo.roundtrip_file);
 			rr.saved_bytes = int64_t(std::filesystem::file_size(fo.roundtrip_file));
 		}
 	};
-	if (!fo.load_path.empty()) rr.script_after_load = script_state_summary(*g);
 	// Every scripted unit is tracked from its first command.
 	for (const Script& s : scripts) {
 		for (int32_t o : s.objs) {
@@ -2061,7 +2068,6 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 		if (s.kind == Script::Attack) {  // the attack target too
 			bool known = false;
 			for (const Tracked& t : rr.tracked) known |= t.who == s.twho && t.o == s.to;
-			rr.script_at_save = script_state_summary(*g);
 			const Unit* u = g->unit(s.twho, s.to);
 			if (!known && u) rr.tracked.push_back({s.twho, s.to, u->x, u->y, u->x, u->y, -1, s.frame, 0, u->x, u->y, 0});
 		}
@@ -2443,12 +2449,6 @@ bool has_flag(int argc, char** argv, const char* key) {
 	return false;
 }
 
-}  // namespace
-
-int main(int argc, char** argv) {
-	if (argc >= 3 && std::strcmp(argv[1], "--dump") == 0) return dump_tables(argv[2]);
-	if (argc < 3) {
-		std::fprintf(stderr,
 // --victory MODE (docs/victory-spec.md section 10): each victory mode of the lobby driven to its end on the loaded scenario,
 // asserting the winner and the game-over state. MODE: all, teams, conquest, capital, sudden, time, score, wonder, territory,
 // economic, chairs, armageddon, allied, tech, resign, reset. The fixtures that need more than two leaders say "skip".
@@ -3063,6 +3063,12 @@ int run_victory_fixtures(const ron::GameFiles& files, const ron::Scenario& sc, c
 	return r.fails == 0 ? 0 : 1;
 }
 
+}  // namespace
+
+int main(int argc, char** argv) {
+	if (argc >= 3 && std::strcmp(argv[1], "--dump") == 0) return dump_tables(argv[2]);
+	if (argc < 3) {
+		std::fprintf(stderr,
 		             "usage: %s <game dir> <scenario.scx> [--frames N] [--seed S] [--list] "
 		             "[--move WHO:o1,o2@X,Y[@FRAME][/form][%%queue]]... [--halt WHO:o1,o2@FRAME]... "
 		             "[--form WHO:o1,o2@FRAME/form[,rotate]]... [--dump-every K] "
@@ -3091,16 +3097,40 @@ int run_victory_fixtures(const ron::GameFiles& files, const ron::Scenario& sc, c
 			}
 			break;
 		}
+		// `ron-sim <game dir> --random STYLE,SIZE,SEED,NATIONS ...`: a random-map skirmish of AI seats (same grammar as ronmap's --random).
+		const bool random_mode = std::strcmp(argv[2], "--random") == 0;
+		if (random_mode && argc >= 4) {
+			arg_store.assign(argv, argv + argc);
+			arg_store.insert(arg_store.begin() + 2, "random");
+			arg_ptrs.clear();
+			for (std::string& a : arg_store) arg_ptrs.push_back(a.data());
+			argv = arg_ptrs.data();
+			argc = int(arg_ptrs.size());
+		}
 		std::string file = argv[2];
 		std::error_code ec;
-		if (!std::filesystem::exists(file, ec)) {
+		if (!random_mode && !std::filesystem::exists(file, ec)) {
 			const std::string r = files.resolve(file);
 			if (r.empty()) throw std::runtime_error("scenario not found: " + file);
 			file = r;
 		}
-		const ron::Scenario sc = ron::parse_scenario(ron::read_file(file));
+		ron::Scenario sc;
+		if (!random_mode) sc = ron::parse_scenario(ron::read_file(file));
 		Rules rules = load_rules(files);
 		start_game(rules, GameSetup());
+		ron::sim::RandomGameSetup random_setup;
+		if (random_mode) {
+			const char* spec = arg_value(argc, argv, "--random");
+			if (!spec) throw std::runtime_error("--random needs STYLE,SIZE,SEED,NATIONS");
+			const std::string perr = ron::sim::parse_random_option(rules, spec, random_setup);
+			if (!perr.empty()) throw std::runtime_error(perr);
+			for (ron::sim::NationSetup& n : random_setup.nation) n.human = false;
+			if (const char* v = std::getenv("RON_LONGRUN_VICTORY")) random_setup.victory = std::atoi(v);  // as ronmap: 2 = conquest only, so a wonder win does not end a long run
+			ron::sim::RandomExtras rx;  // the generated scenario records stand in for the file (the first build only gives them)
+			if (!ron::sim::new_random_game(files, rules, nullptr, random_setup, &rx)) throw std::runtime_error("the random map could not be generated: " + rx.error);
+			sc = std::move(rx.scenario);
+			random_setup = rx.setup;
+		}
 		const char* fa = arg_value(argc, argv, "--frames");
 		const int32_t frames = fa ? int32_t(std::strtol(fa, nullptr, 0)) : 300;
 		const char* sa = arg_value(argc, argv, "--seed");
@@ -3118,19 +3148,6 @@ int run_victory_fixtures(const ron::GameFiles& files, const ron::Scenario& sc, c
 			if (std::strcmp(argv[i], "--move") == 0) scripts.push_back(parse_move(argv[i + 1]));
 			else if (std::strcmp(argv[i], "--halt") == 0) scripts.push_back(parse_halt(argv[i + 1]));
 			else if (std::strcmp(argv[i], "--select") == 0) {  // WHO:o1,o2@FRAME (WHO = leader index; empty list clears)
-		ron::sim::RandomGameSetup random_setup;
-		if (random_mode) {
-			const char* spec = arg_value(argc, argv, "--random");
-			if (!spec) throw std::runtime_error("--random needs STYLE,SIZE,SEED,NATIONS");
-			const std::string perr = ron::sim::parse_random_option(rules, spec, random_setup);
-			if (!perr.empty()) throw std::runtime_error(perr);
-			for (ron::sim::NationSetup& n : random_setup.nation) n.human = false;
-			if (const char* v = std::getenv("RON_LONGRUN_VICTORY")) random_setup.victory = std::atoi(v);  // as ronmap: 2 = conquest only, so a wonder win does not end a long run
-			ron::sim::RandomExtras rx;  // the generated scenario records stand in for the file (the first build only gives them)
-			if (!ron::sim::new_random_game(files, rules, nullptr, random_setup, &rx)) throw std::runtime_error("the random map could not be generated: " + rx.error);
-			sc = std::move(rx.scenario);
-			random_setup = rx.setup;
-		}
 				Script s = parse_halt(argv[i + 1]);
 				s.kind = Script::Select;
 				scripts.push_back(s);
@@ -3254,12 +3271,16 @@ int run_victory_fixtures(const ron::GameFiles& files, const ron::Scenario& sc, c
 			}
 		}
 		if (loading) fo.load_path = arg_value(argc, argv, "--load");
+		if (random_mode) fo.random_setup = &random_setup;
 		const char* pa = arg_value(argc, argv, "--prod-every");
 		const int32_t prod_every = pa ? int32_t(std::strtol(pa, nullptr, 0)) : 0;
 		// GameInfo.reveal_map: --reveal N, else the scenario header's value, else 1 (Normal).
 		const char* ra = arg_value(argc, argv, "--reveal");
 		const int32_t reveal =
 		    ra ? int32_t(std::strtol(ra, nullptr, 0)) : (sc.reveal_map >= 0 && sc.reveal_map <= 3 ? sc.reveal_map : 1);
+		if (const char* vm = arg_value(argc, argv, "--victory")) {  // --victory MODE: docs/victory-spec.md section 10
+			return run_victory_fixtures(files, sc, rules, seed, art.get(), reveal, vm, has_flag(argc, argv, "--verbose"));
+		}
 		if (has_flag(argc, argv, "--spell-fixtures")) {
 			Game g;
 			g.anims = art.get();
@@ -3278,9 +3299,6 @@ int run_victory_fixtures(const ron::GameFiles& files, const ron::Scenario& sc, c
 			            "wonderwin %d popwin %d econwin %d nations %d\n",
 			            g.info.team_style, g.info.game_rules, g.info.elimination, g.info.victory, g.info.score_goal,
 			            g.info.time_limit, g.info.wonderwin, g.info.popwin, g.info.econwin, g.info.num_nations);
-		if (const char* vm = arg_value(argc, argv, "--victory")) {  // --victory MODE: docs/victory-spec.md section 10
-			return run_victory_fixtures(files, sc, rules, seed, art.get(), reveal, vm, has_flag(argc, argv, "--verbose"));
-		}
 			for (int32_t who = 0; who < kNumLeaders; who++) {
 				const Leader& l = g.leaders[size_t(who)];
 				if (!(l.flags & leaderflag::kValid)) continue;
@@ -3408,8 +3426,14 @@ int run_victory_fixtures(const ron::GameFiles& files, const ron::Scenario& sc, c
 				            A.final_frame, why.c_str());
 				return 1;
 			}
+			if (A.script_at_save != c.script_after_load) {
+				std::printf("save round-trip: FAILED: the script state differs after the load:\n  saved:  %s\n  loaded: %s\n",
+				            A.script_at_save.c_str(), c.script_after_load.c_str());
+				return 1;
+			}
 			std::printf("save round-trip: OK (saved at frame %d, %lld bytes; %zu frames compared, final state of %zu bytes identical)\n",
 			            R, (long long)A.saved_bytes, c.digests.size(), A.final_state.size());
+			std::printf("save round-trip: script state restored: %s\n", A.script_at_save.c_str());
 		}
 		return 0;
 	} catch (const std::exception& e) {
@@ -3417,9 +3441,3 @@ int run_victory_fixtures(const ron::GameFiles& files, const ron::Scenario& sc, c
 		return 1;
 	}
 }
-			if (A.script_at_save != c.script_after_load) {
-				std::printf("save round-trip: FAILED: the script state differs after the load:\n  saved:  %s\n  loaded: %s\n",
-				            A.script_at_save.c_str(), c.script_after_load.c_str());
-				return 1;
-			}
-			std::printf("save round-trip: script state restored: %s\n", A.script_at_save.c_str());
