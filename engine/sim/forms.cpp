@@ -528,6 +528,12 @@ void form_compute(Game& g, FormData& F, Group& gr, int32_t x, int32_t y, uint32_
 FormData* group_compute_form(Game& g, Group& gr, int32_t x, int32_t y, int32_t form, int32_t width, bool set_angle,
                              uint32_t* angle, int32_t loc_x, int32_t loc_y, int32_t guarding) {
 	// Group::compute_form @707c80
+	if (form == kFormKeep) {
+		if (FormData* K = form_compute_keep(g, gr, x, y, set_angle, angle, loc_x, loc_y)) return K;
+		// A scattered selection (or none to lay out): the original's LINE instead, and the group moves as LINE.
+		form = 0;
+		gr.form = 0;
+	}
 	const int32_t li = group_find_leader(g, gr);  // "No valid group for formation"
 	if (li < 0) return nullptr;
 	const Unit& L = *g.unit(gr.who, gr.list[size_t(li)]);
@@ -572,6 +578,87 @@ FormData* group_compute_form(Game& g, Group& gr, int32_t x, int32_t y, int32_t f
 			gr.off_y[size_t(i)] = -gr.off_y[size_t(i)];
 		}
 	}
+	return &F;
+}
+
+FormData* form_compute_keep(Game& g, Group& gr, int32_t x, int32_t y, bool set_angle, uint32_t* angle, int32_t loc_x,
+                            int32_t loc_y) {
+	// KEEP (kFormKeep): integer arithmetic only (sin_a / cos_a tables, 64-bit products), so it is as deterministic as
+	// the original's layouts. Uses forms[0] as scratch like LINE would; categorize gives the member order and leader.
+	if (group_find_leader(g, gr) < 0) return nullptr;
+	FormData& F = g.forms[0];
+	F.clear_scratch();
+	const World& w = g.world;
+	const int32_t tx = tcoord_of(x), ty = tcoord_of(y);
+	const bool water = w.in_t(tx, ty) && (w.t(tx, ty) & tmask::kMedium) == tmask::kWater;
+	form_categorize(g, F, gr, water);
+	const int32_t n = gr.num;
+	auto member = [&](int32_t i) -> const Unit* {
+		const Object* ob = g.object(gr.who, gr.list[size_t(i)]);
+		return valid_on_map_unit(ob) ? static_cast<const Unit*>(ob) : nullptr;
+	};
+	// The arrangement's centre (captains only: followers stand beside their captain) and its facing.
+	int64_t sx = 0, sy = 0;
+	int32_t caps = 0, fx = 0, fy = 0;
+	constexpr int32_t kR = 0x1000;
+	for (int32_t i = 0; i < n; i++) {
+		const Unit* u = member(i);
+		if (!u || u->o_up >= 0) continue;
+		sx += u->x, sy += u->y, caps++;
+		fx += sin_a(u->angle, kR);
+		fy -= cos_a(u->angle, kR);
+	}
+	if (caps == 0) return nullptr;
+	const int32_t cx = int32_t(sx / caps), cy = int32_t(sy / caps);
+	// Units spread over the map are not an arrangement: the caller lays them out as LINE instead.
+	constexpr int32_t kMaxExtent = 0x1800;  // 32 tiles from the centre
+	for (int32_t i = 0; i < n; i++) {
+		const Unit* u = member(i);
+		if (u && u->o_up < 0 && vector_dist(u->x - cx, u->y - cy) > kMaxExtent) return nullptr;
+	}
+	// The travel angle: as compute_form, from the group's location to the destination (or the commanded facing).
+	uint32_t A;
+	if (set_angle) {
+		A = *angle;
+	} else {
+		const int32_t dx = x - cx, dy = y - cy;
+		if (dx == 0 && dy == 0) {
+			const int32_t ldx = x - loc_x, ldy = y - loc_y;
+			A = (ldx == 0 && ldy == 0) ? gr.o_angle : find_angle(ldx, ldy);
+		} else {
+			A = find_angle(dx, dy);
+		}
+		*angle = A;
+	}
+	// The facing the arrangement is read in: the mean of the captains' facings when they agree (resultant at least
+	// half the radius), else the travel angle itself (the arrangement is then translated, not turned).
+	const uint32_t facing = vector_dist(fx, fy) >= (kR * caps) / 2 ? find_angle(fx, fy) : A;
+	constexpr int32_t kT = 0x4000;  // sin_table's negative-radius branch multiplies in 32 bits: |r| * 0xffff must fit
+	const int64_t fc = cos_a(facing, kT), fs = sin_a(facing, kT);
+	for (int32_t i = 0; i < n; i++) {
+		const Unit* u = member(i);
+		const int32_t wx = u ? u->x - cx : 0, wy = u ? u->y - cy : 0;
+		// Formation frame: world = (cos(A, lat) + sin(A, dep), sin(A, lat) - cos(A, dep)); its inverse at `facing`.
+		const int32_t lat = int32_t((int64_t(wx) * fc + int64_t(wy) * fs) / kT);
+		const int32_t dep = int32_t((int64_t(wx) * fs - int64_t(wy) * fc) / kT);
+		F.off_x[size_t(i)] = lat;
+		F.off_y[size_t(i)] = dep;
+		F.to_x[size_t(i)] = x + cos_a(A, lat) + sin_a(A, dep);
+		F.to_y[size_t(i)] = y + sin_a(A, lat) - cos_a(A, dep);
+		gr.angles[size_t(i)] = 0;
+	}
+	// Group offsets relative to the leader's slot (what update_positions / do_group_move follow).
+	const int32_t lat0 = F.off_x[size_t(F.idx)], dep0 = F.off_y[size_t(F.idx)];
+	for (int32_t i = 0; i < n; i++) {
+		gr.off_x[size_t(i)] = ucoord_of(F.off_x[size_t(i)] - lat0);
+		gr.off_y[size_t(i)] = ucoord_of(F.off_y[size_t(i)] - dep0);
+	}
+	gr.form_num = n;
+	F.reverse = 0;
+	gr.facing = 0;
+	const int32_t dx = x - F.to_x[size_t(F.idx)], dy = y - F.to_y[size_t(F.idx)];
+	gr.o_angle = find_angle(dx, dy);
+	gr.o_dist = vector_dist(dx, dy);
 	return &F;
 }
 

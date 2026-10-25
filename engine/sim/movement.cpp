@@ -634,7 +634,7 @@ int32_t move_step(Game& g, Unit& u, Order& m, int32_t speed) {
 
 // ---------------------------------------------------------------- do_move @5f7b30
 
-int32_t do_move(Game& g, Unit& u, Order& m) {
+int32_t do_move(Game& g, Unit& u, Order& m, int32_t speed) {
 	const Type& t = *u.ptype;
 	// 1. Fires-while-moving units.
 	if ((t.unit_flags & 0x200000) && obj_attack(g, u) != 0) {
@@ -878,6 +878,7 @@ int32_t do_move(Game& g, Unit& u, Order& m) {
 	int32_t s = get_speed(g, u, u.x, u.y, false);
 	if (kAiSpeed > 1) s *= kAiSpeed;
 	if (unit_is_modern_infantry(g, u)) s = s * 5 / 4;
+	if (speed >= 0) s = speed;  // a KEEP formation member: the group's regulated speed
 
 	if (!(u.unit_masks & umask::kPathClear)) {
 		// 11. Verify the straight line to the latched point.

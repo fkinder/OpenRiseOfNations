@@ -789,7 +789,7 @@ void cycle_research(Ctx& c, int* index) {
 
 std::vector<std::pair<int32_t, int32_t>> formation_slots(Ctx& c, int32_t x, int32_t y, int form, int width, bool set_angle, uint32_t angle) {
 	std::vector<std::pair<int32_t, int32_t>> out;
-	if (!c.game || form < 0 || form >= kNumForms) return out;
+	if (!c.game || form < 0 || (form >= kNumForms && form != kFormKeep)) return out;
 	Game& g = *c.game;
 	auto tmp = std::make_unique<Group>();
 	group_clear(*tmp, -1);
@@ -802,13 +802,14 @@ std::vector<std::pair<int32_t, int32_t>> formation_slots(Ctx& c, int32_t x, int3
 	if (tmp->num <= 0 || group_get_num_cap(g, *tmp) <= 0) return out;
 	int32_t lx = 0, ly = 0;
 	group_get_loc(g, *tmp, &lx, &ly);
-	const FormData saved = g.forms[size_t(form)];
+	const size_t scratch = form == kFormKeep ? 0 : size_t(form);  // KEEP lays out on forms[0]'s scratch
+	const FormData saved = g.forms[scratch];
 	uint32_t a = angle;
 	const FormData* F = group_compute_form(g, *tmp, x, y, form, width, set_angle, &a, lx, ly, 0);
 	if (F) {
 		for (int32_t i = 0; i < tmp->num; i++) out.push_back({F->to_x[size_t(i)], F->to_y[size_t(i)]});
 	}
-	g.forms[size_t(form)] = saved;
+	g.forms[scratch] = saved;
 	return out;
 }
 

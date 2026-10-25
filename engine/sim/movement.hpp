@@ -13,7 +13,8 @@ namespace ron::sim {
 class Game;
 
 // ---- movement.cpp
-int32_t do_move(Game& g, Unit& u, Order& m);           // Unit::do_move @5f7b30 (MOVE_TO, FLEE_TO)
+// Unit::do_move @5f7b30 (MOVE_TO, FLEE_TO). `speed` >= 0 replaces step 10's speed (the KEEP formation's members).
+int32_t do_move(Game& g, Unit& u, Order& m, int32_t speed = -1);
 int32_t do_attack_to(Game& g, Unit& u, Order& m);      // Unit::do_attack_to @5f2320 (combat scan stubbed)
 int32_t do_explore_to(Game& g, Unit& u, Order& m);     // Unit::do_explore_to @5f24a0 (goody scan stubbed)
 int32_t do_flee_to(Game& g, Unit& u, Order& m);        // Unit::do_flee_to @5f2480

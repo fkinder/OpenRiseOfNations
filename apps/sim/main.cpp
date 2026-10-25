@@ -53,7 +53,7 @@
 // --attack issues GROUP + ATTACK (target object TO of leader TWHO). --combat-every prints a combat summary (alive
 // units and hit points per leader, live ammo, corpses, kills) every K frames.
 // --move issues GROUP + MOVE_TO for the listed units of leader WHO at FRAME (default 0); /form sets the formation
-// byte (default -1 = keep), %queue the QueuePos (0 FIRST, 1 LAST, 2 NEW = default). --form issues FORM (form -1 next,
+// byte (default -1 = the units' own; 10 = KEEP, the current arrangement turned to the travel direction), %queue the QueuePos (0 FIRST, 1 LAST, 2 NEW = default). --form issues FORM (form -1 next,
 // -3 previous, -2 keep; rotate is added to the formation angle) with QUEUE_NEW. --dump-every prints the moved units'
 // positions every K frames. The run is
 // repeated from a fresh load and the digests compared (the determinism self-check) unless --no-selfcheck.

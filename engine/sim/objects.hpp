@@ -90,6 +90,8 @@ constexpr uint8_t kPathed = 0x01, kExplicit = 0x04, kReturnHome = 0x08, kApproac
 // PathData.flags (docs/movement-spec.md section 3.2)
 namespace pathflag {
 constexpr uint32_t kFinal = 0x01, kFine = 0x02, kTransport = 0x04, kAround = 0x08, kBuilding = 0x10, kRoad = 0x20;
+// This port's addition: the KEEP formation's slot waypoint (refreshed every frame by do_group_move, sim/groups.hpp).
+constexpr uint32_t kSlot = 0x80;
 }
 
 // ---------------------------------------------------------------- orders

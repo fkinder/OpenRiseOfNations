@@ -1153,7 +1153,7 @@ void group_action_move_near(Game& g, Group& gr, int32_t x, int32_t y, int32_t to
 		Unit* up = move_member(g, gr, i);
 		if (!up || army_skip(*up)) continue;
 		Unit& u = *up;
-		if (u.type < 50 || u.type > 53) u.form = int8_t(form2);
+		if ((u.type < 50 || u.type > 53) && form2 != kFormKeep) u.form = int8_t(form2);  // KEEP is a move-time layout
 		u.form_mod = int8_t(w2);
 		if (q == kQueueLast) std::reverse(u.path.begin(), u.path.end());  // Stack::invert
 		const bool captain = u.o_up < 0;
@@ -1451,6 +1451,7 @@ void add_group_move_order(Game& g, Unit& u, int32_t ux, int32_t uy, uint32_t ang
 int32_t do_group_move(Game& g, Unit& u, Order& m) {
 	// Unit::do_group_move @5e79a0 (GROUP_MOVE, and the movement of GROUP_ATTACK_TO)
 	if (u.group == -1) {
+		if (std::getenv("RON_GROUP_TRACE")) std::printf("  f%d group %d:%d no group\n", g.frame, u.who, u.o);
 		ungroup_move_order(g, u);
 		return 0;
 	}
@@ -1522,7 +1523,9 @@ int32_t do_group_move(Game& g, Unit& u, Order& m) {
 		}
 	if (slot < 0) u.group = -1;
 	else m.form_id = slot;
+	static const bool trace = std::getenv("RON_GROUP_TRACE") != nullptr;
 	if (slot < 0 || lost) {
+		if (trace) std::printf("  f%d group %d:%d slot %d lost %d\n", g.frame, u.who, u.o, slot, int(lost));
 		if (u.group >= 0 && vector_dist(u.x - m.x, u.y - m.y) >= 0x600) {
 			group_refresh_group_order(g, gr, u);
 			return 0;
@@ -1541,7 +1544,15 @@ int32_t do_group_move(Game& g, Unit& u, Order& m) {
 	const PathData T{L.x + gr.curr_x[size_t(m.form_id & 127)], L.y + gr.curr_y[size_t(m.form_id & 127)], 0, 0};
 	// Drop my intermediate waypoints down to the final one (an empty stack yields a zeroed entry, see below).
 	PathData Wp{};
-	for (;;) {
+	if (gr.form == kFormKeep) {
+		// KEEP keeps its stack (detours and the slot waypoint): the final point is read, not popped.
+		Wp = PathData{m.x, m.y, 0, pathflag::kFinal};
+		for (auto it = u.path.rbegin(); it != u.path.rend(); ++it)
+			if (it->flags & pathflag::kFinal) {
+				Wp = *it;
+				break;
+			}
+	} else for (;;) {
 		if (u.path.empty()) {
 			// The original sets length = 1 and reads the stale entry 0 of its array; a zeroed entry here.
 			Wp = PathData{};
@@ -1552,12 +1563,15 @@ int32_t do_group_move(Game& g, Unit& u, Order& m) {
 		if (Wp.flags & pathflag::kFinal) break;
 		if (u.path.empty()) break;
 	}
-	if (!(Wp.flags & pathflag::kFinal)) Wp.flags |= pathflag::kFinal;
-	u.path.push_back(Wp);
+	if (gr.form != kFormKeep) {
+		if (!(Wp.flags & pathflag::kFinal)) Wp.flags |= pathflag::kFinal;
+		u.path.push_back(Wp);
+	}
 	const int32_t ds = vector_dist(T.x - u.x, T.y - u.y);
 	const int32_t dw = vector_dist(Wp.x - u.x, Wp.y - u.y);
 	if (dw - ds <= 0x60 || dw <= 0x180) {
 		// Close to the final point: continue as a plain move.
+		if (trace) std::printf("  f%d group %d:%d near final: ds %d dw %d T (%d,%d) Wp (%d,%d) at (%d,%d)\n", g.frame, u.who, u.o, ds, dw, T.x, T.y, Wp.x, Wp.y, u.x, u.y);
 		m.in_group = 0;
 		m.dest_x = Wp.x;
 		m.dest_y = Wp.y;
@@ -1566,6 +1580,43 @@ int32_t do_group_move(Game& g, Unit& u, Order& m) {
 		return 0;
 	}
 	const uint32_t at = find_angle(T.x - u.x, T.y - u.y);
+	if (gr.form == kFormKeep) {
+		// KEEP (this port's formation, sim/groups.hpp): the member walks to its slot through its own do_move, so the
+		// original's planner takes it around rivers, forests, buildings and other units instead of the group move
+		// giving up; the group only supplies the target (the slot, refreshed every frame unless a detour is being
+		// walked) and the regulated speed: catch-up when the slot is ahead, half speed back to it when it is behind,
+		// a wait when it is right there.
+		const bool ahead = lead_o == get_captain(g, u) ||
+		                   angle_diff(at, find_angle(Wp.x - u.x, Wp.y - u.y)) < 0x55555555u;
+		int32_t s;
+		if (ahead) {
+			if (gr.march == 0 || has_general(g, u, 0x8000, -1) >= 0) {
+				const int32_t mine = unit_speed(g, u);
+				if (mine < gr.speed) {
+					gr.speed = mine;
+					gr.new_speed = mine;
+				}
+			}
+			s = get_speed(g, u, u.x, u.y, true);
+			s += std::min(s / 3, 9);
+		} else {
+			if (ds < 0x30) return 0;
+			s = get_speed(g, u, u.x, u.y, false) / 2;
+		}
+		while (!u.path.empty() && (u.path.back().flags & pathflag::kSlot)) u.path.pop_back();
+		if (u.path.empty() || (u.path.back().flags & pathflag::kFinal)) {
+			u.path.push_back(PathData{T.x, T.y, 0, pathflag::kSlot});
+			m.dest = 1;
+			m.dest_x = T.x;
+			m.dest_y = T.y;
+			u.tolerance = 0;
+			u.unit_masks &= ~umask::kPathClear;
+		}
+		m.in_group = 1;
+		if (m.dest != 0 && m.dest_x == u.x && m.dest_y == u.y) return 0;
+		do_move(g, u, m, s);
+		return 0;
+	}
 	int32_t reduced = 0;
 	auto follow_slot = [&]() {
 		u.path.push_back(T);
@@ -1630,6 +1681,7 @@ int32_t do_group_move(Game& g, Unit& u, Order& m) {
 				add_flock(g, wx * 4 + 2, wy * 4 + 2, lead_who, v + 2);
 			}
 		}
+		if (trace) std::printf("  f%d group %d:%d invalid dest (%d,%d)\n", g.frame, u.who, u.o, m.dest_x, m.dest_y);
 		ungroup_move_order(g, u);
 		return 0;
 	}
@@ -1643,6 +1695,7 @@ int32_t do_group_move(Game& g, Unit& u, Order& m) {
 	}
 	if (move_step(g, u, m, s) != 0) return 0;
 	if (update_order(u) != &m) return 0;
+	if (trace) std::printf("  f%d group %d:%d no step (collide %d:%d)\n", g.frame, u.who, u.o, u.collide_who, u.collide_o);
 	{
 		const OrderType at2 = action_type(u);
 		if ((at2 == kAttack || at2 == kGroupAttack || m.type == kGroupAttackTo) && u.collide != 0) {
@@ -1663,6 +1716,7 @@ void ungroup_move_order(Game& g, Unit& u) {
 	// Unit::ungroup_move_order @5fd140 with the id of the unit's front group move and follower = 0: GROUP_MOVE ->
 	// MOVE_TO, GROUP_ATTACK_TO -> ATTACK_TO (MoveOrder copied except timer, dest = 0, orig = target) at the front,
 	// down the captain chain.
+	const bool keep = u.group >= 0 && u.group < kNumGroups && g.groups.g[size_t(u.group)].form == kFormKeep;
 	const Order* f = u.front();
 	if (!f || !(f->type == kGroupMove || f->type == kGroupAttackTo)) return;
 	const int32_t id = f->id;
@@ -1683,6 +1737,7 @@ void ungroup_move_order(Game& g, Unit& u) {
 		}
 		if (found >= 0) {
 			const Order gm = p->orders[size_t(found)];
+			if (keep) while (!p->path.empty() && (p->path.back().flags & pathflag::kSlot)) p->path.pop_back();  // KEEP's slot waypoint
 			const bool leader = gm.oxx == p->o && gm.whose == p->who;
 			Order n;
 			n.type = gm.type == kGroupAttackTo ? kAttackTo : kMoveTo;

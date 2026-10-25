@@ -8,7 +8,7 @@
 //               [--farm-time SECONDS] [--snapshot out.png [--size WxH]] [--no-hud] [--ui-scale S]
 //               [--play WHO] [--select WHO:o1,o2,...] [--place-click] [--queue WHO:O@TYPE[*N]] [--select-build WHO:o1,...] [--build-page N] [--place TYPE@X,Y]
 //               [--select WHO:o1,...@FRAME] [--option N[:MENU[:TYPE]]@FRAME] [--cursor X,Y@FRAME] [--look X,Y@FRAME]
-//               [--zoom-at LEVEL@FRAME] [--script-log] [--load-game FILE] [--save-game FILE]
+//               [--zoom-at LEVEL@FRAME] [--script-log] [--no-scripts] [--load-game FILE] [--save-game FILE]
 //               [--group NAME@FRAME] [--recall-group N@FRAME] [--regroup N@FRAME]
 //   LEVEL is the game's zoom level 0 (far) .. 6 (closest); the game starts at 5. X,Y is the look-at point in world
 //   units (default: player 1's start camera, else the map centre). The scenario's buildings and units are placed
@@ -407,6 +407,7 @@ static int g_difficulty = -1;
 // --all-ai: every seat of a --random game is a computer player (AI-versus-AI checks).
 static bool g_randomAllAi = false;
 
+static bool g_noScripts = false;  // --no-scripts: the scenario runs without its scripts (headless checks of orders the tutorials block)
 // Debugging aid: RON_SKIP=floor,land,trans,coral,water skips those passes.
 static bool debug_skip(const char* pass) {
 	static const std::string skip = getenv("RON_SKIP") ? std::string(",") + getenv("RON_SKIP") + "," : std::string();
@@ -995,8 +996,10 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 					if (g_difficulty >= 0) _game->info.difficulty = uint8_t(g_difficulty);
 					_game->load(files, sc, *_simRules, _simSeed);
 					// Scenario, general powers and AI production scripts (sim/script_host.hpp).
-					const ron::sim::ScriptLoadReport srep = ron::sim::script_host_load(*_game, files, path, sc);
-					for (const std::string& e : srep.errors) std::fprintf(stderr, "script: %s\n", e.c_str());
+					if (!g_noScripts) {
+						const ron::sim::ScriptLoadReport srep = ron::sim::script_host_load(*_game, files, path, sc);
+						for (const std::string& e : srep.errors) std::fprintf(stderr, "script: %s\n", e.c_str());
+					}
 				}
 				_curView = ron::sim::make_view(*_game);
 				_prevView = _curView;
@@ -5342,7 +5345,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	                                                                                                                     : ron::sim::kQueueNew;
 	if (!_selected.empty()) {
 		const std::vector<int32_t> objs = [self ownSelectedUnits];
-		[self issueAs:me block:^bool { return _cm.issue_move_to(*_game, objs, ix, iy, q); }];
+		// Two or more units walk as a body that keeps the player's own arrangement (kFormKeep, sim/groups.hpp); the
+		// original's formations are chosen with the right drag or the card's formation button.
+		const int32_t form = objs.size() >= 2 ? ron::sim::kFormKeep : -1;
+		[self issueAs:me block:^bool { return _cm.issue_move_to(*_game, objs, ix, iy, q, form); }];
 	} else if (!_selectedBuilds.empty()) {
 		const std::vector<int32_t> objs = [self ownSelectedBuilds];
 		const bool add = (m & NSEventModifierFlagShift) != 0;
@@ -5572,7 +5578,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	const uint32_t angle = facing ? ron::sim::find_angle(int32_t(std::lround(d.x)), int32_t(std::lround(d.y))) : 0;
 	const int form = _formForm, width = _formWidth;
 	[self issueAs:me block:^bool { return _cm.issue_move_to(*_game, objs, ix, iy, q, form, facing, angle, 1, width); }];
-	std::printf("formation move %zu unit(s) to (%d, %d), form %d spacing %d%s at frame %d\n", objs.size(), ix, iy, form, width, facing ? ", facing set" : "", _game->frame);
+	std::printf("formation move %zu unit(s) to (%d, %d), form %d%s spacing %d%s at frame %d\n", objs.size(), ix, iy, form, form == ron::sim::kFormKeep ? " (keep arrangement)" : "", width, facing ? ", facing set" : "", _game->frame);
 }
 
 - (void)uiMouseDown:(CGPoint)p right:(BOOL)right modifiers:(NSEventModifierFlags)m clicks:(NSInteger)clicks {
@@ -5596,7 +5602,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	}
 	_hudPress = NO;
 	if (_formDrag && !right) {  // a left press during a right formation drag cycles the formation
-		_formForm = (_formForm + 1) % 5;
+		_formForm = _formForm == ron::sim::kFormKeep ? 0 : _formForm == 4 ? ron::sim::kFormKeep : _formForm + 1;  // LINE .. ECHELON_R, then KEEP
 		return;
 	}
 	_press = p;
@@ -7776,6 +7782,8 @@ int main(int argc, const char* argv[]) {
 				if (at != std::string::npos) t.frame = std::atoi(spec.c_str() + at + 1);
 				timed_options.push_back(t);
 			} else if (a == "--cursor" && more) {
+			} else if (a == "--no-scripts") {
+				g_noScripts = true;
 				TimedCursor t;
 				std::sscanf(argv[++i], "%f,%f@%d", &t.x, &t.y, &t.frame);
 				timed_cursors.push_back(t);

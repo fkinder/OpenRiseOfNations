@@ -169,6 +169,23 @@ region snap, path inversion), `do_group_move` (leader / member, slot following, 
 circle tables and `Game::total_units`), followers placed by `init_unit`, `find_path`'s escape from an invalid
 tile.
 
+**KEEP, this port's own formation (`kFormKeep` = 10, 2026-10-25; not in the original).** A plain right-click move of two or more
+units in `ronmap` keeps the player's arrangement: `form_compute_keep` (`forms.cpp`) reads every member's offset from the
+captains' centre in the frame of the group's facing (the circular mean of the captains' angles; the travel angle itself when
+they disagree, i.e. a translation), turns it to the travel angle (or the drag's commanded angle) and puts the slots around the
+clicked point; offsets relative to the leader go to `Group.off_*`, every `Group.angles[i]` is 0, `Unit::form` is left alone (it
+is a move-time layout, the card's formation button still cycles the original five), and a selection with a captain more than
+32 tiles from the centre falls back to LINE. En route (`do_group_move`), a KEEP member does not follow the original's rules
+(which hand a member to a plain move when its midpoint or its straight step hits a river, a forest or a building, so a turn
+across any obstacle dissolved the body into a crowd): it keeps its path stack, refreshes a slot waypoint (`pathflag::kSlot`)
+every frame unless a detour is being walked, and moves through its own `do_move` (the original's planner, with a `speed`
+override) at the group's regulated speed (catch-up when the slot is ahead, half speed back to it when behind, a wait on it).
+The leader-lost and near-final rules still end the group move. Integer arithmetic only (`sin_a` / `cos_a` with radius 0x4000:
+the table's negative-radius branch multiplies in 32 bits); self-check OK on tut3 (`--no-scripts`, a knights / pikemen /
+longbowmen / trebuchets army of 13 captains): `--move ...@8000,5600/10` (about-face) ends with the mirrored rows at distinct
+slots, `@6000,6600/10` (quarter turn) likewise except where slots fall into the forest (the original's relocation then sends
+several captains to the same spot next to slot 0). `RON_GROUP_TRACE=1` prints why a member leaves a group move.
+
 Stubbed / missing (TODO comments in code, with spec references):
 - **Groups**: AI armies (`action_move_near`'s `local_40/44/48` city / garrison branch and `Army` state;
   movement-spec 11.4), combat inside group moves (attacking leader near target, collider → `action_attack` /

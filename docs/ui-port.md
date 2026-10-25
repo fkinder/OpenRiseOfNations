@@ -687,7 +687,8 @@ six through the `Armies::emergency` call the original makes when a city or capit
 - **Formation drag** (`uiMouseDragged:` / `endFormationDrag:`, ui-spec 4.1): a right drag of more than 6 px with own units selected starts
   from the selection's common `Unit::form` and mean `form_mod` (default line, 50), shows the preview, and on release issues `MOVE_TO`
   to the press point with the drag direction as `set_angle` / `angle` (`find_angle`, only when the drag is longer than 96 world units),
-  the form and the spacing; a left press during the drag cycles the form (`(form + 1) % 5`), the wheel changes the spacing by 5 (0..100),
+  the form and the spacing; a left press during the drag cycles the form (LINE .. ECHELON_R, then KEEP = the selection's own
+  arrangement turned to the drag direction, `kFormKeep`, sim-implementation.md "KEEP"), the wheel changes the spacing by 5 (0..100),
   Shift / Alt on release queue last / first. The preview draws a ring per selected unit in the owner's colour on a block of
   `ceil(n * (0.1 + 0.9 * width / 100))` columns, 190 world units apart, behind the press point, plus a dotted line to the cursor:
   `Group::compute_form` mutates the global `forms` scratch and cannot be called read-only, so the preview is an approximation of
@@ -938,7 +939,9 @@ the two were unified, so the original's 9 x 18 `hotkey_groups` layout and the re
 - **Regroup** (`regroupGroup`, the panel button, the card button or **Shift+G** with the group selected): one `issue_move_to` for the
   whole group to the centroid of its living members. `Group::action_move_near` lays the members out in their formation around that
   point (`docs/movement-spec.md` section 11) and they walk there as one group move. A right-click move of a group is the same group
-  order (`commandMoveAt` -> one MOVE_TO per owner), so the formation and the group speed apply: `Unit::do_group_move` already holds
+  order (`commandMoveAt` -> one MOVE_TO per owner) with form KEEP when two or more units are selected (2026-10-25: the player's
+  own arrangement, cavalry on the flanks and archers behind, walks as a body and turns with the travel direction; the original's
+  line and the other formations come from the right drag or the card), so the formation and the group speed apply: `Unit::do_group_move` already holds
   `Group::speed` / `new_speed` to the slowest member (`gr.march`, the general's march speed) in `engine/sim/groups.cpp`.
 - **Keys taken**: G (OPTION_GARRISON's key in the key map) now opens the dialog whenever soldiers are selected; the garrison order
   stays on the card. Shift+G (STANCE_STANDGROUND) regroups only while a group is the selection; otherwise it reaches the key map.

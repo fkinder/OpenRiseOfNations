@@ -60,6 +60,11 @@ void groups_process(Game& g);                                               // G
 
 // ---- formations (Form::*, FormData::type_cat; docs/movement-spec.md section 11.2). forms.cpp.
 constexpr int32_t kNumFormCat = 18, kNumForms = 10;
+// KEEP (this port's addition, not an original formation; docs/sim-implementation.md "Formations"): the members keep
+// their current arrangement relative to each other, turned from the way they face to the way they go, so a player can
+// lay out an army (cavalry on the flanks, archers behind ...) and move it as a body. Laid out by form_compute_keep on
+// forms[0]'s scratch; do_group_move's members then always follow their slots instead of the original's midpoint rule.
+constexpr int32_t kFormKeep = 10;
 
 // FormData (0xe90 bytes; Form adds a vbtable). One per formation in the global `forms` (Forms::init @0072e9a0), used
 // as scratch by Group::compute_form and zeroed from +0x30 (o ..) after every Group::action_move_near. Walked raw from
@@ -93,6 +98,11 @@ void form_compute_dests(Game& g, FormData& F, Group& gr, const int32_t* rows, co
 // Form::compute @72e8e0: rows/columns + destinations, then Group.o_angle / o_dist from the leader slot.
 void form_compute(Game& g, FormData& F, Group& gr, int32_t x, int32_t y, uint32_t angle, int32_t width,
                   int32_t facing);
+// KEEP layout (form_compute_keep): slots = destination + each member's offset from the group's centre, the offsets
+// turned by (travel angle - facing), where facing is the circular mean of the captains' angles (the travel angle
+// itself when they disagree). Offsets relative to the leader in Group.off_*, every Group.angles[i] = 0.
+FormData* form_compute_keep(Game& g, Group& gr, int32_t x, int32_t y, bool set_angle, uint32_t* angle, int32_t loc_x,
+                            int32_t loc_y);
 // Group::compute_form @707c80: picks forms[form], categorize, the formation angle (*angle in/out; set_angle = use the
 // commanded angle, possibly flipped), the facing toggle, Form::compute and the flip. (loc_x, loc_y) = the group's
 // current location (get_loc / get_loc_to). Returns the FormData, or null without a leader.
