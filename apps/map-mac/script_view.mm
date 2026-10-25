@@ -140,6 +140,10 @@ void View::say(const std::string& text, const Env& env) { add_message(text, 0xFF
 void View::post(const notices::Note& n, const Env& env, const Callbacks& cb) {
 	if (n.kind == notices::Note::Notice) {
 		notices_.push_back({n.image, n.text, env.ms});
+		if (!n.sound.empty() && cb.play_effect) {
+			const std::string f = sound_file(n.sound.compare(0, 2, "S_") == 0 ? n.sound.substr(2) : n.sound);
+			if (!f.empty()) cb.play_effect(f);
+		}
 		return;
 	}
 	add_message(n.text, n.argb, n.ticks > 0 ? n.ticks : kStdTicks, env);
@@ -187,6 +191,7 @@ void View::reset(const ScriptPresentation* p) {
 	marks_.clear();
 	popup_open_ = goals_open_ = false;
 	over_ = won_ = false;
+	score_hidden_ = false;
 	over_text_.clear();
 	last_seq_ = 0;
 	if (!p) return;
@@ -271,6 +276,10 @@ void View::consume(const ScriptPresentation& p, const Env& env, const Callbacks&
 		case ScriptEvent::kCamera:
 			if (e.text == "clear_selection") {
 				if (cb.clear_selection) cb.clear_selection();
+			} else if (e.text == "select_object") {  // @9f0760: the one object becomes the console's selection (e.who owner, e.x object)
+				if (cb.select_object) cb.select_object(e.who, e.x);
+			} else if (e.text == "hide_score") {  // @9ff4c0: Window::hide(stat_win)
+				score_hidden_ = true;
 			} else if (e.text == "highlight_option") {
 				if (cb.highlight_option) cb.highlight_option(env.hud ? env.hud->option_index(e.text2) : -1);
 			} else if (e.a != ron::sim::CameraRequest::kNone && cb.camera) {
@@ -748,7 +757,7 @@ bool View::goal_dialog_close_at(int x, int y) const { return goals_ok_.contains(
 // The game-over line (MessageWin: game_over_message_size, centred under the resource panel) with the scenario's
 // victory / defeat message (set_victory_message / set_defeat_message).
 void View::draw_game_over(UiRenderer& ui, const Env& env) {
-	if (!over_) return;
+	if (!over_ || !env.game_over_line) return;
 	const int f = ui.font_tag("game_over_message_size");
 	const ron::FontMetrics* m = ui.font_metrics(f);
 	if (!m) return;
@@ -762,6 +771,45 @@ void View::draw_game_over(UiRenderer& ui, const Env& env) {
 			ui.text(f, l, float((env.ui_w - ui.text_width(f, l)) / 2), float(y), kWhite, kBlack);
 			y += m->line_height;
 		}
+	}
+	ui.next_layer();
+}
+
+// StatWin::draw_normal_stats (stat_mode 0): the players ranked by score, the rows stacked upward from 196 px above the screen
+// bottom (setup_entries sorts by the team score; each row is the player's name in his team's text colour, his age and his score,
+// the font of the `data_size` tag with a one pixel black shadow). ui_hide_score hides the window. The columns of the original
+// (the diplomatic status towards every other player, the pointers) are not drawn.
+void View::draw_score(UiRenderer& ui, const Env& env) {
+	if (score_hidden_ || !env.score_window || !env.game || !env.hud_visible) return;
+	const ron::sim::Game& g = *env.game;
+	int f = ui.font_tag("data_size");
+	if (f < 0) f = ui.font(12, -1);
+	const ron::FontMetrics* m = ui.font_metrics(f);
+	if (!m) return;
+	struct Row {
+		int who, score;
+	};
+	std::vector<Row> rows;
+	for (int i = 0; i < 8; i++) {
+		const ron::sim::Leader& L = g.leaders[size_t(i)];
+		if (!(L.flags & 1u)) continue;
+		rows.push_back({i, L.score});
+	}
+	std::stable_sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.score > b.score; });
+	const int row_h = m->line_height + 1;
+	int y = env.ui_h - 196 - 3 - row_h;
+	ui.next_window();
+	for (size_t k = rows.size(); k-- > 0;) {  // the last entry is the lowest row
+		const Row& r = rows[k];
+		const ron::sim::Leader& L = g.leaders[size_t(r.who)];
+		std::string name = L.name;
+		if (name.empty() && g.rules && L.tribe >= 0 && size_t(L.tribe) < g.rules->tribes.size()) name = ron::sim::to_utf8(g.rules->tribes[size_t(L.tribe)].name);
+		const bool out = (L.flags & ron::sim::leaderflag::kDefeated) != 0;
+		const uint32_t col = out ? rgb(150, 150, 150) : text_color(env, r.who);
+		ui.text(f, name, 10.0f, float(y), col, kBlack);
+		const std::string sc = std::to_string(r.score);
+		ui.text(f, sc, float(190 - ui.text_width(f, sc)) + 120.0f, float(y), kWhite, kBlack);
+		y -= row_h;
 	}
 	ui.next_layer();
 }
@@ -781,6 +829,7 @@ void View::draw(UiRenderer& ui, const ScriptPresentation* p, const Env& env) {
 	draw_bubbles(ui, p, env);
 	if (p) draw_arrows(ui, *p, env);
 	draw_notices(ui, env);
+	draw_score(ui, env);
 	draw_game_over(ui, env);
 	if (goals_open_) draw_goal_dialog(ui, env);
 	if (popup_open_) draw_popup(ui, env);

@@ -97,6 +97,7 @@
 #include "render/renderstate.hpp"
 #include "render/terrain_mesh.hpp"
 #include "sim/ai.hpp"
+#include "sim/victory.hpp"
 #include "sim/combat.hpp"
 #include "sim/anim_assets.hpp"
 #include "sim/commands.hpp"
@@ -118,6 +119,7 @@
 #include "keymap.hpp"
 #include "options_ui.hpp"
 #include "prefs.hpp"
+#include "endgame.hpp"
 #include "notices.hpp"
 #include "script_view.hpp"
 #include "tips.hpp"
@@ -775,12 +777,14 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	std::unique_ptr<optui::Page> _optPage;  // the Options page over the game menu (_gameMenu == 3, docs/ui-port.md section 15)
 	double _overMs;  // when the local game-over was first seen (-1 not yet)
 	BOOL _overOffered;
+	int _seatSeen;  // local_play + 1 as the last consumeScript saw it (0 = not yet)
 	BOOL _uiReady;
 	// Mouse-over help, hotkeys, notices from the simulation, minimap layers (docs/ui-port.md section 11).
 	std::unique_ptr<ron::StringTables> _tables;
 	tips::Help _help;
 	BOOL _helpOn;
 	notices::Notifier _notifier;
+	endgame::Screen _endgame;  // the end-game window (_gameMenu == 2, docs/ui-port.md section 17)
 	hud::Hover _hover;
 	int _hoverTick;       // the graphic tick the hover target last changed
 	BOOL _hoverForce;     // --hover: the tooltip shows without the delay
@@ -1121,6 +1125,7 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 		_tables = std::make_unique<ron::StringTables>(*_files, uistr::language());
 		uistr::use(_tables.get());
 		_notifier.init(_tables.get());
+		_endgame.init(*_layout);
 		std::string herr;
 		_helpOn = _hudOn && _help.init(*_files, herr);
 		if (_hudOn && !_helpOn) std::fprintf(stderr, "help.xml unavailable: %s\n", herr.c_str());
@@ -1450,6 +1455,52 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 // (docs/frame-spec.md section 2). The renderer only reads the views.
 static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame since the last report
 
+// Headless checks of the endings the simulation cannot reach quickly (docs/ui-port.md section 17.5): RON_RESIGN_AT=N makes the
+// viewing seat resign at frame N (CommandManager::issue_resign), RON_ARMAGEDDON_AT=N lets the nuke count reach the limit (the blast
+// is not ported: Armageddon counts detonations, victory-spec 5.1), RON_ALLIED_AT=N allies every live leader with every other, RON_CONQUER_AT=N conquers them all.
+- (void)harnessEndings {
+	static const int resign = getenv("RON_RESIGN_AT") ? std::atoi(getenv("RON_RESIGN_AT")) : -1;
+	static const int arma = getenv("RON_ARMAGEDDON_AT") ? std::atoi(getenv("RON_ARMAGEDDON_AT")) : -1;
+	if (!_game || _mp) return;
+	if (resign >= 0 && _game->frame == resign) _cm.issue_resign(false);
+	static const int allied = getenv("RON_ALLIED_AT") ? std::atoi(getenv("RON_ALLIED_AT")) : -1;
+	static const int conquer = getenv("RON_CONQUER_AT") ? std::atoi(getenv("RON_CONQUER_AT")) : -1;
+	const int me = _game->local_play;
+	if (allied >= 0 && _game->frame == allied) {  // every live leader allies with every other (a clique): Leader::set_diplo's allied victory
+		for (int a = 0; a < 8; a++) {
+			for (int b = a + 1; b < 8; b++) {
+				if (!(_game->leaders[size_t(a)].flags & ron::sim::leaderflag::kActive) || !(_game->leaders[size_t(b)].flags & ron::sim::leaderflag::kActive)) continue;
+				ron::sim::leader_set_diplo(*_game, a, b, 2);
+				ron::sim::leader_set_diplo(*_game, b, a, 2);
+			}
+		}
+	}
+	if (conquer >= 0 && _game->frame == conquer) {  // every other leader is conquered (Leader::defeat type 0)
+		for (int i = 0; i < 8; i++) {
+			if (i != me && (_game->leaders[size_t(i)].flags & ron::sim::leaderflag::kActive)) ron::sim::leader_defeat(*_game, i, 0, me, 0);
+		}
+	}
+	// RON_CAMERA_EVENT="select_object:WHO:O@FRAME" / "hide_score@FRAME": posts the no-op camera ScriptEvent the builtins post
+	// (select_object, ui_hide_score), so the consumer in script_view runs end to end on a scenario that has scripts.
+	static const char* ev = getenv("RON_CAMERA_EVENT");
+	if (ev) {
+		char text[64] = {0};
+		int who = -1, obj = -1, at = 0;
+		if (std::sscanf(ev, "%63[a-z_]:%d:%d@%d", text, &who, &obj, &at) < 4) std::sscanf(ev, "%63[a-z_]@%d", text, &at);
+		const ron::sim::ScriptPresentation* p = [self pres];
+		if (p && _game->frame == at) {
+			ron::sim::ScriptPresentation* mp = const_cast<ron::sim::ScriptPresentation*>(p);
+			ron::sim::ScriptEvent e;
+			e.seq = mp->next_seq++, e.frame = _game->frame, e.kind = ron::sim::ScriptEvent::kCamera, e.text = text, e.who = who, e.x = obj;
+			mp->events.push_back(e);
+		}
+	}
+	if (arma >= 0 && _game->frame == arma) {
+		_game->armageddon = std::max(0, ron::sim::get_armageddon(*_game) - 1);
+		ron::sim::armageddon_nuke_detonated(*_game);
+	}
+}
+
 - (void)stepSimulation:(int)frames {
 	if (!_game) return;
 	if (_mp) {  // a multiplayer game: the session decides when a frame runs
@@ -1461,6 +1512,7 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 			_timeMs += kSimFrameMs;  // the virtual clock: graphic ticks advance with the frames (66 ms, whatever the speed)
 			[self cameraStep:kSimFrameMs];
 		}
+		[self harnessEndings];
 		_cm.process_turn(*_game);
 		_hotkeys.process();
 		[self fillScriptInput];
@@ -3638,7 +3690,21 @@ static double footprintMb() {
 		} else if (g.scen.custom_time_limit != 0) {
 			lim = g.scen.custom_time_limit;
 		}
-		out.push_back({5, (lim * 60 - g.tick) * 15, -1, -1});  // Game::tick counts game seconds; 15 frames each
+		// draw_timers: the clock is the time-limit icon; in the last 300 frames it flashes (red / yellow under 120, white / yellow under
+		// 300), and with team style 3 (an attacker against a defender) the barbarian icon takes over for those last frames.
+		const int left = std::max(0, lim * 900 - g.frame);
+		hud::Timer t{5, (lim * 60 - g.tick) * 15, -1, -1};
+		if (left < 120) t.tint = 1, t.kind = g.info.team_style == 3 ? 6 : 5;
+		else if (left < 300) t.tint = 2, t.kind = g.info.team_style == 3 ? 6 : 5;
+		out.push_back(t);
+	}
+	// Musical chairs: the next round, chairs[chairs] * 900 frames after the last defeat (draw_timers kind 7; red / yellow flash in the last 450).
+	if (g.info.victory == 5) {
+		int32_t minutes = 1;
+		if (const ron::sim::CategoryList* cl = g.rules->category_list("chairs"); cl && g.info.chairs < cl->items.size()) minutes = cl->items[g.info.chairs].data[0];
+		hud::Timer t{7, std::max(0, minutes * 900 - (g.frame - g.musical_chairs)), -1, -1};
+		if (t.frames < 450) t.tint = 1;
+		out.push_back(t);
 	}
 	// The armageddon clock: the nukes left before Armageddon (Game::get_armageddon - armageddon) once one has been launched.
 	if (g.armageddon > 0) out.push_back({2, 0, -1, std::max(0, ron::sim::get_armageddon(g) - g.armageddon)});
@@ -4652,7 +4718,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 // ---------------------------------------------------------------- the game menu (docs/ui-port.md "Front end")
 
 - (std::vector<std::string>)gameMenuItems {
-	if (_gameMenu == 2) return {"Return to Main Menu", "Keep Watching", "Quit"};
+	if (_gameMenu == 2) return _endgame.items();  // Examine Map, Game Stats, View Playback, Quit (EndGameWin)
 	if (_mp) return {"Resume Game", "Save Game", "Resign", "Options", "Return to Main Menu", "Quit"};  // a multiplayer save is synchronized (no loading mid-game)
 	return {"Resume Game", "Save Game", "Load Game", "Options", "Return to Main Menu", "Quit"};
 }
@@ -4662,7 +4728,35 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	_gameMenu = kind;
 	_gmHover = 0, _gmPress = -1;
 	_pressing = _boxing = _hudPress = _rightPress = NO;
+	if (kind == 2 && _game) [self openEndGame];
 	if (kind == 3) [self openOptions];  // harness: RON_GAME_MENU=3 shows the Options page
+}
+
+// EndGameWin::exec: the window for the decided game. Return answers Quit (EndGameWin::on_key_click), Esc Examine Map.
+- (void)openEndGame {
+	endgame::Names names;
+	names.leader = [self](int who) {
+		const ron::sim::Leader& L = _game->leaders[size_t(who)];
+		if (!L.name.empty()) return L.name;
+		return _simRules && L.tribe >= 0 && size_t(L.tribe) < _simRules->tribes.size() ? ron::sim::to_utf8(_simRules->tribes[size_t(L.tribe)].name) : std::string();
+	};
+	names.age = [self](int n) { return n >= 1 && n <= 7 ? [self typeName:543 + n] : std::string("Ancient Age"); };  // as the age line of the top bar
+	const ron::sim::ScriptPresentation* p = [self pres];
+	_endgame.open(endgame::make_info(*_game, [self localPlayer], _tables.get(), names, p ? p->victory_message : std::string(), p ? p->defeat_message : std::string()));
+	const endgame::Info& in = _endgame.info();
+	std::printf("frame %d: end-game window: %s (%s) \"%s\"; game time %d:%02d, score %d\n", _game->frame, in.mode == 0 ? "victory" : in.mode == 1 ? "defeat" : "armageddon", in.kind.c_str(),
+	            in.message.c_str(), in.frames / 15 / 60, in.frames / 15 % 60, in.score);
+	if (_scriptLog) {
+		for (int i = 0; i < 8; i++) {
+			const ron::sim::Leader& L = _game->leaders[size_t(i)];
+			if (L.flags & ron::sim::leaderflag::kValid)
+				std::printf("  leader %d: flags 0x%x/0x%x victory type %d, defeat type %d, score %d\n", i, L.flags, L.flags2, L.victory_type, L.defeat_type, L.score);
+		}
+	}
+	_gmHover = 3;
+	_overOffered = YES;
+	if (_sviewOn) _sview.clear_notices();
+	if (getenv("RON_ENDGAME_STATS")) _endgame.show_stats(true);  // snapshots: the score table
 }
 
 // MainMenuBase (interface.xml MAINMENU): the 9-piece scroll background bg0..bg8, the title in font 24, a column of
@@ -4672,6 +4766,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	if (!_gameMenu || !_layout) return;
 	if (_gameMenu == 3) {
 		[self drawOptions];
+		return;
+	}
+	if (_gameMenu == 2) {
+		_endgame.draw(_ui, _uiW, _uiH, _gmHover, _gmPress, _gmRects);
 		return;
 	}
 	const ron::XmlElement* mm = nullptr;
@@ -4729,6 +4827,28 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 - (void)gameMenuChoose:(int)i {
 	const std::vector<std::string> items = [self gameMenuItems];
 	if (i < 0 || size_t(i) >= items.size()) return;
+	if (_gameMenu == 2) {  // EndGameWin::on_button_clicked
+		using A = endgame::Screen::Action;
+		if (!_endgame.enabled(i)) return;
+		const A a = _endgame.action(i);
+		if (a == A::Stats || a == A::Close) {
+			_endgame.show_stats(a == A::Stats);
+			_gmHover = _gmPress = -1;
+			return;
+		}
+		if (a != A::Examine && a != A::Quit && a != A::Continue) return;
+		_gameMenu = 0;
+		_lastFrame = 0;
+		if (a == A::Examine) return;  // the game stays on screen to be looked over
+		if (_ctwBuild && self.onCtwEnd) {  // leaving a campaign battle
+			auto cb = self.onCtwEnd;
+			self.onCtwEnd = nil;
+			cb(_ctwOutcome >= 0 ? _ctwOutcome : 2);
+		} else if (self.onExit) {
+			self.onExit(NO);
+		}
+		return;
+	}
 	const std::string& it = items[size_t(i)];
 	if (it == "Options") {
 		[self openOptions];
@@ -4773,6 +4893,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	if (c == NSUpArrowFunctionKey) _gmHover = (std::max(_gmHover, 0) + n - 1) % n;
 	else if (c == NSDownArrowFunctionKey) _gmHover = (_gmHover + 1) % n;
 	else if (c == '\r' || c == 3) [self gameMenuChoose:std::max(_gmHover, 0)];
+	else if ((e.keyCode == 53 || e.keyCode == 109) && _gameMenu == 2 && _endgame.stats_view()) _endgame.show_stats(false);
 	else if (e.keyCode == 53 || e.keyCode == 109) _gameMenu = 0, _lastFrame = 0;  // Esc / F10: back to the game
 }
 
@@ -6336,6 +6457,10 @@ static int group_key_order(int i) { return (i + 1) % kGroupKeys; }  // panel / f
 		_hud.layout(_uiW, _uiH);
 		_hudState = [self makeHudState];
 	}
+	if (_gameMenu && _gmRects.empty() && _uiReady) {  // no frame has been drawn since the menu opened: lay its buttons out
+		_ui.begin(_uiW, _uiH, 1.0f);
+		[self drawGameMenu];
+	}
 	if (kind == "move") [self uiMouseMoved:p];
 	else if (kind == "down") [self uiMouseDown:p right:NO modifiers:0 clicks:1];
 	else if (kind == "rdown") [self uiMouseDown:p right:YES modifiers:0 clicks:1];
@@ -6583,6 +6708,8 @@ static int vk_of(NSEvent* e) {
 	env.game = _game.get();
 	env.hud = _hudOn ? &_hud : nullptr;
 	env.hud_visible = [self hudVisible];
+	env.score_window = _ctwBuild || _mp || getenv("RON_SCORE_WIN") != nullptr;  // StatWin (docs/ui-port.md section 17.4)
+	env.game_over_line = _gameMenu != 2;
 	__weak MapRenderer* weakSelf = self;
 	env.project = [weakSelf](float wx, float wy, float& x, float& y) {
 		MapRenderer* me = weakSelf;
@@ -6624,6 +6751,10 @@ static int vk_of(NSEvent* e) {
 		me->_selected.clear(), me->_selectedBuilds.clear();
 		[me selectionChanged];
 	};
+	cb.select_object = [weakSelf](int who, int o) {  // select_object @9f0760: the selection becomes that one unit or building
+		MapRenderer* me = weakSelf;
+		if (me) [me selectScriptObject:who o:o];
+	};
 	cb.pause = [weakSelf](bool on) {
 		MapRenderer* me = weakSelf;
 		if (me && !me->_headless && !me->_mp) me->_paused = on;
@@ -6634,6 +6765,21 @@ static int vk_of(NSEvent* e) {
 	};
 	cb.screenshot = [](const std::string& file) { std::printf("script: take_screenshot \"%s\" (not written)\n", file.c_str()); };
 	return cb;
+}
+
+// select_object: the one object becomes the HUD's selection (a unit, or a building: the two are never mixed). RON_CAMERA_EVENT
+// (harnessEndings) posts the script event that reaches this method.
+- (void)selectScriptObject:(int)who o:(int)o {
+	if (!_game) return;
+	_selected.clear(), _selectedBuilds.clear();
+	if ([self unitView:who o:o]) {
+		_selected.push_back({who, o});
+	} else if ([self buildView:who o:o]) {
+		_selectedBuilds.push_back({who, o});
+		[self syncSimBuildings];
+	}
+	[self selectionChanged];
+	if (_scriptLog) std::printf("  select_object %d:%d -> %zu unit(s), %zu building(s) selected\n", who, o, _selected.size(), _selectedBuilds.size());
 }
 
 // After each Game::do_frame: the presentation queue, the local game-over, and --script-log output.
@@ -6665,6 +6811,16 @@ static int vk_of(NSEvent* e) {
 			_ctwEndFrames = 75;
 		}
 	}
+	// Game::process_end_game: the frame that decided the game (or the allied victory, which leaves the simulation running) raises
+	// the end-game window and clears the pending bit. A campaign battle keeps its own hand-over (_ctwEndFrames).
+	if (_game->victory_checked) {
+		_game->victory_checked = false;
+		if (!_ctwBuild && !_overOffered && !_gameMenu) [self openGameMenu:2];
+	}
+	// switch_player_control: the viewed seat changed under the script; the sim's clear_selection event dropped the selection, the
+	// fog, minimap and HUD read the seat each frame, so only the notifier's history has to follow.
+	if (_seatSeen != 0 && _seatSeen != _game->local_play + 1) std::printf("frame %d: viewing seat %d\n", _game->frame, _game->local_play);
+	_seatSeen = _game->local_play + 1;
 	if (_ctwBuild && _ctwOutcome >= 0 && _ctwEndFrames >= 0 && --_ctwEndFrames < 0 && self.onCtwEnd) {
 		auto cb = self.onCtwEnd;
 		self.onCtwEnd = nil;

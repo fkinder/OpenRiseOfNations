@@ -234,9 +234,11 @@ void Hud::draw_timers(UiRenderer& ui, const State& s) {
 		char buf[16];
 		std::snprintf(buf, sizeof buf, "%d:%02d", mins, secs % 60);
 		int dx = bx + 5;
+		const bool phase = (s.graphic_tick & 8) != 0;
+		const uint32_t digit_col = t.tint == 1 ? (phase ? rgb(255, 0, 0) : rgb(255, 255, 0)) : t.tint == 2 ? (phase ? kWhite : rgb(255, 255, 0)) : kWhite;
 		for (const char* p = buf; *p; p++) {
 			const IfacePiece d = ron::iface_find_piece(b, *p == ':' ? std::string("colon_timer") : std::string(1, *p) + "_digit_timer");
-			ui.add(d, float(dx), float(by + 3), 0, 0, kWhite, UiType::ColorAlphaMod);
+			ui.add(d, float(dx), float(by + 3), 0, 0, digit_col, UiType::ColorAlphaMod);
 			dx += d.width;
 		}
 		if (t.count >= 0) {

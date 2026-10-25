@@ -6,7 +6,9 @@
 #include <cctype>
 #include <cmath>
 
+#include "sim/ai.hpp"
 #include "sim/production.hpp"
+#include "sim/victory.hpp"
 
 namespace notices {
 
@@ -16,7 +18,8 @@ using ron::sim::UnitView;
 namespace {
 
 constexpr int64_t key(int who, int o) { return int64_t(who) * 4096 + o; }
-constexpr uint32_t kWhite = 0xFFFFFFFF;
+constexpr uint32_t kWhite = 0xFFFFFFFF, kRed = 0xFFFF0000;
+namespace vk = ron::sim::victoryevent;
 constexpr int kNoticeGap = 400;  // frames between banners (frame - stamp > 400)
 
 }  // namespace
@@ -39,6 +42,32 @@ std::string fill(std::string text, const std::vector<std::string>& args) {
 		}
 		const size_t n = size_t(std::atoi(text.substr(digits, j - digits).c_str()));
 		if (n < args.size()) out += args[n];
+		i = j;
+	}
+	return out;
+}
+
+std::string fill_typed(std::string text, const std::vector<std::string>& strings, const std::vector<int>& numbers) {
+	std::string out;
+	for (size_t i = 0; i < text.size();) {
+		if (text[i] != '$') {
+			out += text[i++];
+			continue;
+		}
+		size_t j = i + 1;
+		while (j < text.size() && std::isupper(static_cast<unsigned char>(text[j]))) j++;
+		const size_t digits = j;
+		while (j < text.size() && std::isdigit(static_cast<unsigned char>(text[j]))) j++;
+		if (digits == i + 1 || digits == j) {
+			out += text[i++];
+			continue;
+		}
+		const size_t n = size_t(std::atoi(text.substr(digits, j - digits).c_str()));
+		if (text.compare(i + 1, digits - i - 1, "NUMBER") == 0) {
+			if (n < numbers.size()) out += std::to_string(numbers[n]);
+		} else if (n < strings.size()) {
+			out += strings[n];
+		}
 		i = j;
 	}
 	return out;
@@ -99,8 +128,7 @@ void Notifier::update(const Env& env, std::vector<Note>& out) {
 				for (int k = 0; k < 6; k++) {
 					if (e.goods[size_t(k)] > amount) amount = e.goods[size_t(k)], best = k;
 				}
-				n.text = best >= 0 ? loc_or(274, "Plunder", "City of $CITYNAME0 captured. Plunder: +$NUMBER0 $GOODTYPE1",
-				                            {name, std::to_string(amount), goods_names[best]})
+				n.text = best >= 0 ? fill_typed(loc(274, "Plunder", "City of $CITYNAME0 captured. Plunder: +$NUMBER0 $GOODTYPE1"), {name, goods_names[best]}, {amount})
 				                   : loc_or(275, "captured", "City of $CITYNAME0 captured.", {name});
 				n.argb = kWhite, n.ping = 4;
 				out.push_back(n);
@@ -246,6 +274,134 @@ void Notifier::update(const Env& env, std::vector<Note>& out) {
 			else if (e.alert == 2) n.text = loc_or(2338, "broken", "$DUBYA0 and $SADDAM1 have broken their alliance.", {na, nb});
 			else if (e.value == 1 && e.alert == 0) n.text = loc_or(573, "peace", "$LEADERNAME0 has signed a peace treaty with $LEADERNAME1.", {na, nb});
 			if (!n.text.empty()) out.push_back(n);
+		} else if (e.kind == 2 && e.frame >= 1 && e.who >= 0 && e.who < 8 && e.value != 6) {
+			// Leader::defeat: "X defeated." for the seat of the loser (a resignation has its own line), in red; the loser's
+			// sound (S_YOU_LOSE is played by the game-over flow, S_SOMEONE_ELSE_LOSES for everybody else) and the
+			// defeat_notice banner of the first loser of the call (not the viewer: the end-game screen is his banner).
+			Note n;
+			n.argb = kRed;
+			n.text = fill_typed(loc(2306, "defeated", "$PLAYERNAME0 defeated."), {nation(e.who)}, {});
+			if (e.who != me) n.sound = "S_SOMEONE_ELSE_LOSES";
+			out.push_back(n);
+			if (e.who != me && !g.game_over) {
+				Note b;
+				b.kind = Note::Notice, b.image = "defeat_notice", b.text = n.text;
+				out.push_back(b);
+			}
+		} else if (e.kind == vk::kWonderStart || e.kind == vk::kWonderWarning) {
+			// GameDaemon::process_victory, the wonder clock: "X now has N net wonder points!" (and team) in red, then "You
+			// will lose unless ..." when the viewer is not an ally of the leader; the start always plays its sound, the
+			// warnings (4500 / 1800 / 900 frames left) speak only to those who are not allies.
+			const bool start = e.kind == vk::kWonderStart, ally = ron::sim::is_ally(g, e.who, me);
+			if (!start && ally) continue;
+			const bool team = ron::sim::num_team_members(g, e.who, 0) >= 2;
+			const int idx = start ? (team ? 1341 : 1342) : (team ? 1344 : 1345);
+			const char* fb = start ? (team ? "$PRESIDENTRICHARDNIXON0 and team now have $NUMBER0 net wonder points!" : "$PRESIDENTRICHARDNIXON0 now has $NUMBER0 net wonder points!")
+			                       : (team ? "$PRESIDENTRICHARDNIXON0 and team have $NUMBER0 net wonder points!" : "$PRESIDENTRICHARDNIXON0 has $NUMBER0 net wonder points!");
+			Note n;
+			n.argb = kRed;
+			n.text = fill_typed(loc(idx, "wonder points", fb), {nation(e.who)}, {e.other});
+			n.sound = start ? "S_WONDER_VICTORY_START" : "S_WONDER_WARNING";
+			out.push_back(n);
+			if (!ally) {
+				Note m;
+				m.argb = kRed;
+				m.text = loc(1343, "lose unless", "You will lose unless you capture/build/destroy enough wonders to reduce this score!");
+				out.push_back(m);
+			}
+			if (start) {  // draw_timers: the timer's banner the first time a leader leads the wonders
+				Note b;
+				b.kind = Note::Notice, b.image = "wonder_timer", b.text = loc(2034, "Timer Started", "Wonder Timer Started!");
+				out.push_back(b);
+			}
+		} else if (e.kind == vk::kWonderStop) {
+			if (wonder_stop_frame_ != e.frame && e.frame >= 1) {  // once per pass
+				wonder_stop_frame_ = e.frame;
+				Note n;
+				n.kind = Note::Message;
+				n.sound = "S_WONDER_VICTORY_STOP";
+				out.push_back(n);
+			}
+		} else if (e.kind == vk::kPopStart || e.kind == vk::kPopWarning || e.kind == vk::kPopStop) {
+			// The territory clock: "X controls N% of the world!" (and team), the warnings (unless the viewer is on the leader's
+			// team) with "You will lose unless you take control of more territory!", and the halted line once per pass.
+			const bool team = ron::sim::num_team_members(g, e.who, 0) >= 2;
+			const bool on_team = e.who == me || ron::sim::is_team_p(g, e.who, me, 0);
+			Note n;
+			n.argb = kRed;
+			if (e.kind == vk::kPopStop) {
+				n.text = fill_typed(team ? loc(1346, "no longer control", "$THEARTISTFORMERLYKNOWNASPRINCE0 and team no longer control $NUMBER0% of the world. ")
+				                         : loc(1347, "no longer controls", "$THEARTISTFORMERLYKNOWNASPRINCE0 no longer controls $NUMBER0% of the world. "),
+				                    {nation(e.who)}, {e.other});
+				n.sound = "S_POP_VICTORY_HALTED";
+				out.push_back(n);
+				continue;
+			}
+			const bool start = e.kind == vk::kPopStart;
+			if (!start && on_team) continue;
+			n.text = fill_typed(team ? loc(1348, "and team control", "$VICEPRESIDENTDANQUAYLE0 and team control $NUMBER0% of the world!")
+			                         : loc(1349, "controls", "$VICEPRESIDENTDANQUAYLE0 controls $NUMBER0% of the world!"),
+			                    {nation(e.who)}, {e.other});
+			n.sound = start ? "S_POP_VICTORY_TIMER_BEGUN" : "S_POP_VICTORY_WARNING";
+			out.push_back(n);
+			if (!on_team) {
+				Note m;
+				m.argb = kRed;
+				m.text = loc(1350, "lose unless", "You will lose unless you take control of more territory!");
+				out.push_back(m);
+			}
+			if (start) {
+				const int secs = e.value / 15;
+				char clock[16];
+				std::snprintf(clock, sizeof clock, "%d:%02d", secs / 60, secs % 60);
+				Note b;
+				b.kind = Note::Notice, b.image = "territory_timer", b.text = loc(2035, "Territory", "Territory Victory: ") + clock;
+				out.push_back(b);
+			}
+		} else if (e.kind == vk::kTimeWarning) {
+			// The time limit: "The game will end in TWO / FIVE / TEN minutes!" (red, S_TIME_LIMIT_WARNING; two minutes out
+			// the original picks a random entry of the same category), and under game_rules 8 the side's line.
+			Note n;
+			n.argb = kRed;
+			n.sound = "S_TIME_LIMIT_WARNING";
+			n.text = e.value == 120 ? loc(1351, "TWO", "The game will end in TWO minutes!")
+			         : e.value == 300 ? loc(1352, "FIVE", "The game will end in FIVE minutes!")
+			                          : loc(1353, "TEN", "The game will end in TEN minutes!");
+			out.push_back(n);
+			if (e.other == 1) {
+				Note m;
+				m.argb = kRed;
+				m.text = ron::sim::leader_get_team(g, me) == 0 ? loc(1354, "survive", "You will win if you can survive until the time runs out!")
+				                                                : loc(1355, "eliminate the defender", "Your team will lose unless you can eliminate the defender in time!");
+				out.push_back(m);
+			}
+		} else if (e.kind == vk::kResigned && e.frame >= 1) {
+			// Player::resign / quit / drop: the viewer hears S_YOU_RESIGN / S_YOU_QUIT; for another player "X resigned." /
+			// "X dropped." in red, the drop_notice banner, and S_ALLY_RESIGNED when he is the viewer's ally else
+			// S_ENEMY_RESIGNED.
+			Note n;
+			n.argb = kRed;
+			if (e.who == me) {
+				n.kind = Note::Message;
+				n.sound = e.value == 0 ? "S_YOU_RESIGN" : "S_YOU_QUIT";
+				out.push_back(n);
+				continue;
+			}
+			if (e.value == 2) n.text = fill_typed(loc(3084, "dropped", "$PLAYERNAME0 dropped."), {nation(e.who)}, {});
+			else n.text = fill_typed(loc(3085, "resigned", "$PLAYERNAME0 resigned."), {nation(e.who)}, {});
+			n.sound = ron::sim::is_ally(g, me, e.who) ? "S_ALLY_RESIGNED" : "S_ENEMY_RESIGNED";
+			out.push_back(n);
+			if (!g.game_over) {
+				Note b;
+				b.kind = Note::Notice, b.image = "drop_notice", b.text = n.text;
+				out.push_back(b);
+			}
+		} else if (e.kind == vk::kNukeCount && e.frame >= 1) {
+			// Nuke::do_damage counts the detonation (Armageddon clock, drawn by the HUD); Nuke::add_nuke plays S_NUKE_HIT. The
+			// original prints no line for the count.
+			Note n;
+			n.sound = "S_NUKE_HIT";
+			out.push_back(n);
 		} else if (e.kind == 16 && e.frame >= 1 && e.who == me) {  // resource flash
 			Note f;
 			f.kind = Note::Flash;

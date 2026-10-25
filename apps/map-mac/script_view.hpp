@@ -34,6 +34,8 @@ struct Env {
 	const ron::sim::Game* game = nullptr;
 	const hud::Hud* hud = nullptr;
 	bool hud_visible = true;
+	bool game_over_line = true;  // the "Victory!" / "Defeat!" line (hidden while the end-game window is up)
+	bool score_window = false;  // the StatWin (docs/ui-port.md section 17.4) is part of this game's interface
 	// World point (x, y; ground height added by the callee) -> UI pixels; false when it is behind the camera.
 	std::function<bool(float wx, float wy, float& x, float& y)> project;
 };
@@ -45,6 +47,7 @@ struct Callbacks {
 	std::function<void(const std::string& abs_path)> play_effect;  // SoundGlobal one-shots (S_PING ...)
 	std::function<void(int kind, int x, int y, int zoom)> camera;   // CameraRequest kinds
 	std::function<void()> clear_selection;
+	std::function<void(int who, int o)> select_object;  // select_object: the console's selection becomes that one object
 	std::function<void(bool on)> pause;
 	std::function<void(int option)> highlight_option;  // highlight_option(name): the OptionIndex, -1 unknown
 	std::function<void(const std::string& file)> screenshot;
@@ -103,6 +106,10 @@ public:
 	bool goal_dialog_close_at(int x, int y) const;
 	bool modal() const { return popup_open_ || goals_open_; }
 	bool game_is_over() const { return over_; }
+	// The banners of the game (AnimNotice list) are dropped when the end-game window opens (EndGameWin::exec cleans them).
+	void clear_notices() { notices_.clear(); }
+	// ui_hide_score: Window::hide(stat_win).
+	bool score_hidden() const { return score_hidden_; }
 
 private:
 	struct Message {
@@ -137,6 +144,7 @@ private:
 	void draw_popup(ron::metal::UiRenderer& ui, const Env& env);
 	void draw_goal_dialog(ron::metal::UiRenderer& ui, const Env& env);
 	void draw_game_over(ron::metal::UiRenderer& ui, const Env& env);
+	void draw_score(ron::metal::UiRenderer& ui, const Env& env);
 	uint32_t neon(const Env& env, int who) const;
 	uint32_t text_color(const Env& env, int who) const;
 
@@ -166,6 +174,7 @@ private:
 	bool goals_open_ = false;
 	ron::IfaceRect goals_ok_;
 	bool over_ = false, won_ = false;
+	bool score_hidden_ = false;
 	std::string over_text_;
 	std::vector<std::pair<std::string, std::vector<std::string>>> globals_;  // soundglobals KEY -> sound tags
 	std::vector<std::pair<std::string, std::string>> sound_files_;           // soundfiles tag -> file

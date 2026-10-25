@@ -1,0 +1,5 @@
+re/decomp/endgame
+EndGameWin::.*
+StatWin::(setup_entries|setup_normal_entries|draw_normal_stats|add_line.*|init|on_redraw|calc_column_widths)
+Game::determine_end_of_game_stats_and_achievements
+MainMenuBase::.*

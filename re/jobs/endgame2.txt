@@ -1,0 +1,7 @@
+re/decomp/endgame
+IFaceMainBase::draw_timers
+IFaceMainBase::draw_game_timer
+IFaceMainBase::draw_.*timer.*
+MessageWin::add_message
+MessageWin::add_simple_message
+IFaceMainBase::do_notice

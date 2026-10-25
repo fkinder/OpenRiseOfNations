@@ -136,8 +136,10 @@ struct Ping {
 // A victory / elimination clock (IFaceMainBase::draw_game_timer, ui-spec 6.1): kind 0 wonder, 1 capital, 2 armageddon,
 // 3 territory, 4 peace, 5 time limit, 7 musical chairs; `frames` left (900 per minute); `who` the team colour of the owner
 // (-1 none); `count` the wonder points / armageddon count (-1 none).
+// `tint` colours the digits: 1 flashes red / yellow (the time limit under 120 frames, musical chairs under 450), 2 white / yellow
+// (the time limit under 300 frames), by the graphic tick as draw_timers does.
 struct Timer {
-	int kind = 0, frames = 0, who = -1, count = -1;
+	int kind = 0, frames = 0, who = -1, count = -1, tint = 0;
 };
 
 // IFaceMiniLibrary: the next research of each library line, or the next age, with its progress (-1: not in production).
