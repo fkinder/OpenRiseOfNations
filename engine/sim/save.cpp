@@ -47,7 +47,8 @@ static_assert(sizeof(Regions) == 10248, "Regions changed: update the REGN sectio
 static_assert(sizeof(Game) == 1657592, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
 // 1608 + 8 + 16 + 16: ScriptHost::ctw (the Conquer the World campaign the scripts run for, sim/ctw.hpp) is a run-time link, ctw_owned the loaded battle's
 // copy of that campaign and battle_token the campaign's liveness check of the battle; the native battle save writes the campaign as its own section (CTWB), not through the script walk.
-static_assert(sizeof(ScriptHost) == 1648, "ScriptHost changed: update walk_scripts()");
+// + 24: ScriptHost::tileset (get_tileset), derived from the scenario by script_host_load on every load, not saved (docs/save-format.md 4).
+static_assert(sizeof(ScriptHost) == 1672, "ScriptHost changed: update walk_scripts()");
 #endif
 
 // A time-sliced / cached search. PathNode pointers (parent, the open and closed trees) become indices into the arena.

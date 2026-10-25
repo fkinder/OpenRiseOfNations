@@ -19,6 +19,7 @@
 #include "sim/script_funcs_internal.hpp"
 #include "sim/search.hpp"
 #include "sim/territory.hpp"
+#include "sim/transport.hpp"
 
 namespace ron::sim {
 namespace sf {
@@ -419,7 +420,7 @@ void install_mutation_funcs(ScriptHost& h) {
 	// ---- units
 	// ScenarioFuncSet::add_unit @9e2220 (create_unit, create_unit_upgrade with the current upgrade, create_unit_in_group
 	// without clearing): returns the last init_unit result (-1 when the last creation failed), -1 on bad arguments.
-	auto add_unit = [&h, &g](int32_t player, int32_t x, int32_t y, int32_t type, int32_t n, bool append) {
+	auto add_unit = [&g](int32_t player, int32_t x, int32_t y, int32_t type, int32_t n, bool append) {
 		const int32_t w = player - 1;
 		if (!live_leader(g, w) || uint32_t(n) > 2000u) return -1;
 		if (type < 0 || !is_unit_type(type)) return -1;  // TypeData::is_unit_type (50..413)
@@ -464,8 +465,7 @@ void install_mutation_funcs(ScriptHost& h) {
 			}
 			if (group_get_num(g, grp) == 0) return last;
 			groups_push_group(g, w, grp, 0);
-			// TODO(transports): Group::action_transport(1) (the units board a new transport) is not ported.
-			h.todo_calls["create_unit: Group::action_transport"]++;
+			group_action_transport(g, grp, 1);  // the units board a new transport (on the local group, as the original)
 			for (int32_t i = 0; i < grp.num; i++) {
 				int32_t o = grp.list[size_t(i)];
 				const Unit* u = unit_at(g, w, o);
@@ -670,6 +670,22 @@ void install_mutation_funcs(ScriptHost& h) {
 		if (a >= 8) return make_int(-1);
 		leader_set_age(g, w, a);
 		return make_int(1);
+	});
+	def("lose_current_age", [&g](NativeCall& c) {  // @9ee6a0: Leader::set_age(ages - 1) (the original tests the age against 0x220, never equal)
+		const int32_t w = c.arg_int(0) - 1;
+		if (!live_leader(g, w)) return make_int(-1);
+		leader_set_age(g, w, g.leaders[size_t(w)].age - 1);
+		return make_int(1);
+	});
+	def("lose_upgrade", [&g](NativeCall& c) {  // @9eed00: lose_tech(type) then the stat and territory recomputation
+		const int32_t w = c.arg_int(0) - 1;
+		const int32_t t = type_index(g, c.arg_str(1));
+		if (t < 0 || !live_leader(g, w) || !has_tech(g, w, t)) return make_int(-1);
+		leader_lose_tech(g, w, t);
+		calc_unit_stats(g, w);
+		calc_wall_stats(g, w);
+		compute_all_territory(g);
+		return make_int(has_tech(g, w, t) ? 0 : 1);
 	});
 	def("lose_tech", [&g](NativeCall& c) {  // @9ee500: a tech, or a category name (the current level - 1)
 		const int32_t w = c.arg_int(0) - 1;
@@ -1260,7 +1276,7 @@ void install_mutation_funcs(ScriptHost& h) {
 		if (!live_leader(g, w)) return make_int(-1);
 		g.scen.ignore_orders = 1;
 		g.scen.objects_ignoring_orders[size_t(w)].push_back(c.arg_int(1));
-		return make_int(1);  // TODO(groups): Group code does not consult the list yet (ScenarioData::ignore_orders)
+		return make_int(1);  // the group actions kill the listed objects from their group (the ignore_orders prelude)
 	});
 	def("is_in_group", [&g](NativeCall& c) {  // @4ce4f0 (who, o): "_Unnamed<who>"
 		const int32_t gi = g.scen.find_group(unnamed(c.arg_int(0)));

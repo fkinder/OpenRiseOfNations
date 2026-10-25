@@ -117,6 +117,15 @@ int32_t type_index(const Game& g, const U16& name) {
 	return -1;
 }
 
+int32_t type_index_alt(const Game& g, const U16& name) {
+	if (name.empty()) return -1;
+	const auto& types = g.rules->types;
+	for (size_t i = 0; i < types.size() && i < size_t(kNumTypes); i++) {
+		if (bhs::ieq(types[i].type_name, name)) return int32_t(i);
+	}
+	return -1;
+}
+
 namespace {
 int32_t category_index(const Game& g, const char* var, const U16& name) {
 	const CategoryList* cl = g.rules->category_list(var);
@@ -239,8 +248,13 @@ void install_script_funcs(ScriptHost& h) {
 	def("is_victory_territory", [&g](NativeCall&) { return make_int(g.info.victory == 7); });
 	def("is_victory_wonder", [&g](NativeCall&) { return make_int(g.info.victory == 6); });
 	def("is_conquest_scenario", [&g](NativeCall&) { return make_int(g.ctw ? 1 : 0); });
-	// get_mapstyle (map_styles[world.map_style].name): TODO(world) the map style is not kept by the loader.
-	def("get_mapstyle", [](NativeCall&) { return make_string(U16()); });
+	// get_mapstyle @9e4cc0: map_styles[world.map_style].name (the key of the rules category; GameInfo.map_style holds the style the
+	// generator picked, the scenario's own value for a stock scenario).
+	def("get_mapstyle", [&g](NativeCall&) {
+		const CategoryList* cl = g.rules->category_list("map_styles");
+		const size_t i = g.info.map_style;
+		return make_string(cl && i < cl->items.size() ? cl->items[i].key : U16());
+	});
 
 	// ---- common scenario queries (beyond the AI set)
 	def("time_min", [&g](NativeCall&) { return make_int(g.tick / 60); });
@@ -406,6 +420,33 @@ void install_script_funcs(ScriptHost& h) {
 		}
 		if (!live_leader(g, w)) return make_int(-1);
 		return make_int(find_build_counter(w, t, fc[0x18], false));
+	});
+	def("find_build_with_type_name", [&g, &fc, find_build_counter](NativeCall& c) {  // @9ec310: find_build on the type's type name
+		const int32_t w = c.arg_int(0) - 1;
+		if (fc[2] < 0) fc[2] = kBuildBase;
+		int32_t t = -1;
+		const U16 name = c.arg_str(1);
+		if (!name.empty()) {
+			t = type_index_alt(g, name);
+			if (t < 0 || !is_build_type(t) || !live_leader(g, w)) return make_int(-1);
+		}
+		if (!live_leader(g, w)) return make_int(-1);
+		return make_int(find_build_counter(w, t, fc[2], true));
+	});
+	def("train_unit", [&g, &fc](NativeCall& c) {  // @9f4030 (counter 0x1b): train_unit_with_cost without the payment test
+		if (fc[0x1b] < 0) fc[0x1b] = kBuildBase;
+		const int32_t num = c.arg_int(1);
+		if (num < 1 || num > 2000) return make_int(-1);
+		const int32_t w = c.arg_int(0) - 1;
+		int32_t t = type_index(g, c.arg_str(2));
+		if (t < 0 || !live_leader(g, w)) return make_int(-1);
+		t = current_upgrade(g, w, t);
+		const int32_t bt = get_graft(g, w, current_upgrade(g, w, g.type(t).where));
+		const int32_t o = find_build_raw(g, w, bt, fc[0x1b], 1);
+		if (o < 0) return make_int(0);
+		fc[0x1b] = o;
+		group_action_queue_up(g, push_one(g, w, o), t, num);
+		return make_int(o);
 	});
 	def("find_idle_citizen", [&g, &fc](NativeCall& c) {  // @9ead70
 		const int32_t w = c.arg_int(0) - 1;
@@ -753,7 +794,33 @@ void install_script_funcs(ScriptHost& h) {
 	sf::install_mutation_funcs(h);
 	sf::install_order_funcs(h);
 	sf::install_ui_funcs(h);
+	sf::install_more_funcs(h);
 	sf::install_ctw_funcs(h);  // last: the campaign-aware versions replace the stand-alone ones (script_funcs_ctw.cpp)
+
+	// The order builtins force ScenarioData::ignore_orders to 0 around their Group::action_* call (their bodies save it, zero it and put
+	// it back), so the orders a script gives are not filtered by the objects it told to ignore orders (orders-spec 2.1 prelude).
+	static const char* const kClearsIgnoreOrders[] = {
+	    "air_base_recall_order", "air_unit_transfer_order", "air_unit_return_order", "citizen_repair_order", "group_explore_order",
+	    "group_attack_order", "group_garrison_order", "group_jump_move", "group_patrol_order", "group_guard_order",
+	    "group_attack_to_order", "group_patrol_order_queue", "group_move_order", "group_waypoint_order", "unit_waypoint_order",
+	    "unit_attack_order", "unit_flee_order", "unit_patrol_order", "unit_attack_ground_order", "unit_explore_order",
+	    "unit_garrison_order", "unit_move_order", "unit_attack_to_order", "unit_patrol_order_queue"};
+	const auto& funcs = rt.registry.funcs();
+	for (size_t i = 0; i < funcs.size() && i < rt.natives.size(); i++) {
+		if (!rt.natives[i]) continue;
+		for (const char* nm : kClearsIgnoreOrders) {
+			if (funcs[i].name8 != nm) continue;
+			Fn inner = std::move(rt.natives[i]);
+			rt.natives[i] = [&g, inner](NativeCall& c) {
+				const int32_t saved = g.scen.ignore_orders;
+				g.scen.ignore_orders = 0;
+				VP r = inner(c);
+				g.scen.ignore_orders = saved;
+				return r;
+			};
+			break;
+		}
+	}
 }
 
 }  // namespace ron::sim

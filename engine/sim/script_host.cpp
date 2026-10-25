@@ -222,6 +222,7 @@ ScriptLoadReport script_host_load(Game& g, const GameFiles& files, const std::st
 	g.scripts = std::make_unique<ScriptHost>(g);
 	ScriptHost& h = *g.scripts;
 	h.files = &files;
+	h.tileset = s.terrain.tileset;
 	{  // GameInfo.scenario_dir
 		const std::string rel = game_relative(files, scenario_path);
 		const size_t slash = rel.find_last_of('\\');

@@ -125,6 +125,7 @@ claim was checked by grepping the writers):
 | `Game::scenario_loading` | a flag that is only set inside `Game::load` |
 | `PathFinder::blocklist` | always `&lists->blocks` (`own_lists`), re-derived |
 | `ScriptHost::game`, `files`, `rt.files[*].code` and the other compiled script data, `rt.natives`, the builtin registry | rebuilt by `script_host_load` from the `.bhs` files |
+| `ScriptHost::tileset` | `get_tileset`'s answer: the scenario's `Terrain::tileset`, set by `script_host_load` from the same scenario file on every load |
 | `ScriptHost` statistics (`runs`, `run_errors`, `run_failures`, `messages`, `todo_calls`, `verbose`), `rt.return_value`, `bytecodes_executed`, `err_count`, the VM's frame and operand stacks | tool counters and per-run scratch (reset at the start of every `run_script`) |
 | `ScriptInput` (all but the selection and armed command) | renderer-filled between frames: screen, interface rectangles, camera, keys, callbacks |
 
@@ -157,6 +158,16 @@ current / parent / root / element pointers share nodes with the documents).
 A renderer consuming the presentation queue keeps its own cursor on `ScriptEvent::seq`; after loading it should skip to
 `next_seq - 1` (ronmap does, `View::reset`).
 
+Coverage of the original's script state (`docs/state-walk.md`, `RunTimeEnv::walk_data` and `ScenarioData::walk_data`), checked field by field on
+2026-10-24: every member of `ScenarioData` that the builtins read or write is in `SCEN` (goals, scenario groups, kill / destroy tallies, last
+razed / built, city-lost bits, population caps, cost and bonus switches, ignore_orders and `objects_ignoring_orders`, reveal and
+attrition-free points, scripted ally masks and diplomacy settings) or in `SCRP` (timers, find counters, the sound, the whole presentation
+state: objectives, highlight, locks, messages, the user warnings), and the `RunTimeEnv` is its compiled files' constant pools, trigger bits
+and static variables. What the original walks and the port derives instead: the script compile output itself (rebuilt from the `.bhs` files),
+`load_scenario_script`, `scenario_name`, `temp_save` and `general_powers_script_file` (scenario file / game info). No new state was added by
+the builtin round that ported the last logged-only builtins (`docs/script-builtins.md`: `ignore_orders` kills, craft points in
+`Unit::mana_burn`, `Leader::plunder_scale` and the rules edits were already walked), so that round did not change the layout or the version.
+
 ## 7. The pathfinder
 
 The original's global A* keeps its trees between calls (a `find_upath` that returns early leaves the valid-answer cache and
@@ -178,7 +189,11 @@ into the arena and a pointer outside the arena is an error. The definitions move
   re-save must equal the file byte for byte), the same remaining frames are run, and the digests are compared one by one,
   followed by the whole saved state of the last frame (`describe_game_difference` names the member of a difference).
   It prints `save round-trip: OK (...)` or the first differing frame. A game that stops early (game over) never reaches FRAME:
-  the check then uses the frame before its end.
+  the check then uses the frame before its end. After the byte comparison it asserts the *script state* explicitly: the game at the save
+  frame and the freshly loaded game (before its first frame) must give the same `script_state_summary` (timers, goals, objectives and how
+  many are done, static variables and how many are set, triggers on, one hash over the static values, trigger bits, objectives, timers and
+  find counters), and prints it:
+  `save round-trip: script state restored: 2 timers, 0 goals, 1 objectives (0 done), 23 static vars (23 set), 37 of 41 triggers on, hash ...`.
 
 `ronmap` (`apps/map-mac`): **F5** quick-saves and **F9** quick-loads one slot,
 `~/Library/Application Support/OpenRiseOfNations/Saves/quicksave.ronsave`; the game menu (Esc / F10) has **Save Game** and

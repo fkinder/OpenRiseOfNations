@@ -3,9 +3,10 @@
 // "_Unnamed<who>", (string name) = a ScenarioData named group, (UnitGroup g) = the script struct, which
 // ScenarioFuncSet::validate_param @9e3410 turns into a pushed Group ("active_unit_group"). Orders are applied
 // directly, as the original does (no command queue); ScenarioData::ignore_orders, which the bodies force to 0 around
-// the action, is not modelled (groups.cpp TODO).
+// the action, is zeroed around the whole builtin by install_script_funcs (script_funcs.cpp).
 #include "script/bhs_stdlib.hpp"
 #include "sim/aircraft.hpp"
+#include "sim/commands.hpp"
 #include "sim/heroes.hpp"
 #include "sim/spells.hpp"
 #include "sim/combat.hpp"
@@ -192,15 +193,12 @@ void install_order_funcs(ScriptHost& h) {
 		}
 		return make_int(gr.num);
 	});
-	families("group_guard_order", [&g, &h](NativeCall& c, Group& gr) {  // @9fb4b0 -> Group::action_guard @6fcd30
+	families("group_guard_order", [&g](NativeCall& c, Group& gr) {  // @9fb4b0 -> Group::action_guard @6fcd30
 		const int32_t tw = c.arg_int(1) - 1, to = c.arg_int(2);
-		const Object* ob = valid_object(g, tw, to);
-		if (!ob) return make_int(-1);
-		// TODO(orders): the GUARD order (Unit::add_guard_order / do_guard @5e5c70) is not simulated: the group attack-moves to the guarded
-		// object instead (the Conquer the World battle scripts use it to hold a post)
+		if (!valid_object(g, tw, to)) return make_int(-1);
 		if (gr.num != 0) {
-			h.todo_calls["group_guard_order: GUARD order (attack-move instead)"]++;
-			group_action_move_to(g, gr, ob->x, ob->y, kQueueNew, false, 0, kAttackTo, 1, -1, -1, 0);
+			if (Build* tb = build_at(g, tw, to)) tb->ever_seen = uint8_t(tb->ever_seen | (1u << (gr.who & 31)));
+			group_action_guard(g, gr, to, tw, kQueueNew, 0);
 		}
 		return make_int(gr.num);
 	});
@@ -252,7 +250,7 @@ void install_order_funcs(ScriptHost& h) {
 	auto ground_one = [&g, one](NativeCall& c, bool patrol) {
 		// unit_attack_ground_order @9f7db0 / unit_patrol_order @9f7fd0: a valid unit, the tile, orders dropped (not
 		// planes), set_group(-1), pushed; then Group::action_air_attack_ground (a plane or a missile) / action_attack_ground, or
-		// action_air_patrol / action_patrol. (ScenarioData::ignore_orders is 0 around the call; that prelude is not modelled.)
+		// action_air_patrol / action_patrol. (ScenarioData::ignore_orders is 0 around the call.)
 		const int32_t w = c.arg_int(0) - 1, o = c.arg_int(1);
 		const int32_t x = c.arg_int(2), y = c.arg_int(3);
 		Unit* u = valid_unit(g, w, o);
@@ -272,6 +270,16 @@ void install_order_funcs(ScriptHost& h) {
 	};
 	def("unit_attack_ground_order", [ground_one](NativeCall& c) { return ground_one(c, false); });
 	def("unit_patrol_order", [ground_one](NativeCall& c) { return ground_one(c, true); });
+	def("unit_patrol_order_queue", [&g, one](NativeCall& c) {  // @9f81d0: unit_patrol_order with QUEUE_LAST
+		const int32_t w = c.arg_int(0) - 1, o = c.arg_int(1);
+		const int32_t x = c.arg_int(2), y = c.arg_int(3);
+		Unit* u = valid_unit(g, w, o);
+		if (!u || x < 0 || y < 0 || x >= g.world.tile_xs || y >= g.world.tile_ys) return make_int(-1);
+		Group& gr = one(w, o);
+		if (is_plane_unit(*u)) group_action_air_patrol(g, gr, tile_centre(x), tile_centre(y), kQueueLast);
+		else group_action_patrol(g, gr, tile_centre(x), tile_centre(y), kQueueLast);
+		return make_int(1);
+	});
 	def("unit_clear_orders", [&g](NativeCall& c) {  // @9f77e0
 		const int32_t w = c.arg_int(0) - 1, o = c.arg_int(1);
 		if (!active_unit_slot(g, w, o) || !valid_unit(g, w, o)) return make_int(-1);
@@ -404,14 +412,17 @@ void install_order_funcs(ScriptHost& h) {
 		Group* gr = create_game_group(g, who, ids);
 		return gr ? group_garrison(*gr, c.arg_int(1) - 1, c.arg_int(2)) : make_int(-1);
 	}, 3);
-	def("unit_eject_order", [&g, &h](NativeCall& c) {  // @9f84e0: a unit inside a unit issues COME_OUT (a command)
+	def("unit_eject_order", [&g](NativeCall& c) {  // @9f84e0: a unit inside a building issues COME_OUT
 		const int32_t w = c.arg_int(0) - 1, o = c.arg_int(1);
-		const Unit* u = valid_unit(g, w, o);
-		if (!live_leader(g, w) || !u || u->inside_up < 0) return make_int(-1);
-		const Object* in = object_at(g, u->inside_up_who, u->inside_up);
-		if (!in || in->is_unit) return make_int(-1);
-		h.todo_calls["unit_eject_order: UnitOut::issue_come_out"]++;  // TODO(commands): the COME_OUT command
-		return make_int(1);
+		Unit* u = valid_unit(g, w, o);
+		if (!live_leader(g, w) || !u) return make_int(-1);
+		int32_t cw = -1;
+		const int32_t in = unit_get_inside(g, *u, &cw);
+		const Object* inside = in >= 0 ? object_at(g, cw, in) : nullptr;
+		if (!inside || inside->is_unit) return make_int(-1);
+		// CommandManager::issue_come_out is applied by process_come_out a turn later; applied directly here (single player: the same effect).
+		unit_action_come_out(g, *u);
+		return make_int(1);  // (the original also plays S_EJECT_ACK on the console)
 	});
 	auto ctw_link = [&g](NativeCall&) {  // get_attack_to @9e6100 / get_attack_from: CTW only ("" otherwise)
 		if (!g.ctw) return make_string(U16());

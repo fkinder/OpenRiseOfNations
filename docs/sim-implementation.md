@@ -698,9 +698,10 @@ BigHugeScript is ported in `engine/script/` (no game data in the repo; see the f
   the script (`economic` / `defensive`) without random_personality and without the boom_vs_rush == 0 coin flip
   (TODO(AI), see the header). Without `Game::scripts` (the check tools) state 1 counts as a failed run and nothing
   else changes.
-- **Builtins on the simulation** (`sim/script_funcs*.cpp`, 2026-10-13): 472 of the 813 builtin names (873
-  registrations with overloads) have a body, about 99 of them from the AI-script work. By the table's categories:
-  162 queries, 144 mutations, 125 presentation, 40 script environment, 1 command. The files:
+- **Builtins on the simulation** (`sim/script_funcs*.cpp`, 2026-10-13; completed 2026-10-24): 630 of the 813 builtin names (675 of the 873
+  registrations) have a body; the 183 names left are called by no shipped script (docs/script-builtins.md lists them, with the per-script
+  call counts of the 46 registrations that were still logged-only and are now ported). By the table's categories: 162 queries, 144 mutations,
+  125 presentation, 40 script environment, 1 command. The files:
 
   | File | What |
   |---|---|
@@ -709,6 +710,7 @@ BigHugeScript is ported in `engine/script/` (no game data in the repo; see the f
   | `script_funcs_mutate.cpp` | goods, rates, pop cap, techs (`gain_tech` / `lose_tech` by name or category, `gain_next_age` = `Leader::set_age`, `set_preq`), type edits (copy-on-write `Game::mut_rules()`: build / job time, rename, disable / enable by tribe, max health / attack / range / armor / speed), victory / defeat, `create_unit*` / `create_building*`, kill / damage / heal, fog (`set_explored`, reveal points, `show_all_map_*`), AI switches, diplomacy (`declare_war`, `make_peace`, `make_alliance`, offers), named groups, the `ScenarioData` switches (`*_costs_disable`, `buildings_gather_*`, `building_*_bonus_*`) |
   | `script_funcs_order.cpp` | orders through a pushed Group as the original: `group_move / attack / attack_to / stance / jump_move / patrol_order` (int-who, named and UnitGroup overloads, each returning the member count), `unit_*_order`, `unit_clear_orders`, `create_game_group` |
   | `script_funcs_ui.cpp` | presentation and seat-local input (below), objectives, goals, messages, sounds, pings, camera, highlights, arrows, flags, iface rectangles, `key_down`, the in-memory XML file builtins |
+  | `script_funcs_more.cpp` | the Conquer the World battle-style builtins the other files lacked (2026-10-24): hero / spy crafts (`general_ambush`, `general_decoy`, `special_forces_*`, `scout_counter_intel`: `ScenarioFuncSet::cast_spell` callers, the craft in ECX read from the disassembly), craft points (`set_unit_craft`, `craft_percent`, `set_unit_type_max_craft`), CTW objectives, resources on the map (`find_resource`), cities (`get_city_name`, `rename_city`), diplomacy switches, `switch_player_control`, `defeat_attacker_and_allies`, `get_tileset`, ... |
 
   New state: `ScenarioData` (`sim/scenario_data.hpp`, `Game::scen`: goals, named groups, kill / destroy tallies,
   last razed / built, city-lost bits, pop cap override, cost switches, time limit), `Leader::chat_status`,
@@ -737,19 +739,29 @@ BigHugeScript is ported in `engine/script/` (no game data in the repo; see the f
   `sound_finished`, warnings, highlights, flags, goal dialog, pause: -1 / 0 or no effect in MP); the port keeps
   each guard (`sf::mp`), so a lockstep game never branches on seat-local input. Objectives, messages and pings are
   not guarded: every machine produces the same events.
-- **Logged stubs / TODOs**: 341 names have no body (logged, returning the error value); of the 137 used by the
-  shipped scripts (3043 call sites) all but 5 call sites are in the CTW campaign scripts (`set_no_attack`,
-  `get_country_owner`, `ctw_set_leader_name`, `get_num_territories`, `group_guard_order`, `get_territory_owner`,
-  `ctw_is_war`, ...: the strategic layer, `ConquestGame`). The non-CTW ones: `get_territory_owner` /
-  `get_territory_strength` (CTW territories) and `get_starting_loc_x/y` (World start locations, not ported).
-  Bodies that call unported systems count in `ScriptHost::todo_calls` (ron-sim prints them): `general_forced_march`
-  / `general_entrench` (spells), `unit_stop_effect` (`Caster::process_spells`), `unit_clear_orders` on planes
-  (strafe), `unit_attack_ground_order`, `group_patrol_order` / `unit_patrol_order`, `unit_garrison_order`,
-  `unit_eject_order` (COME_OUT command), `place_*_with_cost` (AI production), `air_unit_transfer_order`,
-  `create_missile_and_target_build`.
-- **Not done**: save / load of the RunTimeEnv and ScenarioData script state (state-walk.md; TODO), the paused-game
-  runs of `TurnControl::do_frame_solo`, CTW setup / runtime scripts (the conquest battle scenarios with
-  LOAD_SCRIPT and no sibling .bhs get their script from the CTW layer) and the CTW strategic-layer builtins.
+- **Logged stubs / TODOs** (2026-10-24): no builtin that a shipped script calls is logged-only any more (`docs/script-builtins.md`: 46 registrations,
+  274 call sites, all in the Conquer the World battle styles, ported in `script_funcs_more.cpp`, `script_funcs.cpp` (`train_unit`,
+  `find_build_with_type_name`, `get_mapstyle`: the AI production scripts' `sea_map` now reads the real map style), `script_funcs_mutate.cpp`
+  (`lose_current_age`, `lose_upgrade`) and `script_funcs_order.cpp` (`unit_patrol_order_queue`, `group_guard_order` through the real
+  `Group::action_guard`, `unit_eject_order` through `unit_action_come_out`)). `create_unit` of a sea unit on land now runs
+  `Group::action_transport(1)`. **`ScenarioData::ignore_orders`**: `unit_ignore_orders` / `object_ignore_orders` fill
+  `objects_ignoring_orders[who]`, `unit_obey_orders` blanks entries; the 24 order builtins that the original brackets with
+  `ignore_orders = 0` are wrapped the same way (`install_script_funcs`), and the prelude (kill the listed objects from the group) runs in the
+  nine group actions of `aircraft_cmd.cpp` / `combat_orders.cpp`. **Still open (other owners' files)**: the same one-line prelude is a
+  `TODO(scenarios)` in `groups.cpp` (`action_halt`, `follow`, `guard`, the move family at ~1013), `transport.cpp` (3), `garrison.cpp` (2),
+  `construct.cpp` (3) and `econ_gather.cpp` (1); until then a unit made to ignore orders still obeys a player's MOVE / HALT / GARRISON
+  (`capturedarius`, `airliftsetup` are the only shipped users). Approximations: `rename_city` by name and `unit_eject_order` apply the effect
+  of their `CommandManager` command directly (the original queues the command: a turn of latency), `select_object` / `ui_hide_score` /
+  `switch_player_control` post a no-op camera `ScriptEvent` (`select_object`, `hide_score`, `clear_selection`) that the renderer
+  (apps/map-mac, not touched) may consume, `get_tileset` of a generated battle is the node's tileset, `get_commerce_cap` only for the
+  six goods, `num_type` of a rare good is 0.
+- **Save / load**: done (docs/save-format.md 6: `SCRP` and `SCEN` carry the RunTimeEnv and ScenarioData script state; `ron-sim --roundtrip`
+  asserts and prints it). **Not done**: the paused-game runs of `TurnControl::do_frame_solo`.
+
+Results (2026-10-24, docs/script-builtins.md): all 156 stock scenarios and conquest maps 3000 frames with scripts and `--ai-every 8`,
+self-check 156/156, no logged-only builtin or `todo_calls` hit; the 600-frame digests are unchanged, at 3000 only `carib` / `carib2` move
+(`get_mapstyle` now feeds the AI scripts' `sea_map`). All 229 conquest styles played 1500 frames: 63 style runs hit a logged-only builtin
+or stub before, none after. `ron-sim --roundtrip` also asserts the script state (tut1: 2 timers, 23 static vars, 37 of 41 triggers on).
 
 Harness: `ron-sim` loads scripts unless `--no-scripts`; `--script-log` prints the presentation queue as it fills
 (`SCRIPT sound "intro.wav" [path] ms`, `SCRIPT objective added 'id': "text"` / `complete`, camera, pings,

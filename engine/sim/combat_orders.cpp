@@ -873,7 +873,7 @@ void group_distribute_attack(Game& g, Group& gr, int32_t ox, int32_t whom) {
 void group_action_attack(Game& g, Group& gr, int32_t ox, int32_t whom, int32_t mandatory, QueuePos q, int32_t ignore) {
 	// @712490
 	if (!grp_on_map(g, gr) || ox < 0) return;
-	// TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	gr.disband = 0;  // action_begin
 	if (gr.num <= 0) return;
 	Object* Tp = obj_at(g, ox, whom);

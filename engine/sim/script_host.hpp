@@ -59,7 +59,7 @@ public:
 	// GameInfo.scenario_script and ScenarioData::general_powers_script: the names run every frame ("" = none).
 	bhs::U16 scenario_script, general_powers_script;
 
-	// ScenarioData script state (saved with ScenarioData, state-walk.md; save/load: TODO).
+	// ScenarioData script state (saved with ScenarioData in the SCRP section, docs/save-format.md 6).
 	ScriptTimers timers;
 	std::array<int32_t, 31> find_counters{};  // ScenarioData::find_counters (the find_* builtins' resume slots)
 
@@ -116,6 +116,9 @@ public:
 	std::vector<std::string> messages;         // run-time errors / script prints (capped)
 	std::map<std::string, int> todo_calls;     // unported game functions reached from ported builtins
 	bool verbose = false;
+
+	// GameInfo's tileset (Scenario::tileset, get_tileset): set by script_host_load from the scenario; derived, never saved.
+	std::string tileset;
 
 	// Compiles a .bhs file (game-relative or absolute path) and loads its images, unless that file is loaded already
 	// (Compiler::compile skips unchanged files). Returns false with `err` on a compile error.

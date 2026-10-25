@@ -84,6 +84,8 @@ inline Build* valid_build(Game& g, int32_t w, int32_t o) {
 // Type lookups: ScenarioFuncSet::get_type_index @a03480 and the inlined loops (TypeData name +0x60, the first of the
 // 806 types, case-insensitive; "" or unknown: -1).
 int32_t type_index(const Game& g, const U16& name);
+// The same search on the type's type name (+0xb0, get_type_index with the alternate flag set by the *_with_type_name builtins).
+int32_t type_index_alt(const Game& g, const U16& name);
 // get_unit_cat @9e3060: index in rules unit_cats by name (case-insensitive), -1.
 int32_t unit_cat_index(const Game& g, const U16& name);
 // get_stance @9e2c40: the stance index in stances_combat, then worker, caster, packer (first list that has it), -1.
@@ -124,5 +126,6 @@ void install_mutation_funcs(ScriptHost& h);
 void install_ui_funcs(ScriptHost& h);
 void install_order_funcs(ScriptHost& h);
 void install_ctw_funcs(ScriptHost& h);
+void install_more_funcs(ScriptHost& h);
 
 }  // namespace ron::sim::sf

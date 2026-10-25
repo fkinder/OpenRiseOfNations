@@ -80,7 +80,9 @@
 // saved frame and the scripted commands still apply by absolute frame. --roundtrip FRAME is the self-check: run to FRAME,
 // save to a temporary file here, keep running to the end recording the digests, then load that file, run the same
 // remaining frames and compare digest by digest (and the full saved state of the last frame); it prints
-// `save round-trip: OK` or the first differing frame, after the determinism self-check.
+// `save round-trip: OK` or the first differing frame, after the determinism self-check; it then asserts the script state (timers,
+// goals, objectives, static variables, trigger bits, ScenarioData) the loaded game starts with equals the saved game's and prints it
+// (`save round-trip: script state restored: ...`).
 #include <algorithm>
 #include <chrono>
 #include <array>
@@ -1066,6 +1068,63 @@ void print_scripts(const Game& g, const ScriptLoadReport& rep, bool log) {
 	for (const auto& f : h->run_failures) std::printf("  script failures: %s x%d\n", f.first.c_str(), f.second);
 	const auto un = h->unported();
 	if (!un.empty()) {
+// What a save must carry of the scripts (docs/save-format.md 6): the ScenarioData switches, the timers, the objectives, the trigger bits
+// and the static variables of every compiled script, as counts and one hash (the --roundtrip check compares the game that was saved
+// with the game that was loaded).
+std::string script_state_summary(const Game& g) {
+	if (!g.scripts) return "no scripts";
+	const ScriptHost& h = *g.scripts;
+	uint64_t hv = 1469598103934665603ull;
+	auto mix = [&](uint64_t x) { hv = (hv ^ x) * 1099511628211ull; };
+	int statics = 0, live_statics = 0, trig_on = 0, trig_all = 0;
+	std::function<void(const ron::bhs::Value*, int)> val = [&](const ron::bhs::Value* v, int depth) {
+		if (!v || depth > 8) {
+			mix(0);
+			return;
+		}
+		mix(uint64_t(v->cls) << 8 | uint64_t(v->scope));
+		mix(uint64_t(uint32_t(v->i)));
+		uint32_t fb;
+		std::memcpy(&fb, &v->f, 4);
+		mix(fb);
+		for (char16_t c : v->s) mix(c);
+		for (const ron::bhs::VP& e : v->elems) val(e.get(), depth + 1);
+	};
+	for (const auto& fp : h.rt.files) {
+		if (!fp) continue;
+		for (const ron::bhs::RtScript& rs : fp->scripts) {
+			for (uint8_t b : rs.trigger_bits) {
+				trig_all++;
+				trig_on += b ? 1 : 0;
+				mix(b);
+			}
+			for (const ron::bhs::VP& v : rs.static_vars) {
+				statics++;
+				live_statics += v ? 1 : 0;
+				val(v.get(), 0);
+			}
+		}
+	}
+	int done = 0;
+	for (const ScriptObjective& o : h.pres.objectives) {
+		done += o.completed ? 1 : 0;
+		for (char c : o.id) mix(uint8_t(c));
+		mix(uint64_t(uint32_t(o.completed)));
+	}
+	for (const auto& t : h.timers.list) {
+		for (char16_t c : t.name) mix(c);
+		mix(uint64_t(uint32_t(t.expiry)));
+	}
+	int goals = 0;
+	for (const auto& gl : g.scen.goals) goals += int(gl.size());
+	for (int32_t c : h.find_counters) mix(uint64_t(uint32_t(c)));
+	char buf[256];
+	std::snprintf(buf, sizeof buf, "%zu timers, %d goals, %zu objectives (%d done), %d static vars (%d set), %d of %d triggers on, hash %016llx",
+	              h.timers.list.size(), goals, h.pres.objectives.size(), done, statics, live_statics, trig_on, trig_all,
+	              (unsigned long long)hv);
+	return buf;
+}
+
 		std::printf("  unported builtins called:");
 		for (const auto& u : un) std::printf(" %s x%d", u.first.c_str(), u.second);
 		std::printf("\n");
@@ -1342,6 +1401,7 @@ void print_anim_table(const Game& g, const AssetAnimSource& art) {
 	                                 "UNPACK", "CHOP", "W_WOOD", "DUMPWOOD", "WTO_WOOD", "MINE", "W_ORE", "DUMPORE",
 	                                 "WTO_ORE", "BUILD", "REPAIR", "SOW", "REAP", "FARM"};
 	std::vector<int32_t> seen;
+	std::string script_at_save, script_after_load;  // script_state_summary of the game when it was saved / right after it was loaded
 	std::printf("animation frames per graphics piece (frames at 15/s; * = looping, ! = .bha missing):\n");
 	for (int32_t who = 0; who < kNumLeaders; who++) {
 		for (int32_t o = 0; o < g.objects[size_t(who)].unit_mark; o++) {
@@ -1960,6 +2020,7 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 			rr.saved_bytes = int64_t(std::filesystem::file_size(fo.roundtrip_file));
 		}
 	};
+	if (!fo.load_path.empty()) rr.script_after_load = script_state_summary(*g);
 	// Every scripted unit is tracked from its first command.
 	for (const Script& s : scripts) {
 		for (int32_t o : s.objs) {
@@ -1981,6 +2042,7 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 		if (s.kind == Script::Attack) {  // the attack target too
 			bool known = false;
 			for (const Tracked& t : rr.tracked) known |= t.who == s.twho && t.o == s.to;
+			rr.script_at_save = script_state_summary(*g);
 			const Unit* u = g->unit(s.twho, s.to);
 			if (!known && u) rr.tracked.push_back({s.twho, s.to, u->x, u->y, u->x, u->y, -1, s.frame, 0, u->x, u->y, 0});
 		}
@@ -2706,3 +2768,9 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 }
+			if (A.script_at_save != c.script_after_load) {
+				std::printf("save round-trip: FAILED: the script state differs after the load:\n  saved:  %s\n  loaded: %s\n",
+				            A.script_at_save.c_str(), c.script_after_load.c_str());
+				return 1;
+			}
+			std::printf("save round-trip: script state restored: %s\n", A.script_at_save.c_str());

@@ -147,7 +147,7 @@ void unit_process_air_queue(Game& g, Unit& u) {
 
 void group_action_flight(Game& g, Group& gr, int32_t ox, int32_t whom, int32_t order, int32_t shift, int32_t ctrl,
                          int32_t alt) {
-	// TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	gr.disband = 0;  // action_begin
 	if (ox < 0 || whom < 0) return;
 	Object* T = obj_at(g, ox, whom);
@@ -371,7 +371,7 @@ void group_action_launch_flight(Game& g, Group& gr, int32_t ox, int32_t whom, in
 // ---------------------------------------------------------------- PATROL: Group::action_air_patrol @7029d0
 
 void group_action_air_patrol(Game& g, Group& gr, int32_t x, int32_t y, QueuePos q) {
-	// TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	Group planes, others;
 	group_clear(planes, -1);
 	group_clear(others, -1);
@@ -429,7 +429,7 @@ void group_action_air_patrol(Game& g, Group& gr, int32_t x, int32_t y, QueuePos 
 // Group::action_patrol @7030c0, the air half: a group with a plane (leader or member, COUNT_DOMAIN 4) patrols in the air.
 // The ground half (GroupPatrolOrder / Unit::add_patrol_order) is orders_patrol.cpp.
 void group_action_patrol(Game& g, Group& gr, int32_t x, int32_t y, QueuePos q) {
-	// TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	gr.disband = 0;
 	clamp_to_world(g, x, y);
 	const QueuePos q2 = q == kQueueFirst ? kQueueNew : q;
@@ -452,7 +452,7 @@ void group_action_patrol(Game& g, Group& gr, int32_t x, int32_t y, QueuePos q) {
 
 void group_action_launch_patrol(Game& g, Group& gr, int32_t x, int32_t y, QueuePos q, int32_t shift, int32_t ctrl,
                                 int32_t alt) {
-	// TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	bool launched = false;
 	int32_t best_cost = 9999999, best_o = -1, best_w = -1;
 	for (int32_t i = 0; i < gr.num; i++) {
@@ -498,7 +498,7 @@ void group_action_launch_patrol(Game& g, Group& gr, int32_t x, int32_t y, QueueP
 
 void group_action_air_attack_ground(Game& g, Group& gr, int32_t x, int32_t y, QueuePos q) {
 	// @703d80. Planes and missiles bomb a map point; one missile per command.
-	// TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	gr.disband = 0;
 	bool missile_sent = false;
 	clamp_to_world(g, x, y);
@@ -563,7 +563,7 @@ void group_action_air_attack_ground(Game& g, Group& gr, int32_t x, int32_t y, Qu
 // airbases, carriers and silos) bomb the point; a group of ground units gets Unit::add_attack_ground_order on the members
 // that can shoot at the ground (orders_patrol.cpp).
 void group_action_attack_ground(Game& g, Group& gr, int32_t x, int32_t y, QueuePos q) {
-	// TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	gr.disband = 0;
 	if (gr.num == 0) return;
 	clamp_to_world(g, x, y);
@@ -608,7 +608,7 @@ void group_action_attack_ground(Game& g, Group& gr, int32_t x, int32_t y, QueueP
 // ---------------------------------------------------------------- SCRAMBLE: Group::action_scramble @7111c0
 
 void group_action_scramble(Game& g, Group& gr) {
-	// TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	for (int32_t i = 0; i < gr.num; i++) {
 		const Object* B = g.object(gr.who, gr.list[size_t(i)]);
 		if (!B) continue;
@@ -719,7 +719,7 @@ void group_action_unitmask(Game& g, Group& gr, int32_t mask, int32_t set) {
 }
 
 void group_action_recall(Game& g, Group& gr) {
-	// TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	if (gr.num <= 0) return;
 	const int32_t li = leader_index(g, gr);
 	if (li >= 0) {
