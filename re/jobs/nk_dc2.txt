@@ -1,0 +1,7 @@
+re/decomp/nukes
+LeaderData::is_nuke_embargo
+LeaderData::get_nuke_embargo
+LeaderData::get_my_nuke_embargo
+Game::current_age
+LeaderData::can_nuke
+ObjectsData::count_nukes_in_flight

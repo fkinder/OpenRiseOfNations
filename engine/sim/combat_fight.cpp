@@ -186,7 +186,11 @@ void ammo_do_damage(Game& g, Ammo& a) {
 	}
 	// ---- splash
 	if (has_objmask(*sh, objmask::kMissile)) {
-		// TODO(combat-spec 4.11): cruise / nuclear missiles (missile defence, Nuke::add_nuke).
+		// Cruise / nuclear missiles (combat-spec 4.11, docs/nukes-spec.md): missile defence, Nuke::add_nuke + Nuke::do_damage.
+		if (nuke_missile_impact(g, a, *sh)) {
+			ammo_close(a);
+			return;
+		}
 	}
 	if (!ammo_hit_target(g, a)) ammo_check_hit(g, a, D);
 	const int32_t po = a.ox, pw = a.whom;

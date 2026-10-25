@@ -1,0 +1,9 @@
+re/decomp/nukes
+NukeOut::init
+NukeOut::graph_do_damage
+NukeOut::num_current_nukes
+Nuke::been_damaged_before
+TerrainOut::terraform_for_nuke
+Nuke::clear
+Nuke::init
+Terrain::refresh_good_z

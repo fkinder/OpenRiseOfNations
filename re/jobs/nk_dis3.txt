@@ -1,0 +1,2 @@
+re/decomp/nukes/dis
+ScenarioFuncSet::num_type

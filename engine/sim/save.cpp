@@ -45,7 +45,8 @@ static_assert(sizeof(Regions) == 10248, "Regions changed: update the REGN sectio
 // + 9192: Game::ctl (sim/control.hpp: TurnControl speed / pause, the control groups, cheat counters, chat lines) is console state no simulation code reads;
 // the original saves its hotkey groups, the native save does not (docs/sim-implementation.md, "Orders and commands, second pass").
 // + 120: World::roads (the road candidates and the Roads sweep cursor, sim/roadgraph.hpp), saved in the world section.
-static_assert(sizeof(Game) == 1657592 + 120, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
+// + 80: Game::nukes (sim/nukes.hpp), saved in section NUKE.
+static_assert(sizeof(Game) == 1657592 + 120 + 80, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
 // 1608 + 8 + 16 + 16: ScriptHost::ctw (the Conquer the World campaign the scripts run for, sim/ctw.hpp) is a run-time link, ctw_owned the loaded battle's
 // copy of that campaign and battle_token the campaign's liveness check of the battle; the native battle save writes the campaign as its own section (CTWB), not through the script walk.
 // + 24: ScriptHost::tileset (get_tileset), derived from the scenario by script_host_load on every load, not saved (docs/save-format.md 4).
@@ -566,6 +567,15 @@ void walk_scripts(Ar& ar, ScriptHost& h) {
 	walk_vm(ar, h.rt);
 }
 
+// The nuclear explosions in progress (sim/nukes.hpp): written by hand, they are not in the generated walks.
+template <class Ar> void walk(Ar& ar, NukeBlast& v) {
+	FIELDS(ar, v.x, v.y, v.r0, v.r1, v.frame, v.who, v.o, v.hit_o, v.hit_who);
+}
+template <class Ar> void walk(Ar& ar, NukeState& v) {
+	FIELDS(ar, v.blasts, v.craters, v.stamp);
+}
+static_assert(sizeof(NukeBlast) == 80 && sizeof(NukeState) == 80, "NukeBlast / NukeState changed: update their walk() in save.cpp");
+
 // ---------------------------------------------------------------- the file
 
 constexpr char kMagic[4] = {'R', 'O', 'N', 'S'};
@@ -585,6 +595,7 @@ void walk_body(Ar& top, Game& g, bool has_scripts, std::vector<uint8_t>* battle)
 	top.section("LEAD", [&](auto& ar) { fields(ar, g.leaders); });
 	top.section("OBJS", [&](auto& ar) { walk_objects(ar, g); });
 	top.section("GOOD", [&](auto& ar) { fields(ar, g.goods, g.items, g.herds); });
+	top.section("NUKE", [&](auto& ar) { fields(ar, g.nukes); });  // explosions in progress, the sunk tiles, the embargo stamps (version 10)
 	top.section("HGHT", [&](auto& ar) { fields(ar, g.heights.h); });  // the terrain height grid: buildings terraform it (TerrainOut::terraform_for_building)
 	top.section("CITY", [&](auto& ar) {
 		fields(ar, g.cities, g.forts, g.wonder_records, g.unbuilt_cities, g.unbuilt_forts, g.unbuilt_wonders, g.wonders,

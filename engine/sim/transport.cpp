@@ -487,7 +487,8 @@ int32_t check_meet_ship(Game& g, Unit& me, int32_t so, int32_t swho) {
 // ---------------------------------------------------------------- the group actions (2.9, 8.1, 9)
 
 void group_action_set_transport(Game& g, Group& gr, int32_t flag) {
-	// @7024b0. TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	// @7024b0.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	gr.disband = 0;  // action_begin
 	if (gr.buildings != 0) return;
 	const int32_t level = leader_can_transport(g, gr.who);
@@ -501,7 +502,8 @@ void group_action_set_transport(Game& g, Group& gr, int32_t flag) {
 }
 
 void group_action_transport(Game& g, Group& gr, int32_t force) {
-	// @702620. TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	// @702620.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	gr.disband = 0;  // action_begin
 	if (gr.buildings != 0) return;
 	gr.form = -1;  // group +0x10
@@ -536,7 +538,8 @@ void group_action_transport(Game& g, Group& gr, int32_t force) {
 }
 
 void group_action_board_ship(Game& g, Group& gr, int32_t ship_o, QueuePos q) {
-	// @700010. TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	// @700010.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	gr.disband = 0;  // action_begin
 	if (q == kQueueFirst) {
 		// ❓ the decompile runs finish_insert on a temporary group holding the ship; it is run on the group here like the

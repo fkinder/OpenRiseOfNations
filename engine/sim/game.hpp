@@ -27,6 +27,7 @@
 #include "sim/control.hpp"
 #include "sim/fog.hpp"
 #include "sim/groups.hpp"
+#include "sim/nukes.hpp"
 #include "sim/objects.hpp"
 #include "sim/pathfinder.hpp"
 #include "sim/random.hpp"
@@ -575,6 +576,7 @@ public:
 	int32_t queue_fail = 0;             // BuildData::queue_fail (static, walked)
 	int32_t check_borders_budget = 0;   // GameDaemon.borders (per-frame territory budget counter)
 	int32_t armageddon = 0;             // Game.armageddon (nukes left before Armageddon; ARMAGEDDON_BONUS -2)
+	NukeState nukes;                    // the nuclear explosions in progress, the sunk tiles and the embargo stamps (sim/nukes.hpp)
 	// Game over (semaphore byte0 & 0x40, set by Game::check_victory): TurnControl stops stepping the simulation, so
 	// Game::do_frame returns at once. victory_checked = semaphore byte2 & 0x40. musical_chairs = Game.musical_chairs
 	// (frame of the last defeat / chairs elimination). docs/capture-spec.md 7.

@@ -1,0 +1,12 @@
+re/decomp/nukes/dis
+Nuke::add_nuke
+Nuke::do_damage
+Nuke::clear
+Nuke::init
+NukeOut::init
+NukeOut::graph_do_damage
+NukeOut::setup_terrain_terraforming
+Nuke::been_damaged_before
+NukeOut::been_damaged_before
+TerrainOut::terraform_for_nuke
+NukeOut::num_current_nukes

@@ -208,6 +208,8 @@ void leader_tech_race_epoch(Game& g, int32_t who) {
 }
 
 void armageddon_nuke_detonated(Game& g) {
+	// Nuke::do_damage @92bc80: called by sim/nukes.cpp on the frame an explosion is exactly 110 frames old (max_nuke_frames), once per
+	// explosion, not at the detonation (docs/nukes-spec.md 5).
 	if (g.info.starting_resources == 8 || !(g.multiplayer || g.info.num_nations > 1)) return;
 	g.armageddon++;
 	GameEvent e;

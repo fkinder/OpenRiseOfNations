@@ -747,14 +747,14 @@ BigHugeScript is ported in `engine/script/` (no game data in the repo; see the f
   `Group::action_transport(1)`. **`ScenarioData::ignore_orders`**: `unit_ignore_orders` / `object_ignore_orders` fill
   `objects_ignoring_orders[who]`, `unit_obey_orders` blanks entries; the 24 order builtins that the original brackets with
   `ignore_orders = 0` are wrapped the same way (`install_script_funcs`), and the prelude (kill the listed objects from the group) runs in the
-  nine group actions of `aircraft_cmd.cpp` / `combat_orders.cpp`. **Still open (other owners' files)**: the same one-line prelude is a
-  `TODO(scenarios)` in `groups.cpp` (`action_halt`, `follow`, `guard`, the move family at ~1013), `transport.cpp` (3), `garrison.cpp` (2),
-  `construct.cpp` (3) and `econ_gather.cpp` (1); until then a unit made to ignore orders still obeys a player's MOVE / HALT / GARRISON
-  (`capturedarius`, `airliftsetup` are the only shipped users). Approximations: `rename_city` by name and `unit_eject_order` apply the effect
+  nine group actions of `aircraft_cmd.cpp` / `combat_orders.cpp`. The same one-line prelude now also sits in the remaining thirteen sites: `groups.cpp` (`action_halt`, `follow`, `guard`, `move_near`), `transport.cpp`
+(3), `garrison.cpp` (2), `construct.cpp` (`build`, the second action at ~364, `disband`) and `econ_gather.cpp` (`gather`); verified with a unit listed
+as ignoring orders (tut1, units 0:2 / 0:3 / 0:10 with `objects_ignoring_orders`): a player MOVE, HALT and GARRISON no longer move it
+(`capturedarius`, `airliftsetup` are the only shipped users and none of the 156 scenarios changes digest at 600 frames). Approximations: `rename_city` by name and `unit_eject_order` apply the effect
   of their `CommandManager` command directly (the original queues the command: a turn of latency), `select_object` / `ui_hide_score` /
   `switch_player_control` post a no-op camera `ScriptEvent` (`select_object`, `hide_score`, `clear_selection`) that the renderer
   (apps/map-mac, not touched) may consume, `get_tileset` of a generated battle is the node's tileset, `get_commerce_cap` only for the
-  six goods, `num_type` of a rare good is 0.
+  six goods, `num_type` of a rare good (type 6..49) reads the neighbouring `LeaderDataEncrypt` fields xor 0x8221 like the original (`good_count` in `script_funcs.cpp`).
 - **Save / load**: done (docs/save-format.md 6: `SCRP` and `SCEN` carry the RunTimeEnv and ScenarioData script state; `ron-sim --roundtrip`
   asserts and prints it). **Not done**: the paused-game runs of `TurnControl::do_frame_solo`.
 
@@ -857,8 +857,33 @@ gathering, combat), buildings / sites, techs, armies, the stockpile and make lis
 units / captains / standard / attacking, target with its damage, position, muster spot), the combat totals with the
 land military units in armies, difficulty and personality, the score parts and the diplomacy state per opponent
 (diplos, met, agendas, aggression / strong / weak). `--difficulty N` sets the GameInfo difficulty (default 2).
-`RON_AI_TRACE=1` traces each production step on stderr (make list, sites, city census). The digest includes
-personality, sites, make list, census counters, trainer list and armies.
+`RON_AI_TRACE=1` traces each production step on stderr (make list, sites, city census, `make_this` calls with their result and
+the stockpile, `produce_building` failures). The digest includes personality, sites, make list, census counters, trainer list
+and armies. **`--ai-every K` also prints one `aib` line per AI seat** (2026-10-25): age, citizens / military / units, pop
+and cap, stockpiles, income rates per 450 frames (`income / 16`), escrow, the library lines (`lib m/c/c/s tot N need M`:
+epoch techs held against `techs_per_age` of the next age), the `econ` need bits, the production state, script, step and
+make list item 0 (type name), cities, units queued, caravans / merchants / scholars, and the research queue (`*` = the one
+researching).
+
+**Random skirmishes: the cities' names (2026-10-25).** The production scripts (`economic.bhs`, `defensive.bhs`,
+`aibestbuildlibrary.bhs`) address cities by the string `find_city_with_num` returns, and `num_city_buildings`,
+`place_building_with_cost`, `was_city_attacked` ... look the city up by that string. A scenario file carries each city's
+name, but `City::generate_name` (cities.cpp) only keeps the counter ("the string is file-only"), so every city of a
+`new_random_game` had the name `""`, and `city_index("")` is always the first city: the second city was the capital to the
+script, `place_farm` found 5 farms at "the second city", never placed one, and `economic.bhs` sat at step 17 (`Farm < 7`,
+`old_step = 0` defeats the hang timer) for the whole game with its citizens idle: the seats "with 0 citizens / 2 soldiers /
+1,100 knowledge banked" of docs/ui-port.md 16.2b (L2 and L7 of `--random 12,4,1,8` stayed in the Ancient Age for 40,000+
+frames with 7,000 food banked). `ai_production.cpp: name_unnamed_cities` now gives every city of an AI seat the name
+"<tribe> City N" (N = city index + 1; the tribe's `<CITIES>` list is still not read) at the head of `leader_production_ai`,
+before the script runs. Names are outside the digest. With it every seat leaves the Ancient Age by frame 10,000 and the
+leaders reach the Enlightenment Age at ~28,000 and the Industrial Age at ~49,000 (ages at 60,000: 4 3 5 3 4 5 4 4).
+
+What the 60,000-frame game still shows (the decision functions were compared with the decompiles `research_techs`,
+`production_ai_setup`, `found_cities` and found faithful; the rest is the economy under them): wealth is the scarce good
+(+56 per 450 frames against +260 for food and timber, which sit at their commerce cap with 38 gatherers on farms and
+woodcutters), the science line (Chemistry ... 200+ wealth each) is what holds the Industrial Age (`tot 14 need 18`) while 4,500
+knowledge are banked, and the market loop (`use_market` sells a lot of timber at price 1 and `market_speculation` buys it back
+at 20, all eight seats trading the same global levels) drains the little wealth there is.
 
 Result (seed 12345, `scenario/Tutorial5_Trial/tut5.scx`, AI leader 1 at difficulty 2, 12000 frames, self-check OK):
 5 citizens / 1 city / 6 buildings / Ancient at the start; a second city by frame 2000; 29 citizens (28 gathering),
@@ -1011,6 +1036,32 @@ Checks (2026-10-25, seed 12345, scratch build of HEAD + this work):
    tutorials call no unported builtin); then save / load of the script state, the renderer side of
    `sim/script_ui.hpp` (apps/map-mac), the CTW strategic layer.
 
+
+## Nukes (docs/nukes-spec.md; engine/sim/nukes.{hpp,cpp}; 2026-10-25)
+
+- **Ported** (every address in the spec): `Nuke::add_nuke` @92ba30 (`nuke_add`: a `NukeBlast` onto `Game::nukes`, the crater), `Nuke::do_damage` @92bc80
+  (`nuke_do_damage`, first thing in `objects_inc_time`, and once more at the impact), `TerrainOut::terraform_for_nuke` @869ca0 (49 tiles around the impact lose 30
+  from their corner heights, once per tile, never below zero; the list of sunk tiles is saved), the missile branch of `Ammo::do_damage` @678060 (missile defence: the
+  territory owner at the impact or the first land owner within the 120 spiral cells; `MISSILE_DEFENSE_BONUS` of a non-shooter closes the ammo with nobody hurt;
+  nuclear: `nukes_used`, the stamp, `add_nuke`, the reveal circle, the first `do_damage`; other missiles: `missiles_used`), and the nuke embargo
+  (`get_my_nuke_embargo`, `get_nuke_embargo`, `is_nuke_embargo`; `econ_market.cpp`'s `nuke_embargo` now asks it). The hook is in `ammo_do_damage` (combat_fight.cpp).
+- **Quirks kept**: the Armageddon count comes 110 frames after the detonation (the old comment "the frame a nuclear explosion starts" was wrong); the
+  fireball does damage for 40 frames with a radius growing from 100 to `splash_area * 192` (10 frames of delay, then 30 of growth), each object once per explosion;
+  `pct = 256 - dist * 256 / r1` uses the *final* radius; buildings use the footprint half size (96 per tile) and `dist < R`, units `dist <= R`; the cell walk reads the
+  next link after the damage; `terraform_for_nuke` compares the tile with the wcoord size at the edges; a finished explosion stays 430 frames in the list and leaves by
+  swapping with the last. The war declaration (`Leader::action_declare(shooter, 0, 1, 0)`) of a victim on its own ground is made as the original does.
+- **Draws**: none in `nukes.cpp` (sound and smoulder use presentation generators); the `game_random` draws are those of `Object::do_damage`, in the order of the
+  `find_units` list (circle cells or slots) and then the cell spiral.
+- **State**: `Game::nukes` (`NukeState`: blasts with their hit lists, sunk tiles, `stamp[8]` = LeaderData +0x7b4), section `NUKE`, **save version 10**.
+- **Events**: `GameEvent` 27 launched (silo), 28 explosion, 29 stopped by missile defence (plus 26, the Armageddon count). Presentation and the console messages
+  read them.
+- **Harness**: `ron-sim <scn> --nuke WHO:X,Y@FRAME` (a test aid: a NUCLEARMISSILE of the leader is created at the point and detonated; the run checks the radius,
+  the scorch, the leader's counters and the Armageddon count 110 frames later; fails with exit 1), `--victory armageddon` (the counter through a real explosion,
+  then the game ends with defeat type 8). The full chain was seen on `conquest/ColdWar/alaska.scx` (`--cheat givetechs:1@1 --stock 1:99999@2 --queue 1:2054@315@3`:
+  launch at f153, explosion at f335, count at f445).
+- **Not ported / open**: sounds, achievement, messages, drawing; the nuke's spline flight (the ammo flies at the plain speed, so the detonation *time* is approximate);
+  `ai_production.cpp` `market_speculation` does not test the embargo (an AI under embargo keeps trying to trade, `do_buy` / `do_sell` are refused in `action_buy` /
+  `action_sell` only); `LeaderData::nukes_in_flight` is only ever 0, as in the original; `ConsoleWin::run_cmd`'s nuke command.
 
 ## Heroes (docs/heroes-spec.md; engine/sim/heroes.cpp)
 

@@ -37,8 +37,22 @@ using namespace sf;
 bool live_unit(const Unit& u) { return (u.flags & objflag::kValid) != 0; }
 bool valid_unit_o(Game& g, int32_t w, int32_t o) { return valid_unit(g, w, o) != nullptr; }
 
-// Goods: LeaderDataEncrypt + 4t ^ 0x8221 (the stockpile for 0..5). TODO: rare goods read other encrypted fields.
-int32_t good_count(const Leader& l, int32_t t) { return t < 6 ? l.bucket[size_t(t)] : 0; }
+// ScenarioFuncSet::num_type @9e9320 / num_type_with_queued @9e9630 for a good (type < 50): the int at 4t of the encrypted
+// LeaderDataEncrypt block (+0x6eb8) xor 0x8221, the stockpile key. Goods 0..5 are the stockpile; a rare good (6..49) reads past
+// the stockpile into the neighbouring fields, each of which the original keeps xor its own key (economy-spec 0): the result is
+// (field ^ key) ^ 0x8221, the value kept in the script-spec's "garbage past the six goods".
+int32_t good_count(const Leader& l, int32_t t) {
+	if (t < 6) return l.bucket[size_t(t)];
+	auto enc = [](int32_t plain, uint32_t key) { return int32_t((uint32_t(plain) ^ key) ^ 0x8221u); };
+	if (t < 12) return enc(l.leftover[size_t(t - 6)], 0x3421);        // +0x18
+	if (t < 19) return enc(l.resource_cap[size_t(t - 12)], 0x1281);   // +0x30
+	if (t < 25) return enc(l.over_cap[size_t(t - 19)], 0x8932);       // +0x4c
+	if (t < 31) return enc(l.resources[size_t(t - 25)], 0x872);       // +0x64
+	if (t < 37) return enc(l.support[size_t(t - 31)], 0x26076);       // +0x7c
+	if (t < 43) return enc(l.income[size_t(t - 37)], 0x90236);        // +0x94
+	if (t < 49) return enc(l.rate[size_t(t - 43)], 0x73862);          // +0xac
+	return enc(l.bonus[0], 0x6722);                                   // +0xc4 (t = 49)
+}
 
 // ScenarioFuncSet::find_unit @9e2850 (who = leader index): from slot start + 1, wrapping at unit_mark, the next
 // live captain of type t (t < 0: any); mode 1 on the map, mode 2 inside something and active, 0 any.

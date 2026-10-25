@@ -1,0 +1,2 @@
+re/decomp/nukes
+WorldData::is_cliff_at

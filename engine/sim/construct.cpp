@@ -321,7 +321,7 @@ Order* add_repair_order(Game& g, Unit& u, int32_t ox, int32_t whom, QueuePos q, 
 
 void group_action_build(Game& g, Group& gr, int32_t x, int32_t y, int32_t type, QueuePos q) {
 	if (!group_on_map(g, gr)) return;
-	// TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	const int32_t who = gr.who;
 	if (!is_build_type(type)) return;
 	const Type& T = g.type(type);
@@ -361,7 +361,7 @@ void group_action_swarm_around(Game& g, Group& gr, int32_t ox, int32_t whom, Que
 	if (!group_on_map(g, gr)) return;
 	Object* T = g.object(whom, ox);
 	if (!T || !T->alive()) return;
-	// TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	gr.disband = 0;  // action_begin
 	const int32_t who = gr.who;
 	if (q == kQueueFirst) {
@@ -871,7 +871,8 @@ void wall_inc_time(Game& g, Build& b) {
 // ---------------------------------------------------------------- DISBAND (4.9)
 
 void group_action_disband(Game& g, Group& gr, int32_t all) {
-	// TODO(scenarios): ignore_orders prelude. GroupOut::validate_disband @70a4a0 🟡: building groups of more than one
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
+	// GroupOut::validate_disband @70a4a0 🟡: building groups of more than one
 	// member are refused; the city rules for finished buildings and the castable test of DISBAND are not ported.
 	if (gr.buildings && gr.num > 1) return;
 	const int32_t who = gr.who;

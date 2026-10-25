@@ -1,0 +1,8 @@
+re/decomp/nukes/callers.txt
+2
+LeaderData::is_nuke_embargo
+LeaderData::get_nuke_embargo
+LeaderData::get_my_nuke_embargo
+LeaderData::can_nuke
+Nuke::add_nuke
+Nuke::do_damage

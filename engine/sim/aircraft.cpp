@@ -1651,6 +1651,12 @@ void build_do_missile_launch(Game& g, Build& B) {
 			object_update_seen(g, B, false);
 		}
 		// (S_MISSILE_LAUNCHED / S_NUKE_LAUNCHED for the console seat, the "detected" notices for the others)
+		if (type_is(*m->ptype, airtype::kNukeLine, false)) {
+			GameEvent e;
+			e.frame = g.frame, e.kind = nukeevent::kLaunched, e.who = B.who, e.o = mo, e.o2 = B.o, e.value = m->type;
+			if (!m->orders.empty()) e.x = m->orders.front().x, e.y = m->orders.front().y;
+			g.events.push_back(e);
+		}
 	}
 	if (air_trace()) std::fprintf(stderr, "[air] f%d L%d silo %d launches missile %d\n", g.frame, B.who, B.o, mo);
 	unit_come_out(g, *m, 0);

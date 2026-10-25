@@ -1,0 +1,2 @@
+re/decomp/nukes/grep_a3c.txt
+0xa3c\]

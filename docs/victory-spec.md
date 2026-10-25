@@ -114,9 +114,9 @@ below that is not marked "new" is capture-spec 7.3; the corrections:
 frame from `Objects::inc_time`: for each live nuclear effect (`nuke_effect`, added by `Nuke::add_nuke` @92ba30 from `Ammo::do_damage` @678060
 when a nuke-line warhead lands, with its start frame `t0` and duration `d`), **at the frame where `(frame - 1 - t0) / d < 1 <= (frame - t0) / d`
 (i.e. `frame == t0 + d`) and `starting_resources != 8` and (multiplayer or `num_nations > 1`): `armageddon += 1`**; the same
-function then applies the blast damage (`Objects::find_units` in the radius, every frame of the effect). ❓ The blast and the effect list are
-not ported (no `Nuke` in the port: a nuclear missile has no explosion yet); `armageddon_nuke_detonated(g)` is the counter rule for the
-effect to call at `t0 + d` (`kind 26` event). The nuke line waits in `Object::do_launch` while `armageddon >= get_armageddon() - 2`
+function then applies the blast damage (`Objects::find_units` in the radius, every frame of the effect). **Ported** (`sim/nukes.cpp`, docs/nukes-spec.md:
+`d` = `max_nuke_frames` = 110, the blast itself lasts 40 frames; `nuke_do_damage` calls `armageddon_nuke_detonated(g)` at `t0 + 110`, `kind 26` event;
+`ron-sim --nuke` and `--victory armageddon` drive it). The nuke line waits in `Object::do_launch` while `armageddon >= get_armageddon() - 2`
 (aircraft-spec).
 ### 5.2 Wonder victory (victory 0 / 1 / 6) — events new
 Clock start (victory 0, multiplayer or `num_nations > 1`, no World Government on the winner's team, first leader of the pass): message
@@ -222,7 +222,7 @@ capture-spec 9. `init_teams` (lobby only): section 3.4. `init_rules_and_teams`: 
 | tech race | `techs.cpp` (steps 32 / 33), `queues.cpp` |
 | World Government defeats | `techs.cpp` -> `leader_global_government_defeats` |
 | `Player::resign` / `leave_game` / `drop`, RESIGN / QUIT | `victory.cpp`, `commands*.cpp` (`Verb::Resign`, `Verb::Quit`, `issue_resign`) |
-| Armageddon count | `victory.cpp` `armageddon_nuke_detonated` (the nuke blast is not ported) |
+| Armageddon count | `victory.cpp` `armageddon_nuke_detonated`, called by `nukes.cpp` `nuke_do_damage` 110 frames after a detonation |
 
 GameEvent kinds 17-26 (`game.hpp`, `victory.hpp`) carry the clocks to the HUD; the HUD text is a follow-up. `Game::victory_checked` is the end-game
 flag the front end must clear after showing the screen.
@@ -236,7 +236,7 @@ flag the front end must clear after showing the screen.
 
 ## 13. Open
 
-1. ❓ Nuclear explosions (`Nuke::add_nuke`, `Nuke::do_damage`, `Ammo::do_damage` nuke branch): the Armageddon counter has no producer until they are ported.
+1. ~~Nuclear explosions~~ ported (docs/nukes-spec.md): the Armageddon counter's producer is `nuke_do_damage`.
 2. ❓ `GameInfo.players` of a scenario launch (section 3.1).
 3. 🟡 The time-limit port decision for the custom slot outside scripted rules (5.5).
 4. Co-op seats in `leave_game`, balance mode, GameSpy room state, the ranked-game ELO bookkeeping of `init_teams`: online / developer features.

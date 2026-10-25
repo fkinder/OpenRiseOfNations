@@ -22,6 +22,8 @@ Scripts (2026-10-24, `docs/script-builtins.md`): every builtin the shipped `.bhs
 
 2026-10-24 (full skirmish): `ronmap --random 12,4,1,8 --all-ai --frames 60000 --long-run 10000,PREFIX` (and `ron-sim --random ... --perf`) run 8 AIs for 60,000 frames headless without a crash; render encode CPU cut 25 - 40 % (pipeline key, pose strings, HUD rect cache); no nation reaches the Information Age (ages 2 - 4), AI seats with 0 citizens seen, sim hot spots (`find_tpath`, `constant_offset`) listed in `docs/ui-port.md` 16.2b.
 
+2026-10-25 (AI pace): the AI seats that sat at 0 citizens / in the Ancient Age for 40,000+ frames of the 8-AI random skirmish were a naming bug, not a decision bug: random-map cities had the name `""`, so the production scripts' `find_city_with_num(2)` was the capital and `place_farm` never reached the second city; `name_unnamed_cities` (ai_production.cpp) fixes it; ages at 60,000 are now 4 3 5 3 4 5 4 4 (was 2 3 4 2 3 3 3 2), `ron-sim --ai-every` prints an `aib` line per seat; the remaining gap to the original's pace is wealth (sim-implementation "Random skirmishes: the cities' names").
+
 ## Where things stand
 
 **Phase 1: draw the battlefield. Done.** `ronmap` renders any shipped scenario natively in Metal with the original
@@ -52,8 +54,10 @@ moves the selection (P pauses); `--move WHO:o..@X,Y --frames N --snapshot` for h
 `engine/sim/victory.*`, "Victory" in sim-implementation): conquest incl. the last-unit defeat, capital / sudden-death elimination, time limit,
 score, wonder and territory clocks (with the 4500 / 1800 / 900 warnings as `GameEvent` kinds 17-22), economic, musical chairs, tech race,
 allied victory (the end-game flag), Armageddon's counter, resign / leave_game, World Government defeats; seats now set `num_nations` /
-`num_sides`; `ron-sim --victory MODE` has a fixture per mode. Left: the nuclear blast (nothing raises the Armageddon count yet), balance mode,
+`num_sides`; `ron-sim --victory MODE` has a fixture per mode. Left: balance mode,
 the HUD text for the new events, wiring replay RESIGN / QUIT into `player_resign`.
+
+**Nukes (2026-10-25).** `Nuke::add_nuke` / `do_damage`, the 7 x 7 tile crater, the missile-defence test, the Armageddon count 110 frames after a detonation and the nuke embargo are ported (`engine/sim/nukes.*`, `docs/nukes-spec.md`, save version 10, `GameEvent` kinds 27-29, `ron-sim --nuke WHO:X,Y@FRAME`); the last thirteen `ignore_orders` preludes and `num_type` of a rare good are done. Left: the market embargo test in `ai_production.cpp` `market_speculation`, the nuke missile's spline flight, messages and sounds.
 
 ## Next steps, in order
 

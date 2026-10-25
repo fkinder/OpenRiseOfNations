@@ -467,7 +467,8 @@ int32_t do_garrison(Game& g, Unit& u, Order& ord) {
 // ---------------------------------------------------------------- the group actions (5)
 
 void group_action_garrison(Game& g, Group& gr, int32_t ox, int32_t whom, QueuePos q, int32_t find) {
-	// @700490. TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	// @700490.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	gr.disband = 0;  // action_begin
 	if (q == kQueueFirst) {
 		std::vector<Order> saved = group_set_up_insert(g, gr);
@@ -526,7 +527,8 @@ void group_action_garrison(Game& g, Group& gr, int32_t ox, int32_t whom, QueuePo
 }
 
 void group_action_eject_all(Game& g, Group& gr, int32_t back_to_work, int32_t who, int32_t eject_o, int32_t eject_who) {
-	// @710b40. TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	// @710b40.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	gr.disband = 0;  // action_begin
 	if ((eject_who < 0 && who == gr.who) || who < 0) {
 		for (int32_t i = gr.num - 1; i >= 0; i--) {

@@ -1,4 +1,4 @@
-# Save format (native, version 9)
+# Save format (native, version 10)
 
 The engine's own save format for its simulation state: `engine/sim/save.hpp` / `save.cpp` (API and the section walks),
 `save_archive.hpp` (the writer / reader), `save_walk.inc` (the member lists, generated). It is **not** the original game's
@@ -68,6 +68,8 @@ a section whose layout differs from this build's (`N bytes were not read`, or ru
 reported with the section name. The version is bumped on any layout change; there is no migration (a save loads only into
 the build that wrote it, and only against the same rules tables: the hash in `META` is checked).
 
+Version 10: section `NUKE` (`Game::nukes`, sim/nukes.hpp): the nuclear explosions in progress (`NukeBlast`: centre, radii, start frame, shooter, the objects already hurt), the list of tiles `terraform_for_nuke` has sunk (TerrainOut +0x4bd4) and `stamp[8]` (LeaderData +0x7b4, the frame of the leader's last detonation, which starts its trade embargo); docs/nukes-spec.md. `Leader::nukes_used` / `missiles_used` were already walked.
+
 Version 7: `Build::gpiece` (WallData +0x58, the graphics piece of the building's art: `Wall::update_gpiece` / `GraphicPieces::get_build_gpiece`, part of the `builds` checksum; sim-implementation.md fidelity log, eighth pass, item 36).
 
 Version 8: `Leader` combat statistics: `damage_current_frame`, `deaths/kills/hits/damage_fifteen`, `avg_death/kill/damage/hit` and `frame_battle` (LeaderData +0xa4c..+0xa66, updated by `Leader::process_event_frame` every 50 frames).
@@ -94,6 +96,7 @@ reads gzip and plain files alike (`gzopen` on a plain file). Writing goes to `<p
 | `LEAD` | the 10 `Leader`s (all ~270 members, the hero / special records included: economy, production, census, AI personality / sites / make list, diplomacy, victory clocks, stamps ...) |
 | `OBJS` | per leader: `unit_mark`, `build_mark`, `obj_ctr`, then every `unique_ptr<Unit>` and `unique_ptr<Build>` slot **including dead and empty ones** (a presence byte, the `ptype` index, the object; a unit also its time-sliced search) |
 | `GOOD` | `goods`, `items` (`GoodObj`) |
+| `NUKE` | `nukes` (`NukeState`: `blasts` with their hit lists, `craters`, `stamp`; version 10) |
 | `HGHT` | `heights.h` (the terrain height grid: `TerrainOut::terraform_for_building` flattens it under every new building, sim-implementation.md fidelity log item 32; version 5) |
 | `CITY` | `cities`, `forts`, `wonder_records`, `unbuilt_*`, `wonders`, `terra_cotta_total`, `world_pop`, `world_cities`, `starting`, `supplies`, `caravans`, `farms`, `hold_doobers` |
 | `GRUP` | the 512 `Group`s, `last_group`, `proc_group`, the global `forms`, `grouppath`, `group_cols` |

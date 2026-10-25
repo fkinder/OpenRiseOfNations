@@ -1,0 +1,6 @@
+re/decomp/nukes
+ScenarioFuncSet::num_type
+ScenarioFuncSet::num_type_with_queued
+LeaderData::get_good
+LeaderData::has_rare
+LeaderData::get_rare

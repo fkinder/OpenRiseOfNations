@@ -851,7 +851,7 @@ void group_action_gather(Game& g, Group& gr, int32_t ox, QueuePos q) {
 	// Group::action_gather @700b90
 	Group tmp;
 	group_clear(tmp, -1);
-	// TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	gr.disband = 0;  // action_begin (vslot +0x14)
 	gr.form = -1;
 	const QueuePos q2 = q == kQueueFirst ? kQueueNew : q;

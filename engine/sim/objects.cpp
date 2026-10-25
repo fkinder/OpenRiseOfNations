@@ -603,7 +603,8 @@ void objects_process_all(Game& g) {
 }
 
 void objects_inc_time(Game& g) {
-	// TODO(frame-spec 7): Nuke::do_damage, goods, Farms, Doober, Surf.
+	nuke_do_damage(g);  // Nuke::do_damage first of all (frame-spec 7)
+	// TODO(frame-spec 7): goods (plain Goods do nothing), Doober, Surf (presentation).
 	for (int32_t who = 0; who < kNumLeaders; who++) {
 		if (!(g.leaders[size_t(who)].flags & leaderflag::kValid)) continue;
 		for (int32_t o = 0; o < g.objects[size_t(who)].unit_mark; o++) {

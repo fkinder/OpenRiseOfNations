@@ -538,7 +538,8 @@ void groups_process(Game& g) {
 // ---------------------------------------------------------------- actions
 
 void group_action_halt(Game& g, Group& gr, int32_t p) {
-	// Group::action_halt @70d0c0. TODO: ScenarioData::ignore_orders prelude.
+	// Group::action_halt @70d0c0.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	gr.disband = 0;
 	if (gr.buildings) return;
 	gr.form = -1;
@@ -559,7 +560,7 @@ void group_action_halt(Game& g, Group& gr, int32_t p) {
 void group_action_follow(Game& g, Group& gr, int32_t ox, int32_t whom, QueuePos q) {
 	gr.disband = 0;  // action_begin
 	if (gr.buildings || ox < 0 || whom < 0) return;
-	// TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	if (q == kQueueFirst) {
 		std::vector<Order> saved = group_set_up_insert(g, gr);
 		group_action_halt(g, gr, 0);
@@ -587,7 +588,7 @@ void group_action_guard(Game& g, Group& gr, int32_t ox, int32_t whom, QueuePos q
 	group_clear(tmp, -1);
 	tmp.stamp = 0;
 	gr.disband = 0;  // action_begin
-	// TODO(scenarios): the ScenarioData::ignore_orders prelude.
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	if (gr.buildings || ox < 0 || whom < 0 || gr.num <= 0) return;
 	const Object* T = obj_at(g, whom, ox);
 	if (!T || !T->alive() || !on_map(T)) return;
@@ -1010,7 +1011,7 @@ void group_action_move_near(Game& g, Group& gr, int32_t x, int32_t y, int32_t to
                             uint32_t angle, int32_t orders, int32_t p8, int32_t form, int32_t width, int32_t disembark) {
 	// Group::action_move_near @704990
 	if (!group_is_on_map(g, gr)) return;
-	// TODO(orders-spec 2.1): ScenarioData::ignore_orders prelude (scenario scripts).
+	if (g.scen.ignore_orders != 0 && uint32_t(gr.who) < 8) for (size_t k = 0; k < g.scen.objects_ignoring_orders[size_t(gr.who)].size(); k++) if (g.scen.objects_ignoring_orders[size_t(gr.who)][k] >= 0) group_kill(g, gr, g.scen.objects_ignoring_orders[size_t(gr.who)][k], gr.who, 0, 0);  // ScenarioData::ignore_orders prelude
 	if (gr.num <= 0) return;
 	g.grouppath.clear();
 	gr.disband = 0;  // action_begin

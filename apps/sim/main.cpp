@@ -126,6 +126,7 @@
 #include "sim/capture.hpp"
 #include "sim/fog.hpp"
 #include "sim/victory.hpp"
+#include "sim/trig.hpp"
 
 // cities.cpp: Wonders::init_wonder / close_wonder, used by the --victory fixtures.
 namespace ron::sim {
@@ -141,7 +142,7 @@ struct Script {
 	enum Kind { Move, Halt, Form, Attack, Build, Queue, Rally, Swarm, Disband, Unqueue, Gather, CityGather, Buy, Sell,
 		        Tribute, Respond, Peasants, Select, Option, Garrison, EjectAll, Transport, SetTransport, Board, Cast, Flight,
 		        AirPatrol, LaunchPatrol, AttackGround, Scramble, Recall, Kill, Crash, Flock, UnitMask, Stock, Teleport,
-		        Hotkey, ComeOut, Speed, Chat, Pause, Rename, Cheat } kind = Move;
+		        Hotkey, ComeOut, Speed, Chat, Pause, Rename, Cheat, Nuke } kind = Move;
 	int32_t who = 0;
 	std::vector<int32_t> objs;
 	int32_t x = 0, y = 0, frame = 0, form = -1, queue = 2, rotate = 0;
@@ -293,6 +294,31 @@ Script parse_air(Script::Kind k, const std::string& a, const char* name) {
 	else s.x = v1, s.y = v2;
 	return s;
 }
+
+// --nuke WHO:X,Y@FRAME: a nuclear explosion at world position (X, Y), fired by the first live unit of leader WHO (a stand-in for the
+// missile). The run asserts the damage radius, the terrain scorch and the Armageddon count (docs/nukes-spec.md 8).
+Script parse_nuke(const std::string& a) {
+	Script s;
+	s.kind = Script::Nuke;
+	const size_t colon = a.find(':'), comma = a.find(',', colon == std::string::npos ? 0 : colon), at = a.find('@');
+	if (colon == std::string::npos || comma == std::string::npos) throw std::runtime_error("bad --nuke " + a + " (WHO:X,Y@FRAME)");
+	s.who = int32_t(std::strtol(a.c_str(), nullptr, 0));
+	s.x = int32_t(std::strtol(a.c_str() + colon + 1, nullptr, 0));
+	s.y = int32_t(std::strtol(a.c_str() + comma + 1, nullptr, 0));
+	if (at != std::string::npos) s.frame = int32_t(std::strtol(a.c_str() + at + 1, nullptr, 0));
+	return s;
+}
+
+// What --nuke measures: the objects around the centre, the height grid and the Armageddon counter before the explosion, checked at the end.
+struct NukeProbe {
+	struct Obj {
+		int32_t who, o, dist, damage;
+	};
+	int32_t who = 0, o = -1, x = 0, y = 0, frame = 0, radius = 0, arm0 = 0, used0 = 0, craters0 = 0;
+	std::vector<Obj> objs;
+	std::vector<float> heights;
+	std::vector<int32_t> arm_series;  // Game::armageddon after each frame from the detonation on
+};
 
 // WHO:o1,o2@BO:BWHO[@FRAME][%queue]
 Script parse_garrison(const std::string& a) {
@@ -1397,6 +1423,7 @@ struct RunResult {
 	std::vector<uint8_t> final_state;  // save_game_bytes of the last frame (FogOpts::capture_final)
 	std::unique_ptr<Game> final_game;  // that game (to name the field of a difference)
 	bool fog_failed = false;
+	bool nuke_failed = false;  // --nuke: a check failed
 	int64_t saved_bytes = 0;  // size of the round-trip save file
 	bool roundtrip_saved = false;
 	int32_t roundtrip_frame = 0;  // the frame it was taken at
@@ -1898,6 +1925,42 @@ void print_ai(const Game& g) {
 	}
 }
 
+// One compact line per AI seat (--ai-every K, after the long print): age, citizens / military / pop cap, stockpiles, income
+// rates (per 450 frames), the research queue, the units queued, the production script state and the AI's need bits.
+void print_ai_brief(const Game& g) {
+	static const char* kG = "ftwkmo";
+	for (int32_t who = 0; who < 8; who++) {
+		const Leader& L = g.leaders[size_t(who)];
+		if (!(L.flags & leaderflag::kValid) || (L.flags & 0xc) == leaderflag::kHuman) continue;
+		std::string rq;
+		int32_t uq = 0;
+		for (int32_t o = kBuildBase; o < g.objects[size_t(who)].build_mark; o++) {
+			const Build* b = g.build(who, o);
+			if (!b || !b->alive() || !(b->flags & objflag::kActive)) continue;
+			for (int32_t i = 0; i < b->queued; i++) {
+				const int32_t v = b->build_queue.get_queue(i);
+				if (is_tech_type(v)) rq += (rq.empty() ? "" : ",") + type_name(g, v) + (i == 0 ? "*" : "");
+				else uq++;
+			}
+		}
+		std::printf("  aib f%-5d L%d age %d cit %d mil %d units %d pop %d/%d | stock", g.frame, who, L.age, L.peasants, L.combat,
+		            L.active, L.control, L.pop_cap);
+		for (int32_t k = 0; k < 6; k++) std::printf(" %c%d", kG[k], L.bucket[size_t(k)]);
+		std::printf(" | inc");
+		for (int32_t k = 0; k < 6; k++) std::printf(" %c%d", kG[k], L.income[size_t(k)] / 16);
+		std::printf(" | esc");
+		for (int32_t k = 0; k < 6; k++) std::printf(" %d", L.escrow[size_t(k)]);
+		std::printf(" | lib %d/%d/%d/%d tot %d need %d", L.epoch[0], L.epoch[1], L.epoch[2], L.epoch[3], L.epochs,
+		            L.age < 7 ? techs_per_age(g, who, kAges + L.age) : 0);
+		std::printf(" | econ");
+		for (int32_t k = 0; k < 6; k++) std::printf(" %d", L.econ[size_t(k)]);
+		std::printf(" | strat st %d script %s on %d step %d make0 %s/%d | cities %d unitq %d caravans %d merch %d schol %d | research [%s]\n", L.production_ai,
+		            L.prod_script.c_str(), L.prod_script_on, L.prod_step,
+		            L.make_list[0].t >= 0 ? type_name(g, L.make_list[0].t).c_str() : "-", L.make_list[0].val, L.city_num, uq,
+		            L.caras, L.merchants, L.scholars, rq.c_str());
+	}
+}
+
 // Economy summary (--econ-every K): per leader the stockpile, the gather rate and income (resources per 450 frames:
 // rate / 16), caps, market prices; every gather building with gatherers (registered / arrived / max); the workers
 // with a GATHER action and their state.
@@ -1977,6 +2040,9 @@ void print_event(const Game& g, const GameEvent& e) {
 	case 24: std::printf("  f%-5d MUSICAL CHAIRS ROUND (%d min): %d defeated\n", e.frame, e.value, e.other); break;
 	case 25: std::printf("  f%-5d L%d %s\n", e.frame, e.who, e.value == 0 ? "RESIGNED" : e.value == 1 ? "QUIT" : "DROPPED"); break;
 	case 26: std::printf("  f%-5d NUKE COUNT %d\n", e.frame, e.value); break;
+	case 27: std::printf("  f%-5d L%d NUCLEAR MISSILE %d LAUNCHED from silo %d at (%d,%d)\n", e.frame, e.who, e.o, e.o2, e.x, e.y); break;
+	case 28: std::printf("  f%-5d L%d NUCLEAR EXPLOSION at (%d,%d), radius %d\n", e.frame, e.who, e.x, e.y, e.value); break;
+	case 29: std::printf("  f%-5d L%d MISSILE STOPPED by the missile defence of L%d at (%d,%d)\n", e.frame, e.who, e.other, e.x, e.y); break;
 	default: break;
 	}
 }
@@ -2072,6 +2138,7 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 			if (!known && u) rr.tracked.push_back({s.twho, s.to, u->x, u->y, u->x, u->y, -1, s.frame, 0, u->x, u->y, 0});
 		}
 	}
+	std::vector<NukeProbe> probes;
 	for (int32_t f = 0; f < frames; f++) {
 		write_saves();
 		for (const Script& s : scripts) {
@@ -2185,6 +2252,35 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 				else if (n == "unit") cm.issue_cheat_init_unit(s.who, s.num, s.x, s.y);
 				else throw std::runtime_error("unknown --cheat " + n);
 				if (print) std::printf("  f%-5d CHEAT %s (%d)\n", g->frame, n.c_str(), s.who);
+			} else if (s.kind == Script::Nuke) {
+				// A test aid: Ammo::do_damage's nuclear branch, fired by a NUCLEARMISSILE of the leader created at the impact (it dies at once, as the
+				// real one does when it fires its warhead).
+				NukeProbe p;
+				p.who = s.who, p.x = s.x, p.y = s.y, p.frame = g->frame;
+				p.o = init_unit(*g, s.who, 315, s.x, s.y);
+				if (p.o < 0) throw std::runtime_error("--nuke: no room for a missile of leader " + std::to_string(s.who));
+				const int32_t splash = g->type(315).splash_area;
+				p.radius = splash * 192;
+				p.arm0 = g->armageddon, p.used0 = g->leaders[size_t(s.who)].nukes_used, p.craters0 = int32_t(g->nukes.craters.size());
+				p.heights = g->heights.h;
+				for (int32_t w = 0; w < 8; w++) {
+					for (int32_t o = 0; o < g->objects[size_t(w)].unit_mark; o++) {
+						const Unit* u = g->unit(w, o);
+						if (!u || !u->alive() || !u->on_map() || type_is(*u->ptype, 315, false)) continue;
+						p.objs.push_back({w, o, vector_dist(s.x - u->x, s.y - u->y), u->damage});
+					}
+					for (int32_t o = kBuildBase; o < g->objects[size_t(w)].build_mark; o++) {
+						const Build* b = g->build(w, o);
+						if (!b || !b->alive()) continue;
+						const int32_t dx = std::max(0, std::abs(s.x - b->x) - b->ptype->x_size * 96), dy = std::max(0, std::abs(s.y - b->y) - b->ptype->y_size * 96);
+						p.objs.push_back({w, o, vector_dist(dx, dy), b->damage});
+					}
+				}
+				nuke_detonate(*g, s.who, p.o, s.x, s.y, splash);
+				if (Object* m = g->object(s.who, p.o); m && m->alive()) object_die(*g, *m, 0, -1, 0.0f);
+				if (print) std::printf("  f%-5d NUKE %d:%d at (%d,%d), splash %d (radius %d): %zu objects measured, %zu tiles sunk\n", g->frame, s.who, p.o, s.x, s.y,
+				                       splash, p.radius, p.objs.size(), g->nukes.craters.size() - size_t(p.craters0));
+				probes.push_back(std::move(p));
 			} else if (s.kind == Script::Scramble) {
 				cm.issue_scramble(*g, s.objs);
 				if (print) std::printf("  f%-5d SCRAMBLE %d:%d%s\n", g->frame, s.who, s.objs.empty() ? -1 : s.objs[0], s.objs.size() > 1 ? "+" : "");
@@ -2291,6 +2387,7 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 		if (fo.fog_check) fog_check_frame(*g, fc, print);
 		const uint64_t d = g_perf && g->frame < end_frame ? 0 : digest(*g);  // --perf: only the last frame's digest
 		rr.digests.push_back(d);
+		for (NukeProbe& p : probes) p.arm_series.push_back(g->armageddon);
 		for (Tracked& t : rr.tracked) {
 			const Unit* u = g->unit(t.who, t.o);
 			if (!u || !u->alive()) continue;
@@ -2331,7 +2428,10 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 			std::printf("\n");
 		}
 		if (print && fo.econ_every > 0 && g->frame % fo.econ_every == 0) print_economy(*g);
-		if (print && fo.ai_every > 0 && g->frame % fo.ai_every == 0) print_ai(*g);
+		if (print && fo.ai_every > 0 && g->frame % fo.ai_every == 0) {
+			print_ai(*g);
+			print_ai_brief(*g);
+		}
 		if (print && fo.air_every > 0 && g->frame % fo.air_every == 0)
 			for (int32_t who = 0; who < kNumLeaders; who++)
 				for (const std::string& l : air_describe(*g, who)) std::printf("  f%-5d %s\n", g->frame, l.c_str());
@@ -2368,6 +2468,67 @@ RunResult run(const ron::GameFiles& files, const ron::Scenario& sc, const Rules&
 		            g_perf_total_ms / n, g_perf_max_ms, g_perf_total_ms / 1000.0, g->frame);
 	}
 	write_saves();
+	for (const NukeProbe& p : probes) {  // --nuke: the damage radius, the terrain scorch, the Armageddon count and the embargo stamp
+		const int32_t age = g->frame - p.frame;
+		int32_t bad = 0, checks = 0, hit_in = 0, near_n = 0, far_n = 0;
+		auto check = [&](const char* what, bool ok, const char* detail = "") {
+			checks++;
+			if (!ok) bad++;
+			if (print) std::printf("  nuke %s: %s %s\n", ok ? "PASS" : "FAIL", what, detail);
+		};
+		if (age >= 40) {  // the fireball has reached its full radius (10 frames of delay, 30 of growth)
+			bool inside_ok = true, outside_ok = true;
+			for (const NukeProbe::Obj& e : p.objs) {
+				const Object* ob = g->object(e.who, e.o);
+				const bool dead = !ob || !ob->alive();
+				const int32_t dmg = ob ? ob->damage : e.damage;
+				if (e.dist * 10 < p.radius * 6) {  // within 60% of the radius the hit is at least 40% of a full one
+					near_n++;
+					if (!(dead || dmg > e.damage)) inside_ok = false;
+					else hit_in++;
+				} else if (e.dist > p.radius && e.damage == 0) {
+					far_n++;
+					if (dead || dmg != e.damage) outside_ok = false;
+				}
+			}
+			check("everything within 60% of the radius is hurt or dead", inside_ok, (std::to_string(near_n) + " objects, " + std::to_string(hit_in) + " hurt").c_str());
+			check("nothing beyond the radius is touched", outside_ok, (std::to_string(far_n) + " objects").c_str());
+			// the scorch: only the 7 x 7 tiles around the impact change, by multiples of the depth 30
+			const int32_t vxs = g->heights.vxs, cx = tcoord_of(p.x), cy = tcoord_of(p.y);
+			int32_t lowered = 0, stray = 0, odd = 0;
+			for (size_t i = 0; i < p.heights.size() && i < g->heights.h.size(); i++) {
+				const float dh = p.heights[i] - g->heights.h[i];
+				if (dh == 0.0f) continue;
+				const int32_t vx = int32_t(i % size_t(vxs)), vy = int32_t(i / size_t(vxs));
+				if (vx < cx - 3 || vx > cx + 4 || vy < cy - 3 || vy > cy + 4) stray++;
+				const float k = dh / 30.0f;
+				if (k != float(int(k)) || k < 1 || k > 4) odd++;
+				lowered++;
+			}
+			check("the height grid changes only in the 7 x 7 tiles around the impact", stray == 0, (std::to_string(stray) + " stray vertices").c_str());
+			check("every lowered vertex sank by whole multiples of 30", odd == 0 && (lowered > 0 || g->nukes.craters.size() == size_t(p.craters0)),
+			      (std::to_string(lowered) + " vertices, " + std::to_string(g->nukes.craters.size() - size_t(p.craters0)) + " tiles").c_str());
+		} else if (print) {
+			std::printf("  nuke: only %d frames since the explosion (the damage radius needs 40): not checked\n", age);
+		}
+		check("the leader's nukes_used and embargo stamp", g->leaders[size_t(p.who)].nukes_used == p.used0 + 1 && g->nukes.stamp[size_t(p.who)] == p.frame);
+		if (age >= 112) {  // Armageddon: one more, exactly 110 frames after the explosion began
+			const int32_t expect = (g->info.starting_resources != 8 && (g->multiplayer || g->info.num_nations > 1)) ? 1 : 0;
+			int32_t first = -1;
+			for (size_t i = 0; i < p.arm_series.size(); i++)
+				if (p.arm_series[i] != p.arm0) {
+					first = int32_t(i);
+					break;
+				}
+			char buf[96];
+			std::snprintf(buf, sizeof buf, "(counted after the frame run %d frames past the detonation)", first);
+			check("Armageddon counts the nuke once, 110 frames later", g->armageddon - p.arm0 == expect && (expect == 0 || first + 1 == 110 || first == 110), buf);
+		} else if (print) {
+			std::printf("  nuke: only %d frames since the explosion (Armageddon counts at 110): not checked\n", age);
+		}
+		if (bad) rr.nuke_failed = true;
+		std::printf("nuke at (%d,%d) frame %d: %d checks, %d failed\n", p.x, p.y, p.frame, checks, bad);
+	}
 	if (fo.capture_final) rr.final_state = save_game_bytes(*g, fo.save_scenario, fo.save_seed);
 	rr.final_frame = g->frame;
 	if (print) {
@@ -2940,6 +3101,32 @@ static void victory_armageddon(VictoryRig& r) {
 	r.check("game over", g->game_over, 1);
 	r.check("scores are zeroed by the Armageddon rule", g->leaders[size_t(L[0])].score, 0);
 	(void)lim;
+	// The same through the explosion itself: Nuke::do_damage counts the nuke 110 frames after it began, and the game ends.
+	auto n = r.make();
+	const std::vector<int32_t> N = victory_leaders(*n);
+	n->info.starting_resources = 0;
+	n->armageddon = get_armageddon(*n) - 1;
+	int32_t shooter = -1;
+	for (int32_t o = 0; o < n->objects[size_t(N[0])].unit_mark && shooter < 0; o++)
+		if (const Unit* u = n->unit(N[0], o); u && u->alive() && u->on_map()) shooter = o;
+	if (shooter < 0) return std::printf("  skip: no unit to shoot with\n"), void();
+	const Unit* su = n->unit(N[0], shooter);
+	nuke_detonate(*n, N[0], shooter, su->x, su->y, 1);
+	for (int32_t f = 0; f < 109; f++) {
+		n->frame++;
+		nuke_do_damage(*n);
+	}
+	r.check("a detonation does not count at once, nor in its first 109 frames", n->armageddon, get_armageddon(*n) - 1);
+	n->frame++;
+	nuke_do_damage(*n);
+	r.check("the explosion counts as a nuke on its 110th frame", n->armageddon, get_armageddon(*n));
+	n->frame++;
+	nuke_do_damage(*n);
+	r.check("and only once", n->armageddon, get_armageddon(*n));
+	game_daemon_process_victory(*n);
+	bool alln = true;
+	for (int32_t w : N) alln = alln && v_defeated(*n, w) && n->leaders[size_t(w)].defeat_type == 8;
+	r.check("the counted nuke ends the game for everyone (type 8)", alln && n->game_over, 1);
 }
 
 static void victory_allied(VictoryRig& r) {
@@ -3232,6 +3419,7 @@ int main(int argc, char** argv) {
 			else if (std::strcmp(argv[i], "--pause") == 0) scripts.push_back(parse_console(Script::Pause, argv[i + 1], "pause"));
 			else if (std::strcmp(argv[i], "--rename-city") == 0) scripts.push_back(parse_console(Script::Rename, argv[i + 1], "rename-city"));
 			else if (std::strcmp(argv[i], "--cheat") == 0) scripts.push_back(parse_console(Script::Cheat, argv[i + 1], "cheat"));
+			else if (std::strcmp(argv[i], "--nuke") == 0) scripts.push_back(parse_nuke(argv[i + 1]));  // WHO:X,Y@FRAME
 			else if (std::strcmp(argv[i], "--build") == 0) scripts.push_back(parse_prod(Script::Build, argv[i + 1]));
 			else if (std::strcmp(argv[i], "--queue") == 0 || std::strcmp(argv[i], "--research") == 0)
 				scripts.push_back(parse_prod(Script::Queue, argv[i + 1]));
@@ -3364,7 +3552,7 @@ int main(int argc, char** argv) {
 		}
 		const RunResult a = run(files, sc, rules, art.get(), seed, frames, scripts, dump_every, digest_every, true, fo,
 		                        combat_every, prod_every);
-		if (a.fog_failed) return 1;
+		if (a.fog_failed || a.nuke_failed) return 1;
 		if (!has_flag(argc, argv, "--no-selfcheck")) {
 			const RunResult b = run(files, sc, rules, art.get(), seed, frames, scripts, 0, 0, false, fo);
 			size_t diff = a.digests.size();

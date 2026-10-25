@@ -28,12 +28,8 @@ bool has_market(const Game& g, int32_t who) {
 	return false;
 }
 
-// LeaderData::get_nuke_embargo @6d52c0 (waived by SPACEPROGRAM). TODO(nukes): no nukes are simulated.
-bool nuke_embargo(const Game& g, int32_t who) {
-	(void)g;
-	(void)who;
-	return false;
-}
+// LeaderData::get_nuke_embargo @6d52c0 (waived by SPACEPROGRAM): a leader that detonated a nuke (and its allies) may not trade for a while.
+bool nuke_embargo(const Game& g, int32_t who) { return is_nuke_embargo(g, who); }
 
 }  // namespace
 
