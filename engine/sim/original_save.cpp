@@ -2,6 +2,7 @@
 #include "sim/original_save.hpp"
 #include "sim/script_host.hpp"
 #include "sim/ai.hpp"
+#include "sim/fog.hpp"
 #include "sim/economy.hpp"
 
 #include <algorithm>
@@ -413,7 +414,6 @@ struct Loader {
 		       [&](int w, size_t i) -> void* { return i < g.supplies[size_t(w)].size() ? &g.supplies[size_t(w)][i] : nullptr; });
 		simple("caravans", "PtrArray<Caravan>::walk_data", omap::map_caravans_lists(), omap::map_caravan(), [&](int w, size_t n) { g.caravans[size_t(w)].assign(n, CaravanRec()); },
 		       [&](int w, size_t i) -> void* { return i < g.caravans[size_t(w)].size() ? &g.caravans[size_t(w)][i] : nullptr; });
-		// armies (the engine keeps 16 slots per player)
 		{  // the caravans' roads (Stack<PathData> at Caravan +0x10): child images bound one by one
 			static const int step_road = d.find_step(d.find_function("Stack<PathData>::walk_data"), dw::StepKind::Deref);
 			each_container(global("caravans"), container_step("PtrArray<Caravan>::walk_data"), [&](int who, const dw::ContainerData& cd) {
@@ -432,6 +432,7 @@ struct Loader {
 				}
 			});
 		}
+		// armies (the engine keeps 16 slots per player)
 		{
 			const dw::Rec& r = global("armies");
 			sh.bind(&r, omap::map_armies_lists());
@@ -1007,6 +1008,12 @@ void original_post_load_effects(Game& g) {
 	// is a finished pen.
 	for (size_t i = 0; i < g.farms.size(); ++i)
 		if (g.farms[i].valid) farms_add_animals(g, int32_t(i));
+	// Game::run @584590, after CommandManager::start and before the first frame (decompile lines 729 - 731): Leaders::init_production_script,
+	// GameDaemon::calc_danger, GameDaemon::update_all_seen. A recording writes its embedded save right after these two calls in the
+	// recording session (RecordGame::write_save_game follows them), so the file holds a danger map made from the previous fog; the
+	// playback runs them again on the loaded state and the danger map is made from the refreshed fog (is_seen of the objects).
+	calc_danger(g);
+	update_all_seen(g);
 }
 
 bool original_attach_game_script(Game& g, const GameFiles& files, const std::string& name, std::string* err) {

@@ -1,0 +1,2 @@
+re/decomp/fid11/bonus
+Build::do_bonus

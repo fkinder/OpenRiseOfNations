@@ -450,6 +450,16 @@ First differing boundary of `21'23'34`, before -> after: units 1,514 -> **1,622*
 - `GatherOrder::clear` sets `goto_build = 1`; `SimpleArray` capacity grows 4, 8, 16 ...
 - `Objects::find_builds` @65a120 compares `WData.region` and has a cell mode without distance test. See sim-implementation "tenth pass", items 43 - 47, for the effect on `21'23'34`.
 
+### 6.11 Eleventh pass (2026-10-25): what a playback runs before its first frame, the completion bonus
+
+- **`Game::run` @584590 calls `Leaders::init_production_script`, `GameDaemon::calc_danger` and `GameDaemon::update_all_seen` just before the first frame, for a playback as for a new game.** The recording session writes its embedded save right after those calls (`RecordGame::write_save_game`), so the file's `World::danger` is made from the
+  fog of the moment before the refresh and the playback's first frame sees it changed (`is_seen` halves a contribution, `do_danger`). The replay driver now ends `original_post_load_effects` with `calc_danger; update_all_seen`: `world` stops differing at the first row of 40 of the 41 mature replays that had it (first difference +7 .. +127 now; `22'21'11`, a fight, stays at +1), 300 -> 332 fully
+  equal boundaries over the 59 replays, nothing earlier anywhere. `ron-net replay` (`apps/net/replay_cmd.cpp`) loads the save itself and does not call `original_post_load_effects`: it needs the same call.
+- **The danger delta signature**: a world delta (a, b) that is *static* while the stream length changes means the wrong bytes are before the CollBlocks (`b` moves by `a * dN`, N = the stream length change), i.e. in WData / tdata / the fog arrays / danger; a delta that changes shape with the block count is a unit footprint.
+- **`--compare-next` now audits the World buffers** (`seen`, `seen2`, `seen3`, `wcoord_seen`, `danger`, `tdata`, WData members): over a short calm pair they are exact (`21'49'39 -> 21'50'35` has none differing); a few danger cells differ after a fight. `Ammo` is not part of what a save carries over: arrows in flight differ between the engine and the next save by construction.
+- **`Build::do_bonus` @627140** is `bucket_add` of 30 (first Dock / Market / Temple), the food / timber / knowledge / metal / oil completion bonuses (docs/sim-implementation.md "eleventh pass" item 49); it moved the `leaders` delta of boundary 1,928 of `21'23'34` (a Market completes in frame 1,923) from (44, 44921) to the static (65520, 34096).
+- Open: the static `leaders` (-1) / `world` (679) deltas from boundary 1,802 of `21'23'34` (evidence and dead ends: item 52), `units` / `guys` 1,928 (the two builders of the finished Market), the first-row `leaders` of the fights (the territory recompute transient).
+
 ## 7. What blocks exact checksums
 
 State of the fidelity work (2026-10-24; the log of each fix is in docs/sim-implementation.md "Fidelity log"). **Fixed** since the first table:

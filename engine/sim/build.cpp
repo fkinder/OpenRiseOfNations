@@ -787,6 +787,19 @@ void give_free_units(Game& g, Build& b) {
 	}
 }
 
+// Build::do_bonus(good, amount) @627140: LeaderData::bucket_add of the completion bonus (the German tribe bonus scales it; the
+// floating text is presentation).
+static void build_do_bonus(Game& g, const Build& b, int32_t good, int32_t amount) {
+	if (tb(g, b.who, 0xc)) amount = ((K("german_completion_bonus") + 100) * amount) / 100;
+	LD(g, b.who).bucket[size_t(good)] += amount;
+}
+
+// The guard of Build::activate's two do_bonus calls: not the first frame, not a load, `count`, and (is_scenario implies
+// building_resource_bonus).
+static bool completion_bonus_allowed(const Game& g, bool loading, bool count) {
+	return g.frame != 0 && !loading && count && (!g.scenario_mode || g.building_resource_bonus);
+}
+
 void build_activate_full(Game& g, Build& b, bool loading, bool msg, bool count) {
 	const int32_t who = b.who;
 	Leader& l = LD(g, who);
@@ -907,7 +920,7 @@ void build_activate_full(Game& g, Build& b, bool loading, bool msg, bool count) 
 		l.gather_slots[2]++;
 		if (l.gather_slots_high[2] < l.gather_slots[2]) {
 			l.gather_slots_high[2] = l.gather_slots[2];
-			// Build::do_bonus(2, 30) (frame != 0, !loading, count, not a scenario): TODO(economy) resource bonuses.
+			if (completion_bonus_allowed(g, loading, count)) build_do_bonus(g, b, 2, 0x1e);  // Build::activate @624b42
 		}
 	}
 	// Free units on a new high-water mark (4.6 step 8).
@@ -923,15 +936,28 @@ void build_activate_full(Game& g, Build& b, bool loading, bool msg, bool count) 
 		}
 	}
 	// Gather buildings: gather slots; farms get their pen animals (Farms::add_animals, economy-spec / farms-spec 6);
-	// oil wells and platforms their OilWell record (economy-spec 7.4). TODO(economy): Build::do_bonus resource
-	// bonuses on a new high-water mark outside scenarios (frame != 0, !loading, count).
+	// oil wells and platforms their OilWell record (economy-spec 7.4). The completion bonuses
+	// (Build::do_bonus) are paid on a new high-water mark of the slots.
 	if (is_gather_type(*b.ptype)) {
 		static const int32_t kGood[] = {0, 1, 4, 3, 5, 5};
 		const int32_t t = b.type;
 		if (t >= ptype::kFarm && t <= ptype::kOilPlatform) {
 			const int32_t gd = kGood[t - ptype::kFarm];
 			l.gather_slots[size_t(gd)] += b.gather_max;
-			if (l.gather_slots_high[size_t(gd)] < l.gather_slots[size_t(gd)]) l.gather_slots_high[size_t(gd)] = l.gather_slots[size_t(gd)];
+			if (l.gather_slots_high[size_t(gd)] < l.gather_slots[size_t(gd)]) {
+				const int32_t delta = l.gather_slots[size_t(gd)] - l.gather_slots_high[size_t(gd)];
+				l.gather_slots_high[size_t(gd)] = l.gather_slots[size_t(gd)];
+				if (completion_bonus_allowed(g, loading, count)) {  // Build::activate @6259b5: the bonus per good
+					switch (gd) {
+					case 0: build_do_bonus(g, b, 0, K("food_bonus_for_farm")); break;
+					case 1: build_do_bonus(g, b, 1, K("timber_bonus_per_wood_slot") * delta); break;
+					case 3: build_do_bonus(g, b, 3, K("knowledge_bonus_for_university")); break;
+					case 4: build_do_bonus(g, b, 4, K("metal_bonus_per_mine_slot") * delta); break;
+					case 5: build_do_bonus(g, b, 5, K("oil_bonus_for_well")); break;
+					default: break;
+					}
+				}
+			}
 			if (gd == 0) farms_add_animals(g, b.fort);
 		}
 	}

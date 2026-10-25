@@ -1,0 +1,3 @@
+re/decomp/fid11/gp
+GraphicPieces::has_restrictions
+GraphicPieces::get_type

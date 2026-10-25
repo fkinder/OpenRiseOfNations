@@ -1,0 +1,3 @@
+re/decomp/fid11/cb
+GameDaemon::check_borders
+World::compute_reg_territory

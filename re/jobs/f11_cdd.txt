@@ -1,0 +1,4 @@
+re/decomp/fid11/callers_dd.txt
+1
+GameDaemon::do_danger
+GameDaemon::calc_danger
