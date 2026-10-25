@@ -890,6 +890,18 @@ frames with 7,000 food banked). `ai_production.cpp: name_unnamed_cities` now giv
 before the script runs. Names are outside the digest. With it every seat leaves the Ancient Age by frame 10,000 and the
 leaders reach the Enlightenment Age at ~28,000 and the Industrial Age at ~49,000 (ages at 60,000: 4 3 5 3 4 5 4 4).
 
+**Random skirmishes: the scholars' census (2026-10-25).** Why the leaders sat at age 5 with 3,000+ knowledge banked: `Leader::plan_strategy`'s unit
+census counts a scholar towards `filled_gather_slots[3]` (and a citizen towards the oil platform's slot) when `ObjectData::get_inside @651a80`, the
+*outermost* container, is a University (oil platform). Units garrisoned in a building are chained (each one's `inside_up` is the unit before it, only the
+first has the building itself), and the port read the direct container: of 14 scholars in 2 Universities `filled_gather_slots[3]` was 2, so the
+gatherer-building pass of the building scan (`filled < 3/4 of the slots` -> skip, `ai_create.cpp`) never asked for a third University: 14 scholars for the
+whole game, knowledge income 250 - 400 per 450 frames against ages that cost 2,250 - 3,750 knowledge. `ai_strategy.cpp` (`unit_get_inside` for the
+scholars, the oil-platform citizens and `census_region`) fixes it; 8-AI game, ages of seats 0-7 per 10,000 frames, before 11121111 / 22232222 /
+34334333 / 44435443 / 44536553 / 54636563, after 11121111 / 33333232 / 33434443 / 44545553 / 64657564 / 64757564: seats 2 and 4 reach the Information Age
+(frames ~55,000 and ~50,000), seat 4 with `lib 7/7/7/6`. The decision functions (`research_techs` incl. the time factors, which are `min(4, 13 + e)` and
+`min(3, 17 + e)` with `e = (frame - stamp) * ai_speed / 14400` or `/ 25600`, saturated, the knowledge gate `ck > 4/3 * bucket[3]` for age / epoch techs,
+`make_stuff`, `produce_tech`) were re-read against the decompile again and match. Seats 1 and 7 (4 - 5 cities, 28 - 54 citizens, no oil) and 3 (beaten down) still lag: the war.
+
 What the 60,000-frame game still shows (`--random 12,4,1,8`, conquest only, difficulty 2; per 10,000 frames the ages of seats 0-7:
 before the name fix 11011110 / 22023220 / 33033330 / 33034431 / 53244443 / 54244443, after it 11111111 / 22323222 / 33334333 /
 33434433 / 33534433 / 43534544; seats 2 and 7 sat in age 0 / 1 with 14 and 10 citizens and 5,000+ food banked before, none does now).

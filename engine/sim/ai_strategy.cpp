@@ -8,6 +8,7 @@
 #include "sim/ai_internal.hpp"
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
+#include "sim/garrison.hpp"
 #include "sim/orders.hpp"
 #include "sim/guys.hpp"
 #include "sim/trig.hpp"
@@ -26,7 +27,9 @@ bool war_between(const Game& g, int32_t a, int32_t b) {  // either side's diplos
 // the dock's footprint whose region is a sea region; inside anything else, the container's region.
 int32_t census_region(const Game& g, const Unit& u) {
 	if (u.on_map()) return tregion_at(g, u.x, u.y);
-	const Object* c = g.object(u.inside_up_who, u.inside_up);
+	int32_t xw = -1;
+	const int32_t xo = unit_get_inside(g, u, &xw);  // get_inside: the outermost container (garrisoned units are chained)
+	const Object* c = xo >= 0 ? g.object(xw, xo) : nullptr;
 	if (!c) return 0;
 	if (c->ptype->domain != 1 || c->is_unit || !type_is(*c->ptype, ptype::kDock, false)) return tregion_at(g, c->x, c->y);
 	const World& w = g.world;
@@ -216,7 +219,11 @@ void leader_plan_strategy(Game& g, int32_t who) {
 		if (t == 52 || t == 53) {
 			L.scholars++;
 			if (!u.on_map()) {
-				const Object* in = g.object(u.inside_up_who, u.inside_up);
+				// ObjectData::get_inside @651a80: the outermost container. The units inside a building are linked in a chain
+				// (each one's inside_up is the one before it), so only the first has the University as its direct container.
+				int32_t xw = -1;
+				const int32_t xo = unit_get_inside(g, u, &xw);
+				const Object* in = xo >= 0 ? g.object(xw, xo) : nullptr;
 				if (in && type_is(*in->ptype, ptype::kUniversity, false)) L.filled_gather_slots[3]++;
 			}
 		} else if (t == 61 || t == 62 || t == 400) {
@@ -230,7 +237,9 @@ void leader_plan_strategy(Game& g, int32_t who) {
 			const int32_t fdist = g.find_dist;
 			L.peasants++;
 			if (!u.on_map()) {
-				const Object* in = g.object(u.inside_up_who, u.inside_up);
+				int32_t xw = -1;
+				const int32_t xo = unit_get_inside(g, u, &xw);  // get_inside: the outermost container
+				const Object* in = xo >= 0 ? g.object(xw, xo) : nullptr;
 				if (in && type_is(*in->ptype, ptype::kOilPlatform, false)) L.filled_gather_slots[5]++;
 				if (in && in->is_unit && in->ptype->domain == 1) {
 					const Unit& tr = static_cast<const Unit&>(*in);
