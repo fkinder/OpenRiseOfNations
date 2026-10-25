@@ -30,6 +30,7 @@ struct SaveInfo {
 	bool has_scripts = false;    // a ScriptHost was attached (script_host_load had run)
 	bool has_own_rules = false;  // a scenario script rewrote the rules tables (Game::mut_rules)
 	uint64_t rules_hash = 0;     // FNV-1a of the loaded rules tables the game started from
+	bool has_battle_campaign = false;  // header flag 1: a Conquer the World battle that embeds its campaign (section CTWB)
 	// Filled by load_game: errors script_host_load reported (the original run saw the same ones).
 	std::vector<std::string> script_errors;
 };

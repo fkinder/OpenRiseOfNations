@@ -15,6 +15,10 @@ namespace ron::sim::save {
 
 using namespace ron::sim::ctw;
 
+template <class Ar> void walk(Ar& ar, LinkChoice& v) {
+	FIELDS(ar, v.from, v.to, v.attacker, v.defender, v.sea, v.att_supporters, v.def_supporters, v.declare_war_cost, v.needs_war, v.overrun);
+}
+template <class Ar> void walk(Ar& ar, StyleChoice& v) { FIELDS(ar, v.category, v.index, v.custom_id, v.info_text, v.goal1, v.goal2); }
 template <class Ar> void walk(Ar& ar, Card& v) { FIELDS(ar, v.type, v.variant); }
 template <class Ar> void walk(Ar& ar, Piece& v) { FIELDS(ar, v.node, v.moved); }
 template <class Ar> void walk(Ar& ar, News& v) { FIELDS(ar, v.round, v.text); }
@@ -120,6 +124,68 @@ std::string ConquestGame::load_bytes(const GameFiles& f, const sim::Rules& r, co
 		cur_link = LinkChoice();
 		restore_script_statics(statics2);
 		available_links = find_available_links(player_tribe);
+	} catch (const std::exception& e) {
+		return e.what();
+	}
+	return std::string();
+}
+
+// The battle bytes: the campaign (save_bytes) and the state of the battle in progress, the part of the ConquestGame the battle's
+// scripts and place_reinforcements read and write that the campaign save leaves out ("not saved" in ctw.hpp).
+namespace {
+constexpr uint32_t kBattleVersion = 1;
+template <class Ar>
+void walk_battle(Ar& ar, ConquestGame& g, std::vector<uint8_t>& campaign) {
+	using namespace ron::sim::save;
+	uint32_t version = kBattleVersion;
+	io(ar, version);
+	if (Ar::kReading && version != kBattleVersion) ar.error("unsupported battle campaign version " + std::to_string(version));
+	io(ar, campaign);
+	ar.section("CTWB", [&](auto& s) {
+		std::array<std::array<int32_t, 2>, 8> locs{};
+		for (size_t i = 0; i < 8; i++) locs[i] = {g.start_locs[i][0], g.start_locs[i][1]};
+		std::array<int32_t, 8> bslot{};
+		std::array<uint8_t, 8> bhuman{};
+		for (size_t i = 0; i < 8; i++) {
+			bslot[i] = g.battle_slot[i];
+			bhuman[i] = g.battle_human[i] ? 1 : 0;
+		}
+		std::vector<uint8_t> att;
+		for (bool b : g.reinf_att_side) att.push_back(b ? 1 : 0);
+		FIELDS(s, locs, bslot, bhuman, g.reinf_arrived, att, g.reinforce_mark, g.battle_notices, g.cur_link, g.cur_style, g.battle_bonus);
+		if (Ar::kReading) {
+			for (size_t i = 0; i < 8; i++) {
+				g.start_locs[i] = {locs[i][0], locs[i][1]};
+				g.battle_slot[i] = bslot[i];
+				g.battle_human[i] = bhuman[i] != 0;
+			}
+			g.reinf_att_side.assign(att.size(), false);
+			for (size_t i = 0; i < att.size(); i++) g.reinf_att_side[i] = att[i] != 0;
+		}
+	});
+}
+}  // namespace
+
+std::vector<uint8_t> ConquestGame::battle_bytes() const {
+	save::Writer w;
+	std::vector<uint8_t> campaign = save_bytes();
+	walk_battle(w, const_cast<ConquestGame&>(*this), campaign);
+	return std::move(w.buf);
+}
+
+std::string ConquestGame::load_battle_bytes(const GameFiles& f, const sim::Rules& r, const std::vector<uint8_t>& bytes) {
+	try {
+		std::vector<uint8_t> campaign;
+		{
+			ConquestGame probe;  // only the campaign blob is needed to attach the data files first
+			save::Reader rd(bytes.data(), bytes.size(), "battle campaign");
+			walk_battle(rd, probe, campaign);
+		}
+		std::string err = load_bytes(f, r, campaign);
+		if (!err.empty()) return err;
+		std::vector<uint8_t> unused;
+		save::Reader rd(bytes.data(), bytes.size(), "battle campaign");
+		walk_battle(rd, *this, unused);
 	} catch (const std::exception& e) {
 		return e.what();
 	}

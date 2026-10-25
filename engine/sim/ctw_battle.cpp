@@ -26,6 +26,7 @@
 #include "sim/heroes.hpp"
 #include "sim/mapgen.hpp"
 #include "sim/production.hpp"
+#include "sim/save.hpp"
 #include "sim/rules_xml.hpp"
 #include "sim/script_host.hpp"
 #include "sim/search.hpp"
@@ -455,6 +456,10 @@ std::unique_ptr<sim::Game> ConquestGame::build_battle(const GameFiles& F, const 
 	RandomExtras& X = extras ? *extras : local;
 	std::unique_ptr<Game> gp;
 	const int n = int(B.seats.size());
+	std::vector<CtwMapBattle::Player> map_players;
+	// The shared tables as the install left them: an earlier battle's campaign names (apply_tribe_names below, for the HUD) must not leak
+	// into this game's copy of the tables, or building the same battle twice would give two different games.
+	restore_tribe_names(const_cast<sim::Rules&>(R));
 	if (B.custom_map.empty()) {
 		mapgen::ConquestInput conquest;
 		std::string conquest_err;
@@ -491,6 +496,13 @@ std::unique_ptr<sim::Game> ConquestGame::build_battle(const GameFiles& F, const 
 			p.is_human = s.human ? 4 : 0;
 			p.difficulty = difficulty;
 			p.name = s.name;
+			CtwMapBattle::Player rec;
+			rec.who = p.who;
+			rec.tribe = p.tribe;
+			rec.is_human = p.is_human;
+			rec.difficulty = p.difficulty;
+			rec.name = p.name;
+			map_players.push_back(std::move(rec));
 		}
 		gp = std::make_unique<Game>();
 		gp->anims = anims;
@@ -502,6 +514,8 @@ std::unique_ptr<sim::Game> ConquestGame::build_battle(const GameFiles& F, const 
 		X.name = sc.name;
 		X.scenario = sc;
 		script_host_load(*gp, F, path, sc);
+		// the text a save of the battle keeps (its scenario slot): the map and the style's scripts (loading attaches them again)
+		set_battle_setup_text(ctw_map_battle_string({scenario_rel_path(F, path), B.runtime_script, B.setup_script, map_players}));
 	}
 	for (auto& sl : start_locs) sl = {-1, -1};
 	if (B.custom_map.empty()) {
@@ -645,9 +659,14 @@ std::unique_ptr<sim::Game> ConquestGame::build_battle(const GameFiles& F, const 
 	}
 	// ---- tactical cards (setup_scenario_bonuses), rares, the card units, reinforcement entries
 	apply_battle_cards(g, B);
+	g.mut_rules();  // the battle's own copy of the tables (see apply_tribe_names): the simulation never sees the renamed shared ones
 	{
 		ConquestGame& self = const_cast<ConquestGame&>(*this);
 		self.battle_game = gp.get();
+		if (g.scripts) {
+			g.scripts->battle_token = std::make_shared<int>(0);
+			self.battle_token = g.scripts->battle_token;
+		}
 		self.locate_reinforcements(B.link, B.map_style, g.world.xs, g.world.ys);
 		self.apply_tribe_names(const_cast<sim::Rules&>(R), B);
 	}
@@ -655,26 +674,46 @@ std::unique_ptr<sim::Game> ConquestGame::build_battle(const GameFiles& F, const 
 }
 
 // Tribe::set_substitute_tribe: the battle shows the campaign's nation names (slot 5 plays as the Macedonians) in the HUD. The
-// names live in the rules the renderer reads (Rules::tribes[].name); the originals are kept and put back by restore_tribe_names.
+// names live in the rules the renderer reads (Rules::tribes[].name); the originals are kept (process-wide: a second ConquestGame
+// or a second battle restores the same ones) and put back by restore_tribe_names. The Game of the battle never sees them: it
+// owns a private copy of the tables made before this (build_battle), so what the simulation compares (tribe_index) and what a save
+// holds do not depend on whether, or when, the shared tables were renamed.
+namespace {
+std::map<const sim::Rules*, std::vector<std::pair<int, std::u16string>>>& renamed_tables() {
+	static std::map<const sim::Rules*, std::vector<std::pair<int, std::u16string>>> m;
+	return m;
+}
+}  // namespace
+
+const std::vector<std::pair<int, std::u16string>>* original_tribe_names(const sim::Rules& r) {
+	const auto& m = renamed_tables();
+	const auto it = m.find(&r);
+	return it == m.end() || it->second.empty() ? nullptr : &it->second;
+}
+
 void ConquestGame::apply_tribe_names(sim::Rules& r, const BattleDef& B) {
 	restore_tribe_names(r);
+	auto& saved = renamed_tables()[&r];
 	for (size_t i = 0; i < B.seats.size() && i < 8; i++) {
 		const int slot = B.seats[i].slot;
 		const int tribe = B.setup.nation[i].tribe;
 		if (slot < 0 || tribe < 0 || size_t(tribe) >= r.tribes.size() || !def) continue;
 		const std::string& nm = def->tribes[size_t(slot)].display_name;
 		if (nm.empty()) continue;
-		if (std::none_of(saved_names.begin(), saved_names.end(), [&](const auto& p) { return p.first == tribe; }))
-			saved_names.push_back({tribe, r.tribes[size_t(tribe)].name});
+		if (std::none_of(saved.begin(), saved.end(), [&](const auto& p) { return p.first == tribe; }))
+			saved.push_back({tribe, r.tribes[size_t(tribe)].name});
 		r.tribes[size_t(tribe)].name = decode_utf8(reinterpret_cast<const uint8_t*>(nm.data()), nm.size());
 	}
 }
 
 void ConquestGame::restore_tribe_names(sim::Rules& r) {
-	for (const auto& p : saved_names) {
+	auto& m = renamed_tables();
+	const auto it = m.find(&r);
+	if (it == m.end()) return;
+	for (const auto& p : it->second) {
 		if (size_t(p.first) < r.tribes.size()) r.tribes[size_t(p.first)].name = p.second;
 	}
-	saved_names.clear();
+	m.erase(it);
 }
 
 // ---------------------------------------------------------------- outcomes (6)
@@ -691,7 +730,7 @@ void ConquestGame::process_results(int kind, bool player_won, const LinkChoice& 
 	if (kind == 1) player_won = player_attacks;  // an overrun: the attacker wins without a battle
 	// the Skill Bonus card (get_bonus_amt): a won battle's style script rates the performance
 	int bonus = 0;
-	if (kind == 0 && player_won && style.index >= 0 && size_t(style.index) < style_table.size() && battle_game) {
+	if (kind == 0 && player_won && style.index >= 0 && size_t(style.index) < style_table.size() && battle_game && !battle_token.expired()) {
 		std::string txt;
 		bonus = std::max(0, run_bonus_script(*battle_game, style_table[size_t(style.index)], &txt));
 	}

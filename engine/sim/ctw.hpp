@@ -366,8 +366,8 @@ public:
 	std::vector<bool> reinf_att_side;        // per reinforcement: the army belongs to the attacker's nation
 	int reinforce_mark = 0;                  // reinforcements placed so far
 	std::vector<std::string> battle_notices; // "Reinforcements arrive from X": drained by the UI
-	sim::Game* battle_game = nullptr;        // the battle built by build_battle (valid until it is destroyed)
-	std::vector<std::pair<int, std::u16string>> saved_names;  // rules tribe names replaced by the campaign's during a battle
+	sim::Game* battle_game = nullptr;        // the battle built by build_battle; valid only while battle_token is not expired (the Game can be replaced by a recovery)
+	std::weak_ptr<void> battle_token;        // ScriptHost::battle_token of that battle
 	int battle_bonus = 0;                    // Skill Bonus amount of the battle just won (run_bonus_script)
 	std::vector<std::string> messages;  // popup_dialog / notice texts of the script hooks, drained by the UI
 	std::vector<DiploOffer> proposals;   // AI offers to the player (diplo_offer hook)
@@ -517,7 +517,7 @@ public:
 	void locate_reinforcements(const LinkChoice& l, int map_style, int world_w, int world_h);
 	void find_reinforcement_loc(int world_w, int world_h, int a, int b, int n, int map_style, bool att, Reinforcement* out) const;
 	void apply_tribe_names(sim::Rules& r, const BattleDef& b);    // the HUD shows the campaign's nation names in a battle
-	void restore_tribe_names(sim::Rules& r);
+	static void restore_tribe_names(sim::Rules& r);
 	void place_reinforcement(sim::Game& g, Reinforcement& r);
 	void place_reinforcements(sim::Game& g);  // every frame of a battle (Game::do_frame step 6)
 	int invasion_dir() const;                 // get_conquest_invasion_dir
@@ -558,6 +558,11 @@ public:
 
 	// ---------------------------------------------------------------- save (ctw_save.cpp)
 	std::vector<uint8_t> save_bytes() const;
+	// The campaign as a battle's scripts see it (what a native save of the battle embeds, sim/save.cpp "CTWB"): save_bytes() plus the
+	// battle in progress (seats, start tiles, the reinforcement clock, the link and style). load_battle_bytes gives a detached copy
+	// that steps the battle exactly like this one; "" or an error text.
+	std::vector<uint8_t> battle_bytes() const;
+	std::string load_battle_bytes(const GameFiles& f, const sim::Rules& r, const std::vector<uint8_t>& bytes);
 	// Replaces this state with the saved one; the data files are re-read from `f`. Returns "" or an error text.
 	std::string load_bytes(const GameFiles& f, const sim::Rules& r, const std::vector<uint8_t>& bytes);
 	bool save_file(const std::string& path, std::string* err = nullptr) const;
@@ -601,6 +606,12 @@ public:
 
 // find_angle / angle_to_degrees (ctw_reinf.cpp): the compass degrees of a strategic-map delta (x right, y down).
 int angle_degrees_of(int dx, int dy);
+
+// While a battle shows the campaign's nation names in the shared tables (ConquestGame::apply_tribe_names, for the HUD): the (tribe, name)
+// pairs as they were before, process-wide (a second ConquestGame, a second battle or a save sees the same). Null when none is replaced.
+// Nothing simulated reads the replaced names (the battle's Game owns a private copy of the tables) and a native save is written as if
+// the tables were not renamed (sim/save.cpp).
+const std::vector<std::pair<int, std::u16string>>* original_tribe_names(const sim::Rules& r);
 
 // Constants of the CTW_* table (rules.xml CONSTANTS) by lower-case name; 0 when unknown.
 int K(const sim::Rules& r, const char* name);

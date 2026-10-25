@@ -678,12 +678,27 @@ void test_engine(Tally& t, const std::string& dir, uint32_t seed) {
 					frame = sim::read_save_info(got).frame;
 				} catch (const std::exception&) {
 				}
-				replay_ok = rc == 0 && frame == r.frame;
+				replay_ok = rc == 0 && frame == r.frame && got == slurp(o.save_out);   // and, since a loaded battle steps like the live one, byte for byte
 				why = "replay frame " + std::to_string(frame) + " of " + std::to_string(r.frame) + ", rc " + std::to_string(rc);
 			}
 		}
 		t.check(header_ok, what + ": the recording's header holds the battle's setup text (ctw=1, conq=) and the start state");
 		t.check(replay_ok, what + ": ron-net replay plays the recording in lockstep (instances agree at every turn) up to the frame the game ended at", why);
+	}
+	// 6. a battle can be repaired like any game now that a loaded battle steps like the live one: a divergence injected into the guest is repaired from the authority's
+	//    snapshot (generated map, and a custom map whose scripts and campaign come back from the save), the final native saves agree
+	for (const char* battle : {"new_world:auto", "alexander:auto"}) {
+		LoopbackOptions o;
+		o.game_dir = dir;
+		o.ctw_battle = battle;
+		o.humans = 2;
+		o.frames = 360;
+		o.recover = true;
+		o.diverge = {{150, 1}};
+		o.dhi = 3;
+		const LoopbackResult r = run_loopback(o);
+		t.check(r.ok && r.identical && r.epoch == 1 && r.recoveries == 2, std::string("engine, Conquer the World battle (") + battle + "): a divergence injected at frame 150 is repaired from the authority's snapshot, final native saves identical",
+		        r.ok ? "frame " + std::to_string(r.frame) + ", " + std::to_string(r.recoveries) + " snapshot loads" : r.text);
 	}
 	fs::remove_all(tmp, ec);
 }

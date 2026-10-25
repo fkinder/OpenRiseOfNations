@@ -99,6 +99,12 @@ public:
 	// The Conquer the World campaign these scripts run for (sim/ctw.hpp): the strategic-layer hooks and the battle's
 	// ctw_* builtins read / write it (script_funcs_ctw.cpp). Null for a battle started on its own (the stored values above).
 	ctw::ConquestGame* ctw = nullptr;
+	// A battle loaded from a native save has no campaign session to link to: the save embeds the campaign as the battle's scripts see it
+	// (sim/save.cpp "CTWB") and the loaded game owns that copy here, `ctw` pointing at it. Null for a live battle and every other game.
+	std::shared_ptr<ctw::ConquestGame> ctw_owned;
+	// Lives as long as this host: ConquestGame::battle_token watches it, so the campaign knows whether the battle it built is still there (a
+	// recovery replaces the Game by a loaded one) without a pointer that could dangle.
+	std::shared_ptr<void> battle_token;
 	std::shared_ptr<XmlNode> xml_root, xml_curr, xml_parent;
 	std::vector<std::shared_ptr<XmlNode>> xml_elements;
 	bhs::U16 xml_curr_entry;

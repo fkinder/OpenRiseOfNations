@@ -1057,6 +1057,70 @@ int selftest(const std::string& game_dir) {
 			t.check(plain_differs, "without the conquest input the setup text regenerates a different (plain random) map");
 		}
 	}
+	{  // ---- a battle loaded from its native save steps exactly like the live one (docs/ctw-spec.md 5.3): generated and custom maps,
+		// default and scripted styles; and the same battle built twice in one process is the same game
+		auto art = load_anim_source(files, rules);
+		struct Case {
+			const char* campaign;
+			unsigned seed;
+			bool default_style;
+		};
+		const Case cases[] = {{"CTW_World_Map_01", 21, true}, {"CTW_World_Map_01", 21, false}, {"CTW_New_World_Map_01", 8, false},
+		                      {"CTW_Alexander_Map_01", 5, true}, {"CTW_Alexander_Map_01", 5, false}, {"CTW_Napoleon_Map_01", 6, false}};
+		for (const Case& c : cases) {
+			const std::string what = std::string(c.campaign) + (c.default_style ? " default style" : " scripted style");
+			auto b = build_with(files, rules, art.get(), c.campaign, c.seed, {}, c.default_style);
+			if (!b) {
+				t.check(false, what + ": built the battle");
+				continue;
+			}
+			sim::Game& G = *b->game;
+			const std::string rel = sim::scenario_rel_path(files, "ctw:battle");
+			const uint32_t seed = b->ex.setup.seed;
+			const bool custom = !b->B.custom_map.empty();
+			const std::vector<uint8_t> frame0 = sim::save_game_bytes(G, rel, seed);
+			sim::CommandManager cm;
+			cm.play = 0;
+			cm.play_who = 0;
+			for (int f = 0; f < 45; f++) {
+				cm.process_turn(G);
+				G.do_frame();
+			}
+			const std::vector<uint8_t> mid = sim::save_game_bytes(G, rel, seed);  // a save in the middle of the battle
+			std::string why;
+			bool resave = false, stepped = false, own_campaign = false;
+			std::string diff;
+			try {
+				std::unique_ptr<sim::Game> H = sim::load_game_bytes(files, rules, art.get(), mid, nullptr);
+				own_campaign = H && H->scripts && H->scripts->ctw && H->scripts->ctw == H->scripts->ctw_owned.get() && H->scripts->ctw != &b->g;
+				resave = H && sim::save_game_bytes(*H, rel, seed) == mid;
+				if (H) {
+					sim::CommandManager cm2;
+					cm2.play = 0;
+					cm2.play_who = 0;
+					for (int f = 0; f < 150; f++) {
+						cm.process_turn(G);
+						G.do_frame();
+						cm2.process_turn(*H);
+						H->do_frame();
+					}
+					diff = sim::describe_game_difference(*H, G, rel, seed);
+					stepped = diff.empty();
+				}
+			} catch (const std::exception& e) {
+				why = e.what();
+			}
+			t.check(sim::is_ctw_map_scenario(rel) == custom && (custom || sim::is_random_scenario(rel)),
+			        what + ": the scenario slot is " + (custom ? "a ctwmap: text (map and scripts)" : "a random: setup text"));
+			t.check(resave && own_campaign, what + ": a loaded battle re-saves byte-identical and carries its own copy of the campaign" + (why.empty() ? std::string() : ": " + why));
+			t.check(stepped, what + ": loaded then 150 frames == live 150 frames, byte for byte (" + std::to_string(mid.size()) + " bytes)" + (diff.empty() ? std::string() : ": " + diff));
+			// the same battle built a second time, while the first is alive (the shared tables are not edited cumulatively)
+			auto b2 = build_with(files, rules, art.get(), c.campaign, c.seed, {}, c.default_style);
+			const bool twice = b2 && sim::scenario_rel_path(files, "ctw:battle") == rel && sim::save_game_bytes(*b2->game, rel, seed) == frame0;
+			t.check(twice, what + ": building the same battle twice in one process gives the same game" +
+			                   (b2 && !twice ? ": " + sim::describe_save_difference(frame0, sim::save_game_bytes(*b2->game, rel, seed)) : std::string()));
+		}
+	}
 	std::printf("selftest: %d checks, %d failed\n", t.n, t.bad);
 	return t.bad ? 1 : 0;
 }

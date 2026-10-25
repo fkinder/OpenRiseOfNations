@@ -253,7 +253,7 @@ public:
 	int who() const { return observer() ? who_[0] : who_[size_t(slot_ & 7)]; }   // observers: the leader they watch from (the first seat's)
 	int who_of(int slot) const { return who_[size_t(slot & 7)]; }
 	void set_who(const std::array<int, 8>& w);
-	void set_recover(bool on) { recover_ = on; }            // out-of-sync repair from a snapshot (off for a Conquer the World battle: its Game cannot be rebuilt from a save)              // a scenario game: game slot k plays leader w[k] (default: k)
+	void set_recover(bool) {}   // out-of-sync repair from a snapshot is always on: a Conquer the World battle loads from its save like any game now (docs/ctw-spec.md 5.3), so the callers that switched it off for battles (main.mm) have no effect
 	// Makes the Game a multiplayer game: names, handicaps, the multiplayer flag (net::apply_mp_seats with the room's table). Every machine calls
 	// this on its fresh Game before attach() (a game continued from a save already carries them).
 	void prepare_game(sim::Game& g);

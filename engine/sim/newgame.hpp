@@ -82,6 +82,22 @@ bool parse_conquest_input(const std::string& text, mapgen::ConquestInput& out);
 void set_battle_setup_text(const std::string& text);
 std::string battle_setup_text();
 
+// A Conquer the World battle on a custom map (a .scx of the campaign) has no random setup to regenerate: its scenario slot is
+// "ctwmap:" + the map's path + the style's scripts (";btrt=" runtime, ";btsu=" setup, percent-encoded). Loading it parses the
+// map, attaches the scripts (compiled in build_battle's order, the setup script not run: its effects are in the save) and
+// restores the state. `map` is game-relative with '/' separators when it lies in the install (scenario_rel_path).
+struct CtwMapBattle {
+	struct Player {  // what build_battle wrote into the scenario's player records before the load (the AI scripts it loads depend on them)
+		int who = 0, tribe = 0, is_human = 0, difficulty = 0;
+		std::string name;
+	};
+	std::string map, runtime, setup;
+	std::vector<Player> players;
+};
+std::string ctw_map_battle_string(const CtwMapBattle& b);
+bool parse_ctw_map_battle(const std::string& text, CtwMapBattle& out);
+inline bool is_ctw_map_scenario(const std::string& scenario) { return scenario.compare(0, 7, "ctwmap:") == 0; }
+
 // The text form (the scenario-path slot of a save): "random:" + key=value pairs separated by ';'. Round-trips every
 // field. parse returns false on a malformed string.
 std::string random_setup_string(const RandomGameSetup& s);

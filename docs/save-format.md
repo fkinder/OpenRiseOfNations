@@ -27,6 +27,24 @@ and the `Game::load` seed. `load_game` then:
 objects, the scripts) instead of `Game::load`, and step 3 overwrites the state as usual. No `Game` member was added, so the
 layout and the version are unchanged; `scenario_rel_path` passes such a string through.
 
+**Conquer the World battles.** A battle is not a plain scenario or random game: `ConquestGame::build_battle` adds cards, armies, style scripts, seat edits and a
+campaign the scripts run against. Its save is made to load into *the same game*, and to step like the live one byte for byte (checked by `ronmap --ctw-selftest` and
+`ron-net selftest`, docs/ctw-spec.md 5.3):
+
+- the scenario slot is the battle's text: `random:...;ctw=1;conq=...;btrt=...;btsu=...` for a generated map (`scenario_rel_path(files, "ctw:battle")` swaps the placeholder
+  for the last built battle's text), `ctwmap:<map>;btrt=...;btsu=...;pl=who.tribe.human.difficulty.name_...` for a custom `.scx` (`ctw_map_battle_string`). Loading the second kind
+  parses the map with the seat edits `build_battle` made to the scenario's player records (they decide which AI scripts `script_host_load` compiles), runs
+  `Game::load` / `script_host_load` and compiles the style's runtime and setup scripts in `build_battle`'s order (the setup script is **not run**: its effects are in the save);
+- header flag bit 0 (`SaveInfo::has_battle_campaign`) and the section **`CTWB`** (after `SCRP`, before `END!`): `ConquestGame::battle_bytes()`, the campaign (`ConquestGame::save_bytes`)
+  plus the part of the battle in progress the campaign file leaves out (seat slots, start tiles, the reinforcement clock `reinforce_mark` / `reinf_arrived` / sides, notices,
+  link and style). The battle's scripts read and write the campaign (`get_turn`, `ctw_*`, `get_starting_loc_x`) and `place_reinforcements` runs inside `Game::do_frame`; without
+  it a loaded game ran its scripts against "no campaign" and took other branches (the first frame rewrote about 3 KB of the rules). A loaded battle owns that copy
+  (`ScriptHost::ctw_owned`, `ctw` points at it), so it needs no session, and saving it again writes the copy's state: a chain of save / load / save is stable;
+- the shared rules tables carry the campaign's nation names while a battle is on screen (`ConquestGame::apply_tribe_names`, for the HUD). That used to leak into the next battle built in the
+  process and into `RULE` (the diff was taken against the renamed shared tables). Now the names are remembered process-wide (`ctw::original_tribe_names`), a battle's `Game` always
+  owns a private copy of the tables made before the rename (`Game::mut_rules` in `build_battle`), and `RULE` / `rules_hash` are computed against the tables without the overlay
+  (`pristine_rules` in save.cpp). The format version is unchanged: saves without a battle are byte-identical to before.
+
 API (`sim/save.hpp`): `save_game(game, scenario_rel, seed, path)`, `save_game_bytes`, `read_save_info`,
 `load_game(files, rules, anims, path, &info)` / `load_game_bytes`, `scenario_rel_path(files, file)`,
 `describe_save_difference(bytes, bytes)` and `describe_game_difference(game, game, ...)` (the latter names the member where
@@ -40,7 +58,7 @@ strings and containers as a `u32` count followed by the elements (`std::u16strin
 member by member in declaration order, so there is no padding in the file and equal states give byte-identical files.
 
 ```
-"RONS" | u32 version (7) | u32 flags (0) | section*
+"RONS" | u32 version (7) | u32 flags (bit 0: a Conquer the World battle with its campaign, section CTWB) | section*
 section = tag (4 ASCII bytes) | u64 payload length | u32 CRC-32 of the payload | payload
 ```
 
@@ -84,6 +102,7 @@ reads gzip and plain files alike (`gzopen` on a plain file). Writing goes to `<p
 | `AIST` | `armies` (8 x 16 `Army`), `armies_find_dist`, `find_dist`, `find_who` |
 | `SCEN` | `ScenarioData` (goals, scenario groups, kill tallies, overrides ...), `scen_ally_mask`, `scen_diplomacy_setting`, `reveal_points`, `attrition_free_points` |
 | `SCRP` | (only when the game has a `ScriptHost`) the BigHugeScript run time and host, see 6 |
+| `CTWB` | (only when header flag 1 is set: a Conquer the World battle) `ConquestGame::battle_bytes()`, see 1 |
 | `END!` | empty |
 
 ## 4. Derived state that is not saved

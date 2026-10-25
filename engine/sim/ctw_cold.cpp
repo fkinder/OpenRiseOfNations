@@ -214,7 +214,7 @@ void ConquestGame::process_espionage_results(bool won, const StyleChoice& style)
 	int bonus = 0;
 	if (won) {
 		cur_espionage_level++;
-		if (style.index >= 0 && size_t(style.index) < style_table.size() && battle_game) {
+		if (style.index >= 0 && size_t(style.index) < style_table.size() && battle_game && !battle_token.expired()) {
 			std::string txt;
 			bonus = std::max(0, run_bonus_script(*battle_game, style_table[size_t(style.index)], &txt));
 		}

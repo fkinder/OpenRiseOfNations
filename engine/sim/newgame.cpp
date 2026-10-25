@@ -188,6 +188,66 @@ std::string g_battle_setup_text;
 void set_battle_setup_text(const std::string& text) { g_battle_setup_text = text; }
 std::string battle_setup_text() { return g_battle_setup_text; }
 
+std::string ctw_map_battle_string(const CtwMapBattle& b) {
+	std::string o = "ctwmap:" + pct_encode(b.map);
+	if (!b.runtime.empty()) o += ";btrt=" + pct_encode(b.runtime);
+	if (!b.setup.empty()) o += ";btsu=" + pct_encode(b.setup);
+	if (!b.players.empty()) {
+		o += ";pl=";
+		for (size_t i = 0; i < b.players.size(); i++) {
+			const CtwMapBattle::Player& p = b.players[i];
+			o += (i ? "_" : "") + std::to_string(p.who) + "." + std::to_string(p.tribe) + "." + std::to_string(p.is_human) + "." +
+			     std::to_string(p.difficulty) + "." + pct_encode(p.name);
+		}
+	}
+	return o;
+}
+
+bool parse_ctw_map_battle(const std::string& text, CtwMapBattle& out) {
+	if (!is_ctw_map_scenario(text)) return false;
+	CtwMapBattle b;
+	bool have_map = false;
+	std::stringstream ss(text.substr(7));
+	std::string item;
+	bool first = true;
+	while (std::getline(ss, item, ';')) {
+		if (first) {
+			first = false;
+			if (!pct_decode(item, b.map) || b.map.empty()) return false;
+			have_map = true;
+			continue;
+		}
+		const size_t eq = item.find('=');
+		if (eq == std::string::npos) return false;
+		const std::string k = item.substr(0, eq), v = item.substr(eq + 1);
+		if (k == "btrt") { if (!pct_decode(v, b.runtime)) return false; }
+		else if (k == "btsu") { if (!pct_decode(v, b.setup)) return false; }
+		else if (k == "pl") {
+			std::stringstream ps(v);
+			std::string e;
+			while (std::getline(ps, e, '_')) {
+				std::vector<std::string> f;
+				std::stringstream fs(e);
+				std::string x;
+				while (std::getline(fs, x, '.')) f.push_back(x);
+				if (e.size() && e.back() == '.') f.push_back(std::string());
+				CtwMapBattle::Player p;
+				long long a, t, h, d;
+				if (f.size() != 5 || !to_int(f[0], &a) || !to_int(f[1], &t) || !to_int(f[2], &h) || !to_int(f[3], &d) || !pct_decode(f[4], p.name)) return false;
+				p.who = int(a);
+				p.tribe = int(t);
+				p.is_human = int(h);
+				p.difficulty = int(d);
+				b.players.push_back(std::move(p));
+			}
+		}
+		else return false;
+	}
+	if (!have_map) return false;
+	out = std::move(b);
+	return true;
+}
+
 std::string random_setup_string(const RandomGameSetup& s) {
 	std::ostringstream o;
 	o << "random:style=" << s.map_style << ";size=" << s.map_size << ";seed=" << s.seed << ";n=" << s.num_nations

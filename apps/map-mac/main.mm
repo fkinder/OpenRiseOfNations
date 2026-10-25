@@ -7323,7 +7323,6 @@ static int vk_of(NSEvent* e) {
 			return;
 		}
 		auto rt = std::make_shared<mp::Runtime>(room);
-		rt->set_recover(false);   // a battle's Game cannot be rebuilt from a save
 		[r attachMultiplayer:rt loaded:nullptr];   // recorded like every multiplayer game (Recorded Games folder) when its map is a generated one
 		__weak MapAppDelegate* weakSelf = self;
 		const bool host = room->is_host();
@@ -8103,7 +8102,6 @@ int main(int argc, const char* argv[]) {
 			r = [MapRenderer ctwBattleWithDevice:device gameDir:gameDir build:build error:&error];
 			if (r) {
 				auto rt = std::make_shared<mp::Runtime>(room);
-				rt->set_recover(false);
 				rt->record_to(mpRecord);  // a campaign battle is recorded like any game (generated maps only; none unless asked here)
 				rt->enable_bot(mpBot);
 				for (const auto& act : mpActs) rt->add_act(act.first, act.second);

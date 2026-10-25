@@ -16,6 +16,7 @@
 
 #include "assets/chunk.hpp"
 #include "assets/scenario.hpp"
+#include "sim/ctw.hpp"
 #include "sim/newgame.hpp"
 #include "sim/pathfinder_search.hpp"
 #include "sim/save_archive.hpp"
@@ -44,8 +45,9 @@ static_assert(sizeof(Regions) == 10248, "Regions changed: update the REGN sectio
 // + 9192: Game::ctl (sim/control.hpp: TurnControl speed / pause, the control groups, cheat counters, chat lines) is console state no simulation code reads;
 // the original saves its hotkey groups, the native save does not (docs/sim-implementation.md, "Orders and commands, second pass").
 static_assert(sizeof(Game) == 1657592, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
-// 1608 + 8: ScriptHost::ctw (the Conquer the World campaign the scripts run for, sim/ctw.hpp) is a run-time link the native battle save never writes.
-static_assert(sizeof(ScriptHost) == 1616, "ScriptHost changed: update walk_scripts()");
+// 1608 + 8 + 16 + 16: ScriptHost::ctw (the Conquer the World campaign the scripts run for, sim/ctw.hpp) is a run-time link, ctw_owned the loaded battle's
+// copy of that campaign and battle_token the campaign's liveness check of the battle; the native battle save writes the campaign as its own section (CTWB), not through the script walk.
+static_assert(sizeof(ScriptHost) == 1648, "ScriptHost changed: update walk_scripts()");
 #endif
 
 // A time-sliced / cached search. PathNode pointers (parent, the open and closed trees) become indices into the arena.
@@ -308,18 +310,32 @@ void diff_whole(Ar& ar, T& cur, const T& base) {
 	if (changed) io(ar, cur);
 }
 
+// The tables as the install left them. A Conquer the World battle shows the campaign's nation names in the shared tables for the HUD
+// (ctw::original_tribe_names); a save is made, compared and loaded against the tables without that overlay, so it does not depend on
+// whether another battle is on screen in this process. `scratch` keeps the repaired copy alive.
+const Rules& pristine_rules(const Rules& r, std::unique_ptr<Rules>& scratch) {
+	const auto* orig = ctw::original_tribe_names(r);
+	if (!orig) return r;
+	scratch = std::make_unique<Rules>(r);
+	for (const auto& p : *orig) {
+		if (size_t(p.first) < scratch->tribes.size()) scratch->tribes[size_t(p.first)].name = p.second;
+	}
+	return *scratch;
+}
+
 template <class Ar>
 void walk_rules(Ar& ar, Game& g) {
 	bool own = static_cast<bool>(g.own_rules);
 	io(ar, own);
 	if (!own) return;
 	if (!g.base_rules) ar.error("rewritten rules without the loaded tables to compare with");
+	std::unique_ptr<Rules> scratch;
+	const Rules& base = pristine_rules(*g.base_rules, scratch);
 	if constexpr (Ar::kReading) {
-		g.own_rules = std::make_unique<Rules>(*g.base_rules);
+		g.own_rules = std::make_unique<Rules>(base);
 		g.rules = g.own_rules.get();
 	}
 	Rules& cur = *g.own_rules;
-	const Rules& base = *g.base_rules;
 	diff_vec(ar, cur.types, base.types);
 	diff_whole(ar, cur.constants, base.constants);
 	diff_whole(ar, cur.balance, base.balance);
@@ -328,7 +344,9 @@ void walk_rules(Ar& ar, Game& g) {
 	diff_vec(ar, cur.lands, base.lands);
 }
 
-uint64_t rules_hash(const Rules& r) {
+uint64_t rules_hash(const Rules& shared) {
+	std::unique_ptr<Rules> scratch;
+	const Rules& r = pristine_rules(shared, scratch);
 	Writer w;
 	for (const Type& t : r.types) io(w, const_cast<Type&>(t));
 	io(w, const_cast<Constants&>(r.constants));
@@ -554,7 +572,7 @@ void walk_meta(Ar& ar, SaveInfo& m) {
 
 // Sections after META / INFO, shared by the writer and the reader (same order).
 template <class Ar>
-void walk_body(Ar& top, Game& g, bool has_scripts) {
+void walk_body(Ar& top, Game& g, bool has_scripts, std::vector<uint8_t>* battle) {
 	top.section("RULE", [&](auto& ar) { walk_rules(ar, g); });
 	top.section("CORE", [&](auto& ar) { walk_core(ar, g); });
 	top.section("WRLD", [&](auto& ar) { walk_world(ar, g.world); });
@@ -576,6 +594,8 @@ void walk_body(Ar& top, Game& g, bool has_scripts) {
 		fields(ar, g.scen, g.scen_ally_mask, g.scen_diplomacy_setting, g.reveal_points, g.attrition_free_points);
 	});
 	if (has_scripts) top.section("SCRP", [&](auto& ar) { walk_scripts(ar, *g.scripts); });
+	// a Conquer the World battle: the campaign as its scripts see it (ConquestGame::battle_bytes), so the loaded game steps like the live one
+	if (battle) top.section("CTWB", [&](auto& ar) { io(ar, *battle); });
 	top.section("END!", [&](auto&) {});
 }
 
@@ -653,6 +673,7 @@ SaveInfo read_header(Reader& top) {
 	uint32_t flags = 0;
 	top.raw(&info.version, 4);
 	top.raw(&flags, 4);
+	info.has_battle_campaign = (flags & 1u) != 0;
 	if (info.version != kSaveVersion)
 		throw std::runtime_error("save: format version " + std::to_string(info.version) + " (this build reads version " +
 		                         std::to_string(kSaveVersion) + ")");
@@ -694,12 +715,16 @@ std::vector<uint8_t> save_bytes_impl(const Game& cg, const std::string& scenario
 	Writer top;
 	top.trace = trace;
 	top.raw(save::kMagic, 4);
-	const uint32_t version = kSaveVersion, flags = 0;
+	std::vector<uint8_t> battle;
+	const bool has_battle = g.scripts && g.scripts->ctw;
+	if (has_battle) battle = g.scripts->ctw->battle_bytes();
+	info.has_battle_campaign = has_battle;
+	const uint32_t version = kSaveVersion, flags = has_battle ? 1u : 0u;
 	top.raw(&version, 4);
 	top.raw(&flags, 4);
 	top.section("META", [&](Writer& ar) { save::walk_meta(ar, info); });
 	top.section("INFO", [&](Writer& ar) { save::io(ar, g.info); });
-	save::walk_body(top, g, info.has_scripts);
+	save::walk_body(top, g, info.has_scripts, has_battle ? &battle : nullptr);
 	return std::move(top.buf);
 }
 }  // namespace
@@ -794,25 +819,71 @@ std::unique_ptr<Game> load_game_bytes(const GameFiles& files, const Rules& rules
 		if (static_cast<bool>(g->scripts) != info.has_scripts)
 			throw std::runtime_error("save: section 'META': the regenerated random game differs in its scripts");
 	} else {
-		std::string scx = info.scenario;
+		// a Conquer the World battle on a custom map names its scenario file and the style's scripts (ctw_map_battle_string)
+		CtwMapBattle cmb;
+		const bool battle_map = is_ctw_map_scenario(info.scenario);
+		if (battle_map && !parse_ctw_map_battle(info.scenario, cmb)) throw std::runtime_error("save: section 'META': malformed battle map setup");
+		std::string scx = battle_map ? cmb.map : info.scenario;
 		std::error_code ec;
 		if (!std::filesystem::exists(scx, ec) || std::filesystem::path(scx).is_relative()) {
 			const std::string r = files.resolve(scx);
 			if (!r.empty()) scx = r;
 		}
 		if (!std::filesystem::exists(scx, ec)) throw std::runtime_error("save: section 'META': scenario not found: " + info.scenario);
-		const Scenario sc = parse_scenario(read_file(scx));
+		Scenario sc = parse_scenario(read_file(scx));
+		for (const CtwMapBattle::Player& bp : cmb.players) {  // build_battle's seat edits of the scenario's player records
+			for (ScenarioPlayer& p : sc.players) {
+				if (p.who != bp.who) continue;
+				p.tribe = bp.tribe;
+				p.is_human = bp.is_human;
+				p.difficulty = bp.difficulty;
+				p.name = bp.name;
+			}
+		}
 		g->anims = anims;
-		g->info = ginfo;  // the options the original run set before loading (reveal map, difficulty ...)
+		if (battle_map) {  // build_battle's start: the game's options are the campaign difficulty only, the rest is set after the load (and saved)
+			g->info = GameInfo();
+			g->info.difficulty = ginfo.difficulty;
+			g->ctw = true;
+		} else {
+			g->info = ginfo;  // the options the original run set before loading (reveal map, difficulty ...)
+		}
 		g->load(files, sc, rules, info.seed);
 		if (info.has_scripts) {
 			ScriptLoadReport rep = script_host_load(*g, files, std::filesystem::absolute(scx).string(), sc);
 			info.script_errors = std::move(rep.errors);
 		}
+		if (battle_map && g->scripts) {  // the style's scripts in build_battle's order; the setup script's effects are in the save
+			ScriptHost& h = *g->scripts;
+			std::string err;
+			auto base_name = [](std::string p) {
+				for (char& c : p) {
+					if (c == '\\') c = '/';
+				}
+				const size_t slash = p.find_last_of('/');
+				if (slash != std::string::npos) p = p.substr(slash + 1);
+				const size_t dot = p.find_last_of('.');
+				return dot == std::string::npos ? p : p.substr(0, dot);
+			};
+			if (!cmb.runtime.empty() && h.compile(cmb.runtime, &err)) h.scenario_script = bhs::to_u16(base_name(cmb.runtime));
+			if (!cmb.setup.empty()) h.compile(cmb.setup, &err);
+		}
 	}
-	save::walk_body(top, *g, info.has_scripts);
+	std::vector<uint8_t> battle;
+	save::walk_body(top, *g, info.has_scripts, info.has_battle_campaign ? &battle : nullptr);
 	if (top.remaining() != 0) throw std::runtime_error("save: " + std::to_string(top.remaining()) + " bytes after the last section");
 	g->info = ginfo;
+	if (info.has_battle_campaign) {  // the battle's campaign: a copy of its own, linked to the scripts (ScriptHost::ctw_owned)
+		if (!g->scripts) throw std::runtime_error("save: section 'CTWB': a battle campaign without scripts");
+		auto cg = std::make_shared<ctw::ConquestGame>();
+		const std::string err = cg->load_battle_bytes(files, rules, battle);
+		if (!err.empty()) throw std::runtime_error("save: section 'CTWB': " + err);
+		g->scripts->battle_token = std::make_shared<int>(0);
+		cg->battle_token = g->scripts->battle_token;
+		cg->battle_game = g.get();
+		g->scripts->ctw_owned = cg;
+		g->scripts->ctw = cg.get();
+	}
 	if (info_out) *info_out = info;
 	return g;
 }

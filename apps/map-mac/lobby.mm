@@ -937,12 +937,7 @@ void Runtime::start_recording() {
 		std::strftime(stamp, sizeof stamp, "%Y.%m.%d %H'%M'%S", &tm);
 		rec_base_ = default_record_dir() + "/" + stamp + ".rcx";
 	}
-	// a Conquer the World battle on a custom map has no setup text a replay could rebuild (the save of such a battle cannot be loaded either)
-	if (scenario_.rfind("ctw:", 0) == 0) {
-		note("This campaign battle is played on a custom map: it is not recorded.", 0xFFFFE070);
-		rec_on_ = false;
-		return;
-	}
+	// a Conquer the World battle on a custom map is recorded like any other game since its scenario slot is the `ctwmap:` text and its save loads (docs/ctw-spec.md 5.3)
 	// a game that is not a random map (a scenario) cannot be rebuilt from its header: its start state is embedded as a native save. A campaign battle
 	// is built from the campaign (cards, armies, the style's scripts), which a header cannot hold either: the setup text names its map, the save its state
 	if (start_save_.empty() && (!sim::is_random_scenario(scenario_) || setup_.ctw) && hooks_) hooks_->snapshot(start_save_);

@@ -565,8 +565,8 @@ recovery and saves work (`load_game_bytes` reloads the scenario). Headless: `ron
 The host's campaign plays the battle (`ctw_host_start`, `ctw_battle_session`, `ctw_host_result`, `ctw_guest_result` in `lobby.mm`; `ctw_battle.cpp` untouched): in the lobby the host presses **Conquer the World...**, which opens the campaign screens with the room kept;
 **Play** on the map hands the prepared `BattleDef` to the room instead of to a single machine. Seats: the host sits on the campaign player's side, the guests take the other seats (the host's opponents first), the remaining seats are computer players,
 observers watch (`force_N` in the plan). Every machine gets (1) the `BattleDef` as a blob in the table (`encode_battle` / `decode_battle`: every field `build_battle` reads, the setup as its text form; `make_battle` uses the campaign's RNG for some styles, so a
-guest must not re-derive it) and (2) the campaign (`ConquestGame::save_bytes`) as the lobby file, loads it as its copy (`ctwui::load_session`) and builds the same Game (`build_battle`, `new_random_game` / `Game::load` of the custom map). The Game of a battle cannot be rebuilt
-from a save (`"ctw:battle"`), so these games have **no out-of-sync repair and no recording** (a desync ends the game with the error). When the battle is decided the host's side's outcome (1 won, 0 lost, 2 retreated) is applied with `Session::battle_finished`
+guest must not re-derive it) and (2) the campaign (`ConquestGame::save_bytes`) as the lobby file, loads it as its copy (`ctwui::load_session`) and builds the same Game (`build_battle`, `new_random_game` / `Game::load` of the custom map). The Game of a battle is rebuilt from a save like any game
+(8.8; before the sixth pass it could not be, so these games had no out-of-sync repair). When the battle is decided the host's side's outcome (1 won, 0 lost, 2 retreated) is applied with `Session::battle_finished`
 and the new campaign is sent to the guests (`ctw_done` = the battle's sequence number), who replace their copy (`frontEndCtwReceived`); the host returns to the map with the room kept (the next battle can be fought by the same players), the guests to the lobby.
 Headless: `ronmap GAMEDIR --ctw-mp --ctw-battle CAMPAIGN:LINK --host PORT --humans N --frames F --mp-bot` / `--ctw-mp --join HOST:PORT ...`: the host prints the campaign's hash after the outcome, the guest the hash of the copy it received: equal.
 
@@ -608,7 +608,7 @@ without the flag), `ron-net replay` on the corpus: same output; so the flag is k
 
 #### 8.6.10 Left
 
-NAT traversal and internet play (LAN only); the x86-64 / arm64 soak; original-client interoperability (none by design); recording and out-of-sync repair of a Conquer the World battle (its Game cannot be rebuilt from a save), a CTW battle with the campaign's AI nations
+NAT traversal and internet play (LAN only); the x86-64 / arm64 soak; original-client interoperability (none by design); recording of a Conquer the World battle on a custom map (`lobby.mm` skips it), a CTW battle with the campaign's AI nations
 as co-op partners of several guests (the guests fill the opposing seats first); the host as the room's only observer-less player is not forced (a host may watch); an observer cannot yet switch the seat it looks from; Block has no screen button; the lobby rules have no
 "Closed" / "Open" seat types (the number of nations does that); `DIPLOMACY` / `SURVIVAL` drops still do not reset teams; ranked / matchmaking rules.
 
@@ -642,11 +642,10 @@ as co-op partners of several guests (the guests fill the opposing seats first); 
   with N human seats over the loopback; `ronmap --ctw-mp --mp-record FILE` records one headless. `ron-net replay` plays the file in lockstep (instances agree at every turn,
   same frame count as the live game). Single player: the app has no single-player recorder (only the multiplayer runtime writes `.rcx`); a one-human room / loopback
   (`--humans 1`) is recorded and replayed the same way.
-- **Known limit (engine, not the net layer):** a battle game loaded from a save does **not** step like the live one: one `do_frame` after the load the loaded game's rules diff
-  (`RULE` section, own_rules vs base) grows by about 3 KB (live 2,819,079 bytes, loaded 2,822,113 at frame 1). So the replay of a battle agrees with itself but its final
-  state is not byte-identical to the live game's (random games are: 2/2 checks). Same reason the OOS recovery is off for battles. Also, `--ctw-battle alexander:auto` and
-  `cold_war:auto` are custom-map battles: building the *same* custom-map battle twice in one process gives different games (945,868 differing bytes; separate processes are fine,
-  which is how a real game runs). The selftest therefore uses the generated `new_world:auto`.
+- **Known limit, fixed in the sixth pass (8.8):** a battle game loaded from a save did not step like the live one (one `do_frame` after the load the rules diff grew by about 3 KB: live 2,819,079 bytes,
+  loaded 2,822,113 at frame 1), building the same custom-map battle twice in one process gave different games (945,868 differing bytes) and a custom-map battle could not be loaded at all.
+  Cause and repair: docs/ctw-spec.md 5.3 (the loaded Game had no campaign to run its scripts against; the shared rules were renamed cumulatively). The selftest used the generated
+  `new_world:auto` for that reason; `alexander:auto` is covered now.
 - **Internet play groundwork (no UPnP / NAT-PMP).** `engine/net/tcp.*`: `parse_endpoint` ("HOST", "HOST:PORT", `tcp://`, spaces), `resolve_ipv4` (DNS once, every A record tried),
   non-blocking connect bounded by the join timeout (an unanswered address used to hold the caller for the system's minutes), `local_addresses`, `public_host_note`. Join by host
   name works in the Multiplayer screen, `ronmap --join NAME:PORT` and `ron-net join PORT --address NAME[:PORT]`. `--public` on `ron-net host` / `ronmap --host` prints the LAN
@@ -676,3 +675,17 @@ as co-op partners of several guests (the guests fill the opposing seats first); 
 13. (port) The pause quota: whether `Player.pauses` counts used or remaining pauses, and whether a second PAUSE(1) while paused counts. The layer accepts every recorded pause (`max_pauses` 0 = unlimited) and sets the flag from `state`.
 14. (port, answered 2026-10-24) The OOS recovery path and `.rcx` recording of a live session are built (§8.5). Still open: whether the original's recovery save is the
     authority's state at the freeze row (the port's) or one frame later; the per-peer chat in a running game (CHAT verb 68 executes, nothing in `ronmap` sends it).
+
+### 8.8 Sixth pass: a battle loaded from a save steps like the live one (2026-10-24)
+
+- **Engine fix** (docs/ctw-spec.md 5.3, docs/save-format.md 1): a native save of a Conquer the World battle embeds the campaign as the battle's scripts see it (`CTWB`) and a custom-map battle names
+  its map and style scripts in the scenario slot (`ctwmap:`); `load_game` gives a Game that owns its own copy of the campaign. Loaded-then-stepped equals live-stepped byte for byte (generated and
+  custom maps, default and scripted styles, in one process and across processes); building a battle twice in one process gives the same game.
+- **Out-of-sync recovery is back on for battles.** The gate was `Runtime::set_recover(false)` (main.mm, two places, "a battle's Game cannot be rebuilt from a save"); `mp::Runtime::set_recover` in `lobby.h`
+  now ignores the request (one line), so the two calls in main.mm have no effect and can be deleted by whoever owns that file. `mpRestore` loads the snapshot with `load_game_bytes`, which now works for battles.
+  Left: after a recovery the campaign's own `reinforcements` / `battle_notices` are stale (the loaded Game steps its copy), so the "Reinforcements arrive" notices of the UI stop, and the
+  Skill Bonus of that battle is not computed (no live Game to rate); the units still arrive.
+- Tests: `ron-net selftest` 104 -> 106 (a divergence injected into a battle, generated and `alexander:auto`, repaired from the authority's snapshot with identical final saves; the recordings of the
+  two earlier battle checks now replay to the live game's final native save byte for byte, not just to the same frame); `ronmap --ctw-selftest` 51 -> 75.
+- **Not done (outside this pass's files):** recording a custom-map battle (`Runtime::start_recording` in lobby.mm skips the `ctw:` scenarios; the save now loads, so the skip can go), and removing the two
+  `set_recover(false)` calls and the stale comments in lobby.h / lobby.mm.

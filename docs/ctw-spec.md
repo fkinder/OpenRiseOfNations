@@ -284,8 +284,31 @@ cleared in `ConquestGame::close` @79adc0; **where it is set is ❓** (window cod
 `conquest_battle_input` in `ctw_battle.cpp`: the square of the two countries' silhouettes from the PNG pieces, `start_who`, the supporters, the
 barbarians, the tileset, `no_rare`). A generated battle is therefore on the conquest map, not on a plain random one, and a native save of the battle keeps
 that input in its `random:` setup text (`ctw=1;conq=...;btrt=...;btsu=...`, `RandomGameSetup`, fifth pass of randommap-spec.md), so loading it
-regenerates the same map; style 26 is the campaign's own `.scx`, loaded by `build_battle` as a scenario. No recording of a conquest battle exists here: the
-maps are checked by reading (`ron-mapgen --ctw`).
+regenerates the same map; style 26 is the campaign's own `.scx`, loaded by `build_battle` as a scenario. The maps are checked by reading (`ron-mapgen --ctw`).
+
+**A battle saved natively loads into the same game and steps like the live one** (checked byte for byte by `ronmap --ctw-selftest` and `ron-net selftest`; docs/save-format.md 1).
+A battle is more than its map: seat edits, cards, armies, the style's runtime script (`btrt`, every frame) and setup script (`btsu`, once) and, above all, the campaign the
+scripts run against (`ScriptHost::ctw`: `get_turn`, `get_age`, `ctw_*`, `get_starting_loc_x`, and `place_reinforcements` inside `Game::do_frame`, `script_host.cpp` step 6). What was wrong
+(found by the multiplayer pass, fifth pass of multiplayer-spec.md 8.7): a loaded battle had **no campaign** (`ctw == null`), so its scripts took other branches from the first
+frame and rewrote the rules differently (loaded 2,822,113 bytes vs live 2,819,079 one frame after the load: the `RULE` section) and no reinforcement ever arrived. The fix:
+
+1. the save embeds the campaign as the battle sees it (`ConquestGame::battle_bytes()`: the campaign file plus the not-saved battle state, section `CTWB`) and the loaded Game owns a
+   detached copy (`ScriptHost::ctw_owned`, `ctw` points at it, `load_battle_bytes`); a battle on a **custom map** has a scenario slot of its own, `ctwmap:<map>;btrt=..;btsu=..;pl=..`
+   (`ctw_map_battle_string`: the seat edits `build_battle` makes to the scenario's player records decide which AI scripts are compiled, so they are in the text);
+   load compiles the style scripts in `build_battle`'s order and does not rerun the setup script;
+2. building the same battle twice in one process is the same game: `apply_tribe_names` wrote the campaign's nation names into the *shared* rules (the HUD reads them) and a later
+   build copied the renamed tables as its base (945,868 differing bytes for a custom map, `RULE` 26,563 vs 25,049 bytes at frame 0 on Alexander). The originals are now kept
+   process-wide (`ctw::original_tribe_names`), restored at the start of every `build_battle`, the battle's Game always owns a private copy of the tables made before the rename,
+   and `RULE` / `rules_hash` are computed against the tables without the overlay. Nothing else in the process was found to accumulate (the conquest scope, the compile cache
+   and the last-battle registry are reset or rebuilt per build; `set_battle_setup_text` is overwritten by every build);
+3. `ConquestGame::battle_game` is guarded by `battle_token` (a `weak_ptr` to `ScriptHost::battle_token`): after an out-of-sync recovery replaced the Game the campaign no longer
+   points at a destroyed one (the Skill Bonus of a battle repaired in the middle is not computed: there is no live Game to rate).
+
+Checks (`--ctw-selftest`, 75 checks): generated (World default and scripted style, New World scripted) and custom-map (Alexander default and scripted, Napoleon scripted) battles:
+save after 45 frames, load, re-save identical, 150 more frames on both, saves identical (2.2 to 3.3 MB); a second build of the same battle while the first is alive equals the first
+at frame 0. Cross process (separate runs, 6000 frames = 400 s of game, reinforcements included): identical on five campaigns. `ron-net selftest` 106/106: recordings of battles replay
+to the live game's final native save byte for byte, and a divergence injected into a battle (generated and `alexander:auto`) is repaired from the authority's snapshot. Sizes: a battle save grows by the campaign copy, `CTWB` (New World link 0, frame 0: 2,816,890 -> 2,843,668 bytes, +26,778); one frame after loading, the loaded
+and the live game are now equal (before: the `RULE` section alone was 3,034 bytes larger in the loaded game).
 
 **Start positions.** `MapConquest::add_additional_players` places the extra nations near the main two (`game_random` draw); `check_starting_loc` / `check_sea_map` validate land/sea. 
 `build_cities` @796140 (per seat `who`): none when `starting_town == 0`, nation flag 0x80, or by map style (1 No City, 8 Custom: none; 2 only seat 0; 3 only seat 1; 6/7 only seats 0..1);
