@@ -1,0 +1,2 @@
+re/decomp/fid9/grep_stats.txt
+0x(a4c|a5[0-9a-f]|a6[0-6])\]

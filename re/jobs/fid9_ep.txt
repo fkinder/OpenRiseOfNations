@@ -1,0 +1,4 @@
+re/decomp/fid9/endproc
+Leaders::end_process_all
+Leaders::process_all
+Object::do_damage
