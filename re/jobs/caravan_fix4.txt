@@ -1,0 +1,5 @@
+re/decomp/caravan_fix
+CityData::is_seen
+CityData::get_empty_trade_routes
+Array<CaravanLink>::remove
+ArrayBase<CaravanLink>::add

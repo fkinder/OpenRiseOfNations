@@ -717,6 +717,23 @@ int32_t find_gather_spot(Game& g, Unit& u, int32_t range) {
 	return 0;
 }
 
+// Unit::think_civilian_transport(1) @5f40d0 for an AI citizen (types 0x32 / 0x33). The first block (a citizen the leader cannot carry yet,
+// or one that is not cargo, goes exploring only when it is auto-exploring) is the one the corpus reaches; the ferry search after it
+// scores the sea-coast cells of the candidate regions (Region::go_here / coast_here, the per-region counters LeaderData +0x9c0 and
+// +0x10de) and sends the citizen to the best one. TODO(transports): that search is not ported (the Leader members it keeps are not
+// modelled), the branch returns 0 as before.
+static int32_t think_civilian_transport_citizen(Game& g, Unit& u) {
+	const int32_t dom = u.ptype->domain;
+	if (dom == 1 && (u.ptype->unit_flags & 0x10) == 0) return 0;
+	if (dom != 2) {
+		if (leader_can_transport(g, u.who) < unit_transport_type(g, u) || !unit_can_transport(u) || !object_is_cargo(g, u)) {
+			if (!(u.unit_masks & umask::kAutoExplore)) return 0;
+			return think_scout(g, u, 1);
+		}
+	}
+	return 0;
+}
+
 int32_t think_peasant(Game& g, Unit& u, bool force) {
 	// Unit::think_peasant @5f5760
 	if (!force) {
@@ -737,7 +754,8 @@ int32_t think_peasant(Game& g, Unit& u, bool force) {
 		if (idle < T) return 0;
 		if (idle != T && (idle - 2) % 5 != 0) return 0;
 	}
-	// TODO(AI): think_civilian_transport(1) for AI-controlled citizens.
+	// Unit::think_peasant @5f5760: an AI citizen (types 0x32 / 0x33, not the scholars) first asks think_civilian_transport(1).
+	if ((u.unit_masks & umask::kAiControl) && (u.type == 50 || u.type == 51) && think_civilian_transport_citizen(g, u)) return 1;
 	if (!is_scholar_t(u.type) &&
 	    ((u.unit_masks & umask::kBuilder) || unit_worker_stance(u) == 2 || unit_worker_stance(u) == 1) &&
 	    unit_find_build_spot(g, u))
@@ -758,7 +776,19 @@ int32_t think_peasant(Game& g, Unit& u, bool force) {
 		return 1;
 	u.unit_masks &= ~umask::kBuilder;
 	if (u.unit_masks & umask::kAiControl) {
-		// TODO(AI): think_scout when the region has no own city and no site; then find_repair_spot.
+		// @5f5760 (LAB_005f5920): an AI citizen standing in a land region with no allied city of its own scouts for one (think_scout(0))
+		// unless one of the leader's ten sites lies in that region and the citizen has not idled for more than 6 frames.
+		const int32_t reg = g.world.get_tregion(tcoord_of(u.x), tcoord_of(u.y));
+		const Leader& L = g.leaders[size_t(u.who)];
+		if (reg >= 0 && reg < 64 && L.reg_cities[size_t(reg)] == 0) {
+			bool site = false;
+			for (const Site& st : L.sites)
+				if (st.val != 0 && st.reg == reg) {
+					site = true;
+					break;
+				}
+			if (!site || u.idle > 6) return think_scout(g, u, 0);
+		}
 		if (unit_find_repair_spot(g, u)) return 1;
 	}
 	return 0;

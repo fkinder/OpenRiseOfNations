@@ -110,7 +110,9 @@ template <class Ar> void walk(Ar& ar, FarmRec& v) {
 }
 
 template <class Ar> void walk(Ar& ar, CaravanRec& v) {
-	FIELDS(ar, v.city2, v.whom, v.city3, v.whose, v.cara, v.o, v.caravan_flags, v.who);
+	FIELDS(ar, v.city2, v.whom, v.city3, v.whose, v.cara, v.o, v.caravan_flags, v.who, v.road, v.road_size, v.making_road, v.reset_road);
+	FIELDS(ar, v.search_dir0, v.search_gx, v.search_gy, v.search_count);
+	walk_search_ptr(ar, v.trees);  // the suspended road search (SavedSearch, saved by hand in save.cpp)
 }
 
 template <class Ar> void walk(Ar& ar, GoodObj& v) {
@@ -358,7 +360,9 @@ static_assert(sizeof(GameInfo) == 96, "GameInfo changed: update its walk() in sa
 static_assert(sizeof(GameDaemon) == 36, "GameDaemon changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Market) == 124, "Market changed: update its walk() in save_walk.inc");
 static_assert(sizeof(FarmRec) == 92, "FarmRec changed: update its walk() in save_walk.inc");
-static_assert(sizeof(CaravanRec) == 14, "CaravanRec changed: update its walk() in save_walk.inc");
+#if defined(__LP64__)
+static_assert(sizeof(CaravanRec) == 88, "CaravanRec changed: update its walk() in save_walk.inc");
+#endif
 static_assert(sizeof(Game::Herd) == 28, "Game::Herd changed: update its walk() in save_walk.inc");
 static_assert(sizeof(GoodObj) == 16, "GoodObj changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Game::Supply) == 6, "Game::Supply changed: update its walk() in save_walk.inc");

@@ -1,0 +1,2 @@
+re/decomp/caravan_fix/asm_e.txt
+685f90-686060

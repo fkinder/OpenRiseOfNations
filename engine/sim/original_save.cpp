@@ -414,6 +414,24 @@ struct Loader {
 		simple("caravans", "PtrArray<Caravan>::walk_data", omap::map_caravans_lists(), omap::map_caravan(), [&](int w, size_t n) { g.caravans[size_t(w)].assign(n, CaravanRec()); },
 		       [&](int w, size_t i) -> void* { return i < g.caravans[size_t(w)].size() ? &g.caravans[size_t(w)][i] : nullptr; });
 		// armies (the engine keeps 16 slots per player)
+		{  // the caravans' roads (Stack<PathData> at Caravan +0x10): child images bound one by one
+			static const int step_road = d.find_step(d.find_function("Stack<PathData>::walk_data"), dw::StepKind::Deref);
+			each_container(global("caravans"), container_step("PtrArray<Caravan>::walk_data"), [&](int who, const dw::ContainerData& cd) {
+				if (who >= 8) return;
+				for (size_t i = 0; i < cd.elems.size() && i < g.caravans[size_t(who)].size(); ++i) {
+					const dw::Rec* cr = cd.elems[i];
+					if (!cr || !cd.present[i]) continue;
+					CaravanRec& rec = g.caravans[size_t(who)][i];
+					for (const dw::Event& e : cr->ev) {
+						if (e.type != 0 || e.step != step_road || !e.child) continue;
+						const size_t idx = size_t(e.value);
+						if (rec.road.size() <= idx) rec.road.resize(idx + 1);
+						sh.bind(e.child, omap::map_caravan_road(), who, int32_t(i), int32_t(idx));
+						omap::map_caravan_road().load_from(&rec.road[idx], *e.child, 0);
+					}
+				}
+			});
+		}
 		{
 			const dw::Rec& r = global("armies");
 			sh.bind(&r, omap::map_armies_lists());

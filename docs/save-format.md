@@ -1,4 +1,4 @@
-# Save format (native, version 10)
+# Save format (native, version 11)
 
 The engine's own save format for its simulation state: `engine/sim/save.hpp` / `save.cpp` (API and the section walks),
 `save_archive.hpp` (the writer / reader), `save_walk.inc` (the member lists, generated). It is **not** the original game's
@@ -67,6 +67,8 @@ reader and **requires that every payload byte was consumed**. A corrupt section 
 a section whose layout differs from this build's (`N bytes were not read`, or running past its end) and a wrong tag are all
 reported with the section name. The version is bumped on any layout change; there is no migration (a save loads only into
 the build that wrote it, and only against the same rules tables: the hash in `META` is checked).
+
+Version 11: `CaravanRec` (section `CITY`, `Game::caravans`) carries the route's road (`road`, `road_size`: the `Stack<PathData>` and its allocation), `making_road`, `reset_road` and the suspended road search (`trees`: a `SavedSearch` like `Unit::openlist`, with `search_dir0` / `search_gx` / `search_gy` / `search_count`); `PathNode::z_val` (the road searches' terrain height) joins the nodes of every saved search. Economy-spec 6.4.
 
 Version 10: section `NUKE` (`Game::nukes`, sim/nukes.hpp): the nuclear explosions in progress (`NukeBlast`: centre, radii, start frame, shooter, the objects already hurt), the list of tiles `terraform_for_nuke` has sunk (TerrainOut +0x4bd4) and `stamp[8]` (LeaderData +0x7b4, the frame of the leader's last detonation, which starts its trade embargo); docs/nukes-spec.md. `Leader::nukes_used` / `missiles_used` were already walked.
 

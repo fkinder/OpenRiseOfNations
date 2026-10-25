@@ -641,7 +641,17 @@ the port) and the disassembly where the decompile lost arguments (economy-spec Â
 - **Fishermen, merchants, caravans** (econ_trade.cpp): `unit_collect` (UnitData::calc_gather over tiles with the
   upgrade_level radius, crowding), `think_fish` (G8), `think_merchant`, caravan records, `trade_value`,
   `city_compute_trade`, `city_new_caravan`, `city_get_empty_trade_routes`, `add_trade_order`, `do_trade`,
-  `think_caravan`, `end_trade_route`, `group_action_trade` (TRADE 17), LEADER_OPTIONS (73).
+  `think_caravan`, `end_trade_route`, `group_action_trade` (TRADE 17), LEADER_OPTIONS (73). **Caravan roads (2026-10-25, economy-spec 6.3 /
+  6.4):** `caravan_build_road` (find_road with `cara >= 0`: 8-connected, the `vector_dist(N.x - gx, -gy)` heuristic, 3,200 expansions per call with the
+  search suspended in `CaravanRec` and resumed from `Unit::work`), the lane-offset road walk of `do_trade` (the bottom end farther from the unit
+  becomes the destination, the stored road toggles its orientation), `end_trade_route` by the order's buildings, `caravan_work` (the caravan part of
+  `Unit::work`, called from orders.cpp), `Caravans::reset_paths` / `restart_trade_route` / `new_danger` / `verify_road`, `go_to_city` for AI caravans, the
+  `is_seen` tests of the partner choice and of FILTER_CAN_TRADE, and the `trade_value` argument order of the partner choice (asm @5ed665).
+  `CaravanRec` carries `road`, `road_size`, `making_road`, `reset_road` and the suspended search (save version 11; the original's saves map the
+  road, `making_road` and `reset_road`: `map_caravan_road` in original_map_misc.cpp, the loader in original_save.cpp). Oracle: replay
+  `21'56'12 -> 21'56'43` ends with 8 of 9 caravans at the next save's position and orders (3 of 9 before) and the stored roads node for node;
+  `21'23'34 -> 21'45'58` is 4,095 `game_random` draws closer; over the 45 runnable replays 17 of 495 part comparisons first differ later, 3 earlier (by 6,
+  6 and 48 frames: `21'55'37` deaths, `21'56'12` cities / groups, where one caravan repaths in the original and not in the engine), the rest equal.
 - **Views**: LeaderView gather_rate / income / cap / over_cap / buy / sell / can_trade; UnitView gather_who /
   gather_o / gather_arrived / carrying / collecting; BuildView gatherers / gatherers_working / gatherers_max.
 
@@ -656,8 +666,9 @@ differences; ron-combat-check, ron-prod-check, ron-econ-check identical to their
 byte-identical.
 
 Stubbed / approximated (TODO in code, with spec references):
-- Caravan roads (Caravan::build_road, PathFinder::find_road, verify_road, Caravans::new_danger): without a road the
-  original's do_trade heads to the building it is not testing, so routes never complete; `Unit::work`'s road resume.
+- Caravan roads are ported (above). Not wired because the call sites are other owners' files: `Caravan::verify_road` from `Unit::do_move`
+  (movement.cpp: a path point with flag 0x20 whose tile is not a road and is built on / blocked), `Caravans::new_danger` from `Object::take_damage`
+  (combat_damage.cpp `TODO(caravans)`), `City::close` repathing its caravans (cities.cpp); the functions exist in econ_trade.cpp.
 - Packers (merchants' UNPACK casts, unpack_merchant, is_unpacking): merchants stay packed and produce nothing.
 - AI: random_personality / the coin flip in Leader::init, think_civilian_transport, think_scout, think_carry,
   armies, use_market / market_speculation, consider_tribute, City.gatherers / free (AI sites; 0 for humans).
@@ -887,14 +898,16 @@ are constant because `tech_frame` / `tech_cat_frame` are stamped when a tech is 
 divergence; the pace is held down by the goods, in this order: (1) **wealth**: a tech of the Gunpowder / Enlightenment line costs
 300 - 400 wealth (and as much metal) and the leaders earn 55 - 130 wealth per 450 frames, while 700 timber and 3,000 knowledge sit
 banked (`RON_AI_MAKE=<seat>` prints `make_stuff`'s item 0 with its cost, the buckets and the make list; the market only turns timber
-into a few wealth at the global price). (2) **No caravan route ever completes**: every `City::trade_val` is 0 although each seat
-holds 2 - 6 caravans linked to routes (`aib ... trade 0 routes N`), because `do_trade` (econ_trade.cpp, not an AI file) tests the
-proximity of B while it walks to A (and the reverse once loaded: the "no road" quirk of `Caravan::build_road`, still TODO), so
-`caravan_flags & 4` is never set. With the two targets swapped in a scratch build (not applied: another owner's file) wealth income
-rises to 240 - 320 per 450 frames at frame 40,000 and the ages at 60,000 become 5 4 5 3 5 5 5 5 (leaders still in age 4 at 40,000, so
-this alone does not reach the Industrial Age by 40,000). (3) The remaining TODO(AI) items outside the AI files: `Build::do_bonus`
-(resource bonuses of finished buildings, build.cpp), `think_civilian_transport` / `think_scout` for citizens (econ_gather.cpp), the AI
-caravans' `go_to_city` (econ_trade.cpp:541). (4) Seats 1 and 3 are beaten down by their neighbours' armies in the late game (citizens
+into a few wealth at the global price). (2) **Caravan routes did not complete** (fixed 2026-10-25, "Caravan roads" in the Economy section): every `City::trade_val` was 0 although each seat
+held 2 - 6 caravans linked to routes (`aib ... trade 0 routes N`): `do_trade` tests the proximity of B while it walks to A (and the reverse once loaded) and
+only the road walk alternates the ends, but `Caravan::build_road` was not ported, so `caravan_flags & 4` was never set. With the roads, the seats' `trade`
+sum is 240 - 350 at frame 10,000, 1,150 - 1,530 at 20,000 and 2,300 - 5,500 at 60,000 (seat 3 excepted: beaten down to 0 citizens, below; the `aib` field is the summed `trade_val`, wealth rate x16) and the
+ages per 10,000 frames of seats 0-7 become 11111111 / 23222232 / 33333343 / 44434455 / 44535555 / 55535655 (before 11111111 / 22323222 / 33334333 /
+33434433 / 33534433 / 43534544): the leaders reach the Industrial Age at ~40,000 (seats 6 and 7) and the Modern Age at 60,000 (seat 5); the Information
+Age is not reached. What holds the seats at age 5 now: `lib tot 18 need 22` with `research []` and 5,000+ knowledge banked while wealth is 80 - 250
+(`make0 -/99999`): the wealth for the Industrial-line techs (300+ each) is spent as it comes (`esc`), the AI-file side of the pace. (3) The remaining
+TODO(AI) items outside the AI files: the ferry search of `think_civilian_transport` (econ_gather.cpp; `Build::do_bonus` and the citizen `think_scout(0)`
+branch of `think_peasant` are done, as are the AI caravans' `go_to_city`). (4) Seat 3 (with the caravan roads; seats 1 and 3 before) is beaten down by its neighbours' armies in the late game (citizens
 0 - 6, cities 4 -> 2 between frames 30,000 and 45,000 while the army AI keeps attacking): they train citizens again (`make_stuff`
 item 0 = Citizen, `ok 1`) but lose them; that is the war, not a decision bug.
 

@@ -842,52 +842,80 @@ Evidence `re/decomp/econ_trade/` (jobs `re/jobs/dc_econ_trade_*.txt`). ✅ = che
   idle threshold as §4.6 but from `leader_options.peasants_wait` (+8); then `find_city(x, y, SEARCH_ALLIED, who, …,
   FILTER_CAN_TRADE)` @65ba90 — players 0..7 × cities ascending, **last** city at the minimum distance (`≤`) — and
   `add_trade_order(city.o, city.who, −1, −1, QUEUE_NEW, 0)`.
-- FILTER_CAN_TRADE (`valid_filter` entry 17): the candidate is a city centre (flag 0x20, city ≥ 0) and some other seen,
-  alive city (own, or an ally's when the owner `has_preq(FOREIGN_TRADE 684)`) has an empty route with it both ways.
+- FILTER_CAN_TRADE (`valid_filter` entry 17, jump table @67e57c -> @67e204): the candidate is a city centre (flag 0x20, city ≥ 0) and some
+  other alive city (own, or an ally's when the candidate's owner `has_preq(FOREIGN_TRADE 684)`) that is **`is_seen` by the candidate's owner**
+  has an empty route with it both ways.
   `CityData::get_empty_trade_routes(c, p)` @7395c0 = `1 − (links in vans whose caravan has flag 2 and joins (c, p))`:
   one caravan per city pair.
 
-### 6.3 `Unit::do_trade(order)` @5ed270 (each frame)
+### 6.3 `Unit::do_trade(order)` @5ed270 (each frame) ✅
 
-1. `set_anim(CHAR_DEFAULT, 0, 1)` (may draw a Guy idle variant, §8); no caravan slot → assert, return; `making_road` →
-   return (the sliced road search continues in `Unit::work`).
-2. A's city (fail if none); before starting, retarget `ox` to the city centre. Region/transport check.
-3. **Partner choice** (`oxx < 0`): for p 0..7 allied (own, or foreign with FOREIGN_TRADE and `who == pa`), cities c
-   ascending (not A itself, alive, seen, empty route both ways, reachable): `v = (who == pa) ? trade_value(a, pa, c, p)
-   << 2 : trade_value(c, p, a, pa)`; keep the first strict maximum. None → (UI message) `idle = 99`,
-   `kill_current_order`; AI units then `go_to_city(a + 1, pa, 1)` if that city exists.
-4. Both buildings must be active cities (else fail).
-5. **Start** (`!started`): permission (own route, or FOREIGN_TRADE), empty-route checks; if the caravan is nearer B,
-   swap the local (a, pa) ↔ (b, pb) **but not `ox`/`oxx`** (quirk: on a foreign route started nearer B the start-frame
-   arrival test then reads a wrong object); append `{cara, who}` to A's then B's `vans`; set the Caravan's cities,
-   flags |= 1|2, `started = 1`; `compute_trade(A)`, `compute_trade(B)`; `build_road()` — if it returns < 0 (still
-   searching / failed) walk toward A (QUEUE_FIRST) and return.
-6. **Arrival** (within `max(xs, ys)·96 + 0x306` of the building on both axes):
-   - `loaded` and at A: `loaded = 0`, UNIT_TRADE_ROUTE; unless a decoy: flags |= 4, `compute_trade(A)`,
-     `compute_trade(B)`, `cities[pa][a].new_caravan(pb, b)`; move target = B.
-   - `!loaded` (B must be an active trade building) and at B: `loaded = 1`; unless a decoy:
-     `cities[pb][B.city].new_caravan(pa, a)`; move target = A (either way — quirk: with no road the caravan heads to
-     the building it is not testing, so a roadless caravan never completes a trip).
-7. **Movement:** with a road: invert it if the bottom end is nearer, copy it into the unit path, offset intermediate
-   points into a lane (`x += (y − py)/3`, `y += (x_orig − px)/(−3)` for steps within 192), pop, `add_move_order(far end,
-   pathed, QUEUE_FIRST)`, flag a region change, then **invert the stored road unconditionally** (its orientation
-   toggles — keep). Without a road: `find_nearby_spot` around the target (radius `R·96 .. R·96 + 0xc0`) and move if
-   within `R·96 + 0xc6`.
+Port: `econ_trade.cpp do_trade` (2026-10-25: re-checked against the decompile and the disassembly, `re/decomp/caravan_fix/`). The locals keep the
+original's roles: (`a_city`, `a_pl`) = local_18 / param_1, (`b_city`, `b_pl`) = local_1c / local_34, the objects `ox` / `oxx` = local_24 / local_30.
+
+1. `set_anim(CHAR_DEFAULT, 0, 1)` (may draw a Guy idle variant, §8); no caravan slot → assert, return; `making_road` → return
+   (the sliced road search continues in `Unit::work`, §6.4).
+2. A's city (fail if none); before starting, retarget `ox` to the city centre. Region check (unit region against A's, `can_transport` otherwise).
+3. **Partner choice** (`oxx < 0`): for p 0..7 allied with the unit's owner (own, or foreign with FOREIGN_TRADE and `who == pa`), cities c
+   ascending (not A itself, alive, **`CityData::is_seen(c, unit.who)`**, empty route both ways, reachable by region or `can_transport`):
+   `v = (who == pa) ? trade_value(a, pa, c, p) << 2 : trade_value(c, p, a, pa)` — the first pair is the *first* (bonus) end (asm @5ed665:
+   `ECX/EDX = a, pa`, the candidate on the stack; the engine had the two pairs swapped before 2026-10-25); keep the first strict maximum.
+   None → (UI message) `idle = 99`, `kill_current_order`; AI units then `go_to_city(a + 1, pa, 1)` if that city exists.
+4. Both buildings must be active (`flags & 4`), B's `city` ≥ 0 and both cities valid; **then** the region test again with B's region
+   (`(unit ≠ A or A ≠ B region) and !can_transport` → fail).
+5. **Start** (`!started`): permission (own route, or FOREIGN_TRADE), empty-route checks; **if the unit is nearer city B than city A**
+   (`dist(unit, City B.x/y) < dist(unit, City A.x/y)`, asm @5edaf7) swap the local (a, pa) ↔ (b, pb) **but not `ox`/`oxx`** (quirk: on a foreign
+   route started nearer B the start-frame arrival test then reads a wrong object); append `{cara, who}` to the near then the far city's `vans`;
+   set the Caravan's cities (near = `city2`/`whom`), flags |= 1|2, `started = 1`; `compute_trade` of both; `Caravan::build_road()` (§6.4) — if it
+   returns < 0 (still searching / failed) walk to the near city (QUEUE_FIRST, `City.x/y`) and return.
+6. **Arrival** (`LAB_005edd56`, same frame after a start with a road, else every frame):
+   - `loaded`: test the building A (`objects[a_pl][ox]`, `R = max(xs, ys)·96`): within `R + 0x306` on both axes → `loaded = 0`, UNIT_TRADE_ROUTE;
+     unless a decoy: flags |= 4, `compute_trade(A)`, `compute_trade(B)`, `cities[pa][a].new_caravan(pb, b)`. The target is B in any case.
+   - `!loaded`: B (`objects[b_pl][oxx]`) must be an active **trade building (VILLAGE line), else the route ends** (fail); within `R + 0x306` →
+     `loaded = 1`; unless a decoy `cities[pb][B.city].new_caravan(pa, a)`. The target is A in any case.
+   - So **without a road a caravan walks to the building it is not testing and a route never completes** (the quirk); every working route has
+     a road, and the road movement (below) is what alternates the ends.
+7. **Movement:** with a road (`road.length != 0`): invert the stored road if its *bottom* end is nearer to the unit than its top, copy it
+   into the unit path (`Stack::operator=`: the unit's allocation grows to the road's), lane offsets (for i ≥ 1 with |dx|, |dy| to the previous
+   *unshifted* point ≤ 192: `x += dy / 3`, `y += ((dx·0x55555555) >> 32) − dx) / 2`), pop the top, `add_move_order(bottom point,
+   pathed, QUEUE_FIRST)`, flag 4 on the new top when its region differs from the unit's, then **invert the stored road unconditionally**
+   (its orientation toggles on every use — keep). Without a road: `find_nearby_spot` around the target (radius `R·96 .. R·96 + 0xc0`, `R` of
+   the building that was *tested*) and move if within `R + 0xc6`.
 8. Fail: `kill_current_order(0)` (→ `end_trade_route` via close_order); with no order left `think_caravan(1)`.
 
-`Unit::work` @60d180 🟡 resumes `build_road` each frame while `making_road` and ends routes whose action is no longer
-TRADE; `Unit::end_trade_route` @5e3bd0 🟡 clears flags 2|4 and the roads, removes the van links and re-runs
-`compute_trade` on both cities; `City::close` repaths its caravans.
+`Unit::work` @60d180 (`caravan_work`, called from `work` in orders.cpp): for a caravan with `caravan_flags & 6` and an order that is not
+CAST_SPELL: the route is kept only while `get_action()` is TRADE_ROUTE (else `end_trade_route`); `making_road` → `Caravan::build_road` (one
+slice per frame); a current order that is not TRADE_ROUTE needs the *next* order to be (else `end_trade_route`).
+`Unit::end_trade_route` @5e3bd0: only while playing (not loading); clears UNIT_TRADE_ROUTE, `caravan_flags` 2 and 4, the suspended search
+and the road; for a TRADE_ROUTE action sets `loaded = 0` and removes the `{cara, who}` link from the **order's** two cities (`ox`/`oxx`, if
+active, with a valid city), re-running `compute_trade` on each (not the record's: a route started nearer B swapped them).
+`City::close` repaths its caravans (🟡 cities.cpp TODO).
 
-### 6.4 Roads
+### 6.4 Roads ✅ (ported 2026-10-25; replay-checked)
 
-`Caravan::build_road` @73db10: `find_road` / `find_road_restore` (movement-spec §12; `calc_road_cost` draws `rnd(20)`
-per expansion, ≤ 3200 expansions per call), then post-processing: land tiles of the path become **roads**
-(`World::set_road_at(t, 1, 1, 0)` — world state), water runs are thinned (keep one in 4 after the first 5),
-`reset_paths` sets `reset_road` on every other caravan still searching. `Caravan::verify_road` @73d950 rebuilds when a
-road tile gets a building; `Caravans::new_danger(x, y, pl)` @73e0c0 (from a caravan's death in `Object::take_damage`
-when killed outside friendly territory or by a building) restarts every allied caravan whose road passes within 0x600
-(`restart_trade_route`: clear road, flags &= ~4, repath, `build_road` — `trade_val` is not recomputed).
+`Caravan` (0x50) also holds `road` (`Stack<PathData>` +0x10: list, `size` +0x14, `length` +0x18, increment −1 so `increase_size` doubles 0 → 1 → 2 →
+4 …), `making_road` +0x20, `reset_road` +0x24, the suspended search +0x28..+0x40 (trees, first direction, goal, expansions). The original's saves
+walk only the road, `making_road` and `reset_road` (so a loaded game restarts a suspended search). Engine: `CaravanRec` (game.hpp), native save
+version 11 (the search is saved with `PathNode::z_val`).
+
+`Caravan::build_road` @73db10 (`caravan_build_road`): `clear_road` (length 0, the allocation stays); cities invalid → `clear_temp_road`, 0;
+resume (`making_road` and not `reset_road` and trees present) → `find_road_restore`, else (`reset_road` or no trees) `clear_temp_road`,
+`reset_road = 0`, `find_road(A.o, A.who, B.o, B.who, unit, unit.who)`. Result < 0 → −1 (suspended or bad endpoints), 0 → 0 (no tiles), else
+the stack (top = the node next to A) is popped into a temporary stack and **laid**: a land tile (`TData & 0x30 != 0x20`) → `World::set_road_at`,
+flags |= 0x20, thinning counter reset; a water tile is kept when the counter is 0 or fewer than 5 tiles remain on either side (`tolerance = 0x180`,
+counter = 4) else dropped (counter − 1); the first and last kept node get flag 1; the nodes are pushed back (same orientation), `reset_road =
+making_road = 0`, `Caravans::reset_paths` @73e060 (every in-use caravan that is searching gets `reset_road = 1`), return 1.
+`PathFinder::find_road` @688a40 + `astar_caravan_road` @685990 with `cara ≥ 0` (movement-spec §12): 8-connected, the first direction as for buildings,
+**heuristic `vector_dist(N.x − gx, −gy)·40/16`** (asm @685fd9: the y argument is `−gy`, no abs — an original bug), `can_transport` from the unit
+(`unit_can_transport`), 3,200 valid expansions per call; at the budget (or at the goal with ≥ 3,200) the popped node goes back to the open
+list, the trees, direction and goal are stored in the record, `making_road = 1`, −1; `kill_lists(pathfinder)` after every search (also for
+building roads). Replay check: `21'56'12 -> 21'56'43`: 8 of 9 caravans at the next save's position/orders (3 of 9 before), the stored
+roads equal node for node (39 nodes, allocation 64).
+`Caravan::verify_road` @73d950 (`caravan_verify_road`, called from `Unit::do_move` when a path point with flag 0x20 is reached and its
+tile is not a road: a building (`TData & 0x80`, `(& 3) == 3`) on the road rebuilds it) and `Caravans::new_danger(x, y, pl)` @73e0c0
+(`caravans_new_danger`, from `Object::take_damage` when a caravan is killed outside friendly territory or by a building: every allied in-use
+route whose road passes within 0x600 — or that is searching — restarts: clear road and trees, flags &= ~4, `repath`, `build_road`;
+`trade_val` is not recomputed) are ported but **not called** (movement.cpp / combat_damage.cpp are other owners' files).
 
 ### 6.5 Trade value and income ✅
 

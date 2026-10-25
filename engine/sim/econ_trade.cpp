@@ -3,12 +3,15 @@
 
 #include "sim/combat.hpp"
 #include "sim/economy.hpp"
+#include "sim/fog.hpp"
 #include "sim/groups.hpp"
 #include "sim/guys.hpp"
 #include "sim/orders.hpp"
 #include "sim/production_internal.hpp"
+#include "sim/roads.hpp"
 #include "sim/search.hpp"
 #include "sim/spells.hpp"
+#include "sim/transport.hpp"
 #include "sim/trig.hpp"
 
 namespace ron::sim {
@@ -276,34 +279,185 @@ int32_t think_merchant(Game& g, Unit& u) {
 // ---------------------------------------------------------------- caravans (6)
 
 int32_t caravans_init(Game& g, int32_t who, int32_t o) {
-	// Caravans::init_caravan @73e1f0: the first unused record below the mark, else a new one.
+	// Caravans::init_caravan @73e1f0 + Caravan::init @73d130: the first unused record below the mark, else a new one. The record
+	// keeps the allocation of its road stack (Stack.size) across uses.
 	auto& v = g.caravans[size_t(who)];
-	CaravanRec r;
-	r.caravan_flags = 1;
-	r.o = int16_t(o);
-	r.who = int8_t(who);
+	auto set_up = [&](CaravanRec& r, size_t i) {
+		r.cara = int16_t(i);
+		r.o = int16_t(o);
+		r.who = int8_t(who);
+		r.caravan_flags = 1;
+		caravan_clear_temp_road(r);
+		caravan_clear_road(r);
+	};
 	for (size_t i = 0; i < v.size(); i++) {
 		if (!(v[i].caravan_flags & 1)) {
-			r.cara = int16_t(i);
-			v[i] = r;
+			set_up(v[i], i);
 			LD(g, who).caravan_mark = std::max<int32_t>(LD(g, who).caravan_mark, int32_t(i) + 1);
 			return int32_t(i);
 		}
 	}
-	r.cara = int16_t(v.size());
-	v.push_back(r);
+	v.emplace_back();
+	set_up(v.back(), v.size() - 1);
 	LD(g, who).caravan_mark = int32_t(v.size());
 	return int32_t(v.size()) - 1;
 }
 
 void caravans_close(Game& g, int32_t who, int32_t slot) {
+	// Caravans::close_caravan @73e350 (Caravan::close): the road and the suspended search go with it.
 	auto& v = g.caravans[size_t(who)];
 	if (slot < 0 || size_t(slot) >= v.size()) return;
-	v[size_t(slot)].caravan_flags &= uint8_t(~1);
-	v[size_t(slot)].who = -1;
-	v[size_t(slot)].o = -1;
+	CaravanRec& r = v[size_t(slot)];
+	r.caravan_flags &= uint8_t(~1);
+	r.who = -1;
+	r.o = -1;
+	r.city2 = r.whom = r.city3 = r.whose = -1;
+	caravan_clear_temp_road(r);
+	caravan_clear_road(r);
 	while (!v.empty() && !(v.back().caravan_flags & 1)) v.pop_back();
 	LD(g, who).caravan_mark = int32_t(v.size());
+}
+
+// ---------------------------------------------------------------- roads (economy-spec 6.4)
+
+void caravan_clear_road(CaravanRec& r) { r.road.clear(); }  // Caravan::clear_road @73dfc0: pops everything, the allocation stays
+
+void caravan_clear_temp_road(CaravanRec& r) {  // Caravan::clear_temp_road @73de80
+	r.trees.reset();
+	r.search_dir0 = r.search_gx = r.search_gy = r.search_count = 0;
+	r.making_road = 0;
+}
+
+namespace {
+void road_push(CaravanRec& r, const PathData& pd) {  // Stack<PathData>::push on the caravan's road (increase_size(-1) doubles)
+	if (r.road_size <= int32_t(r.road.size())) r.road_size += r.road_size != 0 ? r.road_size : 1;
+	r.road.push_back(pd);
+}
+}  // namespace
+
+void caravans_reset_paths(Game& g) {
+	// Caravans::reset_paths @73e060: every other caravan still searching starts its search over.
+	for (int32_t p = 0; p < 8; p++) {
+		if ((g.leaders[size_t(p)].flags & 3) != 3) continue;
+		for (CaravanRec& r : g.caravans[size_t(p)]) {
+			if ((r.caravan_flags & 1) && r.making_road != 0) r.reset_road = 1;
+		}
+	}
+}
+
+int32_t caravan_build_road(Game& g, CaravanRec& r) {
+	// Caravan::build_road @73db10
+	caravan_clear_road(r);
+	auto city_of = [&](int32_t pl, int32_t c) -> const City* {
+		if (pl < 0 || pl >= 8 || c < 0 || size_t(c) >= g.cities[size_t(pl)].size()) return nullptr;
+		return &g.cities[size_t(pl)][size_t(c)];
+	};
+	const City* ca = r.city2 < 0 || r.city3 < 0 ? nullptr : city_of(r.whom, r.city2);
+	const City* cb = ca ? city_of(r.whose, r.city3) : nullptr;
+	if (!ca || !cb || !ca->valid() || !cb->valid()) {
+		caravan_clear_temp_road(r);
+		return 0;
+	}
+	int32_t res;
+	bool restore = false;
+	if (r.making_road != 0) {
+		if (r.reset_road == 0 && r.trees) restore = true;
+		else {
+			caravan_clear_temp_road(r);
+			r.reset_road = 0;
+		}
+	} else if (r.reset_road != 0 || !r.trees) {
+		caravan_clear_temp_road(r);
+		r.reset_road = 0;
+	}
+	res = find_road_caravan(g, r, ca->o, r.whom, cb->o, r.whose, restore);
+	if (res < 1) {
+		if (res < 0) return -1;
+		r.road.clear();
+		return 0;
+	}
+	// post-process: the road is popped from its top (the source end) into a temporary stack, laid as it goes, and pushed back
+	std::vector<PathData> tmp;
+	int32_t water = 0;
+	while (!r.road.empty()) {
+		PathData n = r.road.back();
+		r.road.pop_back();
+		const int32_t tx = n.x / 192, ty = n.y / 192;
+		const uint16_t td = g.world.t(tx, ty);
+		bool keep = true;
+		if ((td & 0x30) == 0x20) {  // water: thinned
+			if (water == 0 || r.road.size() < 5 || tmp.size() < 5) {
+				water = 4;
+				n.tol = 0x180;
+			} else {
+				water--;
+				keep = false;
+			}
+		} else {
+			g.world.set_road_at(tx, ty, true);
+			n.flags |= 0x20;
+			water = 0;
+		}
+		if (!keep) continue;
+		if (tmp.empty() || r.road.empty()) n.flags |= 1;
+		tmp.push_back(n);
+	}
+	while (!tmp.empty()) {
+		road_push(r, tmp.back());
+		tmp.pop_back();
+	}
+	r.reset_road = 0;
+	r.making_road = 0;
+	caravans_reset_paths(g);
+	return 1;
+}
+
+void caravan_verify_road(Game& g, CaravanRec& r) {
+	// Caravan::verify_road @73d950: a building (or a blocked tile) on the road rebuilds it.
+	for (const PathData& n : r.road) {
+		const uint16_t td = g.world.t(n.x / 192, n.y / 192);
+		if ((td & 0x80) || (td & 3) == 3) {
+			caravan_build_road(g, r);
+			return;
+		}
+	}
+}
+
+void caravan_restart_trade_route(Game& g, CaravanRec& r) {
+	// Caravan::restart_trade_route @73d070: clear the road and search again (trade_val is not recomputed).
+	caravan_clear_road(r);
+	caravan_clear_temp_road(r);
+	r.caravan_flags &= uint8_t(~4);
+	if (r.o >= 0 && r.who >= 0) {
+		Unit* u = g.unit(r.who, r.o);
+		if (u && u->alive()) {
+			repath(g, *u);
+			caravan_build_road(g, r);
+		}
+	}
+}
+
+void caravans_new_danger(Game& g, int32_t x, int32_t y, int32_t pl) {
+	// Caravans::new_danger @73e0c0 (from Object::take_damage): every allied caravan whose road passes within 0x600 restarts.
+	for (int32_t i = 0; i < 8; i++) {
+		if ((g.leaders[size_t(i)].flags & 3) != 3) continue;
+		if (pl != i && !(g.leaders[size_t(i)].diplos(pl) == 2 && g.leaders[size_t(pl)].diplos(i) == 2)) continue;
+		for (size_t c = 0; c < g.caravans[size_t(i)].size() && int32_t(c) < LD(g, i).caravan_mark; c++) {
+			CaravanRec& r = g.caravans[size_t(i)][c];
+			if ((r.caravan_flags & 3) != 3) continue;
+			bool restart = true;
+			if (r.making_road == 0 && !r.road.empty()) {
+				restart = false;
+				for (const PathData& n : r.road) {
+					if (vector_dist(iabs(n.x - x), iabs(n.y - y)) <= 0x600) {
+						restart = true;
+						break;
+					}
+				}
+			}
+			if (restart) caravan_restart_trade_route(g, r);
+		}
+	}
 }
 
 namespace {
@@ -417,25 +571,86 @@ void add_trade_order(Game& g, Unit& u, int32_t ox, int32_t whom, int32_t oxx, in
 }
 
 void end_trade_route(Game& g, Unit& u) {
-	// Unit::end_trade_route @5e3bd0 🟡: clear flags 2 | 4, drop the van links, recompute both cities.
+	// Unit::end_trade_route @5e3bd0: only while the game is being played; clears flags 2 | 4 and the road, then drops the van
+	// links of the ORDER's two cities (not the record's: a route started nearer B swapped them) and recomputes both.
+	if (g.scenario_loading) return;
+	u.unit_masks &= ~0x200u;
 	CaravanRec* r = (u.cara >= 0 && size_t(u.cara) < g.caravans[size_t(u.who)].size()) ? &g.caravans[size_t(u.who)][size_t(u.cara)] : nullptr;
 	if (!r) return;
-	const int32_t c2 = r->city2, p2 = r->whom, c3 = r->city3, p3 = r->whose;
-	r->caravan_flags &= uint8_t(~6);
-	auto unlink = [&](int32_t p, int32_t c) {
-		if (p < 0 || c < 0 || size_t(c) >= g.cities[size_t(p)].size()) return;
-		auto& v = g.cities[size_t(p)][size_t(c)].vans;
-		for (size_t i = 0; i < v.size(); i++)
-			if (v[i][0] == u.cara && v[i][1] == u.who) {
-				v.erase(v.begin() + std::ptrdiff_t(i));
+	r->caravan_flags &= uint8_t(~2);
+	r->caravan_flags &= uint8_t(~4);
+	caravan_clear_temp_road(*r);
+	caravan_clear_road(*r);
+	const Order* act = get_action(u);
+	if (!act || act->type != kTradeRoute) return;
+	Order* a = update_action(g, u);
+	if (!a) return;
+	a->loaded = 0;
+	auto unlink = [&](int32_t o, int32_t p) {
+		if (o < 0 || p < 0 || p >= 8) return;
+		const Build* b = g.build(p, o);
+		if (!b || !(b->flags & objflag::kActive) || b->city < 0 || size_t(b->city) >= g.cities[size_t(p)].size()) return;
+		City& ct = g.cities[size_t(p)][size_t(b->city)];
+		if (!ct.valid()) return;
+		for (size_t i = 0; i < ct.vans.size(); i++)
+			if (ct.vans[i][0] == u.cara && ct.vans[i][1] == u.who) {
+				ct.vans.erase(ct.vans.begin() + std::ptrdiff_t(i));
 				break;
 			}
-		city_compute_trade(g, p, c);
+		city_compute_trade(g, p, b->city);
 	};
-	unlink(p2, c2);
-	unlink(p3, c3);
-	// TODO(trade): Caravan::clear_road / the stored road.
+	unlink(a->ox, a->whom);
+	unlink(a->oxx, a->whose);
 }
+
+void caravan_work(Game& g, Unit& u) {
+	// The caravan part of Unit::work @60d180: a route is kept only while its TRADE_ROUTE order is the action (and the current or
+	// the next order); the suspended road search runs one slice per frame.
+	if (u.cara < 0 || size_t(u.cara) >= g.caravans[size_t(u.who)].size() || !unit_is_caravan(u)) return;
+	CaravanRec& r = g.caravans[size_t(u.who)][size_t(u.cara)];
+	if (!(r.caravan_flags & 6)) return;
+	const Order* cur = u.front();
+	if (cur && cur->type == kCastSpell) return;
+	const Order* act = get_action(u);
+	if (!act || act->type != kTradeRoute) {
+		end_trade_route(g, u);
+		return;
+	}
+	if (r.making_road != 0) caravan_build_road(g, r);
+	cur = u.front();
+	if (!cur || cur->type != kTradeRoute) {
+		// the order list's tail->prev: the order after the current one
+		if (u.orders.size() < 2 || u.orders[1].type != kTradeRoute) end_trade_route(g, u);
+	}
+}
+
+namespace {
+
+// CityData::is_seen @739560: the city's centre building is seen by `by`.
+bool city_is_seen(const Game& g, int32_t who, int32_t c, int32_t by) {
+	const City& ct = g.cities[size_t(who)][size_t(c)];
+	if (!ct.valid() || ct.o < 0 || ct.who < 0) return false;
+	const Object* ob = g.object(ct.who, ct.o);
+	return ob && object_is_seen(g, *ob, by, false);
+}
+
+// Unit::go_to_city @5f79c0 (-> Unit::go_to @5f7a50): a walk to the city centre unless the unit is within 0x480 of it.
+void go_to_city(Game& g, Unit& u, int32_t c, int32_t pl, int32_t order) {
+	const City& ct = g.cities[size_t(pl)][size_t(c)];
+	const Object* ob = g.object(pl, ct.o);
+	if (!ob) return;
+	if (vector_dist(ob->x - u.x, ob->y - u.y) <= 0x480) return;
+	int32_t x = ob->x, y = ob->y;
+	if (find_nearby_spot(g, *u.ptype, x, y, &x, &y, 0x240, 0, 0, 0x55555555u, kFilterNotMe, u.o, u.who, 0, 1, -1, 0, -1) == 0) {
+		Group tmp;
+		group_clear(tmp, -1);
+		group_add(g, tmp, u.o, u.who, 0, 0);
+		const int32_t id = groups_push_group(g, u.who, tmp, 1);
+		if (id >= 0) group_action_move_to(g, g.groups.g[size_t(id)], x, y, kQueueNew, false, 0, order, 0, -1, -1, 0);
+	}
+}
+
+}  // namespace
 
 int32_t think_caravan(Game& g, Unit& u, bool force) {
 	// Unit::think_caravan @5f5650: the peasant threshold from leader option peasants_wait, then the nearest allied
@@ -465,8 +680,9 @@ int32_t think_caravan(Game& g, Unit& u, bool force) {
 			if (!ct.valid()) continue;
 			const int32_t d = vector_dist(iabs(u.x - ct.x), iabs(u.y - ct.y));
 			if (d > bd) continue;
-			// FILTER_CAN_TRADE (valid_filter 17): another seen, alive city with an empty route both ways (own, or an
-			// ally's with FOREIGN_TRADE). TODO(spec): city seen tests (CityData::is_seen) are taken as true.
+			// FILTER_CAN_TRADE (Search::valid_filter entry 17, jump table @67e57c -> @67e204): the candidate is a city centre and
+			// some other city, seen by the candidate's owner, has an empty route with it both ways (own, or an ally's when the
+			// owner has FOREIGN_TRADE).
 			bool ok = false;
 			for (int32_t q = 0; q < 8 && !ok; q++) {
 				if (!(g.leaders[size_t(q)].flags & leaderflag::kValid)) continue;
@@ -474,6 +690,7 @@ int32_t think_caravan(Game& g, Unit& u, bool force) {
 				for (int32_t e = 0; e < g.leaders[size_t(q)].city_mark && size_t(e) < g.cities[size_t(q)].size() && !ok; e++) {
 					if (q == p && e == c) continue;
 					if (!g.cities[size_t(q)][size_t(e)].valid()) continue;
+					if (!city_is_seen(g, q, e, p)) continue;
 					ok = city_get_empty_trade_routes(g, p, c, q, e) != 0 && city_get_empty_trade_routes(g, q, e, p, c) != 0;
 				}
 			}
@@ -490,44 +707,48 @@ int32_t think_caravan(Game& g, Unit& u, bool force) {
 }
 
 int32_t do_trade(Game& g, Unit& u, Order& ord) {
-	// Unit::do_trade @5ed270 (economy-spec 6.3). TODO(trade, economy-spec 6.4): Caravan::build_road and the road
-	// movement; without a road the caravan heads to the building it is not testing (the original's quirk), so a
-	// route never completes until roads are ported.
+	// Unit::do_trade @5ed270 (economy-spec 6.3). The locals keep the original's names: the near / far swap of a route started
+	// nearer B changes a_* / b_* but not the order's ox / oxx, so the arrival tests of that first frame read what the original reads.
 	unit_set_anim(g, u, kCharDefault, 0, 1);
-	if (u.cara < 0) return 0;
-	const int32_t pa = ord.whom;
+	if (u.cara < 0 || size_t(u.cara) >= g.caravans[size_t(u.who)].size()) return 0;
+	CaravanRec& rec = g.caravans[size_t(u.who)][size_t(u.cara)];
+	if (rec.making_road != 0) return 0;  // the sliced road search continues in Unit::work
+	const int32_t pa0 = ord.whom;
 	int32_t a_o = ord.ox;
 	auto fail = [&]() {
 		kill_current_order(g, u, false);
 		if (u.orders.empty()) think_caravan(g, u, true);
 		return 0;
 	};
-	if (a_o < 0 || pa < 0 || pa >= 8) return fail();
-	Build* A = g.build(pa, a_o);
+	if (a_o < 0 || pa0 < 0 || pa0 >= 8) return fail();
+	Build* A = g.build(pa0, a_o);
 	if (!A || A->city < 0) return fail();
-	int32_t ca = A->city;
-	if (!ord.started && g.cities[size_t(pa)][size_t(ca)].o != a_o) {
-		ord.ox = a_o = g.cities[size_t(pa)][size_t(ca)].o;
-		A = g.build(pa, a_o);
+	int32_t a_city = A->city, a_pl = pa0;
+	if (!ord.started && size_t(a_city) < g.cities[size_t(a_pl)].size() && g.cities[size_t(a_pl)][size_t(a_city)].o != a_o) {
+		ord.ox = a_o = g.cities[size_t(a_pl)][size_t(a_city)].o;
+		A = g.build(a_pl, a_o);
+		if (!A) return fail();
 	}
 	const int32_t ureg = g.world.get_tregion(tcoord_of(u.x), tcoord_of(u.y));
 	const int32_t areg = g.world.get_tregion(tcoord_of(A->x), tcoord_of(A->y));
 	if (ureg != areg && !unit_can_transport(u)) return fail();
-	int32_t b_o = ord.oxx, pb = ord.whose;
+	int32_t b_o = ord.oxx, b_pl = ord.whose;
 	if (b_o < 0) {
-		int32_t best = -1, bc = -1, bp = -1;
+		int32_t best = -1, bc = -1, bp = u.who;
 		for (int32_t p = 0; p < 8; p++) {
 			if (!is_ally(g, u.who, p)) continue;
-			if (!(u.who == p || (has_preq(g, u.who, etype::kForeignTrade) && u.who == pa))) continue;
+			if (u.who != p && !(has_preq(g, u.who, etype::kForeignTrade) && u.who == pa0)) continue;
 			for (int32_t c = 0; c < g.leaders[size_t(p)].city_mark && size_t(c) < g.cities[size_t(p)].size(); c++) {
-				if (c == ca && pa == p) continue;
+				if (c == a_city && pa0 == p) continue;
 				const City& ct = g.cities[size_t(p)][size_t(c)];
 				if (!ct.valid()) continue;
-				if (!city_get_empty_trade_routes(g, pa, ca, p, c) || !city_get_empty_trade_routes(g, p, c, pa, ca)) continue;
+				if (!city_is_seen(g, p, c, u.who)) continue;
+				if (!city_get_empty_trade_routes(g, pa0, a_city, p, c) || !city_get_empty_trade_routes(g, p, c, pa0, a_city)) continue;
 				const Build* cb = g.build(p, ct.o);
 				if (!cb) continue;
-				if (g.world.get_tregion(tcoord_of(cb->x), tcoord_of(cb->y)) != areg && !unit_can_transport(u)) continue;
-				const int32_t v = u.who == pa ? trade_value(g, c, p, ca, pa) << 2 : trade_value(g, ca, pa, c, p);
+				if (areg != g.world.get_tregion(tcoord_of(cb->x), tcoord_of(cb->y)) && !unit_can_transport(u)) continue;
+				// asm @5ed665: ECX / EDX = (a_city, pa) are the first (bonus) end; the stack holds the candidate
+				const int32_t v = u.who == pa0 ? trade_value(g, a_city, pa0, c, p) << 2 : trade_value(g, c, p, a_city, pa0);
 				if (best < v) {
 					best = v;
 					bc = c;
@@ -538,71 +759,126 @@ int32_t do_trade(Game& g, Unit& u, Order& ord) {
 		if (best < 0 || bc < 0) {
 			u.idle = 99;
 			kill_current_order(g, u, false);
-			// TODO(AI): AI caravans go_to_city(a + 1, pa, 1).
+			if (u.unit_masks & umask::kAiControl) {
+				const int32_t nx = a_city + 1;
+				if (nx < g.leaders[size_t(pa0)].city_mark && size_t(nx) < g.cities[size_t(pa0)].size() && g.cities[size_t(pa0)][size_t(nx)].valid())
+					go_to_city(g, u, nx, pa0, 1);
+			}
 			return 0;
 		}
 		b_o = g.cities[size_t(bp)][size_t(bc)].o;
-		pb = bp;
+		b_pl = bp;
 		ord.oxx = b_o;
-		ord.whose = pb;
-		const Build* nb = g.build(pb, b_o);
+		ord.whose = b_pl;
+		const Build* nb = g.build(b_pl, b_o);
 		ord.uid2 = nb ? nb->uid : 0xffff;
 	}
-	Build* B = g.build(pb, b_o);
+	Build* B = (b_pl >= 0 && b_pl < 8) ? g.build(b_pl, b_o) : nullptr;
 	if (!A || !(A->flags & objflag::kActive) || !B || !(B->flags & objflag::kActive) || B->city < 0) return fail();
-	int32_t cb = B->city;
-	if (!g.cities[size_t(pa)][size_t(ca)].valid() || !g.cities[size_t(pb)][size_t(cb)].valid()) return fail();
+	int32_t b_city = B->city;
+	if (size_t(a_city) >= g.cities[size_t(a_pl)].size() || size_t(b_city) >= g.cities[size_t(b_pl)].size()) return fail();
+	if (!g.cities[size_t(a_pl)][size_t(a_city)].valid() || !g.cities[size_t(b_pl)][size_t(b_city)].valid()) return fail();
+	const int32_t breg = g.world.get_tregion(tcoord_of(B->x), tcoord_of(B->y));
+	if ((ureg != areg || areg != breg) && !unit_can_transport(u)) return fail();
 	if (!ord.started) {
-		if (!((pb == u.who && pa == u.who) || has_preq(g, u.who, etype::kForeignTrade))) return fail();
-		if (!city_get_empty_trade_routes(g, pa, ca, pb, cb) || !city_get_empty_trade_routes(g, pb, cb, pa, ca)) return fail();
-		// Nearer B: swap the local ends but not ox / oxx (quirk kept).
-		int32_t la = ca, lpa = pa, lb = cb, lpb = pb;
-		if (vector_dist(iabs(u.x - B->x), iabs(u.y - B->y)) < vector_dist(iabs(u.x - A->x), iabs(u.y - A->y))) {
-			std::swap(la, lb);
-			std::swap(lpa, lpb);
+		if (!((b_pl == u.who && a_pl == u.who) || has_preq(g, u.who, etype::kForeignTrade))) return fail();
+		if (!city_get_empty_trade_routes(g, a_pl, a_city, b_pl, b_city) || !city_get_empty_trade_routes(g, b_pl, b_city, a_pl, a_city))
+			return fail();
+		// Nearer B: swap the local ends but not ox / oxx (quirk kept); the distances are to the cities' x / y.
+		const City& cA = g.cities[size_t(a_pl)][size_t(a_city)];
+		const City& cB = g.cities[size_t(b_pl)][size_t(b_city)];
+		const int32_t dA = vector_dist(iabs(cA.x - u.x), iabs(cA.y - u.y));
+		const int32_t dB = vector_dist(iabs(cB.x - u.x), iabs(cB.y - u.y));
+		if (dB < dA) {  // asm @5edaf7: dist(unit, B) < dist(unit, A)
+			std::swap(a_city, b_city);
+			std::swap(a_pl, b_pl);
 		}
-		g.cities[size_t(lpa)][size_t(la)].vans.push_back({u.cara, int16_t(u.who)});
-		g.cities[size_t(lpb)][size_t(lb)].vans.push_back({u.cara, int16_t(u.who)});
-		CaravanRec& r = g.caravans[size_t(u.who)][size_t(u.cara)];
-		r.city2 = int16_t(la);
-		r.whom = int16_t(lpa);
-		r.city3 = int16_t(lb);
-		r.whose = int16_t(lpb);
-		r.caravan_flags |= 3;
+		g.cities[size_t(a_pl)][size_t(a_city)].vans.push_back({u.cara, int16_t(u.who)});
+		g.cities[size_t(b_pl)][size_t(b_city)].vans.push_back({u.cara, int16_t(u.who)});
+		rec.city2 = int16_t(a_city);
+		rec.whom = int16_t(a_pl);
+		rec.city3 = int16_t(b_city);
+		rec.whose = int16_t(b_pl);
+		rec.caravan_flags |= 3;
 		ord.started = 1;
-		city_compute_trade(g, lpa, la);
-		city_compute_trade(g, lpb, lb);
-		// Caravan::build_road: TODO(trade) -> treated as "still searching" (< 0): walk toward A.
-		const City& ac = g.cities[size_t(lpa)][size_t(la)];
-		add_move_order(g, u, ac.x, ac.y, 1, false, kQueueFirst, false, -1, -1);
-		return 0;
+		city_compute_trade(g, a_pl, a_city);
+		city_compute_trade(g, b_pl, b_city);
+		if (caravan_build_road(g, rec) < 0) {
+			const City& ac = g.cities[size_t(a_pl)][size_t(a_city)];
+			add_move_order(g, u, ac.x, ac.y, 1, false, kQueueFirst, false, -1, -1);
+			return 0;
+		}
 	}
-	int32_t target_o = a_o, target_who = pa;
+	// LAB_005edd56: the arrival tests. a_* / b_* are the (possibly swapped) route ends; the objects are those of the order.
+	int32_t target_o = a_o, target_who = a_pl, R = 0;
 	if (ord.loaded) {
-		const int32_t R = std::max(A->ptype->x_size, A->ptype->y_size) * 0x60;
-		if (iabs(u.x - A->x) <= R + 0x306 && iabs(u.y - A->y) <= R + 0x306) {
-			ord.loaded = 0;
-			u.unit_masks |= 0x200;
-			if (!(u.unit_masks & umask::kDecoy)) {
-				g.caravans[size_t(u.who)][size_t(u.cara)].caravan_flags |= 4;
-				city_compute_trade(g, pa, ca);
-				city_compute_trade(g, pb, cb);
-				city_new_caravan(g, pa, ca, pb, cb);
+		const Object* t = g.object(a_pl, a_o);
+		if (t && t->ptype) {
+			R = std::max(t->ptype->x_size, t->ptype->y_size) * 0x60;
+			if (iabs(u.x - t->x) <= R + 0x306 && iabs(u.y - t->y) <= R + 0x306) {
+				ord.loaded = 0;
+				u.unit_masks |= 0x200;
+				if (!(u.unit_masks & umask::kDecoy)) {
+					rec.caravan_flags |= 4;
+					city_compute_trade(g, a_pl, a_city);
+					city_compute_trade(g, b_pl, b_city);
+					city_new_caravan(g, a_pl, a_city, b_pl, b_city);
+				}
 			}
 		}
 		target_o = b_o;
-		target_who = pb;
+		target_who = b_pl;
 	} else {
-		const int32_t R = std::max(B->ptype->x_size, B->ptype->y_size) * 0x60;
-		if (iabs(u.x - B->x) <= R + 0x306 && iabs(u.y - B->y) <= R + 0x306) {
+		const Object* t = g.object(b_pl, b_o);
+		// B must be an active trade building, or the route ends
+		if (!t || !t->ptype || t->is_unit || !(t->flags & objflag::kActive) || !type_is(*t->ptype, ptype::kVillage)) return fail();
+		R = std::max(t->ptype->x_size, t->ptype->y_size) * 0x60;
+		if (iabs(u.x - t->x) <= R + 0x306 && iabs(u.y - t->y) <= R + 0x306) {
 			ord.loaded = 1;
-			if (!(u.unit_masks & umask::kDecoy)) city_new_caravan(g, pb, cb, pa, ca);
+			if (!(u.unit_masks & umask::kDecoy)) {
+				const Build* tbld = g.build(b_pl, b_o);
+				if (tbld && tbld->city >= 0) city_new_caravan(g, b_pl, tbld->city, a_pl, a_city);
+			}
 		}
 	}
-	const Build* T = g.build(target_who, target_o);
+	// LAB_005ee01a: the movement. With a road: the end that is farther from the unit becomes the destination.
+	if (!rec.road.empty()) {
+		if (vector_dist(iabs(rec.road.front().x - u.x), iabs(rec.road.front().y - u.y)) <
+		    vector_dist(iabs(rec.road.back().x - u.x), iabs(rec.road.back().y - u.y)))
+			std::reverse(rec.road.begin(), rec.road.end());  // Stack::invert
+		u.path = rec.road;                                   // Stack::operator=
+		u.path_size = std::max(u.path_size, rec.road_size);
+		if (u.path.size() > 1) {
+			// the lane: every step within 192 of the previous one is nudged sideways (by the previous, unshifted, point)
+			int32_t py = u.path[0].y, px = u.path[0].x;
+			for (size_t i = 1; i < u.path.size(); i++) {
+				const int32_t cy = u.path[i].y, cx = u.path[i].x;
+				const int32_t dy = cy - py, dx = cx - px;
+				if (iabs(dy) < 0xc1 && iabs(dx) < 0xc1) {
+					u.path[i].x += dy / 3;
+					const int32_t hi = int32_t((int64_t(dx) * 0x55555555) >> 32) - dx;
+					u.path[i].y += (hi >> 1) - (hi >> 31);
+				}
+				px = cx;
+				py = cy;
+			}
+		}
+		const PathData popped = u.path.back();
+		u.path.pop_back();
+		const PathData& dest = u.path.empty() ? popped : u.path.front();  // (Stack::pop leaves the element in place: list[0] after the pop)
+		add_move_order(g, u, dest.x, dest.y, 1, true, kQueueFirst, false, -1, -1);
+		if (!u.path.empty()) {
+			const PathData& top = u.path.back();
+			const int32_t r_u = g.world.get_tregion(tcoord_of(u.x), tcoord_of(u.y));
+			const int32_t r_t = g.world.get_tregion(top.x / 192, top.y / 192);
+			if (r_u != r_t) u.path.back().flags |= 4;  // pop + push with the region-change flag
+		}
+		std::reverse(rec.road.begin(), rec.road.end());  // the stored road's orientation toggles on every use
+		return 0;
+	}
+	// no road: a spot near the building that was tested, and a move when it is close enough
+	const Object* T = g.object(target_who, target_o);
 	if (!T) return fail();
-	// (no road) a spot near the target building, and a move when it is close enough.
-	const int32_t R = std::max(T->ptype->x_size, T->ptype->y_size) * 0x60;
 	int32_t sx = T->x, sy = T->y;
 	find_nearby_spot(g, *u.ptype, T->x, T->y, &sx, &sy, R, R + 0xc0, 0, find_angle(u.x - T->x, u.y - T->y), kFilterNotMe,
 	                 u.o, u.who, 0, 0, -1, 0, -1);

@@ -1,0 +1,2 @@
+re/decomp/caravan_fix/asm_g.txt
+67e204-67e2e0

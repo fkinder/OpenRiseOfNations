@@ -17,6 +17,7 @@ struct PathNode {
 	int32_t length = 0, estimate = 0, value = 0, timeout = 0;
 	uint32_t metric = 0;  // cell index (the BRTree keys are unsigned)
 	uint8_t transport = 0, building = 0;
+	int16_t z_val = 0;  // PathNode::z_val (short): the road searches' terrain height (fits the padding before `parent`)
 	PathNode* parent = nullptr;
 };
 

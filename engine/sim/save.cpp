@@ -25,6 +25,10 @@
 namespace ron::sim {
 namespace save {
 
+// A suspended road search (CaravanRec::trees), walked by hand below.
+template <class Ar>
+void walk_search_ptr(Ar& ar, std::shared_ptr<SavedSearch>& p);
+
 // The member lists of the plain structs (generated, see the header of the file).
 #include "sim/save_walk.inc"
 
@@ -81,7 +85,7 @@ void walk_search(Ar& ar, SavedSearch& s) {
 		}
 	};
 	for (PathNode& n : s.nodes) {
-		fields(ar, n.x, n.y, n.length, n.estimate, n.value, n.timeout, n.metric, n.transport, n.building);
+		fields(ar, n.x, n.y, n.length, n.estimate, n.value, n.timeout, n.metric, n.transport, n.building, n.z_val);
 		node_ref(n.parent);
 	}
 	// open: Tree keyed by (value, -sequence)
@@ -136,6 +140,18 @@ void walk_search_ptr(Ar& ar, SearchPtr& p) {
 		return;
 	}
 	if constexpr (Ar::kReading) p.reset(new SavedSearch());
+	walk_search(ar, *p);
+}
+
+template <class Ar>
+void walk_search_ptr(Ar& ar, std::shared_ptr<SavedSearch>& p) {
+	bool has = static_cast<bool>(p);
+	io(ar, has);
+	if (!has) {
+		if constexpr (Ar::kReading) p.reset();
+		return;
+	}
+	if constexpr (Ar::kReading) p = std::make_shared<SavedSearch>();
 	walk_search(ar, *p);
 }
 

@@ -9,6 +9,7 @@
 #include "sim/fog.hpp"
 #include "sim/game.hpp"
 #include "sim/guys.hpp"
+#include "sim/pathfinder.hpp"
 #include "sim/pathfinder_search.hpp"
 #include "sim/placement.hpp"
 #include "sim/trig.hpp"
@@ -129,7 +130,13 @@ int32_t calc_road_cost(Game& g, const PathFinder& pf, RoadNode& N, int32_t px, i
 
 }  // namespace
 
-int32_t find_road(Game& g, std::vector<PathData>& stack, int32_t src_o, int32_t src_pl, int32_t dst_o, int32_t dst_pl) {
+namespace {
+
+// PathFinder::find_road @688a40 and astar_caravan_road @685990. `rec` null: a building road (4-connected, one 3200-expansion
+// budget that fails); a caravan's record: 8-connected, the search is suspended in the record when the budget is spent and
+// `restore` (find_road_restore @685950) resumes it. `stack` is the caravan's road (empty on entry) or the building's.
+int32_t find_road_core(Game& g, std::vector<PathData>& stack, int32_t src_o, int32_t src_pl, int32_t dst_o, int32_t dst_pl,
+                       CaravanRec* rec, bool restore) {
 	PathFinder& pf = g.pathfinder;
 	World& w = g.world;
 	const Object* so = g.object(src_pl, src_o);
@@ -152,55 +159,72 @@ int32_t find_road(Game& g, std::vector<PathData>& stack, int32_t src_o, int32_t 
 	int32_t sx, sy, gx, gy;
 	end_tile(*so, &sx, &sy);
 	end_tile(*dobj, &gx, &gy);
-	// (resuming searches are the caravans'; a building road always starts fresh)
-	if (gx < 0 || gy < 0 || gx >= w.tile_xs || gy >= w.tile_ys || sx < 0 || sy < 0 || sx >= w.tile_xs || sy >= w.tile_ys || (sx == gx && sy == gy)) {
+	if (!restore &&
+	    (gx < 0 || gy < 0 || gx >= w.tile_xs || gy >= w.tile_ys || sx < 0 || sy < 0 || sx >= w.tile_xs || sy >= w.tile_ys || (sx == gx && sy == gy))) {
 		stack.clear();
 		return -1;
 	}
 	pf.avoid_land = 0;
 	pf.avoid_sea = w.w(sx >> 2, sy >> 2).region == w.w(gx >> 2, gy >> 2).region ? 1 : 0;
-	pf.can_transport = 0;  // no unit
+	const Unit* cu = rec ? g.unit(rec->who, rec->o) : nullptr;
+	pf.can_transport = (rec && cu && unit_can_transport(*cu)) ? 1 : 0;
 	pf.saving = 0;
 
-	// ---- astar_caravan_road @685990 with cara < 0: 4-connected, 3200 expansions
-	const int32_t S_x = sx * kTile + 0x60, S_y = sy * kTile + 0x60, G_x = gx * kTile + 0x60, G_y = gy * kTile + 0x60;
+	// ---- astar_caravan_road
+	int32_t S_x = sx * kTile + 0x60, S_y = sy * kTile + 0x60, G_x = gx * kTile + 0x60, G_y = gy * kTile + 0x60;
 	const Ends e{src_o, src_pl, dst_o, dst_pl};
-	SavedSearch L;
-	std::map<const PathNode*, int16_t> zval;  // PathNode.z_val (the search node type carries no height)
-
-	PathNode s;
-	s.x = S_x;
-	s.y = S_y;
-	s.metric = uint32_t(w.tile_xs * (S_y / kTile) + (S_x / kTile));
-	s.length = 0;
-	s.timeout = 1;
-	s.estimate = s.value = (vector_dist(std::abs(S_x - G_x), std::abs(S_y - G_y)) * 0x3c) / 0xc0;
-	{
-		PathNode* p = L.new_node(s);
-		zval[p] = int16_t(find_tcoord_z(g, S_x / kTile, S_y / kTile, 0));
-		L.insert_open(p);
-	}
+	const bool resume = rec && rec->making_road != 0 && rec->trees;
+	std::shared_ptr<SavedSearch> sp;
 	int32_t dir0;
-	{
+	if (!resume) {
+		sp = std::make_shared<SavedSearch>();
+		PathNode s;
+		s.x = S_x;
+		s.y = S_y;
+		s.metric = uint32_t(w.tile_xs * (S_y / kTile) + (S_x / kTile));
+		s.length = 0;
+		s.timeout = 1;
+		s.estimate = s.value = (vector_dist(std::abs(S_x - G_x), std::abs(S_y - G_y)) * 0x3c) / 0xc0;
+		s.z_val = int16_t(find_tcoord_z(g, S_x / kTile, S_y / kTile, 0));
+		sp->insert_open(sp->new_node(s));
 		const int32_t adx = std::abs(S_x - G_x), ady = std::abs(S_y - G_y);
 		if (ady < adx) dir0 = (G_x < S_x ? 1 : 0) * 4 + 3;
 		else dir0 = G_y < S_y ? 1 : 5;
+		if (rec) rec->making_road = 0;
+	} else {
+		sp = std::move(rec->trees);
+		rec->trees.reset();
+		dir0 = rec->search_dir0;
+		G_x = rec->search_gx;
+		G_y = rec->search_gy;
+		rec->making_road = 0;
 	}
+	SavedSearch& L = *sp;
 	int32_t count = 0;
 	PathNode* goal = nullptr;
+	bool sliced = false;
 	while (true) {
 		if (L.open.empty()) break;
 		PathNode* P = L.first_open_node();
 		if (std::abs(P->x - G_x) + std::abs(P->y - G_y) < 1) {
-			if (count < 0xc80) goal = P;
+			if (count < 0xc80) {
+				goal = P;
+				break;
+			}
+			L.insert_open(P);
+			sliced = true;
 			break;
 		}
-		if (count > 0xc7f) break;  // slice: building roads fail
-		const int32_t pz = zval[P];
+		if (count > 0xc7f) {  // the budget is spent: a caravan suspends the search, a building road fails
+			L.insert_open(P);
+			sliced = true;
+			break;
+		}
+		const int32_t pz = P->z_val;
 		int32_t k = dir0 + 1;
 		for (int32_t it = 0; it < 8; it++, k++) {
 			const int32_t d = k < 9 ? k : k - 8;
-			if (d & 1) continue;  // orthoOnly
+			if (!rec && (d & 1)) continue;  // orthoOnly
 			PathNode N;
 			N.x = move_x[d] * kTile + P->x;
 			N.y = move_y[d] * kTile + P->y;
@@ -220,21 +244,36 @@ int32_t find_road(Game& g, std::vector<PathData>& stack, int32_t src_o, int32_t 
 				L.refs.erase(N.metric);
 			}
 			N.parent = P;
-			N.estimate = (vector_dist(std::abs(N.x - G_x), std::abs(N.y - G_y)) * 0x3c) / 0x180;
+			if (!rec) {
+				N.estimate = (vector_dist(std::abs(N.x - G_x), std::abs(N.y - G_y)) * 0x3c) / 0x180;
+			} else {
+				// asm @685fd9: vector_dist(N.x - gx, -gy) with no abs (an original quirk), * 40 / 16 truncating toward zero
+				const int32_t v = vector_dist(N.x - G_x, -G_y) * 40;
+				N.estimate = (v + ((v >> 31) & 0xf)) >> 4;
+			}
 			N.value = N.estimate + N.length;
 			N.timeout = P->timeout + 1;
-			PathNode* np = L.new_node(N);
-			zval[np] = nr.z;
-			L.insert_open(np);
+			N.z_val = nr.z;
+			L.insert_open(L.new_node(N));
 		}
 		L.closed[P->metric] = P;
 	}
-	if (!goal) {
+	kill_lists(pf);  // find_road @688a40 empties the pathfinder's own trees after every search
+	if (sliced && rec) {
+		rec->making_road = 1;
+		rec->trees = sp;
+		rec->search_dir0 = dir0;
+		rec->search_gx = G_x;
+		rec->search_gy = G_y;
+		rec->search_count = count;
+		return -1;
+	}
+	if (sliced) {
 		stack.clear();
 		return -1;
 	}
+	if (!goal) return int32_t(stack.size());  // the open list ran dry: astar returns 0, find_road the (empty) stack's length
 	// emission: from the goal's parent toward the start, excluding the start; tiles that are already BLOCKED are skipped
-	stack.clear();
 	PathNode* n = goal->parent;
 	if (n && n->parent) {
 		do {
@@ -251,6 +290,27 @@ int32_t find_road(Game& g, std::vector<PathData>& stack, int32_t src_o, int32_t 
 		} while (n->parent);
 	}
 	return int32_t(stack.size());
+}
+
+}  // namespace
+
+int32_t find_road(Game& g, std::vector<PathData>& stack, int32_t src_o, int32_t src_pl, int32_t dst_o, int32_t dst_pl) {
+	stack.clear();
+	return find_road_core(g, stack, src_o, src_pl, dst_o, dst_pl, nullptr, false);
+}
+
+int32_t find_road_caravan(Game& g, CaravanRec& rec, int32_t src_o, int32_t src_pl, int32_t dst_o, int32_t dst_pl, bool restore) {
+	std::vector<PathData> tmp;
+	tmp.swap(rec.road);  // (cleared by Caravan::clear_road before the search)
+	tmp.clear();
+	const int32_t r = find_road_core(g, tmp, src_o, src_pl, dst_o, dst_pl, &rec, restore);
+	// the emission pushes one node per Stack::push: replay the allocation growth (increase_size(-1) doubles, 0 -> 1)
+	rec.road.clear();
+	for (const PathData& pd : tmp) {
+		if (rec.road_size <= int32_t(rec.road.size())) rec.road_size += rec.road_size != 0 ? rec.road_size : 1;
+		rec.road.push_back(pd);
+	}
+	return r;
 }
 
 void place_roads_regen(Game& g, Build& b, bool add, Regen regen) {

@@ -1,0 +1,2 @@
+re/decomp/caravan_fix/asm_f.txt
+73e0c0-73e1f0

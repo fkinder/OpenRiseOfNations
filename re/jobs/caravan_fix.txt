@@ -1,0 +1,14 @@
+re/decomp/caravan_fix
+Caravan::.*
+Caravans::.*
+Unit::do_trade
+Unit::think_trade
+Unit::go_to_city
+Unit::think_caravan
+Unit::end_trade_route
+Leader::.*caravan.*
+City::.*trade.*
+City::new_caravan
+Build::do_bonus
+Unit::think_civilian_transport
+Unit::think_scout

@@ -1,0 +1,8 @@
+re/decomp/caravan_fix
+PathFinder::find_road.*
+PathFinder::astar_caravan_road
+PathFinder::kill_lists
+Caravan::clear_temp_road
+Stack<PathData>::.*
+Unit::work
+Unit::repath

@@ -281,6 +281,44 @@ const ClassMap& map_caravan() {
 		b.walks({"Caravan::walk_data"}).resolve([](Game& g, const Seg& s) { return caravan_of(g, s); });
 		b.f("city2", &CaravanRec::city2).f("whom", &CaravanRec::whom).f("city3", &CaravanRec::city3).f("whose", &CaravanRec::whose);
 		b.f("cara", &CaravanRec::cara).f("o", &CaravanRec::o).f("caravan_flags", &CaravanRec::caravan_flags).f("who", &CaravanRec::who);
+		b.f("making_road", &CaravanRec::making_road).f("reset_road", &CaravanRec::reset_road);
+		// road: Stack<PathData> at +0x10: raw [+4, +0xd) = i32 size (allocation), i32 length, u8 increment; the elements are Deref children.
+		b.raw(0x10 + 4, 9, "road",
+		      [](CaravanRec& r, const uint8_t* p) { r.road_size = int32_t(get_le(p, 4)); },  // the elements are loaded one by one from the children
+		      [](const CaravanRec& r, uint8_t* p) {
+			      int32_t size = r.road_size;
+			      const int32_t len = int32_t(r.road.size());
+			      while (size < len) size += size != 0 ? size : 1;  // increment -1: increase_size doubles (0 -> 1)
+			      scalar_emit(size, p, 4);
+			      scalar_emit(len, p + 4, 4);
+			      p[8] = 0xff;
+		      });
+		const dw::Description& d = dw::Description::get();
+		static const int step_road = d.find_step(d.find_function("Stack<PathData>::walk_data"), dw::StepKind::Deref);
+		b.children([](const Game&, const Seg& s, int step, int64_t base, int64_t index, ChildSpec& c) {
+			if (step != step_road || base != 0x10) return false;
+			c.map = &map_caravan_road();
+			c.id = Seg{s.a, s.b, int32_t(index)};
+			return true;
+		});
+		m.finish();
+		return m;
+	}();
+	return m;
+}
+const ClassMap& map_caravan_road() {
+	static const ClassMap m = [] {
+		ClassMap m;
+		Builder<PathData> b(m, "PathData", "PathData");
+		b.walks({"Stack<PathData>::walk_data"}).resolve([](Game& g, const Seg& s) -> PathData* {
+			auto& v = g.caravans[size_t(s.a & 7)];
+			if (size_t(s.b) >= v.size()) return nullptr;
+			return size_t(s.c) < v[size_t(s.b)].road.size() ? &v[size_t(s.b)].road[size_t(s.c)] : nullptr;
+		});
+		b.c("to_x", [](PathData& p, const uint8_t* q) { scalar_load(p.x, q, 4, true); }, [](const PathData& p, uint8_t* q) { scalar_emit(p.x, q, 4); });
+		b.c("to_y", [](PathData& p, const uint8_t* q) { scalar_load(p.y, q, 4, true); }, [](const PathData& p, uint8_t* q) { scalar_emit(p.y, q, 4); });
+		b.c("tolerance", [](PathData& p, const uint8_t* q) { scalar_load(p.tol, q, 4, true); }, [](const PathData& p, uint8_t* q) { scalar_emit(p.tol, q, 4); });
+		b.c("flags", [](PathData& p, const uint8_t* q) { scalar_load(p.flags, q, 4, false); }, [](const PathData& p, uint8_t* q) { scalar_emit(p.flags, q, 4); });
 		m.finish();
 		return m;
 	}();

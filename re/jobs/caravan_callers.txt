@@ -1,0 +1,10 @@
+re/decomp/caravan_fix/callers.txt
+1
+^Caravan::process$
+^Caravan::build_road$
+^Caravan::verify_road$
+^Caravans::new_danger$
+^Caravan::restart_trade_route$
+^Caravan::clear_road$
+^Caravan::clear_temp_road$
+^Caravan::init$

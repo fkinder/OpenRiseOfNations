@@ -307,7 +307,8 @@ void work(Game& g, Unit& u) {
 			if (!cur || !(cur->flags & orderflag::kExplicit)) return;
 		}
 	}
-	// TODO(orders-spec 5): caravans (is_caravan, trade routes).
+	// The caravan part of Unit::work: a trade route lives only while its TRADE_ROUTE order is the action; the road search runs a slice.
+	caravan_work(g, u);
 	if (order_is_move(type)) {
 		if (type == kMoveTo && (u.unit_masks & umask::kMultimove)) {
 			// Re-issue the front move as EXPLORE_TO in front.

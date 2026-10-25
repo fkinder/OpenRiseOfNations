@@ -936,8 +936,13 @@ uint64_t digest(const Game& g) {
 				for (int32_t t : c.traded_with) f.add(t);
 				f.add(uint32_t(c.vans.size()));
 			}
-			for (const CaravanRec& r : g.caravans[size_t(who)])
+			for (const CaravanRec& r : g.caravans[size_t(who)]) {
 				f.add(int32_t(r.city2)), f.add(int32_t(r.city3)), f.add(uint32_t(r.caravan_flags)), f.add(int32_t(r.o));
+				// the route's road and its suspended search (economy-spec 6.4)
+				f.add(uint32_t(r.road.size())), f.add(int32_t(r.road_size)), f.add(int32_t(r.making_road)), f.add(int32_t(r.reset_road));
+				for (const PathData& pd : r.road) f.add(int32_t(pd.x)), f.add(int32_t(pd.y)), f.add(uint32_t(pd.flags));
+				if (r.trees) f.add(int32_t(r.search_dir0)), f.add(int32_t(r.search_gx)), f.add(int32_t(r.search_gy));
+			}
 		}
 	}
 	f.add(uint32_t(g.farms.size()));

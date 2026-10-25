@@ -18,6 +18,7 @@
 namespace ron::sim {
 
 class Game;
+struct CaravanRec;
 struct Group;
 struct Leader;
 
@@ -227,6 +228,15 @@ void add_trade_order(Game& g, Unit& u, int32_t ox, int32_t whom, int32_t oxx, in
 int32_t do_trade(Game& g, Unit& u, Order& o);     // Unit::do_trade @5ed270
 int32_t think_caravan(Game& g, Unit& u, bool force);  // Unit::think_caravan @5f5650
 void end_trade_route(Game& g, Unit& u);          // Unit::end_trade_route @5e3bd0
+void caravan_work(Game& g, Unit& u);             // the caravan part of Unit::work @60d180 (called from orders.cpp work)
+// Caravan roads (economy-spec 6.4): the record's road stack, its time-sliced search and the events that rebuild it.
+void caravan_clear_road(CaravanRec& r);          // Caravan::clear_road @73dfc0
+void caravan_clear_temp_road(CaravanRec& r);     // Caravan::clear_temp_road @73de80
+int32_t caravan_build_road(Game& g, CaravanRec& r);  // Caravan::build_road @73db10: 1 laid, 0 nothing to lay, -1 suspended / failed
+void caravan_verify_road(Game& g, CaravanRec& r);    // Caravan::verify_road @73d950 (from Unit::do_move: not wired, movement.cpp)
+void caravan_restart_trade_route(Game& g, CaravanRec& r);  // Caravan::restart_trade_route @73d070
+void caravans_new_danger(Game& g, int32_t x, int32_t y, int32_t pl);  // Caravans::new_danger @73e0c0 (from Object::take_damage: not wired)
+void caravans_reset_paths(Game& g);              // Caravans::reset_paths @73e060
 void group_action_trade(Game& g, Group& gr, int32_t ox, int32_t whom, int32_t oxx, int32_t whose, QueuePos q);
 
 // ---------------------------------------------------------------- views (sim/view.hpp)

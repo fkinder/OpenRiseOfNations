@@ -412,12 +412,21 @@ struct FarmRec {
 	std::array<std::array<uint8_t, 4>, 4> status{};  // [x][y] 0 bare, 1 growing, 2 ripe, 3 harvested
 };
 
-// A land caravan's route record (Caravan, 0x50; economy-spec 6.1). The road (Stack<PathData>) and the sliced road
-// search are TODO (caravans walk without roads; economy-spec 6.4).
+// A land caravan's route record (Caravan, 0x50; economy-spec 6.1, 6.4): the route's two cities, its flags and the road the
+// caravan walks (Stack<PathData> +0x10, back() = top) with the time-sliced road search (+0x20 .. +0x40, not walked by the
+// original's saves: only `making_road`, `reset_road` and the road are).
+struct SavedSearch;
 struct CaravanRec {
 	int16_t city2 = -1, whom = -1, city3 = -1, whose = -1, cara = -1, o = -1;
 	uint8_t caravan_flags = 0;  // 1 in use, 2 route assigned, 4 a round trip completed
 	int8_t who = -1;
+	std::vector<PathData> road;  // +0x10 Stack<PathData>
+	int32_t road_size = 0;       // its allocation (Stack.size +0x14: 0, then 1, 2, 4 ... as pushes outgrow it, increment -1)
+	int32_t making_road = 0;     // +0x20: a road search is suspended in `trees`
+	int32_t reset_road = 0;      // +0x24: another caravan laid a road meanwhile; the suspended search starts over
+	std::shared_ptr<SavedSearch> trees;                      // +0x28 .. +0x30: the suspended search's open / closed trees
+	int32_t search_dir0 = 0, search_gx = 0, search_gy = 0;   // +0x34, +0x38, +0x3c: its first direction and goal
+	int32_t search_count = 0;                                // +0x40: expansions of the last slice (never read)
 };
 
 // Terrain heights for z (TerrainOut height grid, (4xs+1) x (4ys+1) floats).

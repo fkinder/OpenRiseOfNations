@@ -325,6 +325,7 @@ const ClassMap& map_wonders_lists();
 const ClassMap& map_supply();
 const ClassMap& map_supplies_lists();
 const ClassMap& map_caravan();
+const ClassMap& map_caravan_road();    // PathData (Caravan.road.list[i])
 const ClassMap& map_caravans_lists();
 const ClassMap& map_army();
 const ClassMap& map_armies_lists();

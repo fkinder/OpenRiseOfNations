@@ -13,11 +13,18 @@
 namespace ron::sim {
 
 class Game;
+struct CaravanRec;
 
 // PathFinder::find_road for a building road (unit = -1): path from building (src_o, src_pl) to (dst_o, dst_pl); the nodes (without the
 // start and the goal, without tiles already BLOCKED) are pushed onto `stack` from the goal side to the start side. Returns the stack
 // length, or -1 (no path within 3200 expansions, bad endpoints).
 int32_t find_road(Game& g, std::vector<PathData>& stack, int32_t src_o, int32_t src_pl, int32_t dst_o, int32_t dst_pl);
+
+// PathFinder::find_road / find_road_restore for a caravan (unit >= 0; astar_caravan_road with cara >= 0): the road of the route from
+// building (src_o, src_pl) to (dst_o, dst_pl) is pushed onto rec.road (top = the node next to the source), with the sliced search
+// kept in `rec` (making_road). Returns the stack length, 0 when the open list ran dry, -1 for a bad endpoint or a suspended
+// search. `restore` resumes the search stored in rec.
+int32_t find_road_caravan(Game& g, CaravanRec& rec, int32_t src_o, int32_t src_pl, int32_t dst_o, int32_t dst_pl, bool restore);
 
 // The tail of BuildType::place_roads for building `b` (after the ring of set_road_at calls): `add` with REGEN_TOTAL marks the building
 // MAKE_ROAD (Build +0x60 |= 0x100, processed every 16 frames by Build::process); with REGEN_FORCE it paths a road to the city centre

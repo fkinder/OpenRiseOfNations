@@ -1,0 +1,4 @@
+re/decomp/caravan_fix
+Unit::do_move
+Caravans::close_caravan
+Object::take_damage

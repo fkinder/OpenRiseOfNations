@@ -1,0 +1,2 @@
+re/decomp/caravan_fix/asm_c.txt
+5eda9a-5edd60
