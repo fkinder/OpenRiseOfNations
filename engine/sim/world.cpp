@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "sim/roadgraph.hpp"
+
 namespace ron::sim {
 
 bool CollBlock::empty() {
@@ -37,6 +39,8 @@ void World::init(int32_t x, int32_t y) {
 	coll_blocks.clear();
 	free_coll_blocks.clear();
 	empty_colls = 0;
+	roads = RoadStore();
+	roads.slot.assign(size_t(size), -1);
 }
 
 // ---------------------------------------------------------------- predicates
@@ -131,15 +135,20 @@ void World::set_blocked_at(int32_t tx, int32_t ty, bool on) {
 	if (!on && has_blocked_neighbors(tx, ty)) set_bad_path(tx, ty, true);
 }
 
-void World::set_road_at(int32_t tx, int32_t ty, bool on) {
+void World::set_road_at(int32_t tx, int32_t ty, bool on, bool quiet) {
 	uint16_t& m = t(tx, ty);
 	const int32_t wx = tx >> 2, wy = ty >> 2;
 	if (on) {
+		const uint16_t before = m;
 		m = uint16_t((m & ~tmask::kWater) | tmask::kRoad);  // clears only bit 0x20: water and trees both become road
 		w(wx, wy).flags |= wflag::kRoad;
+		if ((before & tmask::kMedium) != tmask::kRoad && !quiet) roads_road_added(*this, tx, ty);  // Roads::road_added: the road graph
 		return;
 	}
-	if ((m & tmask::kMedium) == tmask::kRoad) m &= uint16_t(~tmask::kMedium);
+	if ((m & tmask::kMedium) == tmask::kRoad) {
+		m &= uint16_t(~tmask::kMedium);
+		if (!quiet) roads_road_cleared(*this, tx, ty);  // Roads::road_cleared (before the wcoord's ROAD flag is re-evaluated)
+	}
 	// WData ROAD goes when no tcoord of the wcoord is a road (x outer, y inner), even if this one was not.
 	for (int32_t x = wx * 4; x < wx * 4 + 4; x++) {
 		for (int32_t y = wy * 4; y < wy * 4 + 4; y++) {

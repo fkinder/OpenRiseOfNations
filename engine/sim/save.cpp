@@ -44,7 +44,8 @@ static_assert(sizeof(Regions) == 10248, "Regions changed: update the REGN sectio
 // 1647392 + 16 (+ 32: Game::herds with its padding): Game::original (the original-save shadow, sim/original_save.hpp) is derived state the native save never writes.
 // + 9192: Game::ctl (sim/control.hpp: TurnControl speed / pause, the control groups, cheat counters, chat lines) is console state no simulation code reads;
 // the original saves its hotkey groups, the native save does not (docs/sim-implementation.md, "Orders and commands, second pass").
-static_assert(sizeof(Game) == 1657592, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
+// + 120: World::roads (the road candidates and the Roads sweep cursor, sim/roadgraph.hpp), saved in the world section.
+static_assert(sizeof(Game) == 1657592 + 120, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
 // 1608 + 8 + 16 + 16: ScriptHost::ctw (the Conquer the World campaign the scripts run for, sim/ctw.hpp) is a run-time link, ctw_owned the loaded battle's
 // copy of that campaign and battle_token the campaign's liveness check of the battle; the native battle save writes the campaign as its own section (CTWB), not through the script walk.
 // + 24: ScriptHost::tileset (get_tileset), derived from the scenario by script_host_load on every load, not saved (docs/save-format.md 4).
@@ -236,7 +237,7 @@ void walk_world(Ar& ar, World& w) {
 		}
 	}
 	fields(ar, w.sea_map, w.wdata, w.tdata, w.seen, w.seen2, w.seen3, w.wcoord_seen, w.danger, w.coll_blocks,
-	       w.free_coll_blocks, w.empty_colls);
+	       w.free_coll_blocks, w.empty_colls, w.roads.slot, w.roads.words, w.roads.free_slots, w.roads.scan_x, w.roads.scan_y, w.roads.scan_road);
 	if constexpr (Ar::kReading) {
 		if (w.wdata.size() != size_t(w.size) || w.tdata.size() != size_t(w.tile_size) || w.seen.size() != size_t(w.fog_size) ||
 		    w.seen2.size() != size_t(w.fog_size) || w.seen3.size() != size_t(w.fog_size) ||
@@ -245,6 +246,9 @@ void walk_world(Ar& ar, World& w) {
 		for (const WData& d : w.wdata) {
 			if (d.block >= int32_t(w.coll_blocks.size())) ar.error("a collision block index is out of range");
 		}
+		if (w.roads.slot.size() != size_t(w.size) || w.roads.words.size() % size_t(RoadStore::kWords) != 0) ar.error("the road store has the wrong size");
+		for (int32_t c : w.roads.slot)
+			if (c >= int32_t(w.roads.words.size() / size_t(RoadStore::kWords))) ar.error("a road cell index is out of range");
 		w.fog_changes++;  // renderers watching the fog grids refresh
 	}
 }

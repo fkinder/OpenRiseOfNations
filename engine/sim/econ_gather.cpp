@@ -241,7 +241,9 @@ void add_gather_order(Game& g, Unit& u, int32_t ox, QueuePos q, bool expl) {
 	o.uid = b ? b->uid : 0xffff;
 	o.build_type = b ? b->type : -1;
 	o.g_tx = o.g_ty = -1;
-	o.goto_build = 0;
+	// The order comes from OrdersMemManager::get_obj, whose clear() (GatherOrder::clear @487340) leaves goto_build = 1,
+	// wait = 0, been_there = 0 (the original does not touch them; only non_flat / dist_mod @+0x25 are zeroed here).
+	o.goto_build = 1;
 	o.non_flat = 0;
 	if (b && is_gather_type(*b->ptype)) {
 		build_add_gatherer(g, *b, u.o, u.who);

@@ -112,20 +112,44 @@ std::vector<const Unit*> find_units_friendly(const Game& g, int32_t x, int32_t y
 	return out;
 }
 
-// Objects::find_builds(x, y, SEARCH_FRIENDLY, who, radius, 0x200, FILTER_CONSTRUCT, 0, _, 0) @65a120.
-// TODO(spec 4.7): find_builds is not decoded; taken as find_units' dense mode over the leader's buildings (slot
-// order, distance from the centre) with FILTER_CONSTRUCT = an unfinished site, same tregion.
+// Objects::find_builds(x, y, SEARCH_FRIENDLY, who, radius, 0x200, FILTER_CONSTRUCT, 0, _, 0) @65a120. The 0x200 flag restricts to
+// the centre wcoord's WData.region (not the tregion). Cell mode (radius >= 0, circle index <= num_def_builds = 200): the circle's
+// wcoords in table order, each cell's down-chain, no distance test. Dense mode: the leader's buildings in slot order, within
+// vector_dist of the centre. FILTER_CONSTRUCT is taken as an unfinished (not active) own site.
 std::vector<Build*> find_builds_construct(Game& g, int32_t x, int32_t y, int32_t who, int32_t radius) {
 	std::vector<Build*> out;
 	const World& w = g.world;
-	const int32_t tx = tcoord_of(x), ty = tcoord_of(y);
-	const int32_t reg = w.in_t(tx, ty) ? w.get_tregion(tx, ty) : -1;
+	const int32_t wx = wcoord_of(x), wy = wcoord_of(y);
+	const int32_t reg = w.in_w(wx, wy) ? w.w(wx, wy).region : -1;
+	auto ok = [&](Build* b) { return b && b->alive() && !(b->flags & objflag::kActive); };
+	const Circles& C = circles();
+	const int32_t k = (radius + 0x2ff) / 0x300;
+	if (radius >= 0 && k <= 64 && C.radius[size_t(k)] <= 200) {
+		for (int32_t i = 0; i < C.radius[size_t(k)]; i++) {
+			const int32_t cx = wx + C.x[size_t(i)], cy = wy + C.y[size_t(i)];
+			if (!w.in_w(cx, cy)) continue;
+			const WData& d = w.w(cx, cy);
+			if (d.down < 0 || d.region != reg) continue;
+			int32_t co = d.down, cw = d.down_who;
+			while (co >= 0) {
+				const Object* ob = (cw >= 0 && cw < 8) ? g.object(cw, co) : nullptr;
+				const int32_t no = ob ? ob->down : -1, nw = ob ? ob->down_who : 0;
+				if (cw == who && co >= kBuildBase) {
+					Build* b = g.build(cw, co);
+					if (ok(b)) out.push_back(b);
+				}
+				co = no;
+				cw = nw;
+			}
+		}
+		return out;
+	}
 	for (int32_t o = kBuildBase; o < g.objects[size_t(who)].build_mark; o++) {
 		Build* b = g.build(who, o);
-		if (!b || !b->alive() || (b->flags & objflag::kActive)) continue;
-		const int32_t bx = tcoord_of(b->x), by = tcoord_of(b->y);
-		if (!w.in_t(bx, by) || w.get_tregion(bx, by) != reg) continue;
-		if (vector_dist(iabs(b->x - x), iabs(b->y - y)) <= radius) out.push_back(b);
+		if (!ok(b)) continue;
+		const int32_t bx = wcoord_of(b->x), by = wcoord_of(b->y);
+		if (!w.in_w(bx, by) || w.w(bx, by).region != reg) continue;
+		if (radius < 0 || vector_dist(iabs(b->x - x), iabs(b->y - y)) <= radius) out.push_back(b);
 	}
 	return out;
 }

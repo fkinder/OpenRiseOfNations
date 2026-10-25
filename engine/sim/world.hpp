@@ -86,6 +86,20 @@ struct CollBlock {
 	bool empty();
 };
 
+// The road candidates of the original (CoordInfo.roads_in_wcoord + num_roads, saved by Terrain::walk_roads) and the Roads sweep cursor.
+// Slab storage so that the state is plain integers (saved natively, loaded from an original save): `slot[wcoord]` is the cell's index in
+// `words` or -1 (no roads_in_wcoord array); a cell is kWords words: [0] = num_roads, then 16 candidates of 4 words each:
+// { element_num, flags, rotation | unknown << 8 | ref_a << 16 | ref_b << 24, support_codes | unknown << 16 | is_terrain_creation << 24 }
+// (RoadElementCandidate, 16 bytes; sim/roadgraph.hpp). Freed cells are zeroed and reused LIFO.
+struct RoadStore {
+	static constexpr int32_t kWords = 65;
+	std::vector<int32_t> slot;
+	std::vector<uint32_t> words;
+	std::vector<int32_t> free_slots;
+	int32_t scan_x = 0, scan_y = 0;  // Roads +0x5fc / +0x600: the wcoord Roads::scan_and_kill_stray_roads processed last
+	std::array<int32_t, 9> scan_road{};  // Roads +0x604: the scan's "tile is a road" cache (an off-map neighbour leaves the previous value)
+};
+
 class World {
 public:
 	// World::init @006b76f0 (after World::close): sizes, default WData, zeroed TData, fog and danger.
@@ -157,8 +171,9 @@ public:
 	// ---- primitive writers (World::set_*). Keep every caller's loop order: the BAD_PATH result is order dependent.
 	void set_bad_path(int32_t tx, int32_t ty, bool on);   // @006b4610: bit + WData.bad
 	void set_blocked_at(int32_t tx, int32_t ty, bool on); // @006b4900
-	// @006b43b0. Roads::road_added / road_cleared (road graph) are not part of the grid; `quiet` callers skip them.
-	void set_road_at(int32_t tx, int32_t ty, bool on);
+	// @006b43b0. `quiet` (param_5) skips Roads::road_added / road_cleared, the road graph (sim/roadgraph.hpp): only the Roads code itself
+	// passes it, after doing its own bookkeeping.
+	void set_road_at(int32_t tx, int32_t ty, bool on, bool quiet = false);
 	void set_tree_at(int32_t tx, int32_t ty, bool on);    // @006b2060 (blocking is separate)
 	void set_mountain_at(int32_t tx, int32_t ty, bool on);  // @006b1f00
 	void set_cliff_at(int32_t tx, int32_t ty, bool on);     // @006b1eb0
@@ -176,6 +191,7 @@ public:
 	std::vector<CollBlock> coll_blocks;   // pool; WData.block indexes it
 	std::vector<int32_t> free_coll_blocks;  // released pool slots (reused LIFO; slot identity is not observable)
 	int32_t empty_colls = 0;  // GameDaemon.empty_colls: process_coll_blocks cursor (saved with the GameDaemon)
+	RoadStore roads;          // the road candidates (sim/roadgraph.hpp)
 
 	// get_coll_block @006b5350: the wcoord's block, nullptr for none; `region` >= 0 and a different WData.region
 	// gives *mismatch = true (the original's (CollBlock*)-1).

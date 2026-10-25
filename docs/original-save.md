@@ -444,6 +444,12 @@ First differing boundary of `21'23'34`, before -> after: units 1,514 -> **1,622*
 3. **Missing state that mature saves need**: `Leader::process_event_frame` (the `*_current_frame` counters, the 15-second sums and the smoothed rates every 50 frames) is ported; the one-frame mismatch of every mature save (`units` / `guys` / `leaders` / `world` at the first row, even though nothing is
    in the first 50) has another cause, not found.
 
+### 6.10 Tenth pass (2026-10-25): road candidates, goto_build, find_builds
+
+- Road candidates are saved by `Terrain::walk_roads` as a top event per cell (value = y*xs+x) whose child `CoordInfo` record holds `num_roads` (byte 0x66) and a 256-byte record of 16 x 16-byte `RoadElementCandidate`; the engine loads them in `Loader::load_roads` into `World::roads`.
+- `GatherOrder::clear` sets `goto_build = 1`; `SimpleArray` capacity grows 4, 8, 16 ...
+- `Objects::find_builds` @65a120 compares `WData.region` and has a cell mode without distance test. See sim-implementation "tenth pass", items 43 - 47, for the effect on `21'23'34`.
+
 ## 7. What blocks exact checksums
 
 State of the fidelity work (2026-10-24; the log of each fix is in docs/sim-implementation.md "Fidelity log"). **Fixed** since the first table:

@@ -1919,7 +1919,7 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 							std::printf("   orders_xy %d,%d los %d,%d group %d supply %d hero %d collide %d/%d/%d o_up %d o_down %d gather_down %d good_obj %d cavarch %d/%d/%d damage_o %d damage_who %d form %d/%d full %d waiting %d recharging %d stance %d safe %d collide_who %d guy_mark %d play %d rare %d doober %d cara %d path %zu (size %d) orders %zu\n", u->orders_x, u->orders_y, u->los_x, u->los_y, u->group, u->supply, u->hero, u->collide, u->collide_o, u->collide_guy, u->o_up, u->o_down, u->gather_down, u->good_obj, u->cavarch_o, u->cavarch_who, u->cavarch_uid, u->damage_o, u->damage_who, u->form, u->form_mod, u->full, u->waiting, u->recharging, u->stance, u->safe, u->collide_who, u->guy_mark, u->play, u->rare, u->doober, u->cara, u->path.size(), u->path_size, u->orders.size());
 							std::printf("   myhits %d damage %d mylos %d myspeed %d myarmor %d healing %d near %d/%d visible %d targeted %d infiltrated %d dmgfrac %d mana_burn %d spell_time %d attrition %d num_queued %d collide_frame %d damage_frame %d announce %d air_alt %d\n", u->myhits, u->damage, u->mylos, u->myspeed, u->myarmor, u->healing, u->near_o, u->near_who, u->visible, u->targeted, u->infiltrated, u->damage_frac, u->mana_burn, u->spell_time, u->attrition, u->num_queued, u->collide_frame, u->damage_frame, u->announce_frame, u->air_alt);
 							for (const sim::PathData& pd : u->path) std::printf("   path (%d,%d t%d f%x)\n", pd.x, pd.y, pd.tol, pd.flags);
-							for (const sim::Order& od : u->orders) std::printf("   order type %d\n", int(od.type));
+							for (const sim::Order& od : u->orders) std::printf("   order type %d ox %d whom %d x %d y %d dest %d tol %d dest_xy %d,%d coll %d,%d pause %d attempts %d g %d,%d goto %d wait %d been %d dm %d flags %02x\n", int(od.type), od.ox, od.whom, od.x, od.y, od.dest, od.tolerance, od.dest_x, od.dest_y, od.coll_x, od.coll_y, od.pause, od.attempts, od.g_tx, od.g_ty, int(od.goto_build), od.wait, int(od.been_there), int(od.dist_mod), unsigned(od.flags));
 							for (const sim::Guy& gy : u->guys)
 								std::printf("   guy %d: anim %d stopped %d cur_time %u end_time %u last_time %d x %d y %d z %d spd %d/%d flags %04x gpiece %d des %d,%d des_angle %08x angle %08x last %d,%d,%d off %d,%d variation %d node %d/%d hold %d whom %d queued %d ox %d\n", gy.guy_num, gy.cur_anim, gy.stopped, gy.cur_time, gy.end_time, gy.last_time, gy.x, gy.y, gy.z, gy.last_speed, gy.avg_speed, gy.guy_flags, gy.gpiece, gy.des_x, gy.des_y, gy.des_angle, gy.angle, gy.last_x, gy.last_y, gy.last_z, gy.off_x, gy.off_y, gy.variation, gy.node_flags, gy.des_node_flags, gy.hold_attack, gy.whom, gy.queued_attack, gy.ox);
 						}
@@ -2449,6 +2449,41 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 							const int64_t M = 65521;
 							if (t1.bytes.size() != g_rb_snap.bytes.size()) {
 								std::printf("  revert-bytes: stream length changed (%zu -> %zu)\n", g_rb_snap.bytes.size(), t1.bytes.size());
+								{  // where: the common prefix and suffix of the two streams bound the inserted / removed region; label it by the new stream's ranges
+									const std::vector<uint8_t>& s0 = g_rb_snap.bytes;
+									const std::vector<uint8_t>& s1 = t1.bytes;
+									size_t pre = 0;
+									while (pre < s0.size() && pre < s1.size() && s0[pre] == s1[pre]) ++pre;
+									size_t suf = 0;
+									while (suf < s0.size() - pre && suf < s1.size() - pre && s0[s0.size() - 1 - suf] == s1[s1.size() - 1 - suf]) ++suf;
+									const dw::Description& dd = dw::Description::get();
+									{  // the first range whose step or length differs between the two walks (an array that grew / shrank)
+										size_t k = 0;
+										const auto& r0 = g_rb_snap.ranges;
+										const auto& r1 = t1.ranges;
+										while (k < r0.size() && k < r1.size() && r0[k].step == r1[k].step && r0[k].len == r1[k].len) ++k;
+										std::printf("    ranges: %zu old, %zu new; first difference at range %zu\n", r0.size(), r1.size(), k);
+										for (size_t q = k > 3 ? k - 3 : 0; q < k + 4; ++q) {
+											for (int side = 0; side < 2; ++side) {
+												const auto& rs = side ? r1 : r0;
+												const auto& bs = side ? s1 : s0;
+												if (q >= rs.size()) continue;
+												const int fnc = dd.step_function(rs[q].step);
+												std::printf("      %s range %zu %d/%d step %d (%s) len %zu:", side ? "new" : "old", q, rs[q].who, rs[q].o, rs[q].step, fnc >= 0 ? dd.function_name(fnc) : "?", rs[q].len);
+												for (size_t z = 0; z < rs[q].len && z < 24; ++z) std::printf(" %02x", bs[rs[q].begin + z]);
+												std::printf("\n");
+											}
+										}
+									}
+									std::printf("    common prefix %zu, common suffix %zu: new stream [%zu, %zu) differs from old [%zu, %zu)\n", pre, suf, pre, s1.size() - suf, pre, s0.size() - suf);
+									for (const auto& r : t1.ranges) {
+										if (r.begin + r.len <= pre || r.begin >= s1.size() - suf) continue;
+										const int fnc = dd.step_function(r.step);
+										std::printf("      new range %d/%d step %d (%s) at %zu len %zu:", r.who, r.o, r.step, fnc >= 0 ? dd.function_name(fnc) : "?", r.begin, r.len);
+										for (size_t q = 0; q < r.len && q < 24; ++q) std::printf(" %02x", s1[r.begin + q]);
+										std::printf("\n");
+									}
+								}
 							} else {
 								const int64_t N = int64_t(t1.bytes.size());
 								const uint32_t h1 = adler_of(t1.bytes), want = it->second[size_t(rp)];
@@ -2680,6 +2715,19 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 										if (sb.size() <= 1) for (size_t cj = ci + 1; cj < add.size() && cj < ci + 40; ++cj) { auto m = sb; m.push_back({add[ci], true}); m.push_back({add[cj], true}); test(m); }
 								}
 								std::printf("      block search done (%d hits, %zu subsets)\n", hits, subsets.size());
+							}
+						}
+						if (std::getenv("RON_STREAM_MAP")) {  // run-length map of the part's stream: consecutive ranges of one step merged (begin, total bytes, count)
+							const dw::Description& dd = dw::Description::get();
+							size_t i = 0;
+							while (i < tr.ranges.size()) {
+								size_t j = i, tot = 0;
+								while (j < tr.ranges.size() && tr.ranges[j].step == tr.ranges[i].step && tr.ranges[j].who == tr.ranges[i].who && tr.ranges[j].o == tr.ranges[i].o) tot += tr.ranges[j++].len;
+								if (tot >= 16 || j - i > 1 || tr.ranges.size() < 400) {
+									const int fnc = dd.step_function(tr.ranges[i].step);
+									std::printf("      map %s: begin %zu total %zu count %zu step %d (%s) who %d o %d\n", dw::kCheckPartNames[k], tr.ranges[i].begin, tot, j - i, tr.ranges[i].step, fnc >= 0 ? dd.function_name(fnc) : "?", tr.ranges[i].who, tr.ranges[i].o);
+								}
+								i = j;
 							}
 						}
 						if (const char* tl = std::getenv("RON_TAIL")) {  // the labelled ranges within the last N bytes of the part's stream
@@ -3052,6 +3100,15 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 					}
 				}
 			}
+			if (const char* td = std::getenv("RON_TILE_DUMP")) {  // RON_TILE_DUMP=F:x0:y0:x1:y1: the engine's tile masks (hex) in a tcoord window before frame F
+				int tf = 0, a0 = 0, b0 = 0, a1 = 0, b1 = 0;
+				if (std::sscanf(td, "%d:%d:%d:%d:%d", &tf, &a0, &b0, &a1, &b1) == 5 && f == tf)
+					for (int y = b0; y <= b1; ++y) {
+						std::printf("  TILES f%d y%3d:", int(f), y);
+						for (int x = a0; x <= a1; ++x) std::printf(" %04x", unsigned(game->world.t(x, y)));
+						std::printf("\n");
+					}
+			}
 			if (const char* gd = std::getenv("RON_DUMP_GAIA")) {  // RON_DUMP_GAIA=F0:F1 (+ RON_DUMP_GAIA_WHO, default 9): the gaia list's units before frames F0..F1
 				int f0 = 0, f1 = 0;
 				if (std::sscanf(gd, "%d:%d", &f0, &f1) == 2 && f >= f0 && f <= f1) {
@@ -3152,6 +3209,24 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 		int pens = 0, farms = 0; for (const auto& f : game->farms) if (f.valid) { ++farms; if (f.farm_type & 1) ++pens; }
 		std::printf("; farms %d pens %d\n", farms, pens);
 	}
+	if (std::getenv("RON_SEG_AUDIT") && game->original) {  // images that carry segments of more than one class over the same bytes (a stale segment of an earlier class: the provider bug of pass 9)
+		std::map<std::string, int> pairs;
+		int multi = 0;
+		for (const auto& kv : game->original->segs) {
+			const auto& sv = kv.second;
+			if (sv.size() < 2) continue;
+			++multi;
+			for (size_t i = 0; i < sv.size(); ++i)
+				for (size_t j = i + 1; j < sv.size(); ++j) {
+					if (sv[i].map == sv[j].map) continue;
+					const int64_t e1 = sv[i].len < 0 ? INT64_MAX : sv[i].base + sv[i].len, e2 = sv[j].len < 0 ? INT64_MAX : sv[j].base + sv[j].len;
+					if (std::max(sv[i].base, sv[j].base) >= std::min(e1, e2)) continue;
+					pairs[sv[i].map->name + " + " + sv[j].map->name]++;
+				}
+		}
+		std::printf("  segment audit: %d images with more than one segment; overlapping pairs of different classes:\n", multi);
+		for (const auto& pr : pairs) std::printf("    %-40s %d\n", pr.first.c_str(), pr.second);
+	}
 	std::printf("  simulated to frame %d (%lld turn boundaries compared, %lld with all 15 parts equal), %lld commands executed\n", game->frame, (long long)boundaries,
 		(long long)all_match, (long long)cmds_run);
 	if (!step_error.empty()) std::printf("  STOPPED: %s\n", step_error.c_str());
@@ -3226,6 +3301,47 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 			} else {
 				std::printf("  terrain heights: not comparable (%zu / %zu samples)\n", he.h.size(), ht.h.size());
 			}
+		}
+		{  // the road candidates (sim/roadgraph.hpp) against the next save's: cells with a different candidate, by member
+			const sim::RoadStore& re = game->world.roads;
+			const sim::RoadStore& rt = truth->world.roads;
+			int64_t cells = 0, diff_cells = 0, d_num = 0, d_arm = 0, d_line = 0, d_elem = 0, d_rot = 0, d_ref = 0, d_sup = 0, d_term = 0, only_e = 0, only_t = 0;
+			int shown = 0;
+			const size_t n = std::min(re.slot.size(), rt.slot.size());
+			for (size_t c = 0; c < n; ++c) {
+				const int32_t se = re.slot[c], st = rt.slot[c];
+				if (se >= 0 || st >= 0) ++cells;
+				if (se < 0 && st < 0) continue;
+				if (se < 0 || st < 0) {
+					(se < 0 ? only_t : only_e)++;
+					if (shown++ < 12) std::printf("  roads: wcoord (%zu,%zu) %s\n", c % size_t(game->world.xs), c / size_t(game->world.xs), se < 0 ? "only in the next save" : "only in the engine");
+					++diff_cells;
+					continue;
+				}
+				const uint32_t* a = &re.words[size_t(se) * sim::RoadStore::kWords];
+				const uint32_t* b = &rt.words[size_t(st) * sim::RoadStore::kWords];
+				bool dc = false;
+				if (a[0] != b[0]) { ++d_num; dc = true; }
+				for (int k = 0; k < 16; ++k) {
+					const uint32_t* x = a + 1 + 4 * k;
+					const uint32_t* y = b + 1 + 4 * k;
+					if (x[0] == y[0] && x[1] == y[1] && x[2] == y[2] && x[3] == y[3]) continue;
+					dc = true;
+					const bool ux = (x[2] & 0xff) == 10, uy = (y[2] & 0xff) == 10;
+					if (ux != uy || (!ux && (x[2] & 0xff) != (y[2] & 0xff) && ((x[2] & 0xff) == 9 || (y[2] & 0xff) == 9))) ++d_rot;
+					if ((x[1] & 0xff000000u) != (y[1] & 0xff000000u)) ++d_arm;
+					if ((x[1] & 0x00ffffffu) != (y[1] & 0x00ffffffu)) ++d_line;
+					if (x[0] != y[0]) ++d_elem;
+					if ((x[2] >> 16) != (y[2] >> 16)) ++d_ref;
+					if ((x[3] & 0xffff) != (y[3] & 0xffff)) ++d_sup;
+					if ((x[3] >> 24) != (y[3] >> 24)) ++d_term;
+					const bool essential = (x[1] & 0xff000000u) != (y[1] & 0xff000000u) || (x[2] >> 16) != (y[2] >> 16) || (x[3] & 0xffff) != (y[3] & 0xffff) || (x[3] >> 24) != (y[3] >> 24) || ux != uy;  // arms, references, support, terrain-creation, presence: what the simulation can see
+					if (essential && shown++ < (std::getenv("RON_ROADS_ALL") ? 40 : 12)) std::printf("  roads: wcoord (%zu,%zu) tile %d: engine %08x %08x %08x %08x  next %08x %08x %08x %08x\n", c % size_t(game->world.xs), c / size_t(game->world.xs), k, x[0], x[1], x[2], x[3], y[0], y[1], y[2], y[3]);
+				}
+				if (dc) ++diff_cells;
+			}
+			std::printf("  road candidates: %lld wcoords with candidates, %lld differ from the next save (only in the engine %lld, only in the save %lld; num %lld, rotation/presence %lld, arms %lld, line bits %lld, element %lld, refs %lld, support %lld, terrain-creation %lld records)\n",
+			            (long long)cells, (long long)diff_cells, (long long)only_e, (long long)only_t, (long long)d_num, (long long)d_rot, (long long)d_arm, (long long)d_line, (long long)d_elem, (long long)d_ref, (long long)d_sup, (long long)d_term);
 		}
 		if (const char* tw = std::getenv("RON_TILES_WINDOW")) {  // RON_TILES_WINDOW=x0:y0:x1:y1: tile masks (hex) of the next save (T) and the engine (E) in a tcoord window
 			int a0 = 0, b0 = 0, a1 = 0, b1 = 0;

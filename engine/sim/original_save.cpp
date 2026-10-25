@@ -285,6 +285,44 @@ struct Loader {
 	}
 	int container_step(const char* fn) { return d.find_step(d.find_function(fn), dw::StepKind::Container); }
 
+	// ---- the road candidates: Terrain::walk_roads, per wcoord (CoordInfo, index y * xs + x) num_roads and, when it is not 0, the 16
+	// RoadElementCandidate records (16 bytes each: element_num, flags, rotation, 1 unknown, ref_a, ref_b, support_codes, 1 unknown, is_terrain_creation)
+	void load_roads() {
+		const dw::Rec& terrain = global("terrain");
+		const int fn = d.find_function("Terrain::walk_roads");
+		RoadStore& rs = g.world.roads;
+		rs = RoadStore();
+		rs.slot.assign(size_t(g.world.size), -1);
+		int64_t cells = 0;
+		for (const dw::Event& e0 : terrain.ev) {
+			if (e0.type != 0 || !e0.child || d.step_function(e0.step) != fn) continue;
+			const int64_t index = e0.value;
+			if (index < 0 || index >= g.world.size) continue;
+			for (const dw::Event& e1 : e0.child->ev) {
+				if (e1.type != 0 || !e1.child || d.step_function(e1.step) != fn) continue;
+				const dw::Rec& info = *e1.child;
+				const int num = int(info.read_int(0x66, 1, false));
+				if (num == 0) continue;
+				const dw::Rec* arr = nullptr;
+				for (const dw::Event& e2 : info.ev)
+					if (e2.type == 0 && e2.child && d.step_function(e2.step) == fn) arr = e2.child;
+				if (!arr) continue;
+				const int32_t s = int32_t(rs.words.size() / RoadStore::kWords);
+				rs.words.resize(rs.words.size() + RoadStore::kWords);
+				uint32_t* c = &rs.words[size_t(s) * RoadStore::kWords];
+				c[0] = uint32_t(num);
+				for (int k = 0; k < 16; ++k) {
+					uint8_t b[16];
+					arr->read(int64_t(k) * 16, b, 16);
+					for (int w = 0; w < 4; ++w) c[1 + 4 * k + w] = uint32_t(b[4 * w] | b[4 * w + 1] << 8 | b[4 * w + 2] << 16 | uint32_t(b[4 * w + 3]) << 24);
+				}
+				rs.slot[size_t(index)] = s;
+				++cells;
+			}
+		}
+		note(std::to_string(cells) + " wcoords with road candidates");
+	}
+
 	// Binds every present element of `cd` to `map` (ids a, i) and loads the engine record through `at(i)`.
 	template <class At> void bind_elements(const dw::ContainerData& cd, const omap::ClassMap& map, int32_t a, At at) {
 		for (size_t i = 0; i < cd.elems.size(); ++i) {
@@ -746,6 +784,7 @@ struct Loader {
 		load_objects();
 		load_lists();
 		load_state();
+		load_roads();
 		if (skipped_slots) note(std::to_string(skipped_slots) + " object slots lie beyond their list's high mark (preallocated empty objects; shadow only)");
 	}
 };

@@ -119,7 +119,9 @@ bool EngineProvider::container(dw::Obj o, const dw::Site& site, dw::ContainerHea
 			// An Array family keeps its allocation: the capacity grows only when the length outgrows it.
 			if (a.spec.simple) {
 				if (old_len == 0 && hdr.size == 0) hdr.increment = -1;
-				while (hdr.size < hdr.length) hdr.size = hdr.size ? hdr.size * 2 : 10;
+				// SimpleArray<int>::increase_size @4220e0 with the default increment -1: 4 slots for the first element, then the size doubles
+				// (add() grows when size <= length, so n elements need the smallest 4 * 2^k >= n).
+				while (hdr.size < hdr.length) hdr.size = hdr.size ? hdr.size * 2 : 4;
 			} else if (old_len == 0) {
 				hdr.size = hdr.length;
 				hdr.increment = 1;
