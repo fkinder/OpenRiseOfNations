@@ -44,6 +44,8 @@
 #include "keymap.hpp"
 #include "options_ui.hpp"
 #include "prefs.hpp"
+#include "recplay.hpp"
+#include <ctime>
 #include "renderer.hpp"
 #include "sim/rules.hpp"
 #include "uistr.hpp"
@@ -71,20 +73,21 @@ struct MainItem {
 	const char* help;
 	bool enabled;
 };
-constexpr int kMainCount = 7;
+constexpr int kMainCount = 8;
 const MainItem kMainItems[kMainCount] = {
     {"Tutorials", "Learn to play, step by step. Start with Tutorial 1.", true},
     {"Skirmish", "Battle computer opponents on a ready-made map, or set up a random map.", true},
     {"Scenarios", "Chess exercises and the battle maps of the Conquer the World campaigns.", true},
     {"Conquer the World", "Lead a nation through a campaign: move armies on the world map, make deals, play the battles.", true},
     {"Multiplayer", "Play with friends on a local network: one player hosts a room, the others join it by address.", true},
+    {"Recorded Games", "Watch your recorded multiplayer games again: switch between the players, see the whole map or one player's view, pause and change the speed.", true},
     {"Options", "Game speed, scroll speed, sound volumes, the interface layout, the key map and the language.", true},
     {"Quit", "Leave Rise of Nations and return to the desktop.", true},
 };
 
-enum Screen { kMain = 0, kTutorials, kSkirmish, kScenarios, kSkirmishSetup, kCtw, kCtwMap, kMpConnect, kMpLobby, kOptions, kScreenCount };
-const char* const kScreenNames[kScreenCount] = {"main", "tutorials", "skirmish", "scenarios", "skirmish-setup", "ctw", "ctw-map", "multiplayer", "mp-lobby", "options"};
-const char* const kListTitles[kScreenCount] = {"Main Menu", "Tutorials", "Skirmish", "Scenarios", "Skirmish Setup", "Conquer the World", "Conquer the World", "Multiplayer", "Multiplayer Lobby", "Options"};
+enum Screen { kMain = 0, kTutorials, kSkirmish, kScenarios, kSkirmishSetup, kCtw, kCtwMap, kMpConnect, kMpLobby, kOptions, kRecorded, kScreenCount };
+const char* const kScreenNames[kScreenCount] = {"main", "tutorials", "skirmish", "scenarios", "skirmish-setup", "ctw", "ctw-map", "multiplayer", "mp-lobby", "options", "recorded"};
+const char* const kListTitles[kScreenCount] = {"Main Menu", "Tutorials", "Skirmish", "Scenarios", "Skirmish Setup", "Conquer the World", "Conquer the World", "Multiplayer", "Multiplayer Lobby", "Options", "Recorded Games"};
 const char* const kListNotes[kScreenCount] = {
     "",
     "Start with Tutorial 1. The tutorials guide you with voice-overs, arrows and objectives.",
@@ -97,6 +100,7 @@ const char* const kListNotes[kScreenCount] = {
     "",
     "",
     "",
+    "Your recorded multiplayer games. Choose one and press Watch: the game plays again from its recording, and you can change whose view you see.",
 };
 
 // Hit-test ids.
@@ -114,6 +118,7 @@ enum : int {
 	kTrack = 33,
 	kPopupBtn = 40,  // + button
 	kRow = 100,      // + entry
+	kRecOpen = 17,   // the Recorded Games list's Open File... button
 	kRandomMap = 14,  // the Skirmish list's Random Map… button
 	kSeedField = 15,  // the setup screen's seed field and its Random button
 	kSeedRandom = 16,
@@ -305,6 +310,10 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	// state
 	Screen _screen;
 	std::vector<launcher::Entry> _entries;
+	recplay::Scanner _recScan;                 // the Recorded Games list: files found at once, headers read on a thread
+	uint32_t _recSeen;
+	std::vector<recplay::Row> _recRows;
+	std::string _recDir;
 	int _sel, _top0;  // selected entry, first visible row
 	int _difficulty;
 	int _focus;       // main menu: keyboard focus (button index)
@@ -646,8 +655,13 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	_screen = s;
 	if (s != kOptions && _opts) _opts->close();
 	if (s != kMpConnect) _lan.close();
+	if (s != kRecorded) _recScan.stop();
 	_sel = 0, _top0 = 0, _focus = 0;
 	_entries.clear();
+	if (s == kRecorded) {
+		[self openRecorded];
+		return;
+	}
 	if (s == kCtw || s == kCtwMap) {
 		[self ctwOpen:s == kCtwMap];
 		return;
@@ -775,7 +789,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		}
 		L.frame = {wx + _btnRect.l - 41, wx + _btnRect.r + 41, L.title.t + _titleRect.h() - _titleRect.t + _titleRect.t, bottom + 41};
 		L.frame.t = wy + _titleRect.h();  // client top + title height (TopMenuSelection::on_redraw)
-		L.info = {44, 580, 452, 532};
+		L.info = {44, 580, 476, 556};
 		L.folder_y = 640;
 		L.label_x = 44;
 		L.change = {980 - 110, 980, 638, 666};
@@ -1004,6 +1018,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	const ron::FontMetrics* m14 = _ui.font_metrics(f14);
 	const int lh = m14 ? m14->line_height : 16;
 	int y = L.note_y;
+	if (_screen == kRecorded) [self refreshRecorded];
 	for (const std::string& line : wrap_text(_ui, f14, kListNotes[_screen], 800)) {
 		[self textAt:f14 text:line x:float((kW - _ui.text_width(f14, line)) / 2) y:float(y) color:kSecondary];
 		y += lh;
@@ -1016,7 +1031,15 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	_ui.border(_border, L.list_frame.offset(_ox, _oy));
 	_ui.next_layer();
 	const int n = int(_entries.size());
-	if (n == 0) {
+	if (n == 0 && _screen == kRecorded) {
+		int ny = L.list.t + 20;
+		const std::string none = _recScan.done() ? "No recorded games yet. Multiplayer games are recorded in " + _recDir + ", and Open File... plays any .rcx file."
+		                                         : "Looking for recorded games...";
+		for (const std::string& line : wrap_text(_ui, f14, none, L.list.w() - 20)) {
+			[self textAt:f14 text:line x:float(L.list.l + 10) y:float(ny) color:kSecondary];
+			ny += lh;
+		}
+	} else if (n == 0) {
 		const char* none = "None of these maps were found in your game folder.";
 		[self textAt:f14 text:none x:float(L.list.l + (L.list.w() - _ui.text_width(f14, none)) / 2) y:float(L.list.t + 20) color:kSecondary];
 	}
@@ -1034,7 +1057,15 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		_ui.next_layer();
 		const launcher::Entry& e = _entries[size_t(i)];
 		_ui.text(f14, e.title, float(R.l + 14), float(R.t + 5), kWhite, kBlack);
-		_ui.text(f12, e.detail, float(R.l + 14), float(R.t + 23), i == _sel ? rgb(225, 225, 235) : kSecondary, kBlack);
+		std::string detail = e.detail;
+		if (_screen == kRecorded) {  // one line of columns: it must fit the row
+			const int room = R.w() - 28;
+			if (_ui.text_width(f12, detail) > room) {
+				while (detail.size() > 8 && _ui.text_width(f12, detail + "...") > room) detail.pop_back();
+				detail += "...";
+			}
+		}
+		_ui.text(f12, detail, float(R.l + 14), float(R.t + 23), i == _sel ? rgb(225, 225, 235) : kSecondary, kBlack);
 		_ui.next_layer();
 	}
 	if (n > L.rows) {  // SCROLLCLASS: vertical back, slider, arrow buttons
@@ -1048,7 +1079,7 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	}
 	// Bottom row: AI difficulty, Back, Play.
 	_ui.next_window();
-	if (_screen != kTutorials) {
+	if (_screen != kTutorials && _screen != kRecorded) {
 		const ron::FontMetrics* fm = _ui.font_metrics(f14);
 		const int fh = fm ? fm->font_height : 16;
 		const int lw = [self textAt:f14 text:"AI Difficulty:" x:112 y:float(L.drop.t + (L.drop.h() - fh) / 2) color:kLabel];
@@ -1087,7 +1118,9 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	_ui.next_window();
 	const int fb = _ui.font(14, -1);
 	[self popupButton:L.back label:"Back" state:(_pressed == kBack ? 2 : _hover == kBack ? 1 : 0) font:fb];
-	[self popupButton:L.play label:"Play" state:(_pressed == kPlay ? 2 : _hover == kPlay ? 1 : 0) font:fb];
+	[self popupButton:L.play label:(_screen == kRecorded ? "Watch" : "Play") state:(_pressed == kPlay ? 2 : _hover == kPlay ? 1 : 0) font:fb];
+	if (_screen == kRecorded)
+		[self popupButton:L.rand label:"Open File…" state:(_pressed == kRecOpen ? 2 : _hover == kRecOpen ? 1 : 0) font:fb];
 	if (_screen == kSkirmish)
 		[self popupButton:L.rand label:"Random Map…" state:(_pressed == kRandomMap ? 2 : _hover == kRandomMap ? 1 : 0) font:fb];
 }
@@ -1188,6 +1221,10 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 
 - (BOOL)snapshotTo:(NSString*)path width:(int)w height:(int)h scale:(float)scale {
 	if (scale <= 0) scale = 1;
+	if (_screen == kRecorded) {  // headless: the headers are read on a thread; the picture waits for the list
+		for (int i = 0; i < 3000 && !_recScan.done(); i++) [NSThread sleepForTimeInterval:0.01];
+		_recSeen = ~0u;
+	}
 	if (_screen == kOptions && _opts && _opts->is_open() && getenv("RON_OPT_SCRIPT")) [self runOptionsScript:@(getenv("RON_OPT_SCRIPT")) path:path width:w height:h scale:scale];
 	id<MTLTexture> out = rm::make_readback_target(_device, w, h);
 	id<MTLCommandBuffer> cb = [_queue commandBuffer];
@@ -1231,7 +1268,8 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	if (L.back.contains(x, y)) return kBack;
 	if (L.play.contains(x, y)) return kPlay;
 	if (_screen == kSkirmish && L.rand.contains(x, y)) return kRandomMap;
-	if (_screen != kTutorials) {
+	if (_screen == kRecorded && L.rand.contains(x, y)) return kRecOpen;
+	if (_screen != kTutorials && _screen != kRecorded) {
 		const IfaceRect drop = [self dropRect];
 		if (_dropOpen) {
 			const int ih = 20, lh2 = 6 * ih + 6;
@@ -1425,6 +1463,10 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 }
 
 - (void)play {
+	if (_screen == kRecorded) {
+		[self playRecording];
+		return;
+	}
 	if (_sel < 0 || size_t(_sel) >= _entries.size()) return;
 	[self click];
 	[self remember];
@@ -1450,8 +1492,9 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 			case 2: [self showScreen:@"scenarios"]; break;
 			case 3: [self showScreen:@"ctw"]; break;
 			case 4: [self showScreen:@"multiplayer"]; break;
-			case 5: [self showScreen:@"options"]; break;
-			case 6: [self openQuitPopup]; break;
+			case 5: [self showScreen:@"recorded"]; break;
+			case 6: [self showScreen:@"options"]; break;
+			case 7: [self openQuitPopup]; break;
 			default: break;
 		}
 		return;
@@ -1523,12 +1566,16 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 		[self showScreen:@"skirmish"];
 	} else if (h == kBack) {
 		[self click];
+		const Screen from = _screen;
 		[self showScreen:@"main"];
-		_focus = std::max(0, int(_screen));
+		_focus = from == kRecorded ? 5 : std::max(0, int(from));
 	} else if (h == kPlay && _screen == kSkirmishSetup) {
 		[self playSetup];
 	} else if (h == kPlay) {
 		[self play];
+	} else if (h == kRecOpen) {
+		[self click];
+		[self openRecordingFile];
 	} else if (h == kRandomMap) {
 		[self click];
 		[self showScreen:@"skirmish-setup"];
@@ -1629,18 +1676,18 @@ NSCursor* ron_game_cursor(const ron::GameFiles& files, int cid) {
 	else if (c == NSPageDownFunctionKey) _sel = std::min(n - 1, _sel + rows);
 	else if (c == NSHomeFunctionKey) _sel = 0;
 	else if (c == NSEndFunctionKey) _sel = n - 1;
-	else if (c == NSLeftArrowFunctionKey && _screen != kTutorials) _difficulty = std::max(0, _difficulty - 1);
-	else if (c == NSRightArrowFunctionKey && _screen != kTutorials) _difficulty = std::min(5, _difficulty + 1);
+	else if (c == NSLeftArrowFunctionKey && _screen != kTutorials && _screen != kRecorded) _difficulty = std::max(0, _difficulty - 1);
+	else if (c == NSRightArrowFunctionKey && _screen != kTutorials && _screen != kRecorded) _difficulty = std::min(5, _difficulty + 1);
 	else if (ret) [self play];
 	else if (esc) {
 		const Screen from = _screen;
 		[self click];
 		[self showScreen:@"main"];
-		_focus = int(from) - 1;
+		_focus = from == kRecorded ? 5 : int(from) - 1;
 		_help = kMainItems[_focus].help;
 		return;
 	}
-	if (c == NSLeftArrowFunctionKey || c == NSRightArrowFunctionKey)
+	if ((c == NSLeftArrowFunctionKey || c == NSRightArrowFunctionKey) && _screen != kRecorded)
 		[NSUserDefaults.standardUserDefaults setInteger:_difficulty forKey:launcher::kDefDifficulty];
 	_sel = std::max(0, _sel);
 	[self scrollToSelection];
@@ -2200,7 +2247,7 @@ static std::vector<std::string> numbered(int lo, int hi) {
 		const std::string f = [me soundFile:key];
 		if (!f.empty()) me->_audio->play_effect(f);
 	};
-	h.closed = [me]() { [me showScreen:@"main"]; me->_focus = 5; me->_help = kMainItems[5].help; };
+	h.closed = [me]() { [me showScreen:@"main"]; me->_focus = 6; me->_help = kMainItems[6].help; };
 	int pane = 0;
 	if (const char* e = getenv("RON_OPT_PANE")) pane = std::atoi(e);  // snapshot checks: Game, Hotkeys, Mouse, Graphics, Sound, Player
 	_opts->open(h, pane);
@@ -2649,6 +2696,107 @@ static bool parse_port(const std::string& s, int& out) {
 
 // The file chooser of the lobby's buttons. RON_MP_PICK=PATH answers it without a window (the window tests, docs/ui-port.md 13.7: a modal panel cannot be
 // driven from a script); otherwise the open panel, nil when cancelled.
+// ---------------------------------------------------------------- the Recorded Games screen (docs/ui-port.md section 18)
+
+// The folder the app records multiplayer games into (mp::default_record_dir) as a list: name, date, map, players, duration. The files are found at
+// once; their headers are read on a thread and the rows fill in as they finish.
+- (void)openRecorded {
+	[self loadSetupLists];
+	_recDir = mp::default_record_dir();
+	_recRows.clear();
+	_recSeen = ~0u;
+	_recScan.start(_recDir);
+	[self refreshRecorded];
+}
+
+- (std::string)recordedDetail:(const recplay::Row&)r {
+	char date[64] = "";
+	const std::time_t t = std::time_t(r.mtime);
+	std::tm tm{};
+	localtime_r(&t, &tm);
+	std::strftime(date, sizeof date, "%b %d, %Y %H:%M", &tm);
+	std::string d = date;
+	if (!r.read) return d + "   |   reading...";
+	const ron::net::PlaybackSummary& s = r.summary;
+	if (!s.ok) return d + "   |   cannot be read: " + s.error;
+	auto name = [](const std::vector<std::string>& v, int i, const char* fallback) { return i >= 0 && size_t(i) < v.size() ? v[size_t(i)] : std::string(fallback); };
+	d += "   |   " + name(_lists.style, s.map_style, "Map") + ", " + name(_lists.size, s.map_size, "?");
+	d += "   |   " + std::to_string(s.players) + (s.players == 1 ? " player: " : " players: ");
+	for (size_t i = 0; i < s.tribes.size() && i < 4; i++) d += std::string(i ? ", " : "") + name(_lists.tribes, s.tribes[i], "?");
+	if (s.tribes.size() > 4) d += ", ...";
+	d += "   |   " + recplay::clock_text(s.end_frame - s.start_frame);
+	if (s.original) d += "   |   original game";
+	if (!s.playable) d += "   |   " + s.unplayable;
+	return d;
+}
+
+- (void)refreshRecorded {
+	if (_screen != kRecorded || _recScan.changed() == _recSeen) return;
+	_recSeen = _recScan.changed();
+	std::string keep;
+	if (_sel >= 0 && size_t(_sel) < _entries.size()) keep = _entries[size_t(_sel)].path;
+	_recRows = _recScan.snapshot();
+	_entries.clear();
+	for (const recplay::Row& r : _recRows) {
+		launcher::Entry e;
+		e.path = r.path;
+		e.title = r.file.size() > 4 && r.file.compare(r.file.size() - 4, 4, ".rcx") == 0 ? r.file.substr(0, r.file.size() - 4) : r.file;
+		e.detail = [self recordedDetail:r];
+		_entries.push_back(std::move(e));
+	}
+	for (size_t i = 0; i < _entries.size(); i++)
+		if (!keep.empty() && _entries[i].path == keep) _sel = int(i);
+}
+
+- (void)playRecording {
+	if (_sel < 0 || size_t(_sel) >= _recRows.size()) return;
+	const recplay::Row& r = _recRows[size_t(_sel)];
+	[self tryPlayRecording:r.path summary:r.read ? &r.summary : nullptr];
+}
+
+- (void)tryPlayRecording:(const std::string&)path summary:(const ron::net::PlaybackSummary*)s {
+	if (!s) {
+		[self showError:@"The header of this recording is still being read. Try again in a moment."];
+		return;
+	}
+	if (!s->ok) {
+		[self showError:[NSString stringWithFormat:@"This file cannot be read as a recording: %s", s->error.c_str()]];
+		return;
+	}
+	if (!s->playable) {
+		[self showError:[NSString stringWithFormat:@"This recording cannot be watched: %s.", s->unplayable.c_str()]];
+		return;
+	}
+	if (s->original) {
+		[self showError:@"This recording was made by the original game. It can be played back and checked against its own check sums (ronmap --playback FILE, "
+		                 "ron-net playback FILE), but its map cannot be drawn yet."];
+		return;
+	}
+	[self click];
+	if ([self.host respondsToSelector:@selector(frontEndPlayRecording:)]) [self.host frontEndPlayRecording:@(path.c_str())];
+}
+
+// Open File...: any .rcx file (RON_REC_PICK=PATH answers the chooser in tests).
+- (void)openRecordingFile {
+	NSURL* url = nil;
+	if (const char* pick = getenv("RON_REC_PICK")) {
+		url = [NSURL fileURLWithPath:@(pick)];
+	} else {
+		NSOpenPanel* panel = [NSOpenPanel openPanel];
+		panel.title = @"Choose a recorded game";
+		panel.directoryURL = [NSURL fileURLWithPath:@(_recDir.c_str())];
+		if ([panel runModal] != NSModalResponseOK || !panel.URL) return;
+		url = panel.URL;
+	}
+	if (![url.pathExtension.lowercaseString isEqualToString:@"rcx"]) {
+		[self showError:@"A recorded game is a file that ends in .rcx."];
+		return;
+	}
+	ron::net::PlaybackSummary s;
+	ron::net::playback_summary(url.path.UTF8String, s);
+	[self tryPlayRecording:url.path.UTF8String summary:&s];
+}
+
 - (NSURL*)mpPickFile:(NSString*)title directory:(NSString*)dir {
 	if (const char* pick = getenv("RON_MP_PICK")) return [NSURL fileURLWithPath:@(pick)];
 	NSOpenPanel* panel = [NSOpenPanel openPanel];

@@ -689,3 +689,22 @@ as co-op partners of several guests (the guests fill the opposing seats first); 
   two earlier battle checks now replay to the live game's final native save byte for byte, not just to the same frame); `ronmap --ctw-selftest` 51 -> 75.
 - **Not done (outside this pass's files):** recording a custom-map battle (`Runtime::start_recording` in lobby.mm skips the `ctw:` scenarios; the save now loads, so the skip can go), and removing the two
   `set_recover(false)` calls and the stale comments in lobby.h / lobby.mm.
+
+### 8.9 Playback: the direct player (2026-10-25; `engine/net/playback.*`, ui-port.md section 18)
+
+A recording plays in the app (Recorded Games, View Playback) and in `ron-net playback` / `ronmap --playback` through **one game** driven by `net::Playback`, not by a lockstep session per human seat:
+
+- **One start-state builder.** `Playback::make_start` builds the game at the start of a recording for the three kinds (`Original`: the embedded save, the original's prologue `original_post_load_effects`, the game script the header names;
+  `NativeSave`: `load_game_bytes` of the embedded native save; `NativeRandom`: `new_random_game` of the header's setup text plus the room's names and handicaps, `apply_mp_seats`). `ron-net replay` (original and native)
+  builds each instance's game through it, so the lockstep run and the viewer start from identical states.
+- **Package groups are the turn boundaries.** The records of one frame (one per human seat, file order = slot order) are a turn; before a group runs the game is at that record frame, its 15 CHECK_SUMS are computed
+  (`GameHooks::checksums`: the DataWalk parts for an original save, the section CRCs for a native game) and compared with the tuple the recording stores in the next boundary's package (the rule `ron-sav --replay` /
+  `ron-net replay` use: the row at record frame R describes the previous row's frame, the first row the start frame + 1). Then every command of every package runs through `GameHooks::execute(slot, ...)` (the entry the session
+  uses; CHECK_SUMS / TURN_DATA / CAMERA are the layer's own and skipped, a drop record is not a package), and the game steps frames up to the next group. `PlaybackSync` keeps the boundaries compared, the all-equal count, the first
+  frame any part differs (`first_out_of_sync`) and each part's first difference.
+- **Numbers.** Original recording 2026.08.30 21'23'34: 3,056 boundaries compared, 320 fully equal, units / guys / world first differ at frame 1,928 (matched through 1,922), builds 2,036, groups 2,042 ... identical to `ron-net replay`
+  and `ron-sav --replay` (and `ronmap --playback` prints the same). A native recording of two machines (`ronmap --host ... --mp-bot --mp-record`, 1,200 frames): 200 of 200 boundaries equal; a recording read while the game is still being
+  written (plain, not yet gzipped) plays the same. 18,344 frames of the original recording take about 34 s with the hashing on every turn (about 1.9 ms a frame).
+- **What it does not do.** Lockstep behaviour that is not in the packages: pauses and speed changes (the viewer has its own speeds), the drop agreement (`Session::apply_drop`; the clear `P` record is skipped), the quota of pauses.
+  The direct player stops at the last package's frame; a lockstep replay runs the turn after it (final frame 1,202 against 1,201 in the native example).
+

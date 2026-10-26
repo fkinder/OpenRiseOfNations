@@ -129,6 +129,8 @@
 #include "assets/strings.hpp"
 #include "sim/capture.hpp"
 #include "audio.hpp"
+#include "net/playback.hpp"
+#include "recplay.hpp"
 #include "sim/script_ui.hpp"
 #include "renderer.hpp"
 #include "ui.hpp"
@@ -537,6 +539,15 @@ static bool debug_skip(const char* pass) {
 - (void)mpTypeScript:(const std::vector<std::pair<int, std::string>>&)lines;  // --mp-type: lines typed into the chat box through the key handler
 - (void)mpClose;  // headless: waits for the other machines, then ends the session (closes the recording)
 @end
+// Playback of a recording (recplay.hpp, engine/net/playback.hpp, docs/ui-port.md section 18): a game of this port's recording, driven by its packages.
++ (instancetype)playbackWithDevice:(id<MTLDevice>)device gameDir:(NSString*)dir playback:(std::shared_ptr<ron::net::Playback>)pb error:(NSString* __autoreleasing*)error;
+@property(nonatomic, readonly) BOOL playbackActive;
+@property(nonatomic, copy) void (^onPlayRecording)(NSString* path);   // View Playback of the end-game window: the app opens the recording of the game that just ended
+- (BOOL)pbRunHeadless:(int64_t)frames;   // headless: steps the recording (frames < 0: to its end) and prints the check-sum report
+- (void)pbSeek:(int64_t)frame;
+- (void)pbSelectSeat:(int)index;
+- (void)pbSelectWho:(int)who;   // the seat of the leader `who`
+- (void)harnessGameMenuChoose:(int)i;   // headless tests: the button i of the game menu / end-game window, as a click would
 
 // ---- HUD data adapter: the console player's numbers for the resource panel and the top strip, from the production view
 // (sim::leader_view: stockpiles, population in use / cap, cities / limit, age). Income rates and the commerce cap belong
@@ -680,6 +691,9 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	BOOL _mpEnded;
 	int32_t _mpFrame;
 	ron::sim::GameView _prevView, _curView;
+	std::unique_ptr<recplay::Viewer> _pbv;   // playing a recording: its Playback, the viewing seat, the speed, the bar
+	BOOL _pbScrub;                           // the timeline is being dragged
+	int64_t _pbScrubFrame;
 	std::unordered_map<int64_t, size_t> _prevIndex;  // sim_key(who, o) -> index in _prevView.units
 	std::map<std::pair<int, int>, int> _scenarioGraphic;  // (who, o) -> unit graphic from the scenario resolution
 	std::map<int32_t, int> _typeGraphic;                 // sim type -> fallback graphic (units created in game)
@@ -1536,7 +1550,8 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 
 // The pause key: alone it flips the flag; in a multiplayer game it is a PAUSE command every machine runs at the same turn.
 - (void)togglePause {
-	if (_mp) _mp->toggle_pause();
+	if (_pbv) _paused = !_paused;   // a recording has no PAUSE command to send: the viewer just stops stepping
+	else if (_mp) _mp->toggle_pause();
 	else if (_game) {  // PAUSE 76 is a command too: it runs at once even while the game is paused (process_turn does not wait for a frame)
 		_cm.issue_pause(!_paused);
 		_cm.process_turn(*_game);
@@ -1561,6 +1576,10 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 			std::fprintf(stderr, "multiplayer: cannot continue the saved game: %s\n", err.c_str());
 			_mpEnded = YES;
 			return;
+	if (_pbv) {  // a recording: its packages decide what runs at each frame
+		[self pbStep:frames];
+		return;
+	}
 		}
 	}
 	// the camera starts on this player's own seat
@@ -1792,6 +1811,337 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 }
 
 // The object under a drawable point for the air orders: the nearest drawn unit within 30 px, else the building whose footprint
+// ---------------------------------------------------------------- playback of a recording (recplay.hpp, engine/net/playback.hpp)
+
++ (instancetype)playbackWithDevice:(id<MTLDevice>)device gameDir:(NSString*)dir playback:(std::shared_ptr<ron::net::Playback>)pb error:(NSString* __autoreleasing*)error {
+	MapRenderer* r = [MapRenderer alloc];
+	const std::string scn = pb->scenario();
+	if (ron::sim::is_random_scenario(scn)) {  // the map of the recording is generated again from its setup text
+		ron::sim::RandomGameSetup setup;
+		if (!ron::sim::parse_random_setup(scn, setup)) {
+			if (error) *error = @"The map setup of the recording cannot be read.";
+			return nil;
+		}
+		r->_randomActive = YES;
+		r->_randomSetup = setup;
+		r = [r initWithDevice:device gameDir:dir scenario:@"" simulate:YES seed:setup.seed error:error];
+	} else {
+		r = [r initWithDevice:device gameDir:dir scenario:@(scn.c_str()) simulate:YES seed:pb->seed() error:error];
+	}
+	if (!r) return nil;
+	NSString* why = [r attachPlayback:pb];
+	if (why) {
+		if (error) *error = why;
+		return nil;
+	}
+	return r;
+}
+
+- (BOOL)playbackActive {
+	return _pbv != nullptr;
+}
+
+// The renderer built the scenario (terrain, trees, art); the recording's start state replaces the game it made and the playback drives it.
+- (NSString*)attachPlayback:(std::shared_ptr<ron::net::Playback>)pb {
+	if (!_game || !_simRules) return @"The game could not be set up.";
+	_pbv = std::make_unique<recplay::Viewer>(pb);
+	__unsafe_unretained MapRenderer* me = self;
+	pb->before_frame = [me]() { [me fillScriptInput]; };
+	pb->after_frame = [me]() { [me consumeScript]; };
+	if (pb->kind() == ron::net::Playback::Kind::NativeRandom) {  // the renderer made the random game already: the room's names and handicaps on top
+		pb->apply_header_seats(*_game);
+	} else {
+		std::string err;
+		ron::net::PlaybackEnv env;
+		env.files = _files.get(), env.rules = _simRules.get(), env.art = _art.get();
+		std::unique_ptr<ron::sim::Game> g = pb->make_start(err, env);
+		if (!g) return @(err.c_str());
+		_game = std::move(g);
+	}
+	_cm.net = nullptr;
+	_cm.discard = true;          // an observer's orders go nowhere: the game belongs to the recording
+	[self afterGameReplaced];
+	pb->bind(*_game);
+	_pbv->speed = recplay::kNormalSpeed;
+	[self pbCollectSeats];
+	int first = 0;
+	for (const ron::net::Playback::SeatInfo& si : pb->seats()) {
+		if (!si.human) continue;
+		for (size_t k = 0; k < _pbv->seats.size(); k++)
+			if (_pbv->seats[k].who == si.who) first = int(k);
+		break;
+	}
+	_fogOn = NO;                 // the whole map to begin with; F shows a player's fog
+	_overOffered = YES;          // the end-game window is not offered: the viewer decides when to leave
+	_paused = NO;
+	[self pbSelectSeat:first];
+	return nil;
+}
+
+- (std::string)pbSeatLabel:(int)who {
+	const ron::sim::Leader& L = _game->leaders[size_t(who)];
+	std::string nation;
+	if (_simRules && L.tribe >= 0 && size_t(L.tribe) < _simRules->tribes.size()) nation = ron::sim::to_utf8(_simRules->tribes[size_t(L.tribe)].name);
+	if (L.name.empty()) return nation.empty() ? "Seat " + std::to_string(who + 1) : nation;
+	return nation.empty() || L.name == nation ? L.name : L.name + " (" + nation + ")";
+}
+
+- (void)pbCollectSeats {
+	_pbv->seats.clear();
+	for (int who = 0; who < 8; who++) {
+		const ron::sim::Leader& L = _game->leaders[size_t(who)];
+		if (!(L.flags & ron::sim::leaderflag::kValid)) continue;
+		recplay::Seat s;
+		s.who = who;
+		s.label = [self pbSeatLabel:who];
+		s.color = L.color;
+		_pbv->seats.push_back(std::move(s));
+	}
+	if (_pbv->seats.empty()) {
+		recplay::Seat s;
+		s.who = 0, s.label = "Seat 1";
+		_pbv->seats.push_back(s);
+	}
+}
+
+// The seat whose game the HUD shows (console.play: seat-local, never feeds the simulation), and the camera on its first unit.
+- (void)pbSelectSeat:(int)index {
+	const int n = int(_pbv->seats.size());
+	if (n == 0 || !_game) return;
+	_pbv->seat = ((index % n) + n) % n;
+	const int who = _pbv->seats[size_t(_pbv->seat)].who;
+	_game->local_play = who;
+	_cm.play = who, _cm.play_who = who;
+	_selected.clear(), _selectedBuilds.clear();
+	_fogUploaded = NO;
+	_notifier.reset(*_game);
+	const ron::sim::ObjectList& ol = _game->objects[size_t(who & 7)];
+	for (int o = 0; o < ol.unit_mark && o < int(ol.units.size()); o++) {
+		const ron::sim::Unit* u = ol.units[size_t(o)].get();
+		if (u && u->alive()) {
+			_lookAt = simd_make_float3(float(u->x), float(u->y), 0);
+			break;
+		}
+	}
+}
+
+- (void)harnessGameMenuChoose:(int)i {
+	[self gameMenuChoose:i];
+}
+
+- (void)pbSelectWho:(int)who {
+	for (size_t k = 0; k < _pbv->seats.size(); k++)
+		if (_pbv->seats[k].who == who) [self pbSelectSeat:int(k)];
+}
+
+// One display frame's worth of playback: the frames the speed asks for, or a slice of a seek.
+- (void)pbTick:(double)dtMs modal:(BOOL)modal {
+	recplay::Viewer& v = *_pbv;
+	ron::net::Playback& pb = *v.pb;
+	if (v.seek_to >= 0) {  // a seek runs the recording forward as far as a slice of the display frame allows
+		const double t0 = CACurrentMediaTime();
+		while (pb.frame() < v.seek_to && !pb.at_end() && CACurrentMediaTime() - t0 < 0.03) pb.step();
+		if (pb.frame() >= v.seek_to || pb.at_end()) {
+			v.seek_to = -1;
+			v.ended = pb.at_end();
+			[self afterGameReplaced];
+			[self pbSelectSeat:v.seat];
+		}
+		return;
+	}
+	if (_paused || modal || v.ended) return;
+	_simMs += dtMs;
+	const double frame_ms = recplay::kFrameMs[std::clamp(v.speed, 0, recplay::kSpeedCount - 1)];
+	int steps;
+	if (frame_ms <= 0) {  // as fast as the machine allows: a slice of the display frame
+		steps = 0;
+		const double t0 = CACurrentMediaTime();
+		while (!v.ended && CACurrentMediaTime() - t0 < 0.012) {
+			[self pbStep:1];
+			steps++;
+		}
+		_simMs = 0;
+	} else {
+		steps = int(_simMs / frame_ms);
+		const int max_steps = v.speed >= 3 ? 40 : 4;
+		if (steps > max_steps) {
+			_simMs = std::fmod(_simMs, frame_ms);
+			steps = max_steps;
+		} else {
+			_simMs -= steps * frame_ms;
+		}
+		[self pbStep:steps];
+	}
+	if (steps && (_game->frame % 15) == 0) [self updateTitle];
+}
+
+- (void)pbStep:(int)frames {
+	ron::net::Playback& pb = *_pbv->pb;
+	for (int i = 0; i < frames; i++) {
+		if (pb.at_end()) {
+			[self pbReachedEnd];
+			break;
+		}
+		if (_headless) {
+			_timeMs += kSimFrameMs;  // the virtual clock, as stepSimulation keeps it
+			[self cameraStep:kSimFrameMs];
+		}
+		pb.step();
+		_prevView = std::move(_curView);
+		[self indexPrevView];
+		_curView = ron::sim::make_view(*_game);
+		[self notifyFrame];
+		if (pb.at_end()) {
+			[self pbReachedEnd];
+			break;
+		}
+	}
+	if (frames > 0) [self syncSimBuildings];
+}
+
+- (void)pbReachedEnd {
+	if (_pbv->ended) return;
+	_pbv->ended = true;
+	if (!_pbv->announced_end) {
+		_pbv->announced_end = true;
+		[self say:"End of the recording."];
+	}
+}
+
+// Jumps to a frame: forward runs the recording up to it, backward builds the start state again first.
+- (void)pbSeek:(int64_t)target {
+	if (!_pbv) return;
+	recplay::Viewer& v = *_pbv;
+	ron::net::Playback& pb = *v.pb;
+	target = std::clamp<int64_t>(target, pb.start_frame(), pb.end_frame());
+	if (target < pb.frame() || (v.ended && target < pb.end_frame())) {
+		std::string err;
+		ron::net::PlaybackEnv env;
+		env.files = _files.get(), env.rules = _simRules.get(), env.art = _art.get();
+		std::unique_ptr<ron::sim::Game> g = pb.make_start(err, env);
+		if (!g) {
+			[self say:"The recording cannot be rewound: " + err];
+			return;
+		}
+		_game = std::move(g);
+		pb.bind(*_game);
+		[self afterGameReplaced];
+		v.ended = false, v.announced_end = false;
+		[self pbCollectSeats];
+	}
+	v.seek_to = target > pb.frame() ? target : -1;
+	if (v.seek_to < 0) [self pbSelectSeat:v.seat];
+	else _pbScrub = NO;
+	if (_headless && v.seek_to >= 0) {   // no display frames to spread the run over
+		while (pb.frame() < v.seek_to && !pb.at_end()) pb.step();
+		v.seek_to = -1;
+		v.ended = pb.at_end();
+		[self afterGameReplaced];
+		[self pbSelectSeat:v.seat];
+	}
+}
+
+- (void)pbSpeedStep:(int)d {
+	_pbv->speed = std::clamp(_pbv->speed + d, 0, recplay::kSpeedCount - 1);
+	[self say:std::string("Playback speed: ") + recplay::kSpeedNames[_pbv->speed]];
+}
+
+- (recplay::BarState)pbBarState {
+	recplay::BarState s;
+	const ron::net::Playback& pb = *_pbv->pb;
+	s.frame = _pbScrub ? _pbScrubFrame : pb.frame();
+	s.start = pb.start_frame(), s.end = pb.end_frame();
+	s.paused = _paused, s.ended = _pbv->ended, s.fog_on = _fogOn, s.seeking = _pbv->seek_to >= 0, s.speed = _pbv->speed;
+	s.seat_label = _pbv->seats.empty() ? std::string() : _pbv->seats[size_t(_pbv->seat)].label;
+	s.sync = pb.sync_text();
+	const ron::net::PlaybackSync& sy = pb.sync();
+	s.sync_kind = !sy.has_rows || sy.compared == 0 ? 0 : sy.first_out_of_sync >= 0 ? 2 : 1;
+	s.hover = _pbv->hit(int(_mouse.x), int(_mouse.y));
+	if (s.hover >= recplay::kBtnCount) s.hover = recplay::kBtnNone;
+	return s;
+}
+
+- (void)drawPlaybackBar {
+	if (!_pbv) return;
+	_pbv->draw(_ui, _uiW, _uiH, [self pbBarState]);
+}
+
+// A press on the bar: 1 the bar took it.
+- (BOOL)pbBarClick:(CGPoint)p {
+	const int hit = _pbv->hit(int(p.x), int(p.y));
+	if (hit == recplay::kBtnNone) return NO;
+	recplay::Viewer& v = *_pbv;
+	switch (hit) {
+		case recplay::kBtnRestart: [self pbSeek:v.pb->start_frame()]; _paused = NO; break;
+		case recplay::kBtnPause:
+			if (v.ended) {
+				[self pbSeek:v.pb->start_frame()];
+				_paused = NO;
+			} else {
+				_paused = !_paused;
+			}
+			break;
+		case recplay::kBtnSlower: [self pbSpeedStep:-1]; break;
+		case recplay::kBtnFaster: [self pbSpeedStep:1]; break;
+		case recplay::kBtnPrev: [self pbSelectSeat:v.seat - 1]; break;
+		case recplay::kBtnNext: [self pbSelectSeat:v.seat + 1]; break;
+		case recplay::kBtnFog: _fogOn = !_fogOn; _fogUploaded = NO; break;
+		case recplay::kBtnExit:
+			if (self.onExit) self.onExit(NO);
+			break;
+		case recplay::kBtnTimeline:
+			_pbScrub = YES;
+			_pbScrubFrame = v.frame_at(int(p.x), [self pbBarState]);
+			break;
+		default: break;
+	}
+	return YES;
+}
+
+- (void)pbBarDrag:(CGPoint)p {
+	if (_pbScrub) _pbScrubFrame = _pbv->frame_at(int(p.x), [self pbBarState]);
+}
+
+- (void)pbBarRelease:(CGPoint)p {
+	if (!_pbScrub) return;
+	_pbScrub = NO;
+	[self pbSeek:_pbv->frame_at(int(p.x), [self pbBarState])];
+}
+
+// Keys of the viewer: Tab / Shift+Tab the next / previous seat, [ and ] thirty seconds back / forward, Home the start. 1 handled.
+- (BOOL)pbKey:(NSEvent*)event {
+	if (event.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl)) return NO;
+	switch (event.keyCode) {
+		case 48: [self pbSelectSeat:_pbv->seat + ((event.modifierFlags & NSEventModifierFlagShift) ? -1 : 1)]; return YES;
+		case 33: [self pbSeek:_pbv->pb->frame() - 450]; return YES;
+		case 30: [self pbSeek:_pbv->pb->frame() + 450]; return YES;
+		case 115: [self pbSeek:_pbv->pb->start_frame()]; _paused = NO; return YES;
+		default: return NO;
+	}
+}
+
+// Headless (--playback with --frames / --snapshot): steps `frames` after the start (< 0: to the end) and prints what ron-net playback prints.
+- (BOOL)pbRunHeadless:(int64_t)frames {
+	if (!_pbv) return NO;
+	ron::net::Playback& pb = *_pbv->pb;
+	const int64_t target = frames < 0 ? INT64_MAX : pb.start_frame() + frames;
+	std::printf("%s: playback of a recording of this port, frames %lld to %lld, %u turns%s\n", pb.path().c_str(), (long long)pb.start_frame(), (long long)pb.end_frame(),
+	            pb.turns_total(), pb.has_check_sums() ? ", CHECK_SUMS rows present" : "");
+	while (!pb.at_end() && pb.frame() < target) [self pbStep:1];
+	if (pb.at_end()) _pbv->ended = true;
+	if (const char* t = getenv("RON_PB_TICKS")) {   // tests: N display frames of DT ms at speed SPEED through the real-time path (RON_PB_TICKS=N,SPEED,DT)
+		int n = 0, sp = _pbv->speed;
+		double dt = 66.7;
+		std::sscanf(t, "%d,%d,%lf", &n, &sp, &dt);
+		_pbv->speed = std::clamp(sp, 0, recplay::kSpeedCount - 1);
+		const int32_t f0 = _game->frame;
+		for (int i = 0; i < n; i++) [self pbTick:dt modal:NO];
+		std::printf("  %d display frames at speed %s: frame %d -> %d%s\n", n, recplay::kSpeedNames[_pbv->speed], f0, _game->frame, _pbv->ended ? ", at the end" : "");
+	}
+	ron::net::playback_print_sync(pb);
+	return YES;
+}
+
 // centre is within 450 world units (as commandAttackAt). Returns false with tw = to = -1 when there is none.
 - (void)objectAtDrawable:(CGPoint)p who:(int&)tw object:(int&)to {
 	tw = to = -1;
@@ -2785,6 +3135,7 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 			_selected.clear(), _selectedBuilds.clear();
 			break;
 		case 'h': case 'H': _hudOn = !_hudOn; break;
+	if (_pbv && [self pbKey:event]) return;
 		case 'p': case 'P':
 			if (!(sp && sp->pause_disabled)) [self togglePause];  // pause_disable
 			break;
@@ -3114,7 +3465,9 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 			[self openGameMenu:2];
 		}
 	}
-	if (_game && ((!_paused && !modal) || _mp)) {
+	if (_pbv && _game) {
+		[self pbTick:_timeMs - before modal:modal];
+	} else if (_game && ((!_paused && !modal) || _mp)) {
 		_simMs += _timeMs - before;
 		const double frame_ms = kTimings[std::clamp(_speed, 0, 4)];
 		int steps = int(_simMs / frame_ms);
@@ -4627,7 +4980,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 }
 
 - (BOOL)saveGameTo:(NSString*)path {
-	if (!_game || _inPopup) return NO;
+	if (!_game || _inPopup || _pbv) return NO;
 	try {
 		ron::sim::save_game(*_game, ron::sim::scenario_rel_path(*_files, _scenarioPath), _simSeed, path.UTF8String);
 		[self say:"Game saved"];
@@ -4641,7 +4994,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 
 // Replaces the simulation with the saved one (the same scenario only: the terrain, trees and art the renderer built stay).
 - (BOOL)loadGameFrom:(NSString*)path {
-	if (!_game || !_simRules || _inPopup) return NO;
+	if (!_game || !_simRules || _inPopup || _pbv) return NO;   // a recording's game belongs to the recording
 	try {
 		const ron::sim::SaveInfo head = ron::sim::read_save_info(path.UTF8String);
 		auto key = [&](const std::string& s) {
@@ -4666,6 +5019,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		[self say:"Could not load the game"];
 		return NO;
 	}
+	[self drawPlaybackBar];
 }
 
 // Everything the renderer derived from the simulation that a replaced Game (a loaded save, an out-of-sync recovery) invalidates.
@@ -4800,6 +5154,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	_ui.next_layer();
 	const int tf = _ui.font(24, -1), bf = _ui.font(14, -1);
 	_ui.text_centered(tf, _gameMenu == 2 ? "Game Over" : "Game Menu", {x, x + w, y + pad - 6, y + pad - 6 + titleH}, 0xFFFFFFFF, 0xFF000000);
+	if (_pbv) return {"Resume Playback", "Restart", "Options", "Return to Main Menu", "Quit"};
 	for (size_t i = 0; i < items.size(); i++) {
 		const int by = y + pad + titleH + int(i) * (bh + gap);
 		const ron::IfaceRect r{x + pad, x + pad + bw, by, by + bh};
@@ -4813,6 +5168,13 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		if (p[0].valid()) _ui.expander(p[0], p[1], p[2], r);
 		else _ui.fill(float(r.l), float(r.t), float(r.w()), float(r.h()), rm::argb(255, 70, 70, 70));
 		_ui.next_layer();
+// The file the game in this window is being recorded into (a multiplayer game; the Recorder flushes every package, so it can be read at once), or nil.
+- (NSString*)recordingPath {
+	if (!_mp || _mp->record_path().empty()) return nil;
+	NSString* path = @(_mp->record_path().c_str());
+	return [[NSFileManager defaultManager] fileExistsAtPath:path] ? path : nil;
+}
+
 		_ui.text_centered(bf, items[i], r, 0xFFFFFFFF, 0xFF000000);
 	}
 }
@@ -4836,6 +5198,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 			_gmHover = _gmPress = -1;
 			return;
 		}
+	_endgame.set_playback(!_pbv && _mp && self.onPlayRecording && [self recordingPath] != nil);   // View Playback: a game that was recorded
 		if (a != A::Examine && a != A::Quit && a != A::Continue) return;
 		_gameMenu = 0;
 		_lastFrame = 0;
@@ -4902,7 +5265,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 // Steps the game speed to `target` (0..3) the way the keys do: SPEED_UP / SPEED_DOWN commands, so a recording and the other machines
 // follow. A multiplayer game keeps the host's speed (the session owns it).
 - (void)stepGameSpeedTo:(int)target {
-	if (!_game || _mp) return;
+	if (!_game || _mp || _pbv) return;
 	target = std::clamp(target, 0, 3);
 	for (int guard = 0; guard < 6 && _speed != target; guard++) {
 		_game->ctl.speed = _speed, _game->ctl.target_frame_time = int32_t(kTimings[std::clamp(_speed, 0, 4)]);
@@ -4917,6 +5280,14 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 // What OK hands to the window: the preferences that act on a running game (the rest are read when a game or the menu starts).
 - (void)applyPrefs:(const prefs::Prefs&)p {
 	if (p.has("game_speed") && p.game_speed != _speed && !(p.game_speed >= 3 && _speed >= 3)) [self stepGameSpeedTo:p.game_speed];
+		if (a == A::Playback) {  // the recording of the game that just ended, from its first frame
+			NSString* path = [self recordingPath];
+			if (path && self.onPlayRecording) {
+				_gameMenu = 0;
+				self.onPlayRecording(path);
+			}
+			return;
+		}
 	if (p.has("help_detail")) {
 		_helpOn = p.help_detail > 0;
 		if (p.help_detail > 0) _verbosity = std::clamp(p.help_detail, 1, 3);
@@ -4937,6 +5308,11 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 }
 
 // Harness (RON_CARRIER_TEST=WHO:O, docs/ui-port.md 14.1): the unit becomes a Carrier (type 351) so the card's REPEAT can be looked at.
+	if (it == "Restart" && _pbv) {
+		[self pbSeek:_pbv->pb->start_frame()];
+		_paused = NO;
+		return;
+	}
 - (void)harnessCarrier:(const char*)spec {
 	int who = 0, o = 0;
 	std::sscanf(spec, "%d:%d", &who, &o);
@@ -5376,6 +5752,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	// The cycle keys: OPTION_CYCLE_BUILDING/type (zoom), OPTION_NOZOOM_BUILDING, OPTION_ALL_BUILDING and the unit kinds.
 	struct Cyc {
 		const char* name;
+	if (_pbv && (o == "OPTION_SLOWER" || o == "OPTION_FASTER")) {  // the viewer's own speeds
+		[self pbSpeedStep:o == "OPTION_FASTER" ? 1 : -1];
+		return 1;
+	}
 		const char* what;
 		BOOL zoom, all, building;
 	};
@@ -5919,6 +6299,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	if (_placeType >= 0 && !([self hudVisible] && _hud.captures(int(p.x), int(p.y)))) {
 		const simd_float2 g = [self groundAt:[self toDrawable:p]];
 		[self previewPlacementAtWorldX:g.x y:g.y];
+	if (_pbv && !right && [self pbBarClick:p]) return;
 	}
 }
 
@@ -5944,6 +6325,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 - (void)uiScrollWheel:(NSEvent*)e at:(CGPoint)p {
 	if (_gameMenu == 3 && _optPage) {
 		_optPage->wheel(double(e.scrollingDeltaY), int(p.x), int(p.y));
+	if (_pbScrub) {
+		[self pbBarDrag:p];
+		return;
+	}
 		return;
 	}
 	if (_gameMenu) return;
@@ -5978,6 +6363,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	const NSPoint wp = [self.view convertPoint:[win mouseLocationOutsideOfEventStream] fromView:nil];
 	const NSRect b = self.view.bounds;
 	if (!NSPointInRect(wp, b)) return;
+	if (_pbScrub) {
+		[self pbBarRelease:p];
+		return;
+	}
 	const float x = float(wp.x), y = float(b.size.height - wp.y), W = float(b.size.width), H = float(b.size.height);
 	static const float speeds[7] = {48, 32, 24, 16, 12, 9, 8};
 	const float option = prefs::get().has("scroll_speed") ? prefs::scroll_factor(prefs::get().scroll_speed) : 1.0f;  // speed_option of the Options page
@@ -6595,6 +6984,10 @@ static int group_key_order(int i) { return (i + 1) % kGroupKeys; }  // panel / f
 	}
 }
 
+	if (_pbv && _uiReady && !_pbv->laid_out()) {  // no frame has been drawn: lay the playback bar out for its hit tests
+		_ui.begin(_uiW, _uiH, 1.0f);
+		[self drawPlaybackBar];
+	}
 // AppKit key codes -> Windows virtual keys for Game::keystate (key_down reads VkKeyScan of a character).
 static int vk_of(NSEvent* e) {
 	switch (e.keyCode) {
@@ -7550,6 +7943,11 @@ static int vk_of(NSEvent* e) {
 			r = [MapRenderer ctwBattleWithDevice:self.device gameDir:self.gameDir build:build error:&err];
 		}
 		if (!r) {
+	r.onPlayRecording = ^(NSString* path) {   // View Playback of the end-game window
+		dispatch_async(dispatch_get_main_queue(), ^{
+			[weakSelf playRecordingAt:path inGame:YES];
+		});
+	};
 			[self.menu setBusy:nil];
 			[self.menu showError:[NSString stringWithFormat:@"Could not prepare the battle: %@", err ?: @"unknown error"]];
 			[self.menu showScreen:@"multiplayer"];
@@ -7600,6 +7998,49 @@ static int vk_of(NSEvent* e) {
 
 // ---- Conquer the World (ctw_ui.h): the campaign's own battles run in the game window like any other game; its end brings
 // the front end back to the strategic map with the outcome applied.
+// Recorded Games (recplay.hpp): the recording at `path` from its first frame, in the game window. A failure from the menu shows on the menu; from the
+// end-game window of a game that was just recorded (`inGame`) it is an alert and the game stays.
+- (void)frontEndPlayRecording:(NSString*)path {
+	[self.menu setBusy:@"Loading the recording…"];
+	[self.view draw];
+	dispatch_async(dispatch_get_main_queue(), ^{
+		[self playRecordingAt:path inGame:NO];
+	});
+}
+
+- (void)playRecordingAt:(NSString*)path inGame:(BOOL)inGame {
+	std::string perr;
+	std::shared_ptr<ron::net::Playback> pb(ron::net::Playback::open(path.UTF8String, self.gameDir.UTF8String, perr).release());
+	NSString* err = nil;
+	MapRenderer* r = nil;
+	if (!pb) err = @(perr.c_str());
+	else r = [MapRenderer playbackWithDevice:self.device gameDir:self.gameDir playback:pb error:&err];
+	if (!r) {
+		NSString* text = [NSString stringWithFormat:@"Could not play the recording: %@", err ?: @"unknown error"];
+		if (inGame) {
+			[self alert:@"Recorded game" text:text];
+		} else {
+			[self.menu setBusy:nil];
+			[self.menu showError:text];
+		}
+		return;
+	}
+	const CGSize ds = self.view.drawableSize;
+	const float scale = float(self.window.backingScaleFactor > 0 ? self.window.backingScaleFactor : 1);
+	[r setUiWidth:int(ds.width) height:int(ds.height) scale:scale];
+	[self.menu stopAudio];
+	self.view.frontEnd = nil;
+	self.menu = nil;
+	[self attachGame:r];
+	__weak MapAppDelegate* weakSelf = self;
+	r.onExit = ^(BOOL quit) {   // back to the list of recordings
+		dispatch_async(dispatch_get_main_queue(), ^{
+			if (quit) [NSApp terminate:nil];
+			else [weakSelf showMenu:@"recorded"];
+		});
+	};
+}
+
 - (std::shared_ptr<ctwui::Session>)frontEndCtwSession {
 	return _ctwSession;
 }
@@ -7944,6 +8385,10 @@ int main(int argc, const char* argv[]) {
 				simulate = false;
 			} else if (a == "--seed" && more) {
 				seed = uint32_t(std::strtoul(argv[++i], nullptr, 0));
+		int pb_seat = -1;      // --pb-seat WHO: the leader whose seat the playback shows (default: the first human seat); --pb-fog: with that seat's fog (default: the whole map)
+		bool pb_fog = false;
+		NSString* playback_path = nil;   // --playback FILE: a recording of this port, played by its packages (docs/ui-port.md section 18)
+		bool frames_given = false;
 			} else if (a == "--perf" && more) {
 				perf_frames = std::atoi(argv[++i]);  // N more headless frames, timed: simulation step and rendered frame (after --frames)
 			} else if (a == "--long-run" && more) {
@@ -7993,6 +8438,12 @@ int main(int argc, const char* argv[]) {
 			} else if (a == "--ui-scale" && more) {
 				ui_scale = float(std::atof(argv[++i]));
 			} else if ((a == "--select" || a == "--select-build") && more && std::strchr(argv[i + 1], '@')) {
+			} else if (a == "--pb-seat" && more) {
+				pb_seat = std::atoi(argv[++i]);
+			} else if (a == "--pb-fog") {
+				pb_fog = true;
+			} else if (a == "--playback" && more) {
+				playback_path = @(argv[++i]);
 				// WHO:o1,o2,...@FRAME: a selection made at FRAME (the scripts see it from then on)
 				const std::string spec = argv[++i];
 				TimedSelect t;
@@ -8087,6 +8538,7 @@ int main(int argc, const char* argv[]) {
 			} else if (a == "--ctw-selftest") {
 				ctwSelftest = true;
 			} else if (a == "--ctw-sim" && more) {
+				frames_given = true;
 				ctwSim = true;
 				ctwCampaign = @(argv[++i]);
 			} else if (a == "--ctw-saveload" && more) {
@@ -8116,7 +8568,7 @@ int main(int argc, const char* argv[]) {
 				ctwVerbose = true;
 			} else if (a == "--menu") {
 				menu = true;
-				static const char* const screens[] = {"main", "tutorials", "skirmish", "skirmish-setup", "scenarios", "quit-popup", "ctw", "ctw-map", "multiplayer", "mp-lobby", "options"};
+				static const char* const screens[] = {"main", "tutorials", "skirmish", "skirmish-setup", "scenarios", "quit-popup", "ctw", "ctw-map", "multiplayer", "mp-lobby", "options", "recorded"};
 				for (const char* sname : screens) {
 					if (more && std::strcmp(argv[i + 1], sname) == 0) {
 						menuScreen = @(argv[++i]);
@@ -8124,7 +8576,8 @@ int main(int argc, const char* argv[]) {
 					}
 				}
 			} else if (a.rfind("--", 0) == 0) {
-				std::printf("usage: %s [game-dir] [--menu [main|tutorials|skirmish|skirmish-setup|scenarios|quit-popup|ctw|ctw-map|multiplayer|mp-lobby|options]] [--snapshot out.png [--size WxH]]\n"
+				std::printf("usage: %s [game-dir] [--menu [main|tutorials|skirmish|skirmish-setup|scenarios|quit-popup|ctw|ctw-map|multiplayer|mp-lobby|options|recorded]] [--snapshot out.png [--size WxH]]\n"
+				            "       ronmap [game-dir] --playback FILE.rcx [--frames N] [--pb-seat WHO] [--pb-fog] [--snapshot out.png [--size WxH]]\n"
 				            "       %s [game-dir] --random STYLE,SIZE,SEED,NATIONS[,TRIBES...] [--all-ai] [--difficulty 0..5] [--frames N] [--census] [--save-game FILE] [--snapshot out.png]\n"
 				            "       %s [game-dir] <scenario.scx> [--zoom 0..6] [--at X,Y] [--no-bloom] [--farm-time S] [--no-sim] [--seed S] "
 				            "[--move WHO:o1,o2@X,Y[@FRAME]]... [--frames N] [--load-game FILE] [--save-game FILE] [--snapshot out.png [--size WxH]]\n", argv[0], argv[0], argv[0]);
@@ -8147,7 +8600,25 @@ int main(int argc, const char* argv[]) {
 		if (ctwSim) return ctwcli::simulate(gameDir.UTF8String, ctwCampaign.UTF8String, seed, ctwRounds, g_difficulty >= 0 ? g_difficulty : 2,
 		                                    ctwOut ? ctwOut.UTF8String : "", ctwVerbose);
 		if (ctwSaveLoad) return ctwcli::save_roundtrip(gameDir.UTF8String, ctwCampaign.UTF8String, seed);
-		if (!scenario && !random_spec && !ctwBattle && mpJoin.empty()) menu = true;
+		std::shared_ptr<ron::net::Playback> playback;
+		if (playback_path) {
+			std::string perr;
+			playback.reset(ron::net::Playback::open(playback_path.UTF8String, gameDir.UTF8String, perr).release());
+			if (!playback) {
+				std::fprintf(stderr, "--playback: %s\n", perr.c_str());
+				return 1;
+			}
+			if (playback->kind() == ron::net::Playback::Kind::Original) {  // the original's own recordings: played and checked, not drawn (their map is not a scenario)
+				std::unique_ptr<ron::sim::Game> g = playback->make_start(perr);
+				if (!g) {
+					std::fprintf(stderr, "--playback: %s\n", perr.c_str());
+					return 1;
+				}
+				for (const std::string& n : playback->take_notes()) std::printf("  %s\n", n.c_str());
+				return ron::net::playback_report(*playback, *g, frames_given ? sim_frames : 0, false);
+			}
+		}
+		if (!scenario && !random_spec && !ctwBattle && mpJoin.empty() && !playback) menu = true;
 		if (menu) {
 			// The front end: headless with --snapshot, else the app opens its window on the Main Menu.
 			id<MTLDevice> device = MTLCreateSystemDefaultDevice();
@@ -8697,6 +9168,8 @@ int main(int argc, const char* argv[]) {
 				else if (opt == "--recall-group") [r recallGroup:std::atoi(v.c_str())];
 				else if (![r regroupGroup:std::atoi(v.c_str())]) std::fprintf(stderr, "--regroup %s issued nothing\n", v.c_str());
 			}
+		} else if (playback) {
+			r = [MapRenderer playbackWithDevice:device gameDir:gameDir playback:playback error:&error];
 			if (f < sim_frames) [r stepSimulation:1];
 		}
 		if (ctwSess) {
@@ -8732,3 +9205,19 @@ int main(int argc, const char* argv[]) {
 	}
 	return 0;
 }
+		if (r.playbackActive && (frames_given || snapshot)) {  // headless: the recording runs to the frame asked for (default: its end), then the report
+			r.onPlayRecording = ^(NSString* path) { std::printf("[view playback] %s\n", path.UTF8String); };
+			if (pb_seat >= 0) [r pbSelectWho:pb_seat];
+			r.fogOn = pb_fog;
+			[r pbRunHeadless:frames_given ? sim_frames : -1];
+			if (!snapshot) {
+				std::fflush(stdout);
+				return 0;
+			}
+			sim_frames = 0;
+		}
+		if (r.multiplayer) {   // tests: the end-game window after the run (RON_GAME_MENU_AFTER=2), and a click on one of its buttons (RON_GAME_MENU_CLICK=2: View Playback)
+			r.onPlayRecording = ^(NSString* path) { std::printf("[view playback] %s\n", path.UTF8String); };
+			if (const char* t = getenv("RON_GAME_MENU_AFTER")) [r openGameMenu:std::atoi(t)];
+			if (const char* c = getenv("RON_GAME_MENU_CLICK")) [r harnessGameMenuChoose:std::atoi(c)];
+		}

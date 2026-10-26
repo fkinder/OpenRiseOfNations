@@ -63,6 +63,8 @@ public:
 	std::vector<std::string> items() const;
 	Action action(int i) const;
 	bool enabled(int i) const;
+	// View Playback is enabled when the game that ended was recorded (a multiplayer game): the app opens its recording from the first frame.
+	void set_playback(bool on) { playback_ = on; }
 	// Draws everything and fills `rects` with the buttons' rectangles in UI pixels.
 	void draw(ron::metal::UiRenderer& ui, int ui_w, int ui_h, int hover, int press, std::vector<ron::IfaceRect>& rects) const;
 
@@ -75,7 +77,7 @@ private:
 	const ron::XmlElement* win_ = nullptr;  // ENDGAMEWIN
 	const ron::XmlElement* rm_ = nullptr;   // IFACERENDERMANAGER (the scroll pieces)
 	Info info_;
-	bool stats_ = false;
+	bool stats_ = false, playback_ = false;
 };
 
 }  // namespace endgame

@@ -193,6 +193,8 @@ class Runtime;
 class CommandSink : public sim::CommandManager {
 public:
 	Runtime* net = nullptr;
+	// A recording being played back (recplay.hpp): the viewer's orders go nowhere. process_turn drops what the HUD queued.
+	bool discard = false;
 	void process_turn(sim::Game& g);
 	// A fresh issuer (a loaded game / a recovery: the group memory of the old game means nothing).
 	void reset();

@@ -36,6 +36,8 @@
 // host sent). A guest asks the host side what to do with the campaign the host sent after the battle.
 - (void)frontEndPlayMultiplayerCtw:(std::shared_ptr<mp::Room>)room session:(std::shared_ptr<ctwui::Session>)session;
 - (NSString*)frontEndCtwReceived:(const std::vector<uint8_t>&)campaign outcome:(int)outcome;
+// Recorded Games (recplay.hpp): watch the recording at `path` (a .rcx of this port) from its start.
+- (void)frontEndPlayRecording:(NSString*)path;
 @end
 
 @interface FrontEnd : NSObject <MTKViewDelegate>
@@ -43,7 +45,7 @@
 @property(nonatomic, weak) MTKView* view;
 @property(nonatomic, readonly) NSString* gameDir;
 - (instancetype)initWithDevice:(id<MTLDevice>)device gameDir:(NSString*)dir error:(NSString* __autoreleasing*)error;
-// main, tutorials, skirmish, skirmish-setup, scenarios, multiplayer, mp-lobby; "quit-popup" = the Main Menu with the Quit popup open.
+// main, tutorials, skirmish, skirmish-setup, scenarios, multiplayer, mp-lobby, recorded; "quit-popup" = the Main Menu with the Quit popup open.
 - (void)showScreen:(NSString*)screen;
 // A message box without buttons (e.g. "Loading…") until cleared with nil; an error box with an OK button.
 - (void)setBusy:(NSString*)text;

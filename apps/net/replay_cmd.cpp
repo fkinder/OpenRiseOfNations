@@ -7,36 +7,20 @@
 
 #include "commands.hpp"
 #include "common.hpp"
+#include "net/playback.hpp"
 #include "sim/anim_assets.hpp"
 #include "sim/datawalk.hpp"
 #include "sim/datawalk_engine.hpp"
 #include "sim/newgame.hpp"
 #include "sim/original_save.hpp"
 #include "sim/rules.hpp"
+#include "sim/save.hpp"
 
 namespace ronnet {
 
 namespace dw = ron::sim::datawalk;
 
 namespace {
-
-// Rules per setup, loaded once from the install (the same cache apps/sav/main.cpp keeps).
-struct RulesCache {
-	explicit RulesCache(const std::string& dir) : files(dir) {}
-	ron::GameFiles files;
-	std::unique_ptr<sim::Rules> base;
-	std::map<std::string, std::unique_ptr<sim::Rules>> by_setup;
-	const sim::Rules& get(const sim::GameSetup& s) {
-		if (!base) base = std::make_unique<sim::Rules>(sim::load_rules(files));
-		char key[96];
-		std::snprintf(key, sizeof key, "%d/%d/%d/%d/%d", s.starting_technology, s.starting_technology2, s.ending_technology, s.game_rules, int(s.flag8));
-		auto it = by_setup.find(key);
-		if (it != by_setup.end()) return *it->second;
-		auto r = std::make_unique<sim::Rules>(*base);
-		sim::start_game(*r, s);
-		return *by_setup.emplace(key, std::move(r)).first->second;
-	}
-};
 
 const char* arg_value(int argc, char** argv, const char* name) {
 	for (int i = 2; i + 1 < argc; ++i)
@@ -107,16 +91,13 @@ int cmd_replay(int argc, char** argv) {
 		return 1;
 	}
 
-	// the rules the save was made with
-	sim::GameSetup setup;
-	setup.starting_technology = rp.save_info.setup_field(sim::kSetStartingTechnology);
-	setup.starting_technology2 = rp.save_info.setup_field(sim::kSetStartingTechnology2);
-	setup.ending_technology = rp.save_info.setup_field(sim::kSetEndingTechnology);
-	setup.game_rules = rp.save_info.setup_field(sim::kSetGameRules);
-	setup.flag8 = (rp.save_info.flags & 8) != 0;
-	RulesCache cache(game_dir);
-	const sim::Rules& rules = cache.get(setup);
-	const std::vector<uint8_t> save = rp.save_bytes();
+	// the start game of every instance: the one implementation the app's playback shares (net/playback.hpp)
+	std::string open_err;
+	std::unique_ptr<net::Playback> pb = net::Playback::open(path, game_dir, open_err);
+	if (!pb) {
+		std::printf("%s: %s\n", basename_of(path).c_str(), open_err.c_str());
+		return 1;
+	}
 
 	std::array<int, 8> seat_who{};
 	for (int i = 0; i < 8; ++i) seat_who[size_t(i)] = i;
@@ -133,32 +114,18 @@ int cmd_replay(int argc, char** argv) {
 	net::LoopbackHub hub(8, 1234, dlo, dhi);
 	std::vector<Inst> inst;
 	std::vector<std::unique_ptr<sim::Game>> games;
-	std::vector<std::unique_ptr<sim::AssetAnimSource>> arts;
-	sim::OriginalLoadReport rep;
+	bool rules_equal = false;
 	const net::ExecPolicy policy = has_flag(argc, argv, "--all-verbs") ? net::ExecPolicy::all_engine() : net::ExecPolicy::sav_compatible();
 	for (int slot : seats) {
-		sim::OriginalLoadReport r;
-		std::unique_ptr<sim::Game> g = sim::load_original_save(cache.files, rules, nullptr, save, &r);
+		std::string lerr;
+		std::unique_ptr<sim::Game> g = pb->make_start(lerr, net::PlaybackEnv(), !no_art);
 		if (!g) {
-			std::printf("%s: load failed: %s\n", basename_of(path).c_str(), r.error.c_str());
+			std::printf("%s: %s\n", basename_of(path).c_str(), lerr.c_str());
 			return 1;
 		}
-		if (slot == seats.front()) rep = r;
-		if (!no_art) {
-			arts.push_back(sim::load_anim_source(cache.files, *g->rules));
-			g->anims = arts.back().get();
-		}
-		// The playback prologue of ron-sav --replay: what the original's load and Game::run do before the first frame (the pens' animals,
-		// leader 9's reset, calc_danger, update_all_seen), and the game script the header names (Setup::build_game's script part).
-		sim::original_post_load_effects(*g);
-		{
-			const std::string script = sim::to_utf8(rp.header.scenario_script);
-			std::string serr;
-			if (!script.empty() && !sim::original_attach_game_script(*g, cache.files, script, &serr))
-				std::printf("  game script \"%s\" not attached: %s\n", script.c_str(), serr.c_str());
-			else if (!script.empty() && slot == seats.front())
-				std::printf("  game script \"%s\" attached\n", script.c_str());
-		}
+		for (const std::string& n : pb->take_notes())
+			if (slot == seats.front() || n.find("not attached") != std::string::npos) std::printf("  %s\n", n.c_str());
+		if (slot == seats.front()) rules_equal = pb->rules_equal();
 		net::ExecPolicy pol = policy;
 		if (has_flag(argc, argv, "--no-commands")) pol.execute = false;
 		Inst in;
@@ -194,7 +161,7 @@ int cmd_replay(int argc, char** argv) {
 	int64_t last_boundary = expect.rbegin()->first;
 	if (max_frames > 0) last_boundary = std::min<int64_t>(last_boundary, start + max_frames);
 	std::printf("%s: replay from save frame %lld, %zu CHECK_SUMS turns, %zu records, rules %s\n", basename_of(path).c_str(), (long long)start, rows.size(),
-	            rp.packages.size(), rep.rules_equal ? "equal to the install's" : "adopted from the save");
+	            rp.packages.size(), rules_equal ? "equal to the install's" : "adopted from the save");
 	{
 		uint32_t v[16];
 		h0.checksums(v);
@@ -274,6 +241,38 @@ int cmd_replay(int argc, char** argv) {
 		}
 		std::printf("  final state (frame %d on every instance): %s\n", games[0]->frame, ok ? "identical" : "DIFFERENT");
 		if (!ok) rc = 1;
+	}
+	return rc;
+}
+
+// ron-net playback: ONE engine instance plays the recording (net/playback.hpp), the way the app's Recorded Games viewer does.
+int cmd_playback(int argc, char** argv) {
+	if (argc < 3) {
+		std::fprintf(stderr, "usage: ron-net playback <file.rcx> [--game DIR] [--frames N] [--all-verbs] [--no-art] [--save out.sav]\n");
+		return 64;
+	}
+	const std::string path = argv[2];
+	const std::string game_dir = arg_value(argc, argv, "--game") ? arg_value(argc, argv, "--game") : game_dir_default();
+	const int64_t frames = arg_value(argc, argv, "--frames") ? std::atoll(arg_value(argc, argv, "--frames")) : 0;
+	std::string err;
+	std::unique_ptr<net::Playback> pb = net::Playback::open(path, game_dir, err);
+	if (!pb) {
+		std::printf("%s: %s\n", basename_of(path).c_str(), err.c_str());
+		return 1;
+	}
+	std::unique_ptr<sim::Game> g = pb->make_start(err, net::PlaybackEnv(), !has_flag(argc, argv, "--no-art"));
+	if (!g) {
+		std::printf("%s: %s\n", basename_of(path).c_str(), err.c_str());
+		return 1;
+	}
+	for (const std::string& n : pb->take_notes()) std::printf("  %s\n", n.c_str());
+	const int rc = net::playback_report(*pb, *g, frames, has_flag(argc, argv, "--all-verbs"));
+	if (const char* out = arg_value(argc, argv, "--save")) {
+		try {
+			sim::save_game(*g, pb->scenario(), pb->seed(), out);
+		} catch (const std::exception& e) {
+			std::printf("  --save: %s\n", e.what());
+		}
 	}
 	return rc;
 }

@@ -293,9 +293,10 @@ Screen::Action Screen::action(int i) const {
 	}
 }
 
-// EndGameWin::update_visibility: View Playback is enabled only with the replay preference and outside scripted / campaign games
-// and multiplayer; the port records no playback, so it stays disabled.
-bool Screen::enabled(int i) const { return stats_ || i != 2; }
+// EndGameWin::update_visibility: View Playback is enabled only with the replay preference and outside scripted / campaign games. The port
+// records its multiplayer games (net/record.hpp), so the button works for a game that was recorded: the app opens the recording at frame 0
+// (recplay.hpp). A single-player game is not recorded: the button stays disabled.
+bool Screen::enabled(int i) const { return stats_ || i != 2 || playback_; }
 
 void Screen::scroll_plate(UiRenderer& ui, IfaceRect r) const {
 	IfacePiece p[9];

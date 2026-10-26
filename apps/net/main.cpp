@@ -24,6 +24,7 @@
 #include <string>
 
 #include "commands.hpp"
+#include "net/playback.hpp"
 #include "common.hpp"
 
 using namespace ronnet;
@@ -255,6 +256,7 @@ int main(int argc, char** argv) {
 	if (cmd == "survey") return cmd_survey(argc, argv);
 	if (cmd == "timing") return cmd_timing(argc, argv);
 	if (cmd == "replay") return cmd_replay(argc, argv);
+	if (cmd == "playback") return cmd_playback(argc, argv);
 	if (cmd == "selftest") return cmd_selftest(argc, argv);
 	if (cmd == "host" || cmd == "join") return cmd_netgame(argc, argv);
 	if (cmd == "loopback") return cmd_loopback(argc, argv);

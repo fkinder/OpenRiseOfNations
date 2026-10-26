@@ -10,6 +10,7 @@
 #include "commands.hpp"
 #include "common.hpp"
 #include "net/game_link.hpp"
+#include "net/playback.hpp"
 #include "node.hpp"
 #include "sim/anim_assets.hpp"
 #include "sim/newgame.hpp"
@@ -28,53 +29,25 @@ int replay_native(const sim::Replay& rp, const std::string& path, const std::str
 		return 1;
 	}
 	try {
-		const ron::GameFiles files(game_dir);
-		sim::Rules rules = sim::load_rules(files);
-		sim::start_game(rules, sim::GameSetup());
-		auto art = sim::load_anim_source(files, rules);
-		const std::vector<uint8_t> save = rp.native_save_bytes();
-		std::string scenario;
-		uint32_t seed = rp.header.seed;
-		sim::RandomGameSetup setup;
-		if (rp.native_save) {
-			const sim::SaveInfo info = sim::read_save_info(save);
-			scenario = info.scenario;
-			seed = info.seed;
-		} else {
-			scenario = ron::sim::to_utf8(rp.header.scenario_path);
-			if (!sim::is_random_scenario(scenario) || !sim::parse_random_setup(scenario, setup)) {
-				std::printf("%s: no embedded save and no random setup in the header: not a recording of this port\n", name.c_str());
-				return 1;
-			}
-			seed = setup.seed;
+		std::string oerr;
+		std::unique_ptr<net::Playback> pb = net::Playback::open(path, game_dir, oerr);
+		if (!pb) {
+			std::printf("%s: %s\n", name.c_str(), oerr.c_str());
+			return 1;
 		}
-		std::array<int, 8> who{};
-		for (int i = 0; i < 8; ++i) who[size_t(i)] = i;
-		for (const sim::ReplayPlayer& p : rp.header.players)
-			if (p.present()) who[size_t(p.play & 7)] = p.who;
+		const std::string scenario = pb->scenario();
+		const uint32_t seed = pb->seed();
+		const std::array<int, 8> who = pb->seat_who();
 		net::LoopbackHub hub(8, 1234, dlo, dhi);
 		std::vector<std::unique_ptr<EngineNode>> nodes;
 		std::vector<Inst> inst;
 		for (int slot : feed.humans) {
-			std::unique_ptr<sim::Game> g = rp.native_save ? sim::load_game_bytes(files, rules, art.get(), save) : sim::new_random_game(files, rules, art.get(), setup);
+			std::unique_ptr<sim::Game> g = pb->make_start(oerr);
 			if (!g) {
-				std::printf("%s: the start state could not be built\n", name.c_str());
+				std::printf("%s: %s\n", name.c_str(), oerr.c_str());
 				return 1;
 			}
-			if (!rp.native_save) {  // the room made it a multiplayer game: the header carries the players' names and handicaps (an embedded save has them already)
-				net::MpSeats seats;
-				seats.plan = net::make_seat_plan(0, 0, int(setup.num_nations), true);
-				for (const sim::ReplayPlayer& p : rp.header.players) {
-					if (!p.present() || p.play < 0 || p.play > 7) continue;
-					if (!(p.flags & 4)) continue;   // human
-					seats.plan.peer_of[size_t(p.play)] = p.play;
-					seats.name[size_t(p.play)] = sim::to_utf8(p.name);
-					seats.handicap[size_t(p.play)] = p.handicap;
-				}
-				seats.plan.nations = setup.num_nations;
-				net::apply_mp_seats(*g, who, seats);
-			}
-			nodes.push_back(std::make_unique<EngineNode>(files, rules, art.get(), std::move(g), scenario, seed, who));
+			nodes.push_back(std::make_unique<EngineNode>(pb->files(), *pb->own_rules(), pb->own_art(), std::move(g), scenario, seed, who));
 			Inst in;
 			in.slot = slot;
 			in.session = std::make_unique<net::Session>(hub.endpoint(slot), nodes.back()->hooks(), session_config_for(rp, slot));

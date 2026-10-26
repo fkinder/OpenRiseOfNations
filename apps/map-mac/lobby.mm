@@ -55,6 +55,10 @@ double steady_ms() {
 
 void CommandSink::process_turn(sim::Game& g) {
 	if (!net) {
+	if (discard) {
+		(*this).*Rob<LocalTag>::ptr = std::vector<sim::Command>();
+		return;
+	}
 		sim::CommandManager::process_turn(g);
 		return;
 	}
