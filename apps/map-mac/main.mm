@@ -685,6 +685,8 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	std::string _randomSpec;    // the --random option text, parsed once the rules are loaded
 	std::function<std::unique_ptr<ron::sim::Game>(const ron::GameFiles&, const ron::sim::Rules&, const ron::sim::AnimSource*,
 	                                              ron::sim::RandomExtras*, std::string*)> _ctwBuild;  // a Conquer the World battle
+	std::function<std::unique_ptr<ron::sim::Game>(const ron::GameFiles&, const ron::sim::Rules&, const ron::sim::AnimSource*,
+	                                              ron::sim::RandomExtras*, std::string*)> _pbBuild;   // a recording of the original game: its loaded save and the terrain made of it
 	int _ctwOutcome, _ctwEndFrames;
 	std::unordered_map<int32_t, int> _pieceGraphic;    // gpiece -> unit graphic (-1: unknown)
 	mp::CommandSink _cm;                 // the local player's commands: executed here, or sent through the multiplayer session (lobby.h)
@@ -889,9 +891,9 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 				}
 			}
 			ron::sim::RandomExtras extras;
-			if (_ctwBuild) {
+			if (_ctwBuild || _pbBuild) {
 				std::string cerr;
-				randomGame = _ctwBuild(files, *_simRules, _art.get(), &extras, &cerr);
+				randomGame = (_pbBuild ? _pbBuild : _ctwBuild)(files, *_simRules, _art.get(), &extras, &cerr);
 				if (!randomGame) {
 					*error = [NSString stringWithFormat:@"The battle could not be built: %s", cerr.c_str()];
 					return nil;
@@ -1816,7 +1818,18 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 + (instancetype)playbackWithDevice:(id<MTLDevice>)device gameDir:(NSString*)dir playback:(std::shared_ptr<ron::net::Playback>)pb error:(NSString* __autoreleasing*)error {
 	MapRenderer* r = [MapRenderer alloc];
 	const std::string scn = pb->scenario();
-	if (ron::sim::is_random_scenario(scn)) {  // the map of the recording is generated again from its setup text
+	if (pb->kind() == ron::net::Playback::Kind::Original) {  // the original's save holds the map's grids, not a scenario or a setup: the terrain is made of the loaded game
+		r->_randomActive = YES;
+		ron::net::Playback* raw = pb.get();
+		r->_pbBuild = [raw](const ron::GameFiles& files, const ron::sim::Rules&, const ron::sim::AnimSource*, ron::sim::RandomExtras* x, std::string* err) -> std::unique_ptr<ron::sim::Game> {
+			std::unique_ptr<ron::sim::Game> g = raw->make_start(*err);
+			if (!g) return nullptr;
+			if (!ron::net::playback_scenario(*g, files, x->scenario, *err)) return nullptr;
+			x->setup = ron::sim::RandomGameSetup();
+			return g;
+		};
+		r = [r initWithDevice:device gameDir:dir scenario:@"" simulate:YES seed:pb->seed() error:error];
+	} else if (ron::sim::is_random_scenario(scn)) {  // the map of the recording is generated again from its setup text
 		ron::sim::RandomGameSetup setup;
 		if (!ron::sim::parse_random_setup(scn, setup)) {
 			if (error) *error = @"The map setup of the recording cannot be read.";
@@ -1825,6 +1838,13 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 		r->_randomActive = YES;
 		r->_randomSetup = setup;
 		r = [r initWithDevice:device gameDir:dir scenario:@"" simulate:YES seed:setup.seed error:error];
+	} else if (ron::sim::is_ctw_map_scenario(scn)) {  // a Conquer the World battle on a custom map: the campaign's scenario file is the map
+		ron::sim::CtwMapBattle cmb;
+		if (!ron::sim::parse_ctw_map_battle(scn, cmb)) {
+			if (error) *error = @"The battle map of the recording cannot be read.";
+			return nil;
+		}
+		r = [r initWithDevice:device gameDir:dir scenario:@(cmb.map.c_str()) simulate:YES seed:pb->seed() error:error];
 	} else {
 		r = [r initWithDevice:device gameDir:dir scenario:@(scn.c_str()) simulate:YES seed:pb->seed() error:error];
 	}
@@ -1850,6 +1870,7 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 	pb->after_frame = [me]() { [me consumeScript]; };
 	if (pb->kind() == ron::net::Playback::Kind::NativeRandom) {  // the renderer made the random game already: the room's names and handicaps on top
 		pb->apply_header_seats(*_game);
+	} else if (_pbBuild) {       // the original's recording: the renderer's game is the start state itself (built with its terrain)
 	} else {
 		std::string err;
 		ron::net::PlaybackEnv env;
@@ -1870,6 +1891,10 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 		for (size_t k = 0; k < _pbv->seats.size(); k++)
 			if (_pbv->seats[k].who == si.who) first = int(k);
 		break;
+	}
+	if (pb->kind() == ron::net::Playback::Kind::NativeSave && pb->start_frame() > 0) {  // an out-of-sync recovery segment: the snapshot is the start state
+		_pbv->note = "Recording starts at frame " + std::to_string(pb->start_frame()) + " (an out-of-sync recovery snapshot)";
+		[self say:_pbv->note];
 	}
 	_fogOn = NO;                 // the whole map to begin with; F shows a player's fog
 	_overOffered = YES;          // the end-game window is not offered: the viewer decides when to leave
@@ -2056,6 +2081,7 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 	s.sync = pb.sync_text();
 	const ron::net::PlaybackSync& sy = pb.sync();
 	s.sync_kind = !sy.has_rows || sy.compared == 0 ? 0 : sy.first_out_of_sync >= 0 ? 2 : 1;
+	s.name = _pbv->note;
 	s.hover = _pbv->hit(int(_mouse.x), int(_mouse.y));
 	if (s.hover >= recplay::kBtnCount) s.hover = recplay::kBtnNone;
 	return s;
@@ -8743,15 +8769,6 @@ int main(int argc, const char* argv[]) {
 			if (!playback) {
 				std::fprintf(stderr, "--playback: %s\n", perr.c_str());
 				return 1;
-			}
-			if (playback->kind() == ron::net::Playback::Kind::Original) {  // the original's own recordings: played and checked, not drawn (their map is not a scenario)
-				std::unique_ptr<ron::sim::Game> g = playback->make_start(perr);
-				if (!g) {
-					std::fprintf(stderr, "--playback: %s\n", perr.c_str());
-					return 1;
-				}
-				for (const std::string& n : playback->take_notes()) std::printf("  %s\n", n.c_str());
-				return ron::net::playback_report(*playback, *g, frames_given ? sim_frames : 0, false);
 			}
 		}
 		if (!scenario && !random_spec && !ctwBattle && mpJoin.empty() && !playback) menu = true;

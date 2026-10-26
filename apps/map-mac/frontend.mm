@@ -2726,6 +2726,8 @@ static bool parse_port(const std::string& s, int& out) {
 	if (s.tribes.size() > 4) d += ", ...";
 	d += "   |   " + recplay::clock_text(s.end_frame - s.start_frame);
 	if (s.original) d += "   |   original game";
+	if (s.ctw_battle) d += "   |   Conquer the World battle";
+	if (s.recovery) d += "   |   starts at frame " + std::to_string(s.start_frame) + " (recovery)";
 	if (!s.playable) d += "   |   " + s.unplayable;
 	return d;
 }
@@ -2765,11 +2767,6 @@ static bool parse_port(const std::string& s, int& out) {
 	}
 	if (!s->playable) {
 		[self showError:[NSString stringWithFormat:@"This recording cannot be watched: %s.", s->unplayable.c_str()]];
-		return;
-	}
-	if (s->original) {
-		[self showError:@"This recording was made by the original game. It can be played back and checked against its own check sums (ronmap --playback FILE, "
-		                 "ron-net playback FILE), but its map cannot be drawn yet."];
 		return;
 	}
 	[self click];

@@ -87,6 +87,7 @@ public:
 	int64_t seek_from = 0;
 	int64_t restart_seek = -1;         // after a rewind: the frame to run to
 	bool announced_end = false;
+	std::string note;                  // a line under the timeline ("Recording starts at frame N" for a recovery segment)
 
 	// Draws the bar at the top of the screen and keeps the button rectangles for `hit`.
 	void draw(ron::metal::UiRenderer& ui, int ui_w, int ui_h, const BarState& s);

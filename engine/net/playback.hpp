@@ -48,6 +48,8 @@ struct PlaybackSummary {
 	int map_style = -1, map_size = -1;
 	int64_t start_frame = 0, end_frame = 0;   // the first frame the playback runs from, the frame of the last package
 	bool has_check_sums = false;
+	bool ctw_battle = false;      // a Conquer the World battle (the embedded save carries the campaign copy)
+	bool recovery = false;        // starts from an out-of-sync recovery snapshot (start_frame > 0): the recording starts there, not at frame 0
 };
 bool playback_summary(const std::string& path, PlaybackSummary& out);
 
@@ -171,6 +173,13 @@ private:
 	void deliver();
 	void compare(int64_t frame);
 };
+
+// The scenario-shaped terrain the renderer draws a loaded game from: Scenario::terrain synthesised from the game's World (tdata / wdata),
+// its height field, its placed mountains and the tileset the original save names (OriginalShadow::tileset), the same record a random
+// game's generator hands the renderer (sim/newgame.hpp RandomExtras::scenario). Used for the recordings of the original game, whose map
+// is no scenario file and no setup text. Objects are not part of it (the renderer draws units and buildings from the simulation's view).
+// False with `err` when the game has no tileset (not a game loaded from an original save).
+bool playback_scenario(const sim::Game& g, const ron::GameFiles& files, Scenario& out, std::string& err);
 
 // Runs a recording to `frames` after its start (0: to its end) with no display and prints the report `ron-net playback` and
 // `ronmap --playback` share (kind, turns compared, per-part first differences). Returns 0 when it ran to where it was asked.

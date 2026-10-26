@@ -6,6 +6,7 @@
 
 #include "net/lobby.hpp"
 #include "sim/datawalk.hpp"
+#include "sim/mountains.hpp"
 #include "sim/original_save.hpp"
 #include "sim/save.hpp"
 
@@ -73,18 +74,92 @@ bool playback_summary(const std::string& path, PlaybackSummary& out) {
 	} else if (rp.native_save) {
 		const sim::SaveInfo info = sim::read_save_info(rp.native_save_bytes());
 		if (sim::is_random_scenario(info.scenario) && sim::parse_random_setup(info.scenario, rs)) out.map_style = rs.map_style, out.map_size = rs.map_size;
+		out.ctw_battle = sim::is_ctw_map_scenario(info.scenario) || (sim::is_random_scenario(info.scenario) && rs.ctw);
 	} else {
 		out.map_style = rp.header.setup_field(sim::kSetMapStyle), out.map_size = rp.header.setup_field(sim::kSetMapSize);
 	}
 	out.start_frame = rp.start_frame();
 	out.end_frame = rp.last_frame();
 	out.has_check_sums = rp.check_sum_rows() > 0;
-	if (rp.header.conquest) out.unplayable = "A Conquer the World battle recording";
+	out.ctw_battle = out.ctw_battle || rp.header.conquest;
+	out.recovery = rp.native_save && out.start_frame > 0;
+	if (rp.header.conquest && !rp.native_save) out.unplayable = "A Conquer the World battle recording without a start state";
 	else if (rp.packages.empty()) out.unplayable = "The recording holds no commands";
 	else if (native) out.playable = true;
 	else if (!rp.has_save) out.unplayable = "Starts from a random map of the original game (no save inside)";
 	else if (!rp.has_save_info) out.unplayable = "The embedded save cannot be read";
 	else out.playable = true;
+	return true;
+}
+
+// ---------------------------------------------------------------- the renderer's terrain of a loaded game
+
+bool playback_scenario(const sim::Game& g, const ron::GameFiles& files, Scenario& out, std::string& err) {
+	if (!g.original || g.original->tileset.empty()) {
+		err = "the game names no tileset";
+		return false;
+	}
+	const sim::World& w = g.world;
+	const int xs = w.xs, ys = w.ys;
+	Terrain& t = out.terrain;
+	t = Terrain();
+	t.tileset = g.original->tileset;
+	t.xs = xs, t.ys = ys;
+	const int txs = xs * 4, tys = ys * 4;
+	if (xs <= 0 || ys <= 0 || g.heights.vxs != t.vxs() || g.heights.vys != t.vys() || g.heights.h.size() != size_t(t.vxs()) * size_t(t.vys())) {
+		err = "the loaded game holds no height field for its map";
+		return false;
+	}
+	t.heights = g.heights.h;
+	t.wcoords.resize(size_t(xs) * size_t(ys));
+	t.coord_flags.resize(size_t(xs) * size_t(ys));
+	// the same flag translation a generated random map gets (newgame.cpp synthesize_terrain)
+	for (int y = 0; y < ys; y++) {
+		for (int x = 0; x < xs; x++) {
+			const sim::WData& d = w.w(x, y);
+			WCoordCell c;
+			uint16_t f = 0;
+			if (d.flags & sim::wflag::kForest) f |= wfile::kForest;
+			if (d.flags & sim::wflag::kRock) f |= wfile::kRocks;
+			if (d.flags & sim::wflag::kCoast) f |= wfile::kCoast;
+			if (d.flags & sim::wflag::kRiver) f |= wfile::kRiver;
+			if (d.flags & sim::wflag::kOil) f |= 0x10;
+			if (d.flags & sim::wflag::kCliff) f |= 0x40;
+			if (d.flags & sim::wflag::kHalfLand) f |= wfile::kHalfWater;
+			c.flags = f;
+			c.land = (d.land == 1 || d.land == 2) ? uint8_t(d.land) : uint8_t(0);
+			c.land_sub = d.land_sub;
+			t.wcoords[size_t(y) * size_t(xs) + size_t(x)] = c;
+			uint16_t cf = 0;
+			if (d.flags & sim::wflag::kHalfLand) cf = 0xa08d;
+			else if (d.land == 2) cf = 0x3009;
+			else if (d.land == 1) cf = 0x3089;
+			else if (d.flags & sim::wflag::kRiver) cf = 0x11;
+			else if (d.flags & sim::wflag::kCoast) cf = 0x4;
+			t.coord_flags[size_t(y) * size_t(xs) + size_t(x)] = cf;
+		}
+	}
+	t.tcoord_mask.assign(size_t(txs) * size_t(tys), 0);
+	for (int ty = 0; ty < tys; ty++) {
+		for (int tx = 0; tx < txs; tx++) {
+			const uint16_t m = w.t(tx, ty);
+			uint16_t f = 0;
+			if ((m & sim::tmask::kMedium) == sim::tmask::kWater) f |= tfile::kWater;
+			if (m & sim::tmask::kCoastal) f |= tfile::kCoastal;
+			if (m & sim::tmask::kRiverB) f |= tfile::kRiver;
+			t.tcoord_mask[size_t(ty) * size_t(txs) + size_t(tx)] = f;
+		}
+	}
+	// the placed mountain ranges (Game::mountains, rebuilt from the saved stamps) as chunk-69 stamps
+	sim::MountainTemplates templates(files);
+	for (const sim::PlacedRange& pr : g.mountains) {
+		MountainStamp st;
+		st.wx = uint8_t(pr.wx), st.wy = uint8_t(pr.wy), st.range_index = pr.range;
+		const sim::MountainRange* mr = pr.range >= 0 ? templates.get(pr.range) : nullptr;
+		st.num_coords = uint8_t(mr ? mr->face_wcoords : int32_t(pr.solid.size()));
+		t.mountains.push_back(st);
+	}
+	out.name = "Recording of the original game";
 	return true;
 }
 

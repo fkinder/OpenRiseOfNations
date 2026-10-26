@@ -113,7 +113,7 @@ constexpr uint32_t kPanel = 0xC8101018u, kButton = 0xD0303040u, kButtonHot = 0xE
 
 void Viewer::draw(ron::metal::UiRenderer& ui, int ui_w, int ui_h, const BarState& s) {
 	(void)ui_h;
-	const int w = std::min(ui_w - 24, 820), h = 56;
+	const int w = std::min(ui_w - 24, 820), h = s.name.empty() ? 56 : 74;   // s.name: a note under the timeline
 	const int x0 = (ui_w - w) / 2, y0 = 62;
 	panel_ = {x0, x0 + w, y0, y0 + h};
 	const int f = ui.font(13, -1), fs = ui.font(12, -1);
@@ -181,6 +181,10 @@ void Viewer::draw(ron::metal::UiRenderer& ui, int ui_w, int ui_h, const BarState
 	ui.next_layer();
 	ui.fill(float(tl + (tr - tl) * frac - 1), float(ty), 3.0f, float(th), 0xFFFFFFFFu, UiType::ColorBlend);
 	ui.next_layer();
+	if (!s.name.empty()) {
+		ui.text(fs, s.name, float(x0 + 8), float(y0 + 54), 0xFFFFE070u, 0xFF000000u);
+		ui.next_layer();
+	}
 }
 
 int Viewer::hit(int x, int y) const {

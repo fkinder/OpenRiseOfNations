@@ -1388,9 +1388,8 @@ Main Menu > **Recorded Games**: the folder `mp::default_record_dir()` names (`~/
 searched recursively, newest first. One row per file: the file name, then `date | map style, size | N players: nations | duration | original game | why it cannot be watched`.
 The detail line fills in while the headers are read. **Watch** (or Return, or a double click) plays the row; **Open File...** asks for any `.rcx` (`RON_REC_PICK=PATH` answers the chooser in tests) and plays it.
 Only the folder the app records into is ever listed; the original's own recordings (`re/oracle`, gitignored test data) are opened only through a path somebody gives (Open File..., `--playback`).
-Recordings of the original game are listed and marked `original game`: they play and check in `ronmap --playback` / `ron-net playback` (the check sums agree up to the engine's own fidelity frontier), but their map
-is not a scenario or a setup text the renderer can build, so **Watch** says so instead of opening a window (18.7). A single-player file without a start state, a Conquer the World battle and a file that does not parse
-are listed with the reason.
+Recordings of the original game are listed and marked `original game`; **Watch** opens them in the game window like any other (18.8: the map is built from the loaded save). A Conquer the World battle is marked
+`Conquer the World battle` and a recording that starts from an out-of-sync recovery snapshot `starts at frame N (recovery)`. A single-player file without a start state and a file that does not parse are listed with the reason.
 
 ### 18.3 Watching
 
@@ -1427,7 +1426,7 @@ ronmap [GAME] --playback FILE.rcx                                # opens the win
 ronmap [GAME] --playback FILE.rcx --frames N [--snapshot out.png [--size WxH]] [--pb-seat WHO] [--pb-fog]
         # headless: N frames after the start (no --frames with --snapshot: to the end), the check-sum report, the picture; --pb-seat WHO the leader whose seat the HUD shows,
         # --pb-fog that seat's fog; --mouse down:X,Y@0 / up clicks the bar (the first mouse event lays it out)
-ronmap [GAME] --playback ORIGINAL.rcx [--frames N]               # a recording of the original game: played and checked, nothing drawn (prints the same report as ron-net playback)
+ronmap [GAME] --playback ORIGINAL.rcx [--frames N] [--snapshot ...]  # a recording of the original game: the same viewer (18.8); prints the same report as ron-net playback
 ron-net playback FILE.rcx [--frames N] [--all-verbs] [--no-art] [--save out.ronsave]
 RON_GAME_MENU_AFTER=2 RON_GAME_MENU_CLICK=2 ronmap --host ... --mp-record F.rcx --snapshot x.png     # the end-game window after the run; clicks View Playback (prints "[view playback] PATH")
 ```
@@ -1446,16 +1445,29 @@ A short native recording made with two headless machines (`ronmap --host 17813 -
 | `playback_seek_back.png` | frame 900, then a click on the timeline at 20 %: the start state is built again and run to 0:15 (`in sync` again, the HUD clock 0:00:15) |
 | `playback_endgame_view_playback.png` | `RON_GAME_MENU_AFTER=2` after a recorded two-machine game: View Playback enabled (white); with `RON_GAME_MENU_CLICK=2` the click prints `[view playback] PATH` and opens that file |
 
-Checks: `ron-net replay` of the original recording 2026.08.30 21'23'34 still gives 320 fully equal turns with `units` first differing at 1,928; `ronmap --playback` and `ron-net playback` of it print the same first
-out-of-sync frame (1,928, per part as `ron-net replay`); the native recording plays in sync to the end (200 of 200 boundaries); the real-time path (`RON_PB_TICKS=N,SPEED,DT` runs `pbTick` N times) steps 59 frames in 60 display
+Checks: `ron-net replay` of the original recording 2026.08.30 21'23'34 still gives 355 fully equal turns with `units` first differing at 2,138; `ronmap --playback` and `ron-net playback` of it print the same first
+out-of-sync frame (2,138, per part as `ron-net replay`); the native recording plays in sync to the end (200 of 200 boundaries); the real-time path (`RON_PB_TICKS=N,SPEED,DT` runs `pbTick` N times) steps 59 frames in 60 display
 frames at 1x, 235 at 4x and 1,078 at Max (60 slices of 12 ms) and the whole recording in 3,000 slices; `ron-check` 0 failures, `ron-ui-check check` 0, `ronmap --ctw-selftest` 75/75, `ron-net selftest` 106/106.
 Not run: the window itself (a recording opened from the list in a real window, a click on Open File..., the timeline drag): every code path under them is the same one the harness drives, only the event delivery differs.
 
 ### 18.7 Open
 
-- **Recordings of the original game cannot be watched**: the start state is the original's save (`load_original_save`), which holds no terrain art and no scenario file for a random map (the original regenerates it
-  from the setup in the stream). `ronmap --playback` and `ron-net playback` run and check them; drawing them needs a renderer that builds terrain from the loaded `World` instead of from a scenario.
-- Conquer the World battle recordings (the campaign is part of the start state) are listed as not watchable; a recording that starts from a recovery snapshot plays from the snapshot.
+- Rivers of an original recording are not drawn as rivers: the save holds the carved heights and the river flags of the grid, not the polylines the river mesh is built from (`Terrain::rivers` stays empty), so a river bed shows as a textured dip without its water. Doobers (bushes, small rocks) are not in the save either.
 - The viewer's players' names come from the game's leaders; the original's recordings keep names out of every printout (`ReplayPlayer::name`).
 - A drop package (the clear `P` record) is not executed by the direct player: the lockstep session's drop agreement acts on the game through `Session::apply_drop`, the viewer only reads the packages.
+- Conquer the World battle recordings play the battle only: the campaign copy the save embeds is loaded (the scripts run against it) but the viewer has no campaign screens and does not apply the outcome.
+
+### 18.8 Original recordings, Conquer the World battles, recovery segments (2026-10-25)
+
+- **Original game** (`.rcx` of the Windows game with an embedded original save): `+playbackWithDevice:` hands the renderer a build hook (`_pbBuild`, the same shape as the battle's `_ctwBuild`): it calls `Playback::make_start` (the loaded save, the playback prologue, the game script) and
+  `ron::net::playback_scenario` (`engine/net/playback.cpp`) makes the `Scenario::terrain` from that game: `World` wdata / tdata translated as a generated random map's are (`synthesize_terrain`), the saved height field (`Game::heights`), the placed mountain ranges (`Game::mountains`)
+  and the tileset name the shadow keeps (`OriginalShadow::tileset`). The rest of the renderer is unchanged: trees from the forest flags, mountains and transitions from the terrain, units and buildings from the simulation's view. The renderer's game IS the start state (nothing is built twice);
+  the seek back builds it again with `make_start`. No change to `original_save.*` was needed (the shadow's fields are public).
+- **Conquer the World battles** (`random:...;ctw=1;conq=...` for a generated map, `ctwmap:...` for a campaign's own map; the CTWB section of the embedded save): the renderer builds the battle's map the way a native save of it does (the setup text regenerates the generated map, the `ctwmap:` text names the
+  `.scx`), then `make_start` loads the embedded save (`load_game_bytes`: the scripts compile, the campaign copy is attached) as the start state. The list marks them; they play and check like any native recording.
+- **Recovery segments** (a recording written after an out-of-sync recovery embeds the snapshot): the viewer starts at the snapshot frame (the timeline, the clock and Restart use it as 0:00), the bar shows "Recording starts at frame N (an out-of-sync recovery snapshot)" and the message line says it once; the list says `starts at frame N (recovery)`.
+
+Checks (`re/previews/`, 1280 x 800, read): `playback_orig_f0.png` / `playback_orig_f1500.png` / `playback_orig_f3000.png` (2026.08.30 21'23'34, a path given explicitly: the Germans' view, SW_Desert tileset, mountains at the top left, the minimap; `in sync` at 1,500, `out of sync at frame 2138` at 3,000 as `ron-net playback`);
+`playback_ctw_new_world_f300.png` (generated map, British), `playback_ctw_alexander_f300.png` (the campaign's Latium map, Greeks), both `in sync` over 50 boundaries; `playback_recovery_f200.png` (the segment after an OOS recovery at 409: note in the bar, in sync); `playback_list_tags.png` (the list tags).
+Recordings made with `ronmap --ctw-mp --ctw-battle new_world:auto --host 27471 --humans 1 --frames 300 --mp-bot --mp-record F.rcx` (and `alexander:auto`) and a two-process game with `--mp-diverge 400` on the guest.
 
