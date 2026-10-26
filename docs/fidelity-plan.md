@@ -13,7 +13,7 @@ recording, and the final state hash equals the original's. Measured per stage:
 |---|---|---|
 | A | the target replay `21'23'34` (18,338 frames, 3,056 boundaries) whole | 1,083 / 3,056 boundaries; `ammo` / `goods` / `walls` / rules / scripts to the end |
 | B | the 44 other replays with an embedded save, whole (except the rows the oracle cannot carry, §4) | 1,291 / ~14,900 boundaries; 2 replays whole |
-| C | the 36 random-map replays (no embedded save: the generator must reproduce the world) | not run yet |
+| C | the 34 random-map replays (no embedded save: the generator must reproduce the world; the 2 `.scx` games are scenario-based) | run (pass 1, 2026-10-26): 13 multiplayer ones have rows; first rows 5 to 10 of 15 parts equal (7.5 on average; table in docs/original-save.md 6.21, regenerate with re/tools/replay-all.sh), the rest wait on the AI's building sites and the start units (docs/randommap-spec.md "Replay first rows") |
 | D | the 10 standalone saves stepped to the next save of their chain with `--compare-next`: 0 mapped members differ | load exact (69/69); stepping leaves the leads of §3.4 |
 
 Presentation (rendering, audio, HUD) is outside this plan: the checksums hash the simulation only.
@@ -56,15 +56,21 @@ engine's late game matures, because the same mechanics recur across replays.
 
 ### 3.3 Stage C: random-map replays
 
-1. Add the generator path to `ron-sav --replay` / `ron-net replay`: a replay without an embedded save builds its
-   world with `new_random_game` from the header's setup (style, size, seed, nations, team style); the
-   `original_post_load_effects` prologue; then the same loop.
+1. **Done (pass 1, 2026-10-26).** The generator path of `ron-sav --replay` / `ron-net replay`: a replay without an embedded save builds its
+   world with `new_random_game` from the header's setup (`original_random_setup`, equal to the setup of the seven saved worlds in all fields, `--setup-check`); the
+   `original_post_load_effects` prologue and the game script; a fresh-state checksum shadow (`prepare_fresh_shadow`); then the same loop. The table: `re/tools/replay-all.sh`.
 2. The first row of every such replay is the oracle of the generator plus the start placement: `world`, `units`,
    `builds` at frame 7 must match. The generator matches the seven saved worlds in land, flags, groups, goods, rivers,
    heights and start towns, but 36 replays x other styles will expose style-specific recipes (the 25 styles each have a
    script); fix per style with `ron-mapgen --compare`-style tables against the first row.
 3. Then the replays proceed as in stages A and B.
 Estimate: 2 passes for the driver and the first rows, then the stage-B rate.
+
+Status after pass 1: items 1 and 2 are in place for every style the corpus uses (6, 8, 14, 18, 21 and the lobby picks 1 and 4); the generator work it caused is listed in
+docs/randommap-spec.md "Replay first rows" (randomize_starts in multiplayer, herds in list 8, `analyze_map`, the build_units farm rule, the order of `Leader::init` and of the empire's objects,
+incremental region labels, the `halfland` log). Open, in the order the first rows meet them: `Leader::produce_building`'s sites (22 of 25 buildings of the chain are off), the scouts' ring cell
+(a draw is still unaccounted: +958 at frame 7), the fog of reveal-map 3, the game script's first edits to the rules (`no_nukes`: the first row's `rules` is 1196242567, the stream's block hashes to
+314192132, the later rows 1896493747). The fully generated single-player `2026.07.11` against `current 2.SVX` (frame 189) is a second full-state oracle for the next pass.
 
 ### 3.4 Stage D: the load path (`--compare-next` leads)
 
@@ -76,8 +82,9 @@ are real go to stage A/B as fixes, the rest are documented as oracle limits.
 
 ### 3.5 Keep the harness honest
 
-- `ron-sav --replay --all`: one command that runs the 45 (then 81) replays and writes the table to `re/oracle/out/`;
-  the STATUS row quotes it. Add it to the acceptance of every fidelity commit so no part moves earlier unnoticed.
+- **Done:** `bash re/tools/replay-all.sh` runs every recording of `re/oracle/Recorded Games` (the 45 + 13 multiplayer ones with rows, the single-player ones as a note) and writes
+  `re/oracle/out/replay-table.tsv` (replay, start, boundaries, fully equal, first-row parts equal, the first differing boundary of each of the 15 parts; `--net` adds the `ron-net` agreement); the STATUS row
+  quotes it. Add it to the acceptance of every fidelity commit so no part moves earlier unnoticed (docs/oracle-corpus.md section 8).
 - `ron-net replay` must keep agreeing with `ron-sav --replay` (it did from pass 12 on); keep the check in the table.
 - The digest of `sim-all` is the regression net for behaviour changes outside the replays (random maps, AI); every
   change is attributed by a switch build before it lands.

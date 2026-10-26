@@ -3,6 +3,8 @@
 // BuildTypeData::snap_center, the other buildings are found by the AI's site search at run time (Leader::produce_building),
 // and the units are placed with Setup::place_unit's exact draw sequence.
 #include <array>
+#include <cstdio>
+#include <cstdlib>
 
 #include "sim/mapgen_internal.hpp"
 
@@ -36,6 +38,11 @@ constexpr int kScoutType = 0x45, kCitizenType = 0x32, kScholarType = 0x34, kMerc
 
 }  // namespace
 
+void Gen::push_entry(const EmpireEntry& e) {
+	res.empire.push_back(e);
+	if (P.on_empire_entry) P.on_empire_entry(res, res.empire.back());
+}
+
 void Gen::emit_unit(int who, int start, int type, int x, int y, int note) {
 	EmpireEntry e;
 	e.kind = EmpireEntry::Unit;
@@ -45,7 +52,7 @@ void Gen::emit_unit(int who, int start, int type, int x, int y, int note) {
 	e.x = x;
 	e.y = y;
 	e.note = note;
-	res.empire.push_back(e);
+	push_entry(e);
 }
 
 // Setup::place_unit @5abca0. (ox, oy): the origin in world units (the city position when there is one).
@@ -58,9 +65,22 @@ int Gen::place_unit(int who, bool has_city, int type, int ox, int oy, int ux, in
 	const int attempts = town == 0 ? 500 : 60;
 	const int owx = wcoord_of(ox), owy = wcoord_of(oy);
 	const int origin_region = inb(owx, owy) ? W(owx, owy).region : 0;
+	const bool trace = std::getenv("RON_PLACE_TRACE") != nullptr;
+	if (trace) {
+		std::fprintf(stderr, "  place_unit who %d type %d origin wcoord (%d,%d) ring %d attempts %d; ring offsets:", who, type, owx, owy, ring, attempts);
+		for (int k = 0; k < ring && k < 40; k++) std::fprintf(stderr, " %d:(%d,%d)", k, int(C.x[size_t(k)]), int(C.y[size_t(k)]));
+		std::fprintf(stderr, "\n");
+	}
 	for (int a = 0; a < attempts; a++) {
 		const int k = ring > 1 ? r.rnd(ring) : 0;
 		const int cx = owx + C.x[size_t(k)], cy = owy + C.y[size_t(k)];
+		if (trace) {
+			const bool ib = inb(cx, cy);
+			const WData* dd = ib ? &W(cx, cy) : nullptr;
+			std::fprintf(stderr, "    attempt %d k %d -> (%d,%d)%s", a, k, cx, cy, ib ? "" : " outside");
+			if (dd) std::fprintf(stderr, " region %d/%d flags %04x land %d down %d tile %04x occupied %d blocked %d", int(dd->region), origin_region, unsigned(dd->flags), int(dd->land), int(dd->down), unsigned(w.t(cx * 4 + 2, cy * 4 + 2)), int(occupied[w.wi(cx, cy)]), int(blocked_tiles[w.ti(cx * 4 + 2, cy * 4 + 2)]));
+			std::fprintf(stderr, "\n");
+		}
 		if (!inb(cx, cy)) continue;
 		const WData& d = W(cx, cy);
 		if (d.region != origin_region) continue;
@@ -74,7 +94,7 @@ int Gen::place_unit(int who, bool has_city, int type, int ox, int oy, int ux, in
 		if (d.flags & wflag::kGoody) continue;
 		occupied[w.wi(cx, cy)] = 1;
 		active_units[size_t(who)]++;
-		emit_unit(who, cur_start, type, cx * 768 + 384, cy * 768 + 384, 0);
+		emit_unit(who, cur_start, type, cx * 768 + 384, cy * 768 + 384, next_unit_note);
 		return int(res.empire.size()) - 1;
 	}
 	// after the attempts: Build::train(city, type) with a city, else init_unit at (x, y) + come_out(0)
@@ -100,6 +120,7 @@ void Gen::build_empire(int who, int start) {
 		return type;
 	};
 	const WCoord st = starts[size_t(start)];
+	if (P.on_empire_start) P.on_empire_start(res, who, st.x, st.y);
 	// ---- build_cities @5ab910
 	int city_x = -1, city_y = -1;
 	bool has_city = false;
@@ -118,7 +139,7 @@ void Gen::build_empire(int who, int start) {
 		e.type = type;
 		e.x = city_x;
 		e.y = city_y;
-		res.empire.push_back(e);
+		push_entry(e);
 		has_city = true;
 		const Footprint f = footprint(rules.types[size_t(type)], city_x, city_y);
 		for (int tx = f.x0; tx < f.x0 + f.w; tx++) {
@@ -136,7 +157,7 @@ void Gen::build_empire(int who, int start) {
 				b.who = who;
 				b.start = start;
 				b.type = t;
-				res.empire.push_back(b);
+				push_entry(b);
 			}
 		};
 		if (town == 3) {
@@ -185,8 +206,9 @@ void Gen::build_empire(int who, int start) {
 	}
 	if (bonus == 5 && konst("greek_start_scholars") != 0 && has_city) {
 		for (int i = 0; i < konst("greek_start_scholars"); i++) {
-			const int e = place_unit(who, has_city, graft(kScholarType), orig_x, orig_y, 0, 0);
-			if (e >= 0) res.empire[size_t(e)].note = 2;  // Unit::go_inside the university
+			next_unit_note = 2;   // Unit::go_inside the university (the entry is executed as it is emitted)
+			place_unit(who, has_city, graft(kScholarType), orig_x, orig_y, 0, 0);
+			next_unit_note = 0;
 		}
 	}
 	if (bonus == 16) n += K.at(uint32_t(constant_offset("korean_citizens")));
@@ -195,13 +217,15 @@ void Gen::build_empire(int who, int start) {
 		if (town < 2) {
 			place_unit(who, has_city, cit, orig_x, orig_y, 0, 0);
 		} else if (i < n_farm) {
-			// created by Objects::init_unit at the first farm (slot 2001), come_out(0) and a gather order: no ring draw
+			// created by Objects::init_unit at the building in slot 2001, come_out(0) and a gather order: no ring draw
 			emit_unit(who, start, cit, -1, -1, 1);
 			active_units[size_t(who)]++;
 		} else {
-			// ❓ randommap-spec §8: the later citizens look for a farm with room (not known before the site search); here
-			// they are placed near the city
-			place_unit(who, has_city, cit, orig_x, orig_y, 0, 0);
+			// the later citizens look for a farm with room from slot 2002 on and are created there (no ring draw; newgame.cpp create_empires).
+			// The fallback of the decompile (no farm: slot 2001 or Setup::place_unit) needs the buildings the site search will place; it is not
+			// taken here (the five farms of a large town and the three of a small one are always placed on the stock maps)
+			emit_unit(who, start, cit, -1, -1, 5);
+			active_units[size_t(who)]++;
 		}
 	}
 }
@@ -231,6 +255,7 @@ void Gen::build_empires() {
 	}
 	res.start_order = order;
 	phase("start order");
+	if (P.after_start_order) P.after_start_order(order);
 	// step 9: empires
 	occupied.assign(size_t(cells), 0);
 	blocked_tiles.assign(size_t(w.tile_size), 0);

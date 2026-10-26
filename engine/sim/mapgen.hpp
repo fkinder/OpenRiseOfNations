@@ -105,6 +105,16 @@ struct Params {
 	int reveal_map = 1;
 	bool ctw = false;            // Conquer the World (excludes Marble from the pool)
 	std::array<int, 8> tribe{{0, 1, 2, 3, 4, 5, 6, 7}};  // tribe of each slot
+	// Called once the start order is known, before the empires are built (Setup::build_game step 7: Leader::init for every valid leader in
+	// start order; its random_personality draws come from game_random and sit between the start order's and the empires' draws).
+	std::function<void(const std::array<int, 8>&)> after_start_order;
+	// Called with every empire entry (city, building, unit) the moment the generator emits it, in the original's order. Setup::build_empire
+	// creates the objects as it goes (a later Setup::place_unit sees the city, the buildings and the units before it, and the objects' own
+	// game_random draws sit between the ring draws), so a caller that builds a Game executes each entry here instead of after the generator.
+	std::function<void(const struct Result&, const struct EmpireEntry&)> on_empire_entry;
+	// Called when Setup::build_empire starts for a seat: its start location (wcoords). build_cities stores the start's region as the leader's home_reg
+	// (+0x9c8) whatever the starting town, a nomad included.
+	std::function<void(const struct Result&, int who, int wx, int wy)> on_empire_start;
 };
 
 struct Context {
@@ -132,7 +142,7 @@ struct EmpireEntry {
 	int32_t who = 0, start = 0;
 	int32_t type = 0;
 	int32_t x = -1, y = -1;        // world units
-	int32_t note = 0;              // Unit: 1 = created at farm slot (no ring draw), 2 = go_inside the university
+	int32_t note = 0;              // Unit: 1 = created at the building in slot 2001 (no ring draw), 5 = created at the next farm with room (no ring draw), 2 = go_inside the university
 };
 
 struct RiverPath {
@@ -159,6 +169,11 @@ struct Result {
 	std::vector<RiverPath> rivers;
 	int32_t river_beds = 0;
 	int32_t doobers = 0;
+	// Terrain.halfland_locs / halfland_types / halfland_subtypes: the log Terrain::mark_halfwater keeps - one entry (the wcoord, its land and its
+	// land_sub BEFORE it turned half water) per cell that turned, in the order the pass visits them (a cell may appear more than once). World::walk_data
+	// hashes the three lists; the engine's World does not model them.
+	std::vector<std::array<int32_t, 2>> halfland_locs;
+	std::vector<int32_t> halfland_types, halfland_subtypes;
 	// TerrainOut's height grid at the end of Terrain::init (master_land_heights): (4 xs + 1) x (4 ys + 1) floats, x fastest.
 	// Land is the fractal height blended towards the coast, the sea is -273, the shelf follows the coast generators' influence
 	// lines; then the oil-site plateaus, the river troughs (RiversOut), adjust_for_mountains(0) and Cliffs::init. A game's start towns

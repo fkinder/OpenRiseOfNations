@@ -14,6 +14,14 @@
 //                commands through CommandPackage where the engine supports the verb), compute the 15 parts at every turn boundary and compare
 //                them with the CHECK_SUMS rows of the replay: per part, the first boundary that differs. Needs node (re/tools/rcxdump.mjs) for
 //                the command stream (or --json file) and the CSV of re/tools/rcxdump.mjs --checksums.
+//   --extract-save F  write the embedded save of a replay (the decompressed stream) to F
+//   --setup-check S   (with a replay without an embedded save) the lobby setup decoded from its header against the setup read back from the save S of the same game
+//   --shadow-test     (with a save) the 15 parts of the loaded save against the same engine state over an emptied / another save's shadow made fresh (prepare_fresh_shadow);
+//                     RON_SHADOW_TEMPLATE=other.SVX names the template
+//   --analysis-check  (with a save) the World members the engine does not model (World::analyze_map, the territory limits, the halfland log) as new_random_game
+//                     generates them for the save's setup, against the save's own; env RON_REGION_DIFF / RON_WINDOW / RON_WORLD_ARRAYS / RON_HALFLAND / RON_GOOD_Z
+//   (a replay without an embedded save is generated from its header: start path of docs/original-save.md section 6.21; with --compare-next a single-player one is
+//   compared at the next save's frame; RON_SHADOW_SAVE names the template save, RON_PLACE_TRACE traces Setup::place_unit)
 //   --step-diff N     (with a save or replay) which mapped members the engine changes in N frames from the save
 //   --compare-next B  (with --replay) run to the frame of replay B's embedded save and list the members that differ from that save
 //   --solve-at B      (with --replay) at boundary B: for each of units/builds/groups/guys/leaders/goods/world whose hash differs, test
@@ -62,6 +70,9 @@
 #include "sim/movement.hpp"
 #include "sim/pathfinder.hpp"
 #include "sim/rules.hpp"
+#include "net/playback.hpp"
+#include "sim/newgame.hpp"
+#include "sim/replay.hpp"
 #include "sim/rules_xml.hpp"
 
 namespace dw = ron::sim::datawalk;
@@ -829,6 +840,7 @@ bool trace_part(dw::Provider& p, int part, PartTrace& out) {
 		dw::Site site{d.find_step(d.find_function("Array<Group>::walk_data"), dw::StepKind::Container, -1, 0), 0};
 		dw::ContainerHeader h;
 		if (!p.container(groups, site, h)) return false;
+		if (std::getenv("RON_TRACE_HDR")) std::printf("   groups container: length %d size %d increment %d flags %02x\n", h.length, h.size, int(h.increment), unsigned(h.flags));
 		for (int64_t i = 0; i < h.length; ++i) {
 			dw::Obj e = p.element(groups, site, i);
 			if (!e) continue;
@@ -1803,22 +1815,42 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 	std::map<int, int> seat_who;
 	if (hdr) if (const Json* pl = hdr->get("players")) for (size_t i = 0; i < pl->a.size(); ++i) seat_who[int(pl->a[i].num("play", int64_t(i)))] = int(pl->a[i].num("who", int64_t(i)));
 
-	// the engine's game
-	dw::Tree peek(dw::Description::get());
-	dw::SaveDecode psd = dw::decode_save(peek, save.data(), save.size(), 0);
-	if (!psd.result.ok) { std::printf("replay: decode failed\n"); return 1; }
-	sim::GameSetup setup;
-	setup.starting_technology = int32_t(field_int(peek, "game.info.starting_technology"));
-	setup.starting_technology2 = int32_t(field_int(peek, "game.info.starting_technology2"));
-	setup.ending_technology = int32_t(field_int(peek, "game.info.ending_technology"));
-	setup.game_rules = int32_t(field_int(peek, "game.info.game_rules"));
-	setup.flag8 = (field_int(peek, "game.info.flags") & 8) != 0;
+	// the engine's game: from the embedded save, or (a recording without one: a random map of the original) generated from the setup of the
+	// header's GameInfo and random-game-info block, the way Setup::build_game builds it from the lobby (net/playback.hpp original_random_setup)
+	const bool from_setup = save.empty();
 	static std::unique_ptr<RulesCache> cache;
 	if (!cache) cache = std::make_unique<RulesCache>(game_dir);
-	const sim::Rules& rules = cache->get(setup);
 	sim::OriginalLoadReport rep;
-	std::unique_ptr<sim::Game> game = sim::load_original_save(cache->files, rules, nullptr, save, &rep);
-	if (!game) { std::printf("replay: load failed: %s\n", rep.error.c_str()); return 1; }
+	std::unique_ptr<sim::Game> game;
+	sim::GameSetup setup;
+	const sim::Rules* rules_p = nullptr;
+	if (from_setup) {
+		sim::Replay srp;
+		sim::RandomGameSetup rsetup;
+		std::string e;
+		if (!sim::read_replay(path, srp, e)) { std::printf("replay: %s\n", e.c_str()); return 1; }
+		if (!ron::net::original_random_setup(srp, rsetup, e)) { std::printf("replay: no embedded save and %s\n", e.c_str()); return 1; }
+		setup = ron::net::original_rules_setup(srp.header);
+		rules_p = &cache->get(setup);
+		game = ron::net::original_random_game(cache->files, *rules_p, nullptr, srp, rsetup, e);
+		if (!game) { std::printf("replay: the generator failed: %s\n", e.c_str()); return 1; }
+		rep.rules_equal = true;
+		std::printf("  start: random map generated by new_random_game from the header (style %d, size %d, seed %u, %d nations); %s\n", rsetup.map_style, rsetup.map_size,
+		            rsetup.seed, rsetup.num_nations, ron::sim::random_setup_string(rsetup).c_str());
+	} else {
+		dw::Tree peek(dw::Description::get());
+		dw::SaveDecode psd = dw::decode_save(peek, save.data(), save.size(), 0);
+		if (!psd.result.ok) { std::printf("replay: decode failed\n"); return 1; }
+		setup.starting_technology = int32_t(field_int(peek, "game.info.starting_technology"));
+		setup.starting_technology2 = int32_t(field_int(peek, "game.info.starting_technology2"));
+		setup.ending_technology = int32_t(field_int(peek, "game.info.ending_technology"));
+		setup.game_rules = int32_t(field_int(peek, "game.info.game_rules"));
+		setup.flag8 = (field_int(peek, "game.info.flags") & 8) != 0;
+		rules_p = &cache->get(setup);
+		game = sim::load_original_save(cache->files, *rules_p, nullptr, save, &rep);
+		if (!game) { std::printf("replay: load failed: %s\n", rep.error.c_str()); return 1; }
+	}
+	const sim::Rules& rules = *rules_p;
 	// The art: animation lengths and release frames come from the install's .bha files (without them every animation is 3 frames).
 	std::unique_ptr<sim::AssetAnimSource> art;
 	if (!no_art) {
@@ -2024,8 +2056,23 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 			else std::printf("  game script \"%s\" not attached: %s\n", hs->s.c_str(), err.c_str());
 		}
 	}
+	if (from_setup) ron::net::prepare_fresh_shadow(*game);   // the shadow of a generated game fits its engine state (after the prologue and the script)
+	if (const char* dpk = std::getenv("RON_DUMP_PART_START")) {
+		// the labelled stream of part k (trace_part) of the start state, hex per range: RON_DUMP_PART_START=k
+		sim::EngineProvider e0(*game);
+		PartTrace t0;
+		trace_part(e0, std::atoi(dpk), t0);
+		const dw::Description& dd = dw::Description::get();
+		std::printf("  part %s at the start: %zu bytes\n", dw::kCheckPartNames[std::atoi(dpk)], t0.bytes.size());
+		for (const PartTrace::R& r : t0.ranges) {
+			std::printf("    [%5zu +%3zu] who %2d o %4d %-28s", r.begin, r.len, r.who, r.o, dd.function_name(dd.step_function(r.step)));
+			for (size_t k = 0; k < r.len && k < 40; ++k) std::printf(" %02x", t0.bytes[r.begin + k]);
+			std::printf("\n");
+		}
+	}
 	auto rows = all_check_sums(csv_path, path);
-	if (rows.empty()) { std::printf("replay: no CHECK_SUMS rows for %s in %s\n", basename_of(path).c_str(), csv_path.c_str()); return 1; }
+	// A single-player recording carries no rows; with --compare-next its end state is still checked against the next recording's embedded save.
+	if (rows.empty() && next_path.empty()) { std::printf("replay: no CHECK_SUMS rows for %s in %s\n", basename_of(path).c_str(), csv_path.c_str()); return 1; }
 	const int64_t start = game->frame;
 	std::printf("%s: replay from save frame %lld, %zu CHECK_SUMS turns, %zu records, rules %s\n", basename_of(path).c_str(), (long long)start, rows.size(),
 		recs ? recs->a.size() : size_t(0), rep.rules_equal ? "equal to the install's" : "adopted from the save");
@@ -2046,7 +2093,7 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 			first = false;
 		}
 	}
-	int64_t last_boundary = expect.rbegin()->first;
+	int64_t last_boundary = expect.empty() ? start : expect.rbegin()->first;
 	if (max_frames > 0) last_boundary = std::min<int64_t>(last_boundary, start + max_frames);
 	// --compare-next: run to the frame of the next replay's embedded save (the same game, saved when a player rejoined)
 	std::vector<uint8_t> next_save;
@@ -2073,10 +2120,14 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 		// the state of the save itself against the first row: the parts that do not change in one frame must match already
 		sim::EngineProvider ep(*game);
 		dw::CheckSumParts base = dw::compute_check_sums(ep);
-		const auto& e1 = expect.begin()->second;
-		std::printf("  save state (frame %lld) against the first row (boundary %lld):", (long long)start, (long long)expect.begin()->first);
-		for (int k = 0; k < dw::kCheckPartCount; ++k) std::printf(" %s=%s", dw::kCheckPartNames[k], base.v[k] == e1[size_t(k)] ? "=" : "!");
-		std::printf("\n");
+		if (!expect.empty()) {
+			const auto& e1 = expect.begin()->second;
+			std::printf("  save state (frame %lld) against the first row (boundary %lld):", (long long)start, (long long)expect.begin()->first);
+			for (int k = 0; k < dw::kCheckPartCount; ++k) std::printf(" %s=%s", dw::kCheckPartNames[k], base.v[k] == e1[size_t(k)] ? "=" : "!");
+			std::printf("\n");
+		} else {
+			std::printf("  (no CHECK_SUMS rows: single player; the state at the next save's frame is compared below)\n");
+		}
 	}
 #ifdef RON_RNG_PROFILE_HOOK
 	if (std::getenv("RON_RNG_PROFILE")) sim::g_rng_hook = rng_hook_fn;
@@ -4100,6 +4151,30 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 		std::printf("  at frame %lld, engine against the next save:", (long long)next_frame);
 		for (int k = 0; k < dw::kCheckPartCount; ++k) std::printf(" %s=%s", dw::kCheckPartNames[k], a1.v[k] == a2.v[k] ? "=" : "!");
 		std::printf("\n");
+		if (std::getenv("RON_STREAM_DIFF")) {
+			// the labelled byte differences of every differing part, engine against the next save (RON_STREAM_DIFF=n: the first n differing bytes of each part)
+			const int maxn = std::max(1, std::atoi(std::getenv("RON_STREAM_DIFF")));
+			const dw::Description& dd = dw::Description::get();
+			for (int k : {0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11}) {
+				if (a1.v[k] == a2.v[k]) continue;
+				PartTrace ta, tb;
+				trace_part(e1, k, ta);
+				trace_part(e2, k, tb);
+				std::printf("  stream diff of %s: engine %zu bytes, original %zu bytes\n", dw::kCheckPartNames[k], ta.bytes.size(), tb.bytes.size());
+				int shown2 = 0;
+				for (size_t i = 0; i < ta.bytes.size() && i < tb.bytes.size() && shown2 < maxn; ++i) {
+					if (ta.bytes[i] == tb.bytes[i]) continue;
+					++shown2;
+					std::printf("    byte %zu: engine %02x original %02x", i, ta.bytes[i], tb.bytes[i]);
+					for (const PartTrace::R& r : tb.ranges)
+						if (i >= r.begin && i < r.begin + r.len) {
+							std::printf("  in %s (range of %zu bytes, who %d o %d, +%zu)", dd.function_name(dd.step_function(r.step)), r.len, r.who, r.o, i - r.begin);
+							break;
+						}
+					std::printf("\n");
+				}
+			}
+		}
 		{
 			// The terrain height grid (Terrain::master_land_heights, saved): buildings terraform it (TerrainOut::terraform_for_building), so after the
 			// same BUILD commands the engine's grid must be the next save's. Reported: vertices that differ, their bounding box and the largest gap.
@@ -4303,6 +4378,14 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 					std::printf("   E:");
 					for (int x = a0; x <= a1; ++x) std::printf(" %04x", unsigned(game->world.t(x, y)));
 					std::printf("\n");
+				}
+		}
+		if (std::getenv("RON_CMP_BUILDS_ALL")) {   // every building of the leaders 0 and 1: type and position in the engine (E) and the next save (T)
+			for (int w2 = 0; w2 < 2; ++w2)
+				for (int o2 = sim::kBuildBase; o2 < std::max(game->objects[size_t(w2)].build_mark, truth->objects[size_t(w2)].build_mark); ++o2) {
+					const sim::Build* be = game->build(w2, o2);
+					const sim::Build* bt = truth->build(w2, o2);
+					std::printf("    BLD %d/%d  E: %s   T: %s\n", w2, o2, be ? (std::to_string(be->type) + " at " + std::to_string(be->x) + "," + std::to_string(be->y)).c_str() : "none", bt ? (std::to_string(bt->type) + " at " + std::to_string(bt->x) + "," + std::to_string(bt->y)).c_str() : "none");
 				}
 		}
 		if (const char* cb = std::getenv("RON_CMP_BUILD")) {  // RON_CMP_BUILD=who,o: the building as the next save has it (T) and as the engine has it (E)
@@ -4521,6 +4604,50 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 
 }  // namespace
 
+
+// --setup-check <save.SVX>: the setup original_random_setup decodes from this recording's header (map style / size, seed, seats with tribe, team,
+// human, difficulty, colour, every lobby setting) against the setup read back from the loaded save of the same game: the two texts must be equal.
+int setup_check_run(const std::string& rcx, const std::string& save_path, const std::string& game_dir) {
+	sim::Replay rp;
+	std::string e;
+	if (!sim::read_replay(rcx, rp, e)) { std::printf("setup-check: %s\n", e.c_str()); return 1; }
+	sim::RandomGameSetup hs;
+	if (!ron::net::original_random_setup(rp, hs, e)) { std::printf("setup-check: %s\n", e.c_str()); return 1; }
+	std::vector<uint8_t> raw, bytes;
+	bool gz = false;
+	if (!read_file(save_path, raw) || !maybe_gunzip(raw, bytes, gz)) { std::printf("setup-check: cannot read %s\n", save_path.c_str()); return 1; }
+	dw::Tree peek(dw::Description::get());
+	dw::SaveDecode psd = dw::decode_save(peek, bytes.data(), bytes.size(), 0);
+	if (!psd.result.ok) { std::printf("setup-check: the save does not decode\n"); return 1; }
+	sim::GameSetup gs;
+	gs.starting_technology = int32_t(field_int(peek, "game.info.starting_technology"));
+	gs.starting_technology2 = int32_t(field_int(peek, "game.info.starting_technology2"));
+	gs.ending_technology = int32_t(field_int(peek, "game.info.ending_technology"));
+	gs.game_rules = int32_t(field_int(peek, "game.info.game_rules"));
+	gs.flag8 = (field_int(peek, "game.info.flags") & 8) != 0;
+	RulesCache cache(game_dir);
+	sim::OriginalLoadReport rep;
+	std::unique_ptr<sim::Game> g = sim::load_original_save(cache.files, cache.get(gs), nullptr, bytes, &rep);
+	if (!g) { std::printf("setup-check: load failed: %s\n", rep.error.c_str()); return 1; }
+	sim::RandomGameSetup ss = ron::net::setup_from_game(*g);
+	ss.map_size = int(field_int(peek, "game.info.map_size"));
+	ss.game_speed = int(field_int(peek, "game.info.game_speed"));
+	const std::string a = sim::random_setup_string(hs), b = sim::random_setup_string(ss);
+	std::vector<std::string> ka, kb;
+	for (const std::string* src : {&a, &b}) {
+		std::stringstream st(src->substr(7));
+		std::string t;
+		auto& dst = src == &a ? ka : kb;
+		while (std::getline(st, t, ';')) dst.push_back(t);
+	}
+	int diffs = 0;
+	for (size_t i = 0; i < ka.size() && i < kb.size(); ++i)
+		if (ka[i] != kb[i] && ka[i].compare(0, 5, "speed") != 0) { std::printf("  differs: header %s, save %s\n", ka[i].c_str(), kb[i].c_str()); ++diffs; }
+	if (!diffs) std::printf("  setup-check: the header's setup equals the save's (%zu fields)\n", ka.size());
+	else std::printf("  setup-check: %d field(s) differ\n", diffs);
+	return diffs ? 2 : 0;
+}
+
 // A crash while stepping the engine prints the call stack (symbols of this binary) instead of dying silently.
 static void on_crash(int sig) {
 	void* frames[48];
@@ -4546,7 +4673,8 @@ int main(int argc, char** argv) {
 	int mutate = 0;
 	bool replay = false, use_commands = true, verbose = false, no_art = false, field_report = false;
 	int64_t frames = 0, step_diff = 0;
-	std::string json_path, next_replay;
+	std::string json_path, next_replay, extract_save, setup_check;
+	bool shadow_test = false, analysis_check = false;
 	std::vector<std::string> revert;
 	std::string game_dir = game_dir_default();
 	std::vector<std::string> fields;
@@ -4571,6 +4699,10 @@ int main(int argc, char** argv) {
 		else if (a == "--step-diff" && i + 1 < argc) step_diff = std::atoll(argv[++i]);
 		else if (a == "--compare-next" && i + 1 < argc) next_replay = argv[++i];
 		else if (a == "--no-art") no_art = true;
+		else if (a == "--extract-save" && i + 1 < argc) extract_save = argv[++i];
+		else if (a == "--setup-check" && i + 1 < argc) setup_check = argv[++i];
+		else if (a == "--shadow-test") shadow_test = true;
+		else if (a == "--analysis-check") analysis_check = true;
 		else if (a == "--field-report") field_report = true;
 		else if (a == "--revert" && i + 1 < argc) { std::stringstream ss(argv[++i]); std::string t; while (std::getline(ss, t, ',')) revert.push_back(t); }
 		else if (a == "--mutate" && i + 1 < argc) mutate = std::atoi(argv[++i]);
@@ -4622,8 +4754,18 @@ int main(int argc, char** argv) {
 		const dw::Rec* g = header.find_global(desc.find_global("game"));
 		if (g->read_int(0x814 + 0xc + 2, 1, false) & 2) { std::printf("  Conquer the World replay: not supported\n"); return 1; }
 		std::printf("  header: frame %lld, save_name %s\n", (long long)field_int(header, "game.frame"), name.empty() ? "empty (starts from scratch, no embedded save)" : "present");
+		if (!setup_check.empty()) return setup_check_run(path, setup_check, game_dir);
 		if (name.empty()) {
-			if (replay || engine_rt) std::printf("  no embedded save: the game starts from the setup (random map, rules block in the stream), which needs the map generator path; not supported here\n");
+			if (replay) {
+				// no embedded save: the generator path (replay_run builds the game from the header's setup)
+				std::printf("  no embedded save: the game starts from the header's setup (random map, generated by new_random_game)\n");
+				if (csv.empty()) {
+					size_t kk = path.find("Recorded Games");
+					csv = kk != std::string::npos ? path.substr(0, kk) + "out/checksums.csv" : "re/oracle/out/checksums.csv";
+				}
+				return replay_run(path, std::vector<uint8_t>(), game_dir, frames, json_path, csv, use_commands, verbose, next_replay, no_art, revert);
+			}
+			if (engine_rt) std::printf("  no embedded save: nothing to round-trip\n");
 			return 0;
 		}
 		save_pos = p;
@@ -4645,6 +4787,13 @@ int main(int argc, char** argv) {
 	if (!is_save) std::printf("  embedded save: %zu bytes at offset %zu; frames: replay header %lld, save %lld\n", sd.end - save_pos, save_pos,
 		(long long)field_int(header, "game.frame"), (long long)field_int(tree, "game.frame"));
 	int rc = (is_save && sd.end != file_end) ? 1 : 0;
+	if (!extract_save.empty()) {
+		// the embedded save of a replay (or the decompressed stream of a save) as a file
+		std::ofstream of(extract_save, std::ios::binary);
+		of.write(reinterpret_cast<const char*>(buf.data() + save_pos), std::streamsize(sd.end - save_pos));
+		std::printf("  wrote %zu bytes of the %s to %s\n", sd.end - save_pos, is_save ? "save" : "embedded save", extract_save.c_str());
+		return of ? rc : 1;
+	}
 	if (step_diff > 0) {
 		// which mapped members does the engine change when it simulates N frames from this save?
 		std::vector<uint8_t> save(buf.begin() + std::ptrdiff_t(save_pos), buf.begin() + std::ptrdiff_t(sd.end));
@@ -4824,6 +4973,297 @@ int main(int argc, char** argv) {
 		}
 		std::vector<uint8_t> save(buf.begin() + std::ptrdiff_t(save_pos), buf.begin() + std::ptrdiff_t(sd.end));
 		return replay_run(path, save, game_dir, frames, json_path, csv, use_commands, verbose, next_replay, no_art, revert);
+	}
+	if (std::getenv("RON_DUMP_CONTAINERS")) {
+		// diagnostic: every container of the decoded save, per global, in walk order: walk function, header, elements (RON_DUMP_CONTAINERS=1)
+		const dw::Description& d = dw::Description::get();
+		std::vector<uint8_t> save(buf.begin() + std::ptrdiff_t(save_pos), buf.begin() + std::ptrdiff_t(sd.end));
+		dw::Tree pk(dw::Description::get());
+		dw::decode_save(pk, save.data(), save.size(), 0);
+		std::set<const dw::Rec*> seen;
+		std::function<void(const dw::Rec*, const std::string&, int)> walk = [&](const dw::Rec* r, const std::string& path, int depth) {
+			if (!r || !seen.insert(r).second || depth > 6) return;
+			std::map<int, int> nth;
+			for (const dw::Event& e : r->ev) {
+				if (e.type == 0 && e.child) { if (depth < 2) walk(e.child, path + "/" + d.function_name(d.step_function(e.step)), depth + 1); }
+				if (e.type != 2 || !e.cd) continue;
+				size_t ne = 0;
+				for (const dw::Rec* c : e.cd->elems) ne += c != nullptr;
+				const int k = nth[e.step]++;
+				std::printf("  %-40s %-34s #%d len %d size %d inc %d flags %02x elems %zu data %zu\n", path.c_str(), d.function_name(d.step_function(e.step)), k, e.cd->length, e.cd->size, int(e.cd->increment), e.cd->flags, ne, e.cd->data.size());
+			}
+		};
+		for (int gid = 0; gid < d.global_count(); ++gid) if (const dw::Rec* r = pk.find_global(gid)) walk(r, d.global_name(gid), 0);
+		return 0;
+	}
+	if (const char* dp = std::getenv("RON_DUMP_STREAM")) {
+		// diagnostic: the walked bytes of part RON_DUMP_STREAM (13 scenario_data, 14 script_run_time) as runs of non-zero bytes: offset: bytes
+		std::vector<uint8_t> save(buf.begin() + std::ptrdiff_t(save_pos), buf.begin() + std::ptrdiff_t(sd.end));
+		dw::Tree pk(dw::Description::get());
+		dw::decode_save(pk, save.data(), save.size(), 0);
+		sim::GameSetup gs;
+		gs.starting_technology = int32_t(field_int(pk, "game.info.starting_technology"));
+		gs.starting_technology2 = int32_t(field_int(pk, "game.info.starting_technology2"));
+		gs.ending_technology = int32_t(field_int(pk, "game.info.ending_technology"));
+		gs.game_rules = int32_t(field_int(pk, "game.info.game_rules"));
+		gs.flag8 = (field_int(pk, "game.info.flags") & 8) != 0;
+		RulesCache cache(game_dir);
+		sim::OriginalLoadReport rep;
+		std::unique_ptr<sim::Game> g = sim::load_original_save(cache.files, cache.get(gs), nullptr, save, &rep);
+		if (!g) return 1;
+		sim::EngineProvider e(*g);
+		const int part = std::atoi(dp);
+		std::vector<uint8_t> bytes;
+		{
+			const dw::Description& d = dw::Description::get();
+			dw::ChecksumWalker w(d, e);
+			w.set_hook([&](int, const uint8_t* b, size_t n) { bytes.insert(bytes.end(), b, b + n); });
+			w.reset();
+			const char* fn = part == 13 ? "ScenarioData::walk_data" : "RunTimeEnv::walk_data";
+			const char* gl = part == 13 ? "scenario_data" : "run_time_env";
+			const int gid = d.find_global(gl);
+			w.walk(fn, e.global(gid), gid, 0);
+		}
+		if (std::getenv("RON_LIST_GLOBALS")) {
+			const dw::Description& dd = dw::Description::get();
+			for (int gid = 0; gid < dd.global_count(); ++gid) {
+				const dw::Rec* r = pk.find_global(gid);
+				std::printf("  global %3d %-40s class %-20s rec %s bytes %zu events %zu\n", gid, dd.global_name(gid), dd.global_class(gid), r ? "yes" : "no", r ? r->bytes.size() : 0, r ? r->ev.size() : 0);
+			}
+		}
+		if (part == 13 && std::getenv("RON_FIND_SCEN")) {
+			const dw::Rec* rec = pk.find_global(dw::Description::get().find_global("scenario_data"));
+			std::printf("  scenario_data rec: origin %lld, %zu bytes, %zu events\n", (long long)rec->origin, rec->bytes.size(), rec->ev.size());
+			for (size_t i = 0; i + 12 <= rec->bytes.size(); ++i) {
+				int32_t a, b, c;
+				std::memcpy(&a, &rec->bytes[i], 4); std::memcpy(&b, &rec->bytes[i + 4], 4); std::memcpy(&c, &rec->bytes[i + 8], 4);
+				if (b == 200 && c == 12000) std::printf("  msg_time/game_msg_time found at image offset %zu (first int %d)\n", i + 4, a);
+			}
+		}
+		std::printf("  stream of part %d: %zu bytes\n", part, bytes.size());
+		if (const char* of = std::getenv("RON_DUMP_STREAM_FILE")) { std::ofstream o(of, std::ios::binary); o.write(reinterpret_cast<const char*>(bytes.data()), std::streamsize(bytes.size())); }
+		for (size_t i = 0; i < bytes.size();) {
+			if (!bytes[i]) { ++i; continue; }
+			size_t j = i;
+			while (j < bytes.size() && j - i < 24 && bytes[j]) ++j;
+			std::printf("  %5zu:", i);
+			for (size_t k = i; k < j; ++k) std::printf(" %02x", bytes[k]);
+			std::printf("\n");
+			i = j;
+		}
+		return 0;
+	}
+	if (analysis_check) {
+		// World::analyze_map: the World members the engine does not model, as new_random_game computes them for this save's setup, against the save's own
+		std::vector<uint8_t> save(buf.begin() + std::ptrdiff_t(save_pos), buf.begin() + std::ptrdiff_t(sd.end));
+		dw::Tree pk(dw::Description::get());
+		dw::decode_save(pk, save.data(), save.size(), 0);
+		sim::GameSetup gs;
+		gs.starting_technology = int32_t(field_int(pk, "game.info.starting_technology"));
+		gs.starting_technology2 = int32_t(field_int(pk, "game.info.starting_technology2"));
+		gs.ending_technology = int32_t(field_int(pk, "game.info.ending_technology"));
+		gs.game_rules = int32_t(field_int(pk, "game.info.game_rules"));
+		gs.flag8 = (field_int(pk, "game.info.flags") & 8) != 0;
+		RulesCache cache(game_dir);
+		sim::OriginalLoadReport rep;
+		std::unique_ptr<sim::Game> g = sim::load_original_save(cache.files, cache.get(gs), nullptr, save, &rep);
+		if (!g) { std::printf("analysis-check: load failed\n"); return 1; }
+		sim::RandomGameSetup S = ron::net::setup_from_game(*g);
+		S.map_size = int(field_int(pk, "game.info.map_size"));
+		S.randomize_starts = (g->multiplayer || (field_int(pk, "game.info.flags") & 0) != 0);
+		if (std::getenv("RON_RANDSTARTS")) S.randomize_starts = std::atoi(std::getenv("RON_RANDSTARTS")) != 0;
+		sim::RandomExtras X;
+		std::unique_ptr<sim::Game> ng = sim::new_random_game(cache.files, cache.get(gs), nullptr, S, &X);
+		if (!ng) { std::printf("analysis-check: generation failed: %s\n", X.error.c_str()); return 1; }
+		const dw::Description& dd = dw::Description::get();
+		struct Row { const char* name; int64_t mine; };
+		const Row rows[] = {{"map", X.result.picked_style}, {"player_territory_limit", X.result.territory_limits[0]}, {"colonized_territory_limit", X.result.territory_limits[3]},
+		                    {"player_reg", X.analysis.player_reg}, {"resource_reg", X.analysis.resource_reg}, {"forest_size", X.analysis.forest_size},
+		                    {"mountain_size", X.analysis.mountain_size}, {"rock_size", X.analysis.rock_size}, {"total_metal", X.analysis.total_metal},
+		                    {"total_oil", X.analysis.total_oil}, {"goodies", X.analysis.goodies}, {"land_resources", X.analysis.land_resources},
+		                    {"sea_resources", X.analysis.sea_resources}, {"seed", X.result.world_seed}, {"land_size", ng->world_total_land}, {"sea_map", ng->world.sea_map}};
+		int bad = 0;
+		std::string line;
+		for (const Row& r : rows) {
+			dw::FieldValue v;
+			std::string err;
+			const std::string path = std::string("world.") + r.name;
+			if (!dw::read_field(pk, path, v, err)) { std::printf("  %s: %s\n", r.name, err.c_str()); continue; }
+			if (v.i != r.mine) { ++bad; std::printf("  world.%s: save %lld, generated %lld\n", r.name, (long long)v.i, (long long)r.mine); }
+		}
+		(void)dd;
+		if (std::getenv("RON_GOOD_Z")) {
+			// SubObject +0xc (z_internal, XOR 0x63637) of the save's goods and items against find_data_z at their position
+			const dw::Description& d2 = dw::Description::get();
+			for (int which = 0; which < 2; ++which) {
+				const dw::Rec* grec = pk.find_global(d2.find_global(which ? "items" : "goods"));
+				const std::vector<sim::GoodObj>& list = which ? g->items : g->goods;
+				std::map<int, int> hist;
+				int n = 0;
+				if (grec)
+					for (const dw::Event& e : grec->ev) {
+						if (e.type != 2 || !e.cd) continue;
+						for (size_t i = 0; i < e.cd->elems.size() && i < list.size(); ++i) {
+							const dw::Rec* r = e.cd->elems[i];
+							if (!r || !list[i].alive()) continue;
+							int32_t zi = int32_t(r->read_int(0xc, 4, true));
+							const int32_t z = zi ^ 0x63637;
+							const int32_t zz = sim::find_data_z(*g, list[i].x, list[i].y, 1);
+							++hist[z - zz];
+							if (++n <= 4) std::printf("  %s %zu type %d at %d,%d: shadow z %d, find_data_z %d\n", which ? "item" : "good", i, list[i].type, list[i].x, list[i].y, z, zz);
+						}
+					}
+				std::printf("  %s: z - find_data_z histogram:", which ? "items" : "goods");
+				int shown2 = 0;
+				for (const auto& kv : hist) if (shown2++ < 12) std::printf(" %d:%d", kv.first, kv.second);
+				std::printf("\n");
+			}
+		}
+		if (const char* win = std::getenv("RON_WINDOW")) {   // RON_WINDOW=x0,y0,x1,y1: land / region / flags of the save (S) and the generated world (G)
+			int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+			std::sscanf(win, "%d,%d,%d,%d", &x0, &y0, &x1, &y1);
+			for (int which = 0; which < 2; ++which) {
+				const sim::World& W = (which ? ng.get() : g.get())->world;
+				std::printf("  %s: land/region/flags\n", which ? "generated" : "save");
+				for (int y = y0; y <= y1; ++y) {
+					std::printf("   y%3d:", y);
+					for (int x = x0; x <= x1; ++x) {
+						const sim::WData& d = W.w(x, y);
+						std::printf(" %d/%3d/%04x", int(d.land), int(d.region), unsigned(d.flags));
+					}
+					std::printf("\n");
+				}
+			}
+		}
+		if (std::getenv("RON_WORLD_ARRAYS")) {   // the SimpleArray<WCoord> blocks of World::walk_data part 2 / 3 in walk order (start_x, start_y, start_city_x, start_city_y, oil_x, oil_y)
+			const dw::Description& d3 = dw::Description::get();
+			const dw::Rec* wr = pk.find_global(d3.find_global("world"));
+			int k = 0;
+			if (wr)
+				for (const dw::Event& e : wr->ev) {
+					if (e.type != 2 || !e.cd) continue;
+					if (std::string(d3.function_name(d3.step_function(e.step))) != "SimpleArray<WCoord>::walk_data") continue;
+					std::printf("  world array %d: len %d size %d inc %d flags %02x:", k++, e.cd->length, e.cd->size, int(e.cd->increment), e.cd->flags);
+					for (size_t q = 0; q + 4 <= e.cd->data.size(); q += 4) std::printf(" %d", int32_t(e.cd->data[q] | e.cd->data[q + 1] << 8 | e.cd->data[q + 2] << 16 | uint32_t(e.cd->data[q + 3]) << 24));
+					std::printf("\n");
+				}
+			std::printf("  generated starts:");
+			for (const auto& st : X.result.starts) std::printf(" (%d,%d)", st[0], st[1]);
+			std::printf("; city entries:");
+			for (const auto& en : X.result.empire) if (en.kind == sim::mapgen::EmpireEntry::City) std::printf(" who %d at (%d,%d) = wcoord (%d,%d)", en.who, en.x, en.y, en.x / 768, en.y / 768);
+			std::printf("\n");
+		}
+		if (const char* hl = std::getenv("RON_HALFLAND")) {   // RON_HALFLAND=n: Terrain.halfland_locs / types / subtypes of the save: the first n entries and the cells' flags
+			const dw::Description& d3 = dw::Description::get();
+			const dw::Rec* tr = pk.find_global(d3.find_global("terrain"));
+			std::vector<std::pair<int, int>> locs;
+			std::vector<std::vector<int32_t>> ints;
+			if (tr)
+				for (const dw::Event& e : tr->ev) {
+					if (e.type != 2 || !e.cd) continue;
+					const std::string fn = d3.function_name(d3.step_function(e.step));
+					if (fn == "Array<WCoordData>::walk_data")
+						for (const dw::Rec* r : e.cd->elems) locs.push_back({int(r->read_int(0, 4, true)), int(r->read_int(4, 4, true))});
+					else if (fn == "SimpleArray<int>::walk_data") {
+						std::vector<int32_t> v;
+						for (size_t k = 0; k + 4 <= e.cd->data.size(); k += 4) v.push_back(int32_t(e.cd->data[k] | e.cd->data[k + 1] << 8 | e.cd->data[k + 2] << 16 | uint32_t(e.cd->data[k + 3]) << 24));
+						ints.push_back(std::move(v));
+					}
+				}
+			const int n = std::atoi(hl);
+			std::printf("  halfland_locs %zu entries; int arrays:", locs.size());
+			for (auto& v : ints) std::printf(" %zu", v.size());
+			std::printf("\n");
+			std::map<std::pair<int, int>, int> th;
+			for (size_t i = 0; i < locs.size(); ++i) {
+				const sim::WData& cell = g->world.w(locs[i].first, locs[i].second);
+				if (int(i) < n) std::printf("   [%4zu] (%3d,%3d) type %d sub %d  cell: land %d flags %04x land_sub %d\n", i, locs[i].first, locs[i].second, ints.size() > 0 && i < ints[0].size() ? ints[0][i] : -1, ints.size() > 1 && i < ints[1].size() ? ints[1][i] : -1, int(cell.land), unsigned(cell.flags), int(cell.land_sub));
+				++th[{ints.size() > 0 && i < ints[0].size() ? ints[0][i] : -1, ints.size() > 1 && i < ints[1].size() ? ints[1][i] : -1}];
+			}
+			for (const auto& kv : th) std::printf("   type %d sub %d: %d\n", kv.first.first, kv.first.second, kv.second);
+			std::set<std::pair<int, int>> uniq(locs.begin(), locs.end());
+			int hl_cells = 0;
+			for (int y = 0; y < g->world.ys; ++y) for (int x = 0; x < g->world.xs; ++x) hl_cells += (g->world.w(x, y).flags & 0x100) != 0;
+			std::printf("   distinct cells %zu, cells with flag 0x100: %d\n", uniq.size(), hl_cells);
+			const auto& gl = X.result.halfland_locs;
+			size_t fd = 0;
+			while (fd < gl.size() && fd < locs.size() && gl[fd][0] == locs[fd].first && gl[fd][1] == locs[fd].second && ints.size() > 1 && fd < ints[0].size() && ints[0][fd] == X.result.halfland_types[fd] && ints[1][fd] == X.result.halfland_subtypes[fd]) ++fd;
+			std::printf("   generated halfland log: %zu entries; first difference at index %zu%s\n", gl.size(), fd, fd == gl.size() && fd == locs.size() ? " (none: equal)" : "");
+			if (fd < gl.size() && fd < locs.size())
+				std::printf("     save (%d,%d) type %d sub %d; generated (%d,%d) type %d sub %d\n", locs[fd].first, locs[fd].second, ints.size() > 1 && fd < ints[0].size() ? ints[0][fd] : -1, ints.size() > 1 && fd < ints[1].size() ? ints[1][fd] : -1, gl[fd][0], gl[fd][1], X.result.halfland_types[fd], X.result.halfland_subtypes[fd]);
+		}
+		if (std::getenv("RON_REGION_DIFF")) {
+			// the cells whose region differs: (save region, generated region) pairs with their cell counts, the first cell of each, and the region sizes
+			std::map<std::pair<int, int>, std::pair<int, std::string>> pairs;
+			for (int y = 0; y < g->world.ys && y < ng->world.ys; ++y)
+				for (int x = 0; x < g->world.xs && x < ng->world.xs; ++x) {
+					const int a = g->world.w(x, y).region, b = ng->world.w(x, y).region;
+					if (a == b) continue;
+					auto& e = pairs[{a, b}];
+					if (e.first++ == 0) e.second = std::to_string(x) + "," + std::to_string(y);
+				}
+			for (const auto& kv : pairs) std::printf("  region save %d (size %d) / generated %d (size %d): %d cells, first at %s\n", kv.first.first, g->regions.r[size_t(kv.first.first & 127)].size, kv.first.second, ng->regions.r[size_t(kv.first.second & 127)].size, kv.second.first, kv.second.second.c_str());
+		}
+		std::printf("  analysis-check: %d of %zu World members differ\n", bad, sizeof rows / sizeof rows[0]);
+		return bad ? 2 : 0;
+	}
+	if (shadow_test) {
+		// the freshness test of the checksum shadow: the 15 parts of the loaded save, then of the same engine state over a shadow whose object
+		// containers were emptied (clear_shadow_containers; what a generated game starts from): they must agree where the engine owns the state
+		std::vector<uint8_t> save(buf.begin() + std::ptrdiff_t(save_pos), buf.begin() + std::ptrdiff_t(sd.end));
+		dw::Tree pk(dw::Description::get());
+		dw::decode_save(pk, save.data(), save.size(), 0);
+		sim::GameSetup gs;
+		gs.starting_technology = int32_t(field_int(pk, "game.info.starting_technology"));
+		gs.starting_technology2 = int32_t(field_int(pk, "game.info.starting_technology2"));
+		gs.ending_technology = int32_t(field_int(pk, "game.info.ending_technology"));
+		gs.game_rules = int32_t(field_int(pk, "game.info.game_rules"));
+		gs.flag8 = (field_int(pk, "game.info.flags") & 8) != 0;
+		RulesCache cache(game_dir);
+		sim::OriginalLoadReport rep;
+		std::unique_ptr<sim::Game> g = sim::load_original_save(cache.files, cache.get(gs), nullptr, save, &rep);
+		if (!g) { std::printf("shadow-test: load failed: %s\n", rep.error.c_str()); return 1; }
+		const int tparts[] = {0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11};
+		std::map<int, PartTrace> t1, t2;
+		sim::EngineProvider e1(*g);
+		const dw::CheckSumParts p1 = dw::compute_check_sums(e1);
+		for (int k : tparts) trace_part(e1, k, t1[k]);
+		if (std::getenv("RON_SHADOW_TEMPLATE")) {
+			// the shadow of ANOTHER save (a different game) under this engine state, then prepared: what a generated game gets
+			std::vector<uint8_t> traw, tbytes;
+			bool tgz = false;
+			if (!read_file(std::getenv("RON_SHADOW_TEMPLATE"), traw) || !maybe_gunzip(traw, tbytes, tgz)) { std::printf("shadow-test: cannot read the template\n"); return 1; }
+			sim::OriginalLoadReport trep;
+			std::unique_ptr<sim::Game> gt = sim::load_original_save(cache.files, cache.get(gs), nullptr, tbytes, &trep);
+			if (!gt) { std::printf("shadow-test: the template does not load\n"); return 1; }
+			g->original = gt->original;
+			for (int who = 0; who < sim::kNumLeaders; ++who) g->original->leader_ai[who] = who < 8 && (g->leaders[size_t(who)].flags & 1);
+			std::printf("  (the shadow is the template's, not the save's own)\n");
+		} else {
+			ron::net::clear_shadow_containers(*g->original);
+		}
+		if (!std::getenv("RON_NO_PREPARE")) ron::net::prepare_fresh_shadow(*g);
+		sim::EngineProvider e2(*g);
+		const dw::CheckSumParts p2 = dw::compute_check_sums(e2);
+		for (int k : tparts) trace_part(e2, k, t2[k]);
+		const dw::Description& d = dw::Description::get();
+		int bad = 0;
+		for (int k = 0; k < dw::kCheckPartCount; ++k) {
+			std::printf("  %-16s loaded %10u emptied %10u %s\n", dw::kCheckPartNames[k], p1.v[k], p2.v[k], p1.v[k] == p2.v[k] ? "equal" : "DIFFERENT");
+			bad += p1.v[k] != p2.v[k];
+			if (p1.v[k] == p2.v[k] || !t1.count(k)) continue;
+			const PartTrace &a = t1[k], &b = t2[k];
+			size_t i = 0;
+			while (i < a.bytes.size() && i < b.bytes.size() && a.bytes[i] == b.bytes[i]) ++i;
+			std::printf("      stream %zu vs %zu bytes, first difference at byte %zu", a.bytes.size(), b.bytes.size(), i);
+			for (const PartTrace::R& r : b.ranges)
+				if (i >= r.begin && i < r.begin + r.len) {
+					std::printf(" in a range of %zu bytes (who %d o %d) of %s (+%zu)", r.len, r.who, r.o, d.function_name(d.step_function(r.step)), i - r.begin);
+					break;
+				}
+			std::printf("; loaded %02x emptied %02x\n", i < a.bytes.size() ? a.bytes[i] : 0, i < b.bytes.size() ? b.bytes[i] : 0);
+		}
+		return bad ? 2 : 0;
 	}
 	if (engine_rt) {
 		std::vector<uint8_t> save(buf.begin() + std::ptrdiff_t(save_pos), buf.begin() + std::ptrdiff_t(sd.end));

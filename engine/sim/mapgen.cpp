@@ -169,11 +169,13 @@ void Gen::build_game() {
 		for (uint16_t m : w.tdata) ct += (m & tmask::kLowField) == tmask::kCliff;
 		note(std::to_string(placed_cliffs.size()) + " cliffs placed: " + std::to_string(cw) + " cliff wcoords, " + std::to_string(ct) + " cliff tcoords");
 	}
+	// what a caller that creates the empire's objects as the entries are emitted (Params::on_empire_entry) needs of the result by now
+	res.mountains = placed_mountains;
+	for (const WCoord& s : starts) res.starts.push_back({s.x, s.y});
+	res.conquest_starts = conq_starts;
 	build_empires();
 	create_herd_units();
 	phase("herds");
-	for (const WCoord& s : starts) res.starts.push_back({s.x, s.y});
-	res.conquest_starts = conq_starts;
 	for (const GoodObj& go : c.goods) {
 		if (go.alive() && go.type == kOilGood) res.oil_locations.push_back({wcoord_of(go.x), wcoord_of(go.y)});
 	}

@@ -354,6 +354,8 @@ public:
 	void build_empire(int who, int start);
 	int place_unit(int who, bool has_city, int type, int x, int y, int ux, int uy);
 	void emit_unit(int who, int start, int type, int x, int y, int note);
+	void push_entry(const EmpireEntry& e);   // res.empire.push_back + Params::on_empire_entry
+	int next_unit_note = 0;                  // the note of the next Setup::place_unit product that lands on a ring cell (2: a scholar that goes inside its university)
 	std::vector<uint8_t> occupied;  // wcoords with a placed unit / the city footprint
 	std::vector<uint8_t> blocked_tiles;  // the city's footprint tcoords
 	std::array<int, 10> active_units{};

@@ -76,26 +76,22 @@ int cmd_replay(int argc, char** argv) {
 	if (rp.native_save || (!rp.has_save && sim::is_random_scenario(sim::to_utf8(rp.header.scenario_path)))) {  // a recording of this port
 		return replay_native(rp, path, game_dir, dlo, dhi, arg_value(argc, argv, "--save") ? arg_value(argc, argv, "--save") : "", verbose);
 	}
-	if (!rp.has_save) {
-		std::printf("%s: no embedded save: the game starts from the setup (random map, rules block in the stream); not supported here "
-		            "(`ron-net timing` runs the turn clock of such replays)\n", basename_of(path).c_str());
-		return 0;
+	const bool from_setup = !rp.has_save;   // a random map of the original: generated from the header's setup (net/playback.hpp)
+	// the start game of every instance: the one implementation the app's playback shares (net/playback.hpp)
+	std::string open_err;
+	std::unique_ptr<net::Playback> pb = net::Playback::open(path, game_dir, open_err);
+	if (!pb) {
+		std::printf("%s: %s%s\n", basename_of(path).c_str(), open_err.c_str(), from_setup ? " (`ron-net timing` runs the turn clock of such replays)" : "");
+		return from_setup ? 0 : 1;
 	}
+	if (from_setup) std::printf("%s: no embedded save: random map generated from the header's setup (new_random_game, then the playback prologue)\n", basename_of(path).c_str());
 	Feed feed;
 	if (!feed.build(rp, err)) {
 		std::printf("%s: %s\n", basename_of(path).c_str(), err.c_str());
 		return 1;
 	}
-	if (!rp.has_save_info) {
+	if (!from_setup && !rp.has_save_info) {
 		std::printf("%s: cannot read the embedded save's game info\n", basename_of(path).c_str());
-		return 1;
-	}
-
-	// the start game of every instance: the one implementation the app's playback shares (net/playback.hpp)
-	std::string open_err;
-	std::unique_ptr<net::Playback> pb = net::Playback::open(path, game_dir, open_err);
-	if (!pb) {
-		std::printf("%s: %s\n", basename_of(path).c_str(), open_err.c_str());
 		return 1;
 	}
 
@@ -160,7 +156,7 @@ int cmd_replay(int argc, char** argv) {
 	}
 	int64_t last_boundary = expect.rbegin()->first;
 	if (max_frames > 0) last_boundary = std::min<int64_t>(last_boundary, start + max_frames);
-	std::printf("%s: replay from save frame %lld, %zu CHECK_SUMS turns, %zu records, rules %s\n", basename_of(path).c_str(), (long long)start, rows.size(),
+	std::printf("%s: replay from %s frame %lld, %zu CHECK_SUMS turns, %zu records, rules %s\n", basename_of(path).c_str(), from_setup ? "generated-game" : "save", (long long)start, rows.size(),
 	            rp.packages.size(), rules_equal ? "equal to the install's" : "adopted from the save");
 	{
 		uint32_t v[16];

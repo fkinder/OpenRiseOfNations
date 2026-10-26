@@ -928,6 +928,9 @@ struct TerrainInit {
 			int l = 2, s = 0;
 			verify_land(x, y, &l, &s);
 		} else {
+			g.res.halfland_locs.push_back({x, y});   // Terrain.halfland_locs / types / subtypes: the cell, its land and land_sub before it turned half water
+			g.res.halfland_types.push_back(int32_t(d.land));
+			g.res.halfland_subtypes.push_back(int32_t(d.land_sub));
 			set_region(x, y, land_reg, sea_reg);
 			d.land = 0;
 			d.land_sub = 0;
@@ -1655,8 +1658,33 @@ void Gen::terrain_init() {
 	res.height_vys = ti.vys;
 	// regions: the half-water wcoords joined the land regions and left the sea ones
 	for (WData& d : w.wdata) d.region2 = 0;
-	rg.clear_all(w);
-	rg.find_all(w);
+	if (std::getenv("RON_REGIONS_REFLOOD")) {   // the earlier behaviour (a flood fill from scratch), kept to compare worlds
+		rg.clear_all(w);
+		rg.find_all(w);
+	} else {
+		// The original keeps its region lists incrementally: a cell that turns half water leaves its sea region and joins an adjacent land region
+		// WITHOUT merging that region with the others it touches (the 9-cell island at (89,66) of the 2026.08.30 chain's world stays region 15
+		// although its half-water shore touches the continent). The labels the pass above kept in step (set_region) are the original's: only the
+		// sizes are counted from them, and find_all (every cell is labelled, so it floods nothing) runs its tail: region2 of the half-water
+		// cells, the coastal bits, the ranks and the raster-order lists.
+		for (Region& g : rg.r) {
+			g.flags = 0;
+			g.climate = 0;
+			g.fertile = 0;
+			g.common_factor = 8;
+			g.goody_factor = 8;
+			g.size = 0;
+			g.coords.clear();
+		}
+		rg.land = 0;
+		rg.sea = Regions::kFirstSea;
+		for (const WData& d : w.wdata) {
+			if (d.region <= 0 || d.region >= Regions::kNum) continue;
+			rg.r[size_t(d.region)].size++;
+			if (d.region >= Regions::kFirstSea) rg.sea = std::max<int32_t>(rg.sea, d.region);
+		}
+		rg.find_all(w);
+	}
 	sync_regions();
 }
 

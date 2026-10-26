@@ -4,11 +4,17 @@
 #include <cstdio>
 #include <cctype>
 #include <cstring>
+#include <set>
+#include <tuple>
 
 #include "net/lobby.hpp"
 #include "sim/datawalk.hpp"
+#include "sim/guys.hpp"
+#include "sim/datawalk_engine.hpp"
+#include "sim/original_map.hpp"
 #include "sim/mountains.hpp"
 #include "sim/original_save.hpp"
+#include "sim/replay.hpp"
 #include "sim/save.hpp"
 
 namespace ron::net {
@@ -349,6 +355,634 @@ bool playback_scenario(const sim::Game& g, const ron::GameFiles& files, Scenario
 	return true;
 }
 
+
+// ---------------------------------------------------------------- the setup of an original random game
+
+namespace {
+
+// GameInfo +0x... setup bytes the engine's GameInfo does not hold as such are read from the header by index.
+int hs(const sim::ReplayHeader& h, sim::ReplaySetupField f) { return h.setup_field(f); }
+
+}  // namespace
+
+bool original_random_setup(const sim::Replay& rp, sim::RandomGameSetup& out, std::string& err) {
+	const sim::ReplayHeader& h = rp.header;
+	if (rp.has_save || rp.native_save) {
+		err = "the recording has an embedded save";
+		return false;
+	}
+	if (!h.scenario_path.empty()) {
+		err = "a scenario file game (the map comes from the .scx)";
+		return false;
+	}
+	if (h.conquest) {
+		err = "a Conquer the World battle";
+		return false;
+	}
+	std::vector<const sim::ReplayPlayer*> present;
+	for (const sim::ReplayPlayer& p : h.players)
+		if (p.present()) present.push_back(&p);
+	if (present.empty() || present.size() > 8) {
+		err = "the header holds no players";
+		return false;
+	}
+	if (rp.random_info.entries.size() < present.size()) {
+		err = "no random-game-info block for the header's players";
+		return false;
+	}
+	sim::RandomGameSetup s;
+	s.map_style = hs(h, sim::kSetMapStyle);
+	s.map_size = hs(h, sim::kSetMapSize);
+	s.seed = h.seed;
+	s.num_nations = int(present.size());
+	s.starting_town = hs(h, sim::kSetStartingTown);
+	s.starting_resources = hs(h, sim::kSetStartingResources);
+	s.starting_technology = hs(h, sim::kSetStartingTechnology);
+	s.ending_technology = hs(h, sim::kSetEndingTechnology);
+	s.victory = hs(h, sim::kSetVictory);
+	s.elimination = hs(h, sim::kSetElimination);
+	s.score_goal = hs(h, sim::kSetScoreGoal);
+	s.time_limit = hs(h, sim::kSetTimeLimit);
+	s.wonderwin = hs(h, sim::kSetWonderWin);
+	s.popwin = hs(h, sim::kSetPopWin);
+	s.econwin = hs(h, sim::kSetEconWin);
+	s.pop_limit = hs(h, sim::kSetPopLimit);
+	s.tech_cost = hs(h, sim::kSetTechCost);
+	s.rush_rules = hs(h, sim::kSetRushRules);
+	s.reveal_map = hs(h, sim::kSetRevealMap);
+	s.game_rules = hs(h, sim::kSetGameRules);
+	s.game_speed = hs(h, sim::kSetGameSpeed);
+	s.no_tribe_powers = (h.flags & 4) != 0;
+	// The start locations are shuffled in a multiplayer game (Map::randomize_starts: the host's seat gets no fixed start; evidence: the two
+	// start cities of the first segment of the 2026.08.30 chain sit at the swapped starts of the unshuffled order)
+	s.randomize_starts = h.multiplayer;
+	if (std::getenv("RON_RANDSTARTS")) s.randomize_starts = std::atoi(std::getenv("RON_RANDSTARTS")) != 0;
+	// the seats: the leaders (`who`) in order; the entry of the random-game-info block of the player is its resolved team and nation
+	std::vector<size_t> order(present.size());
+	for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+	std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return present[a]->who < present[b]->who; });
+	for (size_t k = 0; k < order.size(); ++k) {
+		const sim::ReplayPlayer& p = *present[order[k]];
+		const sim::ReplayRandomInfo::Entry& e = rp.random_info.entries[order[k]];
+		sim::NationSetup& n = s.nation[k];
+		n.tribe = e.leader_value >= 0 && e.leader_value < 24 ? e.leader_value : (p.tribe < 24 ? int(p.tribe) : -1);
+		n.team = e.team >= 0 && e.team < 4 ? int(e.team) : -1;
+		n.human = (p.flags & 4) != 0;
+		n.difficulty = hs(h, sim::kSetDifficulty);
+		n.color = int(k);
+	}
+	out = s;
+	return true;
+}
+
+sim::RandomGameSetup setup_from_game(const sim::Game& g) {
+	sim::RandomGameSetup s;
+	const sim::GameInfo& gi = g.info;
+	s.map_style = gi.map_style;
+	s.map_size = 0;
+	s.seed = g.seed;
+	s.starting_town = gi.starting_town;
+	s.starting_resources = gi.starting_resources;
+	s.starting_technology = gi.starting_technology;
+	s.ending_technology = gi.ending_technology;
+	s.victory = gi.victory;
+	s.elimination = gi.elimination;
+	s.score_goal = gi.score_goal;
+	s.time_limit = gi.time_limit;
+	s.wonderwin = gi.wonderwin;
+	s.popwin = gi.popwin;
+	s.econwin = gi.econwin;
+	s.pop_limit = gi.pop_limit;
+	s.tech_cost = gi.tech_cost;
+	s.rush_rules = gi.rush_rules;
+	s.reveal_map = gi.reveal_map;
+	s.game_rules = gi.game_rules;
+	s.no_tribe_powers = (gi.flags & 4) != 0;
+	int n = 0;
+	for (int i = 0; i < 8; ++i) {
+		const sim::Leader& l = g.leaders[size_t(i)];
+		if (!(l.flags & sim::leaderflag::kValid)) continue;
+		sim::NationSetup& ns = s.nation[size_t(n)];
+		ns.tribe = l.tribe;
+		ns.team = gi.team[size_t(i)] >= 0 && gi.team[size_t(i)] < 4 ? int(gi.team[size_t(i)]) : -1;
+		ns.human = (l.flags & sim::leaderflag::kHuman) != 0;
+		ns.difficulty = l.difficulty;
+		ns.color = l.color;
+		++n;
+	}
+	s.num_nations = n;
+	return s;
+}
+
+sim::GameSetup original_rules_setup(const sim::ReplayHeader& h) {
+	sim::GameSetup setup;
+	setup.starting_technology = hs(h, sim::kSetStartingTechnology);
+	setup.starting_technology2 = hs(h, sim::kSetStartingTechnology2);
+	setup.ending_technology = hs(h, sim::kSetEndingTechnology);
+	setup.game_rules = hs(h, sim::kSetGameRules);
+	setup.flag8 = (h.flags & 8) != 0;
+	return setup;
+}
+
+void apply_original_lobby(sim::Game& g, const sim::ReplayHeader& h) {
+	sim::GameInfo& gi = g.info;
+	gi.starting_resources2 = uint8_t(hs(h, sim::kSetStartingResources2));
+	gi.starting_technology2 = hs(h, sim::kSetStartingTechnology2);
+	gi.chairs = uint8_t(hs(h, sim::kSetChairs));
+	gi.map_style = uint8_t(hs(h, sim::kSetMapStyle));
+	gi.team_style = uint8_t(hs(h, sim::kSetTeamStyle));
+	gi.flags = h.flags;
+	// GameInfo.player[slot]: flags and the lobby's team byte as the header holds them (8 = no team)
+	for (const sim::ReplayPlayer& p : h.players) {
+		if (!p.present()) continue;
+		gi.player_flags[size_t(p.slot & 7)] = p.flags;
+		gi.team[size_t(p.slot & 7)] = p.team;
+	}
+}
+
+namespace {
+
+uint64_t shadow_mix_key(int32_t step, int64_t base, int64_t index) {   // datawalk.cpp mix_key (the key of a recorded event)
+	uint64_t h = uint64_t(uint32_t(step)) * 0x9E3779B97F4A7C15ull;
+	h ^= (uint64_t(base) + 0x7F4A7C15ull) * 0xC2B2AE3D27D4EB4Full;
+	h = (h << 29) | (h >> 35);
+	h ^= (uint64_t(index) + 0x1234567ull) * 0x165667B19E3779F9ull;
+	return h;
+}
+
+// Forwards a checksum walk to the engine's provider and records the containers it asks for.
+class ProbeProvider : public dw::Provider {
+public:
+	explicit ProbeProvider(dw::Provider& in) : in_(in) {}
+	struct Site3 {
+		const dw::Rec* rec;
+		int step;
+		int64_t base;
+	};
+	std::vector<Site3> sites;
+	void begin_walk() override { in_.begin_walk(); }
+	void hold_containers(bool on) override { in_.hold_containers(on); }
+	dw::Obj global(int gid) override { return in_.global(gid); }
+	const uint8_t* image(dw::Obj o, int64_t off, uint32_t n) override { return in_.image(o, off, n); }
+	dw::Obj child(dw::Obj o, const dw::Site& site, int64_t index) override { return in_.child(o, site, index); }
+	bool local(dw::Obj o, const dw::Site& site, int64_t& value) override { return in_.local(o, site, value); }
+	bool container(dw::Obj o, const dw::Site& site, dw::ContainerHeader& hdr) override {
+		sites.push_back({static_cast<const dw::Rec*>(o), site.step, site.base});
+		return in_.container(o, site, hdr);
+	}
+	bool present(dw::Obj o, const dw::Site& site, int64_t i) override { return in_.present(o, site, i); }
+	int32_t data_type(dw::Obj o, const dw::Site& site, int64_t i) override { return in_.data_type(o, site, i); }
+	dw::Obj element(dw::Obj o, const dw::Site& site, int64_t i) override { return in_.element(o, site, i); }
+	const uint8_t* bytes(dw::Obj o, const dw::Site& site, uint64_t n) override { return in_.bytes(o, site, n); }
+	const uint8_t* string(dw::Obj o, const dw::Site& site, uint32_t& len) override { return in_.string(o, site, len); }
+
+private:
+	dw::Provider& in_;
+};
+
+dw::Rec* clone_rec(dw::Tree& tree, const dw::Rec& src) {
+	dw::Rec* r = tree.new_rec(src.cls);
+	r->origin = src.origin;
+	r->bytes = src.bytes;
+	r->ev = src.ev;
+	return r;
+}
+
+}  // namespace
+
+void prepare_fresh_shadow(sim::Game& g) {
+	if (!g.original || !g.original->tree) return;
+	sim::OriginalShadow& sh = *g.original;
+	std::vector<ProbeProvider::Site3> sites;
+	{
+		sim::EngineProvider e(g);
+		ProbeProvider probe(e);
+		dw::compute_check_sums(probe);
+		sites = probe.sites;
+	}
+	std::set<std::tuple<const dw::Rec*, int, int64_t>> done;
+	for (const ProbeProvider::Site3& st : sites) {
+		if (!done.insert(std::make_tuple(st.rec, st.step, st.base)).second) continue;
+		auto it = sh.segs.find(st.rec);
+		if (it == sh.segs.end()) continue;
+		sim::omap::ArraySpec spec;
+		bool owned = false;
+		for (const sim::omap::Segment& s : it->second) {
+			if (!s.map->array_fn) continue;
+			if (s.len >= 0 && (st.base < s.base || st.base >= s.base + s.len)) continue;
+			if (s.map->array_fn(g, s.id, st.step, st.base, spec)) { owned = true; break; }
+		}
+		if (!owned) {
+			if (std::getenv("RON_PREPARE_TRACE")) std::printf("  site %s step %d base %lld: not engine-owned\n", dw::Description::get().function_name(dw::Description::get().step_function(st.step)), st.step, (long long)st.base);
+			continue;
+		}
+		dw::Rec* rec = const_cast<dw::Rec*>(st.rec);
+		dw::ContainerData* cd = nullptr;
+		const uint64_t key = shadow_mix_key(st.step, st.base, 0);
+		for (dw::Event& e : rec->ev)
+			if (e.type == 2 && e.step == st.step && e.key == key && e.cd) { cd = e.cd; break; }
+		if (!cd) continue;
+		const int32_t want = spec.count;
+		auto has = [&](int32_t i) -> bool {
+			if (spec.present) return spec.present(i);
+			if (spec.extra_present) return spec.extra_present(i);
+			if (spec.child && spec.child_id && spec.child->resolve) return spec.child->resolve(g, spec.child_id(i)) != nullptr;
+			return true;
+		};
+		const bool by_engine = bool(spec.present) || bool(spec.extra_present);
+		dw::Rec* proto = nullptr;
+		for (dw::Rec* c : cd->elems)
+			if (c) { proto = c; break; }
+		std::vector<dw::Rec*> elems(size_t(std::max(want, 0)), nullptr);
+		std::vector<uint8_t> present(elems.size(), 0);
+		std::vector<int32_t> types(elems.size(), 0);
+		const dw::ContainerKind ck = dw::Description::get().container_kind(st.step);
+		const bool ptr_kind = ck == dw::ContainerKind::PtrArray || ck == dw::ContainerKind::MultiPtrArray;
+		for (int32_t i = 0; i < want; ++i) {
+			const bool h = has(i);
+			dw::Rec* old = size_t(i) < cd->elems.size() ? cd->elems[size_t(i)] : nullptr;
+			if (h) elems[size_t(i)] = old ? old : (proto ? clone_rec(*sh.tree, *proto) : nullptr);
+			present[size_t(i)] = by_engine ? (h ? 1 : 0) : 1;
+			types[size_t(i)] = spec.dtype && h ? spec.dtype(i) : 0;
+		}
+		if (std::getenv("RON_PREPARE_TRACE")) {
+			int hv = 0;
+			for (int32_t i = 0; i < want; ++i) hv += has(i);
+			std::printf("  site %s step %d base %lld: engine count %d (has %d), template length %d size %d elems %zu%s%s\n", dw::Description::get().function_name(dw::Description::get().step_function(st.step)), st.step,
+			            (long long)st.base, want, hv, cd->length, cd->size, cd->elems.size(), spec.grow_only ? " grow_only" : "", spec.keep_size ? " keep_size" : "");
+		}
+		// Good / Item: SubObject +0xc (z_internal, XOR 0x63637; not modelled by the engine) is TerrainOut::find_data_z of the position, flag 1 (water and
+		// negative heights give 0): the chain's 131 goods and 10 items all agree with it
+		if (spec.child && (spec.child->name == "Good" || spec.child->name == "Item") && spec.child->resolve) {
+			for (int32_t i = 0; i < want; ++i) {
+				if (!elems[size_t(i)]) continue;
+				const sim::GoodObj* o = static_cast<const sim::GoodObj*>(spec.child->resolve(g, spec.child_id(i)));
+				if (!o) continue;
+				const int32_t z = sim::find_data_z(g, o->x, o->y, 1) ^ 0x63637;
+				elems[size_t(i)]->write(0xc, reinterpret_cast<const uint8_t*>(&z), 4);
+				const uint8_t who = 0xff;   // SubObject +9 who = -1 and +0xa o = the list index (u16): the bytes before z_internal of every good / item
+				const uint16_t oi = uint16_t(i);
+				elems[size_t(i)]->write(9, &who, 1);
+				elems[size_t(i)]->write(0xa, reinterpret_cast<const uint8_t*>(&oi), 2);
+			}
+		}
+		cd->length = want;
+		cd->elems = std::move(elems);
+		if (ptr_kind) {
+			cd->present = std::move(present);
+			if (ck == dw::ContainerKind::MultiPtrArray) cd->types = std::move(types);
+		}
+	}
+}
+
+void clear_shadow_containers(sim::OriginalShadow& sh) {
+	if (!sh.tree) return;
+	const dw::Description& d = dw::Description::get();
+	std::set<const dw::Rec*> seen;
+	std::vector<dw::Rec*> todo;
+	for (int gid = 0; gid < d.global_count(); ++gid)
+		if (const dw::Rec* r = sh.tree->find_global(gid)) todo.push_back(const_cast<dw::Rec*>(r));
+	while (!todo.empty()) {
+		dw::Rec* r = todo.back();
+		todo.pop_back();
+		if (!r || !seen.insert(r).second) continue;
+		for (dw::Event& e : r->ev) {
+			if (e.type == 0 && e.child) todo.push_back(e.child);
+			if (e.type != 2 || !e.cd) continue;
+			dw::ContainerData& cd = *e.cd;
+			bool any = false;
+			for (dw::Rec* c : cd.elems) any = any || c != nullptr;
+			if (!any) continue;
+			cd.length = 0;   // the header's capacity (size / increment / flags) stays what the template had
+			cd.present.clear();
+			cd.types.clear();
+			cd.elems.clear();
+		}
+	}
+}
+
+namespace {
+
+// The checksum provider (sim/datawalk_engine.hpp) lays the engine's state over a decoded save of the original (the "shadow": the members the
+// engine does not model, the padding, the container headers). A generated game has none, so a fresh-state save of the corpus serves as the
+// template: `Saves/current 2.SVX` (frame 189 of a game that has just started) next to the "Recorded Games" folder of the recording, or the
+// file named by RON_SHADOW_SAVE. Everything the engine models is overlaid from the generated game; only never-modelled members stay the
+// template's.
+std::string template_save_path(const std::string& replay_path) {
+	if (const char* e = std::getenv("RON_SHADOW_SAVE")) {
+		if (*e) return e;
+	}
+	// the embedded save of the first segment of the 2026.08.30 chain is a game two frames after its start (fresh scenario data, fresh object
+	// lists); a save of the Saves folder is the fallback
+	const size_t k = replay_path.find("Recorded Games");
+	const std::string root = k != std::string::npos ? replay_path.substr(0, k) : std::string("re/oracle/");
+	const std::string chain = root + "Recorded Games/Multi/Playback - 2026.08.30 21'23'34 (Sun).rcx";
+	if (std::FILE* f = std::fopen(chain.c_str(), "rb")) {
+		std::fclose(f);
+		return chain;
+	}
+	return root + "Saves/current 2.SVX";
+}
+
+std::shared_ptr<sim::OriginalShadow> load_template_shadow(const ron::GameFiles& files, const sim::Rules& rules, const std::string& path, std::string& err) {
+	std::FILE* f = std::fopen(path.c_str(), "rb");
+	if (!f) {
+		err = "cannot read the template save " + path + " (the checksum shadow of a generated game)";
+		return nullptr;
+	}
+	std::vector<uint8_t> raw;
+	uint8_t buf[1 << 16];
+	for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) raw.insert(raw.end(), buf, buf + n);
+	std::fclose(f);
+	std::vector<uint8_t> bytes;
+	bool gz = false;
+	if (path.size() > 4 && path.compare(path.size() - 4, 4, ".rcx") == 0) {
+		// a recording: its embedded save is the template
+		sim::Replay trp;
+		if (!sim::read_replay_bytes(raw, trp, err) || !trp.has_save) {
+			err = "the recording " + path + " holds no embedded save to serve as the template";
+			return nullptr;
+		}
+		bytes = trp.save_bytes();
+	} else if (!sim::replay_gunzip(raw, bytes, gz)) {
+		err = "cannot inflate the template save " + path;
+		return nullptr;
+	}
+	sim::OriginalLoadReport rep;
+	std::unique_ptr<sim::Game> gt = sim::load_original_save(files, rules, nullptr, bytes, &rep);
+	if (!gt) {
+		err = "the template save does not load: " + rep.error;
+		return nullptr;
+	}
+	return gt->original;
+}
+
+// Trees decoded from the rules blocks of recordings (their nodes are referenced by the shadows they were transplanted into).
+std::vector<std::unique_ptr<dw::Tree>>& kept_trees() {
+	static std::vector<std::unique_ptr<dw::Tree>> v;
+	return v;
+}
+
+// The recording's own rules block (Game::walk_rules_data; replay-spec section 6) replaces the template's: the `rules` part hashes the image the
+// game was played with, which is the data revision of the recording (two revisions in the corpus), not the template's.
+bool transplant_rules(const sim::Replay& rp, sim::OriginalShadow& sh) {
+	if (!rp.has_rules || rp.rules_at == 0) return false;
+	auto tree = std::make_unique<dw::Tree>(dw::Description::get());
+	dw::DecodeResult r = dw::decode_function(*tree, rp.data.data(), rp.data.size(), rp.rules_at, "Game::walk_rules_data", "game", 0x10);
+	if (std::getenv("RON_PREPARE_TRACE")) std::printf("  rules block of the recording: at %zu size %zu: decode %s end %zu error %s\n", rp.rules_at, rp.rules_size, r.ok ? "ok" : "FAILED", r.end, r.error.c_str());
+	if (!r.ok || r.end != rp.rules_at + rp.rules_size) return false;
+	const dw::Description& d = dw::Description::get();
+	int copied = 0;
+	for (int gid = 0; gid < d.global_count(); ++gid) {
+		const dw::Rec* src = tree->find_global(gid);
+		if (!src || (src->bytes.empty() && src->ev.empty())) continue;
+		dw::Rec* dst = sh.tree->global(gid);
+		dst->origin = src->origin;
+		dst->bytes = src->bytes;
+		dst->ev = src->ev;
+		dst->pass = 0;
+		dst->cursor = 0;
+		++copied;
+	}
+	if (std::getenv("RON_PREPARE_TRACE")) std::printf("  rules block: %d globals replaced in the shadow\n", copied);
+	if (!copied) return false;
+	kept_trees().push_back(std::move(tree));
+	return true;
+}
+
+// World's unmodelled members (docs/original-save.md section 6.21): the resolved style, the territory limits, World::analyze_map's counts, the
+// generator's seed. They are walked by the `world` part and never change after the start.
+void patch_world_shadow(sim::Game& g, const sim::RandomExtras& X) {
+	const dw::Description& d = dw::Description::get();
+	dw::Rec* rec = const_cast<dw::Rec*>(g.original->tree->find_global(d.find_global("world")));
+	if (!rec) return;
+	auto put = [&](const char* name, int64_t v) {
+		const dw::FieldInfo* f = d.find_field("World", name);
+		if (!f) return;
+		const int32_t x = int32_t(v);
+		rec->write(f->offset, reinterpret_cast<const uint8_t*>(&x), 4);
+	};
+	const sim::mapgen::Result& r = X.result;
+	put("map", r.picked_style);
+	put("player_territory_limit", r.territory_limits[0]);
+	put("player_territory_limit_civic", r.territory_limits[1]);
+	put("player_territory_limit_city", r.territory_limits[2]);
+	put("colonized_territory_limit", r.territory_limits[3]);
+	put("colonized_territory_limit_civic", r.territory_limits[4]);
+	put("colonized_territory_limit_city", r.territory_limits[5]);
+	put("player_reg", X.analysis.player_reg);
+	put("resource_reg", X.analysis.resource_reg);
+	put("forest_size", X.analysis.forest_size);
+	put("mountain_size", X.analysis.mountain_size);
+	put("rock_size", X.analysis.rock_size);
+	put("total_metal", X.analysis.total_metal);
+	put("total_oil", X.analysis.total_oil);
+	put("goodies", X.analysis.goodies);
+	put("land_resources", X.analysis.land_resources);
+	put("sea_resources", X.analysis.sea_resources);
+	put("seed", r.world_seed);
+	// World.start_x / start_y (the start locations in order) and start_city_x / start_city_y (the four wcoords of each start's city site: (x, y),
+	// (x - 1, y), (x, y - 1), (x - 1, y - 1), start after start); the oil lists stay empty in every save
+	if (dw::Rec* wr = const_cast<dw::Rec*>(g.original->tree->find_global(d.find_global("world")))) {
+		int idx = 0;
+		for (dw::Event& e : wr->ev) {
+			if (e.type != 2 || !e.cd || std::string(d.function_name(d.step_function(e.step))) != "SimpleArray<WCoord>::walk_data") continue;
+			std::vector<int32_t> v;
+			for (const auto& st : r.starts) {
+				if (idx == 0) v.push_back(st[0]);
+				else if (idx == 1) v.push_back(st[1]);
+				else if (idx == 2) { v.push_back(st[0]); v.push_back(st[0] - 1); v.push_back(st[0]); v.push_back(st[0] - 1); }
+				else if (idx == 3) { v.push_back(st[1]); v.push_back(st[1]); v.push_back(st[1] - 1); v.push_back(st[1] - 1); }
+			}
+			if (idx < 4) {
+				dw::ContainerData& cd = *e.cd;
+				cd.data.assign(reinterpret_cast<const uint8_t*>(v.data()), reinterpret_cast<const uint8_t*>(v.data()) + v.size() * 4);
+				cd.length = int32_t(v.size());
+				if (!v.empty()) {
+					int32_t size = 4;
+					while (size < int32_t(v.size())) size *= 2;
+					cd.size = size;
+					cd.increment = -1;
+					cd.flags = 0;
+				}
+			}
+			++idx;
+		}
+	}
+	// Terrain.halfland_locs / halfland_types / halfland_subtypes (World::walk_data parts 10 - 12): the log of Terrain::mark_halfwater; Array and SimpleArray
+	// capacities double from 4 (SimpleArray<int>::increase_size @4220e0 with the default increment)
+	if (dw::Rec* tr = const_cast<dw::Rec*>(g.original->tree->find_global(d.find_global("terrain")))) {
+		int simple = 0;
+		for (dw::Event& e : tr->ev) {
+			if (e.type != 2 || !e.cd) continue;
+			const std::string fn = d.function_name(d.step_function(e.step));
+			dw::ContainerData& cd = *e.cd;
+			auto header = [&](size_t n) {
+				cd.length = int32_t(n);
+				if (!n) return;
+				int32_t size = 4;
+				while (size < int32_t(n)) size *= 2;
+				cd.size = size;
+				cd.increment = -1;
+				cd.flags = 0;
+			};
+			if (fn == "Array<WCoordData>::walk_data" && cd.data.empty()) {
+				cd.elems.clear();
+				for (const auto& l : r.halfland_locs) {
+					dw::Rec* w = g.original->tree->new_rec("WCoordData");
+					w->write(0, reinterpret_cast<const uint8_t*>(&l[0]), 4);
+					w->write(4, reinterpret_cast<const uint8_t*>(&l[1]), 4);
+					cd.elems.push_back(w);
+				}
+				header(cd.elems.size());
+			} else if (fn == "SimpleArray<int>::walk_data" && simple < 2) {
+				const std::vector<int32_t>& v = simple == 0 ? r.halfland_types : r.halfland_subtypes;
+				cd.data.assign(reinterpret_cast<const uint8_t*>(v.data()), reinterpret_cast<const uint8_t*>(v.data()) + v.size() * 4);
+				header(v.size());
+				++simple;
+			} else if (fn == "SimpleArray<int>::walk_data") {
+				++simple;
+			}
+		}
+	}
+}
+
+// The template (a two-player game) walks only its two active leaders in full; a leader beyond them stores 8 bytes, so a game with more seats finds no
+// children, strings or containers where LeaderData::walk_data asks for them. Leader k gets leader 0's image and events at its own base (the bases are
+// recovered from the recorded keys), and the same for the object lists of `objects`.
+void activate_template_leaders(sim::OriginalShadow& sh, int n) {
+	const dw::Description& d = dw::Description::get();
+	auto clone_event = [&](const dw::Event& src, uint64_t key) {
+		dw::Event e = src;
+		e.key = key;
+		if (e.child) e.child = clone_rec(*sh.tree, *e.child);
+		if (e.cd) {
+			dw::ContainerData* cd = sh.tree->new_container();
+			*cd = *e.cd;
+			for (dw::Rec*& el : cd->elems)
+				if (el) el = clone_rec(*sh.tree, *el);
+			e.cd = cd;
+		}
+		return e;
+	};
+	// the events of a global whose recorded bases lie in [lo, hi): (event index, base, index); filter = the walk function name of the step ("" = any)
+	auto recover = [&](dw::Rec& rec, int64_t lo, int64_t hi, const char* fn) {
+		struct Ev {
+			size_t at;
+			int64_t base, index;
+		};
+		std::vector<Ev> out;
+		for (size_t i = 0; i < rec.ev.size(); ++i) {
+			const dw::Event& e = rec.ev[i];
+			if (*fn && std::string(d.function_name(d.step_function(e.step))) != fn) continue;
+			const int64_t index = e.type == 0 ? e.value : 0;
+			for (int64_t b = lo; b < hi; ++b)
+				if (shadow_mix_key(e.step, b, index) == e.key) {
+					out.push_back({i, b, index});
+					break;
+				}
+		}
+		return out;
+	};
+	if (dw::Rec* lr = const_cast<dw::Rec*>(sh.tree->find_global(d.find_global("leaders")))) {
+		auto active = [&](int k) {
+			uint8_t b = 0;
+			lr->read(int64_t(k) * 0x6eec, &b, 1);
+			return (b & 1) != 0;
+		};
+		if (active(0)) {
+			auto evs = recover(*lr, 0, 0x6eec, "");
+			std::vector<uint8_t> img(0x6eec);
+			lr->read(0, img.data(), img.size());
+			for (int k = 1; k < n && k < 8; ++k) {
+				if (active(k)) continue;
+				const int32_t who = k;
+				std::memcpy(img.data() + 8, &who, 4);   // LeaderData.who
+				lr->write(int64_t(k) * 0x6eec, img.data(), img.size());
+				std::vector<dw::Event> add;
+				for (const auto& v : evs) add.push_back(clone_event(lr->ev[v.at], shadow_mix_key(lr->ev[v.at].step, v.base + int64_t(k) * 0x6eec, v.index)));
+				for (dw::Event& e : add) lr->ev.push_back(e);
+			}
+		}
+	}
+	if (dw::Rec* orc = const_cast<dw::Rec*>(sh.tree->find_global(d.find_global("objects")))) {
+		auto evs = recover(*orc, 4, 4 + 0x1c, "MultiPtrArray<Object>::walk_data");
+		for (int k = 1; k < n && k < 8; ++k) {
+			bool have = false;
+			for (const auto& v : evs) {
+				const uint64_t key = shadow_mix_key(orc->ev[v.at].step, v.base + int64_t(k) * 0x1c, v.index);
+				for (const dw::Event& e : orc->ev) have = have || e.key == key;
+			}
+			if (have) continue;
+			std::vector<dw::Event> add;
+			for (const auto& v : evs) add.push_back(clone_event(orc->ev[v.at], shadow_mix_key(orc->ev[v.at].step, v.base + int64_t(k) * 0x1c, v.index)));
+			for (dw::Event& e : add) orc->ev.push_back(e);
+		}
+	}
+}
+
+// The members of the template that belong to the template's own game rather than to a fresh one.
+void patch_shadow_for_setup(sim::Game& g, const sim::Replay& rp) {
+	const sim::ReplayHeader& h = rp.header;
+	sim::OriginalShadow& sh = *g.original;
+	const dw::Description& d = dw::Description::get();
+	transplant_rules(rp, sh);   // the block of the stream is the image before any game script edited it (the first row of a no_nukes game; the script's later edits stay unmodelled in the shadow)
+	const bool scripted = h.setup_field(sim::kSetScriptType) != 0 || !h.scenario_script.empty();
+	if (!scripted) {
+		// no game script: ScenarioData::load_scenario_script is 0 (the template's game ran one) and the script runtime holds no script file
+		// (RunTimeEnv::walk_data: a bare count; the 262145 of every scriptless multiplayer row)
+		if (dw::Rec* sc = const_cast<dw::Rec*>(sh.tree->find_global(d.find_global("ScenarioData::load_scenario_script")))) {
+			const int32_t zero = 0;
+			sc->write(0, reinterpret_cast<const uint8_t*>(&zero), 4);
+		}
+		if (dw::Rec* rt = const_cast<dw::Rec*>(sh.tree->find_global(d.find_global("run_time_env")))) {
+			for (dw::Event& e : rt->ev)
+				if (e.type == 1) { e.value = 0; break; }
+		}
+	}
+}
+
+}  // namespace
+
+std::unique_ptr<sim::Game> original_random_game(const ron::GameFiles& files, const sim::Rules& rules, const sim::AnimSource* art, const sim::Replay& rp,
+                                                const sim::RandomGameSetup& setup, std::string& err) {
+	sim::RandomExtras extras;
+	extras.original = load_template_shadow(files, rules, template_save_path(rp.path), err);
+	if (!extras.original) return nullptr;
+	std::shared_ptr<sim::OriginalShadow> shadow = extras.original;
+	// The game ran on the rules block the recording carries (adopt_rules does the same for a save): two data revisions exist in the corpus, and the
+	// `rules` part hashes the engine's tables. The adopted tables are used for the generation too; the Game keeps them as its own.
+	std::unique_ptr<sim::Rules> adopted;
+	if (rp.has_rules && rp.rules_at != 0) {
+		try {
+			auto own = std::make_unique<sim::Rules>(rules);
+			sim::read_image_into(rp.data, rp.rules_at, *own);
+			if (sim::write_image(*own) != sim::write_image(rules)) adopted = std::move(own);
+		} catch (const std::exception&) {
+		}
+	}
+	std::unique_ptr<sim::Game> g = sim::new_random_game(files, adopted ? *adopted : rules, art, setup, &extras);
+	if (!g) {
+		err = extras.error.empty() ? "the generator failed" : extras.error;
+		return nullptr;
+	}
+	if (adopted) {
+		g->own_rules = std::move(adopted);
+		g->rules = g->own_rules.get();
+		g->base_rules = &rules;
+	}
+	for (int who = 0; who < sim::kNumLeaders; ++who) shadow->leader_ai[who] = who < 8 && (g->leaders[size_t(who)].flags & sim::leaderflag::kValid) != 0;
+	apply_original_lobby(*g, rp.header);
+	{
+		int seats = 0;
+		for (int who = 0; who < 8; ++who) seats += (g->leaders[size_t(who)].flags & sim::leaderflag::kValid) != 0 ? 1 : 0;
+		activate_template_leaders(*shadow, seats);
+	}
+	patch_shadow_for_setup(*g, rp);
+	patch_world_shadow(*g, extras);
+	return g;
+}
+
 // ---------------------------------------------------------------- open
 
 std::unique_ptr<Playback> Playback::open(const std::string& path, const std::string& game_dir, std::string& err) {
@@ -381,10 +1015,15 @@ std::unique_ptr<Playback> Playback::open(const std::string& path, const std::str
 	} else {
 		pb->kind_ = Kind::Original;
 		if (!rp.has_save) {
-			err = "no embedded save: the game starts from the setup (random map, rules block in the stream), which is not supported";
-			return nullptr;
-		}
-		if (!rp.has_save_info) {
+			// no embedded save: the game starts from the lobby's setup (a random map; the rules block of the stream is the install's rules)
+			std::string serr;
+			if (!original_random_setup(rp, pb->setup_, serr)) {
+				err = "no embedded save and " + serr;
+				return nullptr;
+			}
+			pb->kind_ = Kind::OriginalRandom;
+			pb->scenario_ = sim::random_setup_string(pb->setup_);
+		} else if (!rp.has_save_info) {
 			err = "cannot read the embedded save's game info";
 			return nullptr;
 		}
@@ -475,6 +1114,25 @@ std::unique_ptr<sim::Game> Playback::make_start(std::string& err, const Playback
 			}
 			return g;
 		}
+		if (kind_ == Kind::OriginalRandom) {
+			if (!cache_) cache_ = std::make_shared<RulesCache>(files_);
+			const sim::Rules& rules = cache_->get(original_rules_setup(rp_.header));
+			if (with_art && arts_.empty()) arts_.push_back(sim::load_anim_source(files_, rules));
+			std::unique_ptr<sim::Game> g = original_random_game(files_, rules, with_art ? arts_.back().get() : nullptr, rp_, setup_, err);
+			if (!g) return nullptr;
+			rules_equal_ = true;
+			notes_.push_back("random map generated from the header's setup (style " + std::to_string(setup_.map_style) + ", size " + std::to_string(setup_.map_size) +
+			                 ", seed " + std::to_string(setup_.seed) + ", " + std::to_string(setup_.num_nations) + " nations)");
+			sim::original_post_load_effects(*g);
+			const std::string script = sim::to_utf8(rp_.header.scenario_script);
+			std::string serr;
+			if (!script.empty()) {
+				if (sim::original_attach_game_script(*g, files_, script, &serr)) notes_.push_back("game script \"" + script + "\" attached");
+				else notes_.push_back("game script \"" + script + "\" not attached: " + serr);
+			}
+			prepare_fresh_shadow(*g);
+			return g;
+		}
 		const ron::GameFiles& files = env.files ? *env.files : files_;
 		const sim::Rules* rules = env.rules;
 		if (!rules) {
@@ -523,8 +1181,9 @@ void Playback::apply_header_seats(sim::Game& g) {
 
 void Playback::bind(sim::Game& g, bool all_verbs) {
 	game_ = &g;
-	ExecPolicy policy = kind_ == Kind::Original && !all_verbs ? ExecPolicy::sav_compatible() : ExecPolicy::all_engine();
-	hooks_ = std::make_unique<GameHooks>(g, who_, kind_ == Kind::Original ? ChecksumMode::Original : ChecksumMode::Native, policy, scenario_, seed_);
+	const bool original = kind_ == Kind::Original || kind_ == Kind::OriginalRandom;
+	ExecPolicy policy = original && !all_verbs ? ExecPolicy::sav_compatible() : ExecPolicy::all_engine();
+	hooks_ = std::make_unique<GameHooks>(g, who_, original ? ChecksumMode::Original : ChecksumMode::Native, policy, scenario_, seed_);
 	hooks_->before_frame = before_frame;
 	hooks_->after_frame = after_frame;
 	next_ = 0;
@@ -653,7 +1312,7 @@ int playback_report(Playback& pb, sim::Game& g, int64_t frames, bool all_verbs) 
 		const size_t s = p.find_last_of('/');
 		return s == std::string::npos ? p : p.substr(s + 1);
 	}();
-	const char* kinds[] = {"original game", "native save", "native random game"};
+	const char* kinds[] = {"original game", "native save", "native random game", "random map of the original game"};
 	std::printf("%s: playback of a recording of the %s, from frame %lld to %lld, %u turns, %s\n", name.c_str(), kinds[int(pb.kind())],
 	            (long long)pb.start_frame(), (long long)pb.end_frame(), pb.turns_total(), pb.has_check_sums() ? "CHECK_SUMS rows present" : "no CHECK_SUMS rows");
 	const int64_t target = frames > 0 ? pb.start_frame() + frames : INT64_MAX;

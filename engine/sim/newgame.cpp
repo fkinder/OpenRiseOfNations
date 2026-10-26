@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -24,6 +25,7 @@
 #include "sim/production.hpp"
 #include "sim/script_host.hpp"
 #include "sim/search.hpp"
+#include "sim/original_save.hpp"
 #include "sim/territory.hpp"
 
 namespace ron::sim {
@@ -577,7 +579,8 @@ void init_diplomacy(Game& g, int32_t who, int32_t tribe) {
 			continue;
 		}
 		const bool team = is_team(g, who, i);
-		l.diplo[size_t(i)] = team ? 2 : locked ? 0 : 1;
+		// a rush rule (RUSHRULES != 0: peace until an age, or until minute N for N >= 9) starts every non-allied pair at peace: the chain's leaders hold diplos [2,1,1,1,1,1,1,1]
+		l.diplo[size_t(i)] = team ? 2 : (locked && g.info.rush_rules == 0) ? 0 : 1;
 		if (team) l.treaty(i) |= 1;
 	}
 	if (tribe < 0) {
@@ -586,6 +589,8 @@ void init_diplomacy(Game& g, int32_t who, int32_t tribe) {
 	}
 	leader_init_ally_mask(g, who);
 }
+
+constexpr int32_t kHerdWho = 8;  // the original's list of wild animals (Herd::create_units)
 
 int clampi(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
 
@@ -624,19 +629,103 @@ RandomGameSetup resolve_setup(const RandomGameSetup& in, const Rules& rules) {
 	return s;
 }
 
-// Setup::build_empire's products, created in the list's order (city, its buildings, the units).
-void create_empires(Game& g, const mapgen::Result& res) {
+// World::analyze_map @6b58b0 (Setup::build_game step 10, after the empires and the herds): the land total, the regions' flags 4 (a leader has a city
+// there: the first valid leader of the region) and 8 (no city, and a size of at least the map-size threshold), the sea_map refinement, and the
+// counts of the world's goods, forest, mountain and rock cells that the original keeps in World +0x50..+0x74 (not modelled by the engine's World;
+// they are returned for the checksum shadow). The loop over the regions is the land regions 1..63; the leaders' reg_cities arrays are 64 wide.
+WorldAnalysis analyze_map(Game& g) {
+	WorldAnalysis a;
+	World& w = g.world;
+	g.world_total_land = 0;
+	int32_t player_land = 0, resource_land = 0;
+	// threshold: (S * S / 2 + 60 xs) / (S * S), at least 1, S = the map_sizes entry at +0x144 of the list data (7: the threshold of the 100 x 100
+	// world of the 2026.08.30 chain is 122, which keeps 13 resource regions)
+	const int32_t S = 7, SS = S * S;
+	int32_t thr = (SS / 2 + (w.xs * 16 - w.xs) * 4) / SS;
+	if (thr < 1) thr = 1;
+	for (int32_t r = 1; r < 64; r++) {
+		Region& R = g.regions.r[size_t(r)];
+		g.world_total_land += R.size;
+		bool player = false;
+		for (int32_t k = 0; k < 8 && !player; k++)
+			if ((g.leaders[size_t(k)].flags & leaderflag::kValid) && g.leaders[size_t(k)].reg_cities[size_t(r)] != 0) player = true;
+		if (player) {
+			a.player_reg++;
+			R.flags |= 4;
+			player_land += R.size;
+		} else if (thr <= R.size) {
+			a.resource_reg++;
+			resource_land += R.size;
+			R.flags |= 8;
+		}
+	}
+	for (int32_t y = 0; y < w.ys; y++) {
+		for (int32_t x = 0; x < w.xs; x++) {
+			const WData& d = w.w(x, y);
+			const bool water = (d.land == 1 || d.land == 2) && !(d.flags & 0x100);
+			if (water) {
+				if (d.flags & 1) a.sea_resources++;
+				continue;
+			}
+			if (d.flags & 1) a.land_resources++;
+			if (d.flags & 0x8000) a.goodies++;
+			if (d.flags & 0x20) a.forest_size++;
+			if ((w.t(x * 4 + 2, y * 4 + 2) & 3) == 2) a.mountain_size++;
+			if (d.flags & 0x800) a.total_oil++;
+			if (d.flags & 8) a.rock_size++;
+		}
+	}
+	// MountainsData::total_gather_size: MountainRangeData::gather_size(wx, wy, -1, no list) per placed range. With who = -1 every counted tile
+	// passes the owner test (the decompile tests `who < 0` after the tile's owner), so the share is the whole of the size class's gather value.
+	for (const PlacedRange& pr : g.mountains) {
+		if (pr.solid.empty()) continue;
+		int32_t counted = 0;
+		for (const auto& sl : pr.solid) {
+			const int32_t wx = sl[0] + pr.wx, wy = sl[1] + pr.wy;
+			if (!w.in_w(wx, wy)) continue;
+			if ((w.w(wx, wy).flags & 0x20) || (w.t(4 * wx + 2, 4 * wy + 2) & 3) != 2) continue;
+			counted++;
+		}
+		const Constants& K = g.rules->constants;
+		const int32_t n = pr.tcoord_count;
+		int32_t cls = n < K.at(constant_offset("mtn_tiny_size"))     ? K.at(constant_offset("mtn_tiny_gather"))
+		              : n < K.at(constant_offset("mtn_small_size"))  ? K.at(constant_offset("mtn_small_gather"))
+		              : n < K.at(constant_offset("mtn_medium_size")) ? K.at(constant_offset("mtn_medium_gather"))
+		              : n < K.at(constant_offset("mtn_large_size"))  ? K.at(constant_offset("mtn_large_gather"))
+		                                                             : K.at(constant_offset("mtn_huge_gather"));
+		if (counted != 0 && cls < 1) cls = 1;
+		if (std::getenv("RON_ANALYZE_TRACE")) std::fprintf(stderr, "  mountain range %d at %d,%d: solid %zu, tcoords %d, counted %d, gather %d\n", pr.range, pr.wx, pr.wy, pr.solid.size(), n, counted, cls);
+		a.total_metal += cls;
+	}
+	const int32_t sm = w.sea_map;
+	if (sm < 0 || sm > 4) {
+		if (a.player_reg > 1) w.sea_map = (player_land * 2 <= resource_land ? 1 : 0) + 3;
+		else if (a.resource_reg != 0) w.sea_map = 2;
+		else w.sea_map = g.world_total_land < (w.size << 2) / 5 ? 1 : 0;
+	} else if (sm == 3 && a.player_reg > 1 && player_land * 2 <= resource_land) {
+		w.sea_map = 4;
+	}
+	return a;
+}
+
+// Setup::build_empire's products (city, its buildings, the units), created one entry at a time as the generator emits them (Params::on_empire_entry):
+// the original creates the objects as it goes, so the ring draws of Setup::place_unit and the objects' own draws interleave.
+struct EmpireBuilder {
+	explicit EmpireBuilder(Game& game) : g(game) {
+		city_o.fill(-1);
+		rest_cursor.fill(0);
+	}
+	Game& g;
 	std::array<int32_t, 8> city_o;
-	city_o.fill(-1);
-	std::array<int32_t, 8> farm_o;
-	farm_o.fill(-1);
-	for (const mapgen::EmpireEntry& e : res.empire) {
+	std::array<int32_t, 8> rest_cursor;   // Setup::build_units' local_c: how far the farm search of the later citizens has moved
+
+	void add(const mapgen::EmpireEntry& e) {
 		const int32_t who = e.who;
-		if (who < 0 || who >= 8) continue;
+		if (who < 0 || who >= 8) return;
 		if (e.kind == mapgen::EmpireEntry::City) {
 			// Setup::build_cities: Build::init, activate(0, 0, 0), cities_built++, update_seen(ally), territory.
 			const int32_t o = init_build_site(g, who, e.type, e.x, e.y, false, -1);
-			if (o < 0) continue;
+			if (o < 0) return;
 			Build& b = *g.build(who, o);
 			build_activate_full(g, b, false, false, false);
 			g.leaders[size_t(who)].cities_built++;
@@ -644,42 +733,48 @@ void create_empires(Game& g, const mapgen::Result& res) {
 			city_o[size_t(who)] = o;
 			if (b.city >= 0) compute_all_territory(g);
 		} else if (e.kind == mapgen::EmpireEntry::Building) {
-			if (city_o[size_t(who)] < 0) continue;
+			if (city_o[size_t(who)] < 0) return;
 			// Leader::produce_building(t, city.o, 0): the AI's site search + init_build.
 			produce_building(g, who, e.type, city_o[size_t(who)], 0);
 		} else {
-			if (farm_o[size_t(who)] < 0) {
-				const ObjectList& ol = g.objects[size_t(who)];
-				for (int32_t o = kBuildBase; o < ol.build_mark; o++) {
-					const Build* b = g.build(who, o);
-					if (b && b->alive() && b->type == ptype::kFarm) {
-						farm_o[size_t(who)] = o;
-						break;
+			if (e.note == 1 || e.note == 5) {
+				// Setup::build_units (the decompile and the 2026.08.30 chain's first frames): the first n_farm citizens of a town start are created at
+				// the building in slot 2001 (the woodcutter of a small / large town, whatever it is), come out and gather there; the others look
+				// for a farm with room from slot 2002 on, a cursor that moves on after every citizen (each farm holds one: the five farms of a
+				// large town get five citizens), and gather at it.
+				int32_t slot = kBuildBase + 1;
+				if (e.note == 5) {
+					const ObjectList& ol = g.objects[size_t(who)];
+					int32_t s = kBuildBase + 2 + rest_cursor[size_t(who)]++;
+					int32_t found = -1;
+					for (; s < ol.build_mark; s++) {
+						const Build* b = g.build(who, s);
+						if (!b || !b->alive()) break;
+						if (b->type == ptype::kFarm) { found = s; break; }
+						rest_cursor[size_t(who)]++;
 					}
+					slot = found >= 0 ? found : kBuildBase + 1;
 				}
-			}
-			if (e.note == 1) {
-				// A starting citizen of a town start: created at the first farm, comes out, and gathers there.
-				const Build* farm = farm_o[size_t(who)] >= 0 ? g.build(who, farm_o[size_t(who)]) : nullptr;
-				if (!farm) {
+				const Build* site = g.build(who, slot);
+				if (!site || !site->alive()) {
 					const Build* c = city_o[size_t(who)] >= 0 ? g.build(who, city_o[size_t(who)]) : nullptr;
-					if (!c) continue;
+					if (!c) return;
 					const int32_t o = init_unit(g, who, e.type, c->x, c->y);
 					if (o >= 0) unit_come_out(g, *g.unit(who, o), 0);
-					continue;
+					return;
 				}
-				const int32_t o = init_unit(g, who, e.type, farm->x, farm->y);
-				if (o < 0) continue;
+				const int32_t o = init_unit(g, who, e.type, site->x, site->y);
+				if (o < 0) return;
 				Unit& u = *g.unit(who, o);
 				unit_come_out(g, u, 0);
-				if (g.info.starting_resources != 8) add_gather_order(g, u, farm_o[size_t(who)], kQueueNew, false);
+				if (g.info.starting_resources != 8) add_gather_order(g, u, slot, kQueueNew, false);
 			} else if (e.x < 0) {
 				// Setup::place_unit found no spot with a city: Build::train(city, type).
 				const int32_t co = city_o[size_t(who)];
 				if (co >= 0) build_train(g, *g.build(who, co), e.type);
 			} else {
 				const int32_t o = init_unit(g, who, e.type, e.x, e.y);
-				if (o < 0) continue;
+				if (o < 0) return;
 				Unit& u = *g.unit(who, o);
 				if (e.note == 4) {
 					unit_come_out(g, u, 0);
@@ -697,7 +792,7 @@ void create_empires(Game& g, const mapgen::Result& res) {
 			}
 		}
 	}
-}
+};
 
 // Herd::create_units for every herd (the animals' positions are the herd cell centres; spread with find_nearby_spot).
 void create_herds(Game& g, const mapgen::Result& res) {
@@ -706,9 +801,11 @@ void create_herds(Game& g, const mapgen::Result& res) {
 		int32_t x = a.x, y = a.y, ox = 0, oy = 0;
 		const Type& T = g.type(a.unit_type);
 		if (find_nearby_spot(g, T, a.x, a.y, &ox, &oy, 0, 3 * 768, 0, 0x80000000u, 0, -1, -1, 0, 0, -1, 0, -1) == 0) x = ox, y = oy;
-		const int32_t o = init_unit(g, kGaiaWho, a.unit_type, x, y);
+		// Herd::create_units: Objects::init_unit(8 (gaia), ..) - the wild animals are list 8 of the original's objects (the saves hold them
+		// there); list 9 is the birds, gulls and pen animals the file does not hold
+		const int32_t o = init_unit(g, kHerdWho, a.unit_type, x, y);
 		if (o < 0) continue;
-		Unit& u = *g.unit(kGaiaWho, o);
+		Unit& u = *g.unit(kHerdWho, o);
 		u.angle = a.angle;
 		u.dest_angle = a.angle;
 		unit_set_angle(g, u, u.angle, true);
@@ -808,12 +905,14 @@ std::unique_ptr<Game> new_random_game(const GameFiles& files, const Rules& rules
                                       const RandomGameSetup& setup, RandomExtras* extras) {
 	RandomExtras local;
 	RandomExtras& X = extras ? *extras : local;
+	std::shared_ptr<OriginalShadow> shadow = std::move(X.original);  // the caller's input (see RandomExtras)
 	X = RandomExtras();
 	const RandomGameSetup S = resolve_setup(setup, rules);
 	X.setup = S;
 	auto gp = std::make_unique<Game>();
 	Game& g = *gp;
 	g.anims = anims;
+	g.original = std::move(shadow);
 
 	// ---- GameInfo (the lobby), the way Game::init_rules_and_teams reads it.
 	GameInfo& gi = g.info;
@@ -894,39 +993,8 @@ std::unique_ptr<Game> new_random_game(const GameFiles& files, const Rules& rules
 		}
 		conquest_scope = std::make_unique<mapgen::ConquestScope>(&conquest_in);
 	}
-	X.result = mapgen::generate_into(g, files, p);
-	const mapgen::Result& res = X.result;
-	if (!res.ok) {
-		X.error = res.error;
-		return nullptr;
-	}
-	g.frame = 0;
-	g.tick = 0;
-
-	// ---- the terrain the renderer draws and the simulation's heights (Terrain::init)
-	X.scenario.name = "Random Map: " + mapgen::style_name(rules, res.picked_style) + ", " + std::to_string(res.xs) + "x" +
-	                  std::to_string(res.ys) + ", seed " + std::to_string(S.seed);
-	X.name = X.scenario.name;
-	X.scenario.world_seed = res.world_seed;
-	X.scenario.terrain = synthesize_terrain(g, files, res);
-	g.heights.vxs = X.scenario.terrain.vxs();
-	g.heights.vys = X.scenario.terrain.vys();
-	g.heights.h = X.scenario.terrain.heights;
-
-	// Mountain ranges as MountainsData keeps them (gather tiles of mines).
-	g.mountains.clear();
-	for (const PlacedMountain& m : res.mountains) {
-		PlacedRange pr;
-		pr.wx = m.wx;
-		pr.wy = m.wy;
-		pr.range = m.range;
-		pr.solid = m.wcoords;
-		pr.tiles = m.tcoords;
-		pr.tcoord_count = int32_t(m.tcoords.size());
-		g.mountains.push_back(std::move(pr));
-	}
-
-	// ---- Leaders::init, then the seats in start order (Setup::build_game step 7: Leader::init(who, tribe, who))
+	// ---- Leaders::init (before Setup::build_game reseeds game_random: no effect on the generator's stream), then the seats in start order
+	// (Setup::build_game step 7: Leader::init(who, tribe, who), its draws between the start order's and the empires': a hook of the generator)
 	for (int32_t who = 0; who < kNumLeaders; who++) {
 		g.leaders[size_t(who)] = Leader();
 		init_diplomacy(g, who, -1);
@@ -936,7 +1004,6 @@ std::unique_ptr<Game> new_random_game(const GameFiles& files, const Rules& rules
 	}
 	heroes_init(g);
 	g.everyone_mask = 0;
-	bool have_local = false;
 	for (int i = 0; i < n; i++) {
 		const NationSetup& ns = S.nation[size_t(i)];
 		Leader& l = g.leaders[size_t(i)];
@@ -945,40 +1012,102 @@ std::unique_ptr<Game> new_random_game(const GameFiles& files, const Rules& rules
 		if (ns.human) l.flags |= leaderflag::kHuman;
 		g.everyone_mask |= 1u << uint32_t(i);
 	}
-	for (int k = 0; k < 8; k++) {
-		const int32_t who = res.start_order[size_t(k)];
-		if (who < 0 || who >= n) continue;
-		const NationSetup& ns = S.nation[size_t(who)];
-		Leader& l = g.leaders[size_t(who)];
-		l.tribe = ns.tribe;
-		l.color = ns.color;
-		init_diplomacy(g, who, ns.tribe);
-		leader_init_techs(g, who);
-		leader_init_economy(g, who, true);
-		leader_calc_attrition(g, who);
-		leader_calc_anti_attrition(g, who);
-		if (ns.human) l.flags |= leaderflag::kHuman;
-		else l.flags &= ~leaderflag::kHuman;
-		leader_init_ai(g, who);
-		l.difficulty = ns.difficulty;
-		l.name = ns.human ? std::string("Player") : to_utf8(rules.tribes[size_t(ns.tribe)].name);
-		if (ns.human) l.flags |= leaderflag::kHuman;
-		else l.flags &= ~leaderflag::kHuman;
-		l.flags |= leaderflag::kValid | leaderflag::kActive;
-		if (ns.human && !have_local) {
-			g.local_play = who;
-			have_local = true;
+	bool have_local = false;
+	p.after_start_order = [&](const std::array<int, 8>& order) {
+		for (int k = 0; k < 8; k++) {
+			const int32_t who = order[size_t(k)];
+			if (who < 0 || who >= n) continue;
+			const NationSetup& ns = S.nation[size_t(who)];
+			Leader& l = g.leaders[size_t(who)];
+			l.tribe = ns.tribe;
+			l.color = ns.color;
+			init_diplomacy(g, who, ns.tribe);
+			leader_init_techs(g, who);
+			leader_init_economy(g, who, true);
+			leader_calc_attrition(g, who);
+			leader_calc_anti_attrition(g, who);
+			if (ns.human) l.flags |= leaderflag::kHuman;
+			else l.flags &= ~leaderflag::kHuman;
+			leader_init_ai(g, who);
+			// the stamps a fresh leader of the original holds (the chain's leaders at frame 7): lost_city_stamp -90, attacked_by -1, every
+			// last_building_finished -1, lost_capital_modifier 0
+			l.lost_city_stamp = -90;
+			l.attacked_by = -1;
+			l.last_building_finished.fill(-1);
+			l.lost_capital_modifier = 0;
+			// LeaderData +0x54 status[]: 1 for every leader that is not a player (the chat filter; chain7 and the saves hold [0,0,1,1,1,1,1,1] for two seats)
+			for (int j = 0; j < 8; j++) l.chat_status[size_t(j)] = j < n ? 0 : 1;
+			l.difficulty = ns.difficulty;
+			l.name = ns.human ? std::string("Player") : to_utf8(rules.tribes[size_t(ns.tribe)].name);
+			if (ns.human) l.flags |= leaderflag::kHuman;
+			else l.flags &= ~leaderflag::kHuman;
+			l.flags |= leaderflag::kValid | leaderflag::kActive;
+			if (ns.human && !have_local) {
+				g.local_play = who;
+				have_local = true;
+			}
 		}
-	}
-	g.leaders[kGaiaWho].flags = leaderflag::kValid;
-	g.leaders[kGaiaWho].color = kGaiaWho;
-	armies_init(g);
-	init_combat_data(g);
-	compute_all_territory(g);
+	};
+	// ---- what must exist before the first object is created: the terrain the renderer draws and the simulation's heights (Terrain::init), the
+	// mountain ranges, the gaia leaders, the armies, the territory. Done once, when the generator emits its first empire entry (or after it).
+	bool ready = false;
+	auto make_ready = [&](const mapgen::Result& res) {
+		if (ready) return;
+		ready = true;
+		g.frame = 0;
+		g.tick = 0;
+		if (g.original) {
+			g.original->tileset = res.tileset;
+			g.original->tile_land = load_tile_land_info(files, res.tileset);
+		}
+		X.scenario.name = "Random Map: " + mapgen::style_name(rules, res.picked_style) + ", " + std::to_string(res.xs) + "x" +
+		                  std::to_string(res.ys) + ", seed " + std::to_string(S.seed);
+		X.name = X.scenario.name;
+		X.scenario.world_seed = res.world_seed;
+		X.scenario.terrain = synthesize_terrain(g, files, res);
+		g.heights.vxs = X.scenario.terrain.vxs();
+		g.heights.vys = X.scenario.terrain.vys();
+		g.heights.h = X.scenario.terrain.heights;
 
-	// ---- the objects: empires (step 9), then every herd's animals (step 10)
-	g.scenario_mode = g.scripted_rules || g.ctw;
-	create_empires(g, res);
+		// Mountain ranges as MountainsData keeps them (gather tiles of mines).
+		g.mountains.clear();
+		for (const PlacedMountain& m : res.mountains) {
+			PlacedRange pr;
+			pr.wx = m.wx;
+			pr.wy = m.wy;
+			pr.range = m.range;
+			pr.solid = m.wcoords;
+			pr.tiles = m.tcoords;
+			pr.tcoord_count = int32_t(m.tcoords.size());
+			g.mountains.push_back(std::move(pr));
+		}
+
+		g.leaders[kGaiaWho].flags = leaderflag::kValid;
+		g.leaders[kGaiaWho].color = kGaiaWho;
+		// Leader 8 owns the herds' animals; a loaded game has it valid, active and "human" (flags 7, plus the recompute bit the first frame sets)
+		g.leaders[kHerdWho].flags = leaderflag::kValid | leaderflag::kActive | leaderflag::kHuman;
+		armies_init(g);
+		init_combat_data(g);
+		compute_all_territory(g);
+		g.scenario_mode = g.scripted_rules || g.ctw;
+	};
+	// ---- the objects: empires (step 9), created as the generator emits their entries; then every herd's animals (step 10)
+	EmpireBuilder builder(g);
+	p.on_empire_entry = [&](const mapgen::Result& r, const mapgen::EmpireEntry& e) {
+		make_ready(r);
+		builder.add(e);
+	};
+	p.on_empire_start = [&](const mapgen::Result& r, int who, int wx, int wy) {
+		make_ready(r);
+		if (who >= 0 && who < 8 && g.world.in_w(wx, wy)) g.leaders[size_t(who)].home_reg = g.world.w(wx, wy).region;   // Setup::build_cities: leader +0x9c8
+	};
+	X.result = mapgen::generate_into(g, files, p);
+	const mapgen::Result& res = X.result;
+	if (!res.ok) {
+		X.error = res.error;
+		return nullptr;
+	}
+	make_ready(res);
 	create_herds(g, res);
 	// A capital: the first city of a seat (Build::activate names it in the original's lobby flow).
 	for (int i = 0; i < n; i++) {
@@ -989,8 +1118,7 @@ std::unique_ptr<Game> new_random_game(const GameFiles& files, const Rules& rules
 		}
 	}
 	// World::analyze_map, World::compute_all_territory, then Game::run's first-frame preparations.
-	g.world_total_land = 0;
-	for (int32_t r = 1; r < 64; r++) g.world_total_land += g.regions.r[size_t(r)].size;
+	X.analysis = analyze_map(g);
 	compute_all_territory(g);
 	calc_danger(g);
 	update_all_seen(g);

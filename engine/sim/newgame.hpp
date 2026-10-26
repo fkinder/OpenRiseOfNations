@@ -112,13 +112,25 @@ std::string parse_random_option(const Rules& rules, const std::string& spec, Ran
 // gets); `doobers` is the count the generator reported, at most 1200 are placed. Used by the recordings of the original game as well.
 void place_land_doobers(const World& w, uint32_t seed, int doobers, Terrain& t);
 
+// What World::analyze_map @6b58b0 leaves in the World besides land_size / sea_map / the regions' flags 4 and 8 (the original's unmodelled World
+// members: the checksum shadow gets them from here; docs/original-save.md section 6.21).
+struct WorldAnalysis {
+	int32_t player_reg = 0, resource_reg = 0, forest_size = 0, mountain_size = 0, rock_size = 0, total_metal = 0, total_oil = 0, goodies = 0,
+	        land_resources = 0, sea_resources = 0;
+};
+
 // Everything the renderer needs next to the Game (all optional output of new_random_game).
 struct RandomExtras {
 	mapgen::Result result;  // the generator's result (starts, rivers, mountains, empire list, draw counts)
 	Scenario scenario;      // terrain + objects as scenario records (resolve_battlefield / the terrain mesh read it)
 	RandomGameSetup setup;  // the setup as resolved (random tribes, random age ...)
+	WorldAnalysis analysis; // World::analyze_map's counts
 	std::string name;       // "Random Map: Great Lakes, 60x60, seed 123"
 	std::string error;      // set when new_random_game returned null
+	// INPUT (the only one): the original-save shadow the checksum provider needs (sim/original_save.hpp, a fresh-state template save with its
+	// objects rebound to the new game by the caller). new_random_game sets it as Game::original before the empires are built, so the start
+	// towns' Terrain::object_placed land runs as in the original, and gives the shadow the generated map's tileset.
+	std::shared_ptr<OriginalShadow> original;
 };
 
 // Setup::build_game for a random map plus the Game::run pieces Game::load runs (rules, leaders, starting resources, scripts).

@@ -392,3 +392,30 @@ What the loader work can rely on, confirmed here:
   the replays' next bytes (random-info block, then records starting at the stated frame) show where the walk must stop.
 - Expected body sizes: 4.2 to 7.9 MB decompressed (the stored gzip is 0.62 to 1.2 MB).
 - Cross-checks after loading: `current 2.SVX` against replay `2026.07.11 00'24'00` run from scratch (§5), and the header frame/seed/players of any save against `svxhead`.
+
+## 8. The replay table (`re/tools/replay-all.sh`)
+
+`bash re/tools/replay-all.sh [--frames N] [--jobs J] [--only REGEX] [--out FILE] [--net]` runs `build/ron-sav <file> --replay` on every recording of
+`re/oracle/Recorded Games` (the 59 that start from an embedded save, the 34 random-map ones that start from the header's setup, and the 2 `.scx` scenario games, which
+are reported and not run) and writes one row per recording to `re/oracle/out/replay-table.tsv`, then prints the totals. At most `--jobs` simulations run at a time
+(default 4). The columns:
+
+| column | meaning |
+|---|---|
+| `replay` | the date and time of the file name (`Multi/` for the multiplayer folder); never a player name |
+| `start` | `save` (the embedded save is loaded) or `setup` (generated from the header: `new_random_game`, the playback prologue, `prepare_fresh_shadow`) |
+| `mode` | `MP` or `SP`; a single-player recording carries no CHECK_SUMS rows (replay-spec.md section 11), its row only says so in `note` |
+| `boundaries`, `equal` | turn boundaries compared, and how many of them have all 15 parts equal |
+| `first_row_parts_equal` | of the 15 parts, how many are equal at the first CHECK_SUMS row (the boundary after the start frame: record frame 7 of a generated start) |
+| 15 part columns | the first boundary frame at which the part differs (`1` for a generated start = already the first row), or `=` when it matches through the last boundary compared |
+| `net_equals_sav` | with `--net`: whether `ron-net replay` printed the same 15 lines (multiplayer recordings only) |
+| `note` | why a row has no numbers |
+
+The corpus has 59 multiplayer and 36 single-player recordings; 45 + 13 multiplayer ones have rows (one more, `Multi/2025.06.10 21'38'50`, ends at frame 1). The table is
+the harness of docs/fidelity-plan.md section 3.5: a fidelity change must not move a part earlier in any row (the 45 saved replays: 14,904 boundaries, 1,656 with all 15 parts equal
+before stage C, `first_row_parts_equal` 14.8 on average).
+
+The setup of a generated start and its cross-check: `ron-sav <rcx> --setup-check <save>` prints the lobby setup decoded from the header and compares it with the one read
+back from the save of the same game (seven pairs, section 5: `2025.09.13 15'21'52`, `2025.09.14 13'07'44`, `2025.12.16 21'07'54`, `2026.03.07 20'04'37`, `2026.03.09 18'22'27`,
+`2026.07.11 00'24'00`, `2026.09.07 20'35'54` against `DO NOT DELETE`, `DO NOT DELETE 2`, `show dad point injustice`, `East indies final surround`, `east indies 2 (rn`,
+`current 2`, `current RN`): all seven equal in all 31 fields. docs/original-save.md section 6.21 describes the generated start, its shadow and the findings.
