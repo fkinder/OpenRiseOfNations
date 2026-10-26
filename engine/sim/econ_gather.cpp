@@ -717,22 +717,8 @@ int32_t find_gather_spot(Game& g, Unit& u, int32_t range) {
 	return 0;
 }
 
-// Unit::think_civilian_transport(1) @5f40d0 for an AI citizen (types 0x32 / 0x33). The first block (a citizen the leader cannot carry yet,
-// or one that is not cargo, goes exploring only when it is auto-exploring) is the one the corpus reaches; the ferry search after it
-// scores the sea-coast cells of the candidate regions (Region::go_here / coast_here, the per-region counters LeaderData +0x9c0 and
-// +0x10de) and sends the citizen to the best one. TODO(transports): that search is not ported (the Leader members it keeps are not
-// modelled), the branch returns 0 as before.
-static int32_t think_civilian_transport_citizen(Game& g, Unit& u) {
-	const int32_t dom = u.ptype->domain;
-	if (dom == 1 && (u.ptype->unit_flags & 0x10) == 0) return 0;
-	if (dom != 2) {
-		if (leader_can_transport(g, u.who) < unit_transport_type(g, u) || !unit_can_transport(u) || !object_is_cargo(g, u)) {
-			if (!(u.unit_masks & umask::kAutoExplore)) return 0;
-			return think_scout(g, u, 1);
-		}
-	}
-	return 0;
-}
+// Unit::think_civilian_transport(1) @5f40d0 for an AI citizen (types 0x32 / 0x33): the ferry search of sim/ferry.cpp.
+static int32_t think_civilian_transport_citizen(Game& g, Unit& u) { return unit_think_ferry(g, u, 1); }
 
 int32_t think_peasant(Game& g, Unit& u, bool force) {
 	// Unit::think_peasant @5f5760

@@ -202,7 +202,7 @@ int32_t blocked_tcoord(Game& g, int32_t type, int32_t x, int32_t y, int32_t who,
 	if (m & tmask::kRiverB) return C(block::kRiver);
 	if (is_gather_type(bt) && is_flat_gather(bt)) {
 		// LandData::get_amount(get_land(x, y, 1), get_good()) == 0 -> NO_RESOURCES.
-		const int32_t land = w.gather_land(x >> 2, y >> 2);
+		const int32_t land = w.gather_land_tile(x, y);  // get_land(TCoord, 1) @6b4c70
 		static const int32_t kGood[] = {0, 1, 4, 3, 5, 5};
 		const int32_t gd = type >= ptype::kFarm && type <= ptype::kOilPlatform ? kGood[type - ptype::kFarm] : -1;
 		int32_t amount = 0;

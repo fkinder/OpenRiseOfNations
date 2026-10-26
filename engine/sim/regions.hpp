@@ -27,6 +27,11 @@ struct Region {
 	int32_t common_factor = 8, goody_factor = 8;
 	uint64_t coastal = 0;  // BitMask<64> over land regions
 	uint64_t coast = 0;    // BitMask<64>: bit k = sea region 0x40 + k
+	// Region +0x3c / +0x40 (not walked by Region::walk_data, so a loaded game starts with both clear): Unit::think_scout marks the region as
+	// scouted by a leader when it finds nothing left to explore there (bit `who` of `scouted`, `scout_mark` reset), and the ferry search
+	// of Unit::think_civilian_transport skips the regions a leader has scouted (sim/ferry.cpp).
+	uint8_t scouted = 0;
+	int32_t scout_mark = 0;
 	std::vector<WCoord> coords;  // raster order (rebuild_coords)
 };
 

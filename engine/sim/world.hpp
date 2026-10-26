@@ -158,6 +158,10 @@ public:
 	bool buildings_allowed(int32_t wx, int32_t wy) const { return (w(wx, wy).flags & 0x78) == 0; }
 	// get_land(w, 1) @006b4730: the gather-land index (rules <LANDS>) of a wcoord.
 	int32_t gather_land(int32_t wx, int32_t wy) const;
+	// get_land(t, 1) @006b4c70 (the TCoord overload, BuildTypeData::blocked_tcoord / calc_gather's first call): the same index from a tile.
+	// A coast wcoord (flag 4) is the ocean (2) under a water tile and plain land (0) under a land tile, never COAST (3); a mountain
+	// tile is MOUNTAINS (5) whatever the wcoord says.
+	int32_t gather_land_tile(int32_t tx, int32_t ty) const;
 	// has_blocked_neighbors @006b2990: any in-map neighbour (move 1..8) BLOCKED.
 	bool has_blocked_neighbors(int32_t tx, int32_t ty) const;
 	// has_gather_access(t, -1, 0, 1) @006b4e50: a tree, mountain or cliff tcoord with an in-map orthogonal neighbour

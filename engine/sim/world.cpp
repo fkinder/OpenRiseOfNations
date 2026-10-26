@@ -56,6 +56,18 @@ int32_t World::gather_land(int32_t wx, int32_t wy) const {
 	return d.land;
 }
 
+int32_t World::gather_land_tile(int32_t tx, int32_t ty) const {
+	const WData& d = w(tx >> 2, ty >> 2);
+	const uint16_t f = d.flags;
+	const uint16_t m = t(tx, ty);
+	if (f & wflag::kCoast) return (m & tmask::kMedium) == tmask::kWater ? land::kOcean : land::kLand;
+	if (f & wflag::kForest) return land::kForest;
+	if ((m & tmask::kLowField) == tmask::kMountain) return land::kMountains;
+	if (f & wflag::kOil) return land::kOil;
+	if (f & wflag::kRock) return land::kRocks;
+	return d.land;
+}
+
 bool World::has_blocked_neighbors(int32_t tx, int32_t ty) const {
 	for (int k = 1; k <= 8; k++) {
 		const int32_t x = tx + move_x[k], y = ty + move_y[k];

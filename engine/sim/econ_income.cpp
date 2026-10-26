@@ -44,18 +44,8 @@ void set_rare_bit(std::array<uint8_t, 8>& m, int32_t i) {
 // tdist(dx, dy): the octagonal vector_dist of TCoord differences (vector_dist(TCoord, TCoord, TCoord, TCoord) @46d060).
 int32_t tdist(int32_t ax, int32_t ay) { return vector_dist(iabs(ax), iabs(ay)); }
 
-// WorldData::get_land(TCoord, 1) @6b4c70: the gather land of one tile (flat path).
-int32_t tile_gather_land(const World& w, int32_t tx, int32_t ty) {
-	const WData& d = w.w(tx >> 2, ty >> 2);
-	const uint16_t f = d.flags;
-	const uint16_t m = w.t(tx, ty);
-	if (f & wflag::kCoast) return (m & tmask::kMedium) == tmask::kWater ? land::kOcean : land::kLand;
-	if (f & wflag::kForest) return land::kForest;
-	if ((m & tmask::kLowField) == tmask::kMountain) return land::kMountains;
-	if (f & wflag::kOil) return land::kOil;
-	if (f & wflag::kRock) return land::kRocks;
-	return d.land;
-}
+// WorldData::get_land(TCoord, 1) @6b4c70: the gather land of one tile (World::gather_land_tile).
+int32_t tile_gather_land(const World& w, int32_t tx, int32_t ty) { return w.gather_land_tile(tx, ty); }
 
 // WorldData::has_gather_access(t, who, p4, 0) @6b4e50 (the GATHER_EDGE variant used by total_gather_access and the
 // woodcutter / miner tile choice).

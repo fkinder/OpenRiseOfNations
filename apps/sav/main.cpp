@@ -558,6 +558,7 @@ int astar_check(const std::string& path, const std::vector<uint8_t>& save, const
 	return 0;
 }
 
+void tcoord_scan(sim::EngineProvider& ep, const std::string& path);
 int engine_roundtrip(const std::string& path, const std::vector<uint8_t>& save, const std::string& game_dir, bool quiet, bool diag, int mutate) {
 	// The game setup the rules depend on, read from the save's GameInfo.
 	dw::Tree peek(dw::Description::get());
@@ -616,6 +617,7 @@ int engine_roundtrip(const std::string& path, const std::vector<uint8_t>& save, 
 	int bad = audit_bad;
 	// The verify block: engine provider against the stored values.
 	sim::EngineProvider ep(*game);
+	if (std::getenv("RON_TCOORD_SCAN")) tcoord_scan(ep, path);
 	std::vector<dw::VerifyEntry> es = dw::compute_verify(ep, game->original->verify);
 	std::map<std::string, std::pair<int, int>> byname;  // name -> (entries, mismatches)
 	std::vector<std::pair<std::string, int>> first_bad;
@@ -899,6 +901,23 @@ bool trace_part(dw::Provider& p, int part, PartTrace& out) {
 		return true;
 	}
 	return false;
+}
+
+void tcoord_scan(sim::EngineProvider& ep, const std::string& path) {  // RON_TCOORD_SCAN=1: every building's mining list header (length, size, increment) as loaded
+	PartTrace tr;
+	if (!trace_part(ep, 1, tr)) return;
+	const dw::Description& dd = dw::Description::get();
+	for (size_t i = 0; i + 3 < tr.ranges.size(); ++i) {
+		const auto& r = tr.ranges[i];
+		const int fnc = dd.step_function(r.step);
+		if (fnc < 0 || std::strcmp(dd.function_name(fnc), "Array<TCoordData>::walk_data") != 0 || r.len != 4) continue;
+		const auto& r2 = tr.ranges[i + 1];
+		if (r2.len != 4 || r2.who != r.who || r2.o != r.o) continue;
+		auto rd32 = [&](size_t at) { return uint32_t(tr.bytes[at]) | uint32_t(tr.bytes[at + 1]) << 8 | uint32_t(tr.bytes[at + 2]) << 16 | uint32_t(tr.bytes[at + 3]) << 24; };
+		const auto& r3 = tr.ranges[i + 2];
+		std::printf("  MINLIST %s %d/%d length %u size %u inc %02x%02x\n", basename_of(path).c_str(), r.who, r.o, rd32(r.begin), rd32(r2.begin), tr.bytes[r3.begin], tr.bytes[r3.begin + 1]);
+		i += 3;
+	}
 }
 
 uint32_t adler_of(const std::vector<uint8_t>& b) {
@@ -1829,6 +1848,44 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 								sim::apply_member_bytes(*game, mc, nb);
 								std::printf("  patched %s of (%d,%d,%d) by %+lld\n", key, a, b, c, dl);
 							}
+					}
+				}
+				if (const char* bt = std::getenv("RON_B14")) {  // RON_B14=who,o,B : brute force the position of one building at boundary B against `builds`
+					int bw = 0, bo = 0, bB = 0;
+					std::sscanf(bt, "%d,%d,%d", &bw, &bo, &bB);
+					if (f == bB) {
+						sim::Build* b = game->build(bw, bo);
+						const int32_t x0 = b->x, y0 = b->y, z0 = b->z;
+						for (int dx = -8; dx <= 8; ++dx)
+							for (int dy = -8; dy <= 8; ++dy)
+								for (int dz : {0, 1}) {
+									b->x = x0 + dx * 96; b->y = y0 + dy * 96;
+									b->z = dz ? sim::find_data_z(*game, b->x, b->y, 1) : z0;
+									sim::EngineProvider er(*game);
+									dw::CheckSumParts gr = dw::compute_check_sums(er);
+									if (gr.ok && gr.v[1] == it->second[1]) std::printf("  B14 HIT builds: dx %d dy %d (x %d y %d) z %d (dz %d)\n", dx * 96, dy * 96, b->x, b->y, b->z, dz);
+								}
+						b->x = x0; b->y = y0; b->z = z0;
+					}
+				}
+				if (const char* gt = std::getenv("RON_G14")) {  // RON_G14=who,o,B : brute force the clock members of guy 0 of that unit at boundary B against `guys` and `units`
+					int gw = 0, go = 0, gB = 0;
+					std::sscanf(gt, "%d,%d,%d", &gw, &go, &gB);
+					if (f == gB) {
+						sim::Unit* u = game->unit(gw, go);
+						sim::Guy g0 = u->guys[0];
+						std::vector<int> ets;
+						for (int an = 0; an < 4; ++an) ets.push_back(int(game->anims->frames(g0.gpiece, an)));
+						for (int an = 0; an < 4; ++an)
+							for (int ct = 0; ct < 6; ++ct)
+								for (int lt : {ct - 1, -1})
+									for (int et : ets) {
+										u->guys[0].cur_anim = int8_t(an); u->guys[0].cur_time = uint32_t(ct); u->guys[0].last_time = lt; u->guys[0].end_time = uint32_t(et);
+										sim::EngineProvider er(*game);
+										dw::CheckSumParts gr = dw::compute_check_sums(er);
+										for (int pk : {0, 6}) if (gr.ok && gr.v[pk] == it->second[size_t(pk)]) std::printf("  G14 HIT part %s: anim %d cur_time %d last_time %d end_time %d\n", dw::kCheckPartNames[pk], an, ct, lt, et);
+									}
+						u->guys[0] = g0;
 					}
 				}
 				if (const char* rt = std::getenv("RON_RNG_TRY")) {
@@ -2998,6 +3055,17 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 				}
 			}
 			if (next_frame >= 0 && f == next_frame) break;
+			if (const char* tu = std::getenv("RON_TRACE_UNIT")) {  // RON_TRACE_UNIT=who,o,F0,F1: that unit's state before each frame of the window
+				int tw = 0, to = 0, t0 = 0, t1 = 0;
+				if (std::sscanf(tu, "%d,%d,%d,%d", &tw, &to, &t0, &t1) == 4 && f >= t0 && f <= t1)
+					if (const sim::Unit* u = game->unit(tw, to)) {
+						std::printf("  TU f%d %d/%d x %d y %d z %d ang %08x masks %08x in %d/%d coll %d/%d orders", int(f), tw, to, u->x, u->y, u->z, u->angle, u->unit_masks, u->inside_up, u->inside_up_who, u->collide, u->collide_frame);
+						for (const sim::Order& od : u->orders) std::printf(" [t%d %d,%d ox %d]", int(od.type), od.x, od.y, od.ox);
+						std::printf(" path %zu (size %d)", u->path.size(), u->path_size);
+						if (!u->guys.empty()) { const sim::Guy& gy = u->guys[0]; std::printf(" guy anim %d ct %u spd %d/%d ang %08x flags %x stopped %d", gy.cur_anim, gy.cur_time, gy.last_speed, gy.avg_speed, gy.angle, unsigned(gy.guy_flags), int(gy.stopped)); }
+						std::printf("\n");
+					}
+			}
 			if (const char* ins = std::getenv("RON_INSERT")) {
 				// experiment: RON_INSERT="F:k[,F:k..]" draws k extra numbers (k < 0: puts the generator back |k| draws) just before frame F's do_frame
 				std::stringstream is(ins);
@@ -3255,7 +3323,7 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 				const int nsc = std::sscanf(dm, "%d:%d/%d:%63s", &mf, &mw, &mo, pat);
 				if (nsc >= 3 && f == mf) {
 					for (const sim::MemberChange& c : sim::members_of(*game, {std::string(pat)})) {
-						if (c.id.a != mw || c.id.b != mo) continue;
+						if (c.id.a != mw || c.id.b != mo) { if (std::getenv("RON_DUMP_ANY") && c.key == std::string(pat)) std::printf("  ANY %s (%d,%d,%d)\n", c.key.c_str(), c.id.a, c.id.b, c.id.c); continue; }
 						std::printf("  MEMBER f%d %s (%d,%d,%d):", int(f), c.key.c_str(), c.id.a, c.id.b, c.id.c);
 						for (uint8_t by : c.now) std::printf(" %02x", by);
 						std::printf("\n");

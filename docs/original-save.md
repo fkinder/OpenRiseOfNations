@@ -478,6 +478,14 @@ First differing boundary of `21'23'34`, before -> after: units 1,514 -> **1,622*
 - The three fixes: `Unit::resolve_unit_collision`'s GATHER-on-a-farm early return (units 1,928 -> 2,084), `Stack<PathData>` allocation growth on every push (-> 2,138), `Terrain::object_placed` -> `land_sub` (world 1,928 -> 2,204; the tileset name is the walked `TileSet` String of the save). See sim-implementation "thirteenth pass", items 61 - 65.
 - Open: `units` / `guys` 2,138 (unit 1/14's idle animation choice, item 64c), `world` 2,204, `builds` 2,252, `groups` 2,330, `leaders` 2,438, `cities` 2,606.
 
+### 6.14 Fourteenth pass (2026-10-26): the gull draws, the counters of Unit::init, the TCoord land, the scouted bits
+
+- A `game_random` offset behind a visible mismatch is found with `RON_INSERT=F:k` scans; the unhashed leader list 9 (birds, gulls, pen animals) can only be seen through its later visible consumers (fish bursts, idle picks). The 2,138 "idle animation" of 21'23'34 was three gull fire draws.
+- `--solve-at B` single-byte hits are often spurious; a delta that stays constant over several boundaries is static state, one that grows is a simulation difference.
+- The `Region` +0x3c / +0x40 pair (scout mark, scouted bits) and the Array increment defaults are not in the original's walk: a loaded game starts them clear / at the size the recorded length implies (`ArraySpec::first_size`: 4 for `SimpleArray<int>`, 5 for the mining list of `BuildData`).
+- The pass's fixes: sim-implementation "fourteenth pass", items 66 - 76. 21'23'34 now simulates 869 of 3,056 boundaries with all 15 parts equal (355 before); first differing boundaries: units 4,466, builds 5,264, groups / guys / world 5,246, leaders 5,396, cities 5,402, goods 7,082, ammo 6,896, deaths 7,094, items matches to the end.
+- Open: the 5,246 squad spawn (a Barracks' three-unit squad, ungroup of the follower), `Docks::remask_docks`, the caravan 1/56, the first fight.
+
 ## 7. What blocks exact checksums
 
 State of the fidelity work (2026-10-24; the log of each fix is in docs/sim-implementation.md "Fidelity log"). **Fixed** since the first table:

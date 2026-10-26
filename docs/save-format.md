@@ -1,4 +1,4 @@
-# Save format (native, version 12)
+# Save format (native, version 13)
 
 The engine's own save format for its simulation state: `engine/sim/save.hpp` / `save.cpp` (API and the section walks),
 `save_archive.hpp` (the writer / reader), `save_walk.inc` (the member lists, generated). It is **not** the original game's
@@ -69,6 +69,8 @@ reported with the section name. The version is bumped on any layout change; ther
 the build that wrote it, and only against the same rules tables: the hash in `META` is checked).
 
 Version 12: `Game::docks` (section `CITY`, after `forts`: `Dock` = dock, o, reg, dock_flags, who, gull_o; the dock records `Docks::init_dock` keeps, sim-implementation.md twelfth pass, item 58) and `Leader::dock_mark` (LeaderData +0x42c) / `reg_docks` (+0x135e, int16[64]) in the leader walk. The seagulls of the docks are gaia units of slot 9 (saved natively, not in the original's saves).
+
+Version 13: `Region::scouted` (uint8, bit `who` = the leader has scouted the region) and `Region::scout_mark` (int32) in the `Region` walk (`Region` +0x3c / +0x40 of the original, which `Region::walk_data` does not store; `Unit::think_scout` sets them, the ferry search of `Unit::think_civilian_transport` reads them, sim-implementation.md fourteenth pass, item 72). `sizeof(Region)` 80 -> 88.
 
 Version 11: `CaravanRec` (section `CITY`, `Game::caravans`) carries the route's road (`road`, `road_size`: the `Stack<PathData>` and its allocation), `making_road`, `reset_road` and the suspended road search (`trees`: a `SavedSearch` like `Unit::openlist`, with `search_dir0` / `search_gx` / `search_gy` / `search_count`); `PathNode::z_val` (the road searches' terrain height) joins the nodes of every saved search. Economy-spec 6.4.
 

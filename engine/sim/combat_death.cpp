@@ -233,6 +233,7 @@ void unit_close(Game& g, Unit& u, int32_t death, int32_t gpiece, float deg) {
 		}
 	}
 	u.path.clear();
+	u.path_size = 0;  // @60ee50 (LAB_0060f9e0): the path stack's storage is freed and its size / length set to 0, so Unit::init's Stack<PathData>::init(10) runs again for the slot
 	close_orders(g, u, (u.flags & objflag::kValid) != 0);
 	// Caravans::close_caravan (the original closes it in the block above, before close_orders; here after, so the
 	// TRADE_ROUTE order's end_trade_route still finds the record's cities).

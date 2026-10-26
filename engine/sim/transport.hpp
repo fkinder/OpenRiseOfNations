@@ -32,6 +32,10 @@ int32_t unit_transport_type(const Game& g, const Unit& u);
 bool unit_can_ever_transport(const Game& g, const Unit& u);
 // ObjectData::is_cargo() @653600 (vslot 0x110): on the map and a land unit type.
 bool object_is_cargo(const Game& g, const Object& ob);
+// Unit::think_civilian_transport(flag) @5f40d0 (sim/ferry.cpp): the unit's leader can carry it across water, so it walks to the coast of its region
+// facing the best other land region (flag 0: a scout looking for an unscouted region; flag 1: an AI citizen looking for a region to settle).
+// 1 when it gave an order, 0 when not (an auto-exploring unit with nothing to do falls back to think_scout(1)).
+int32_t unit_think_ferry(Game& g, Unit& u, int32_t flag);
 // ObjectData::cargo_inside() @64dcd0: the carry_size of the captains inside a carrier.
 int32_t cargo_inside(const Game& g, const Object& ob);
 // ObjectData::can_carry(o, who) @6483c0 with `carrier` as this: the unit (o, who) fits (same leader, land cargo, room left).

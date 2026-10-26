@@ -342,6 +342,14 @@ void unit_init(Game& g, Unit& u, int32_t who, int32_t type, int32_t o, int32_t x
 			if (type_is(*u.ptype, 0x45, false)) u.unit_masks2 |= 0x4080;
 		}
 		if (type_is(*u.ptype, 0x77, false)) u.unit_masks2 |= umask2::kMarines;
+		// Unit::init @612e7e: the types of class 0x143 (the Bark line) get UNIT2_ATTACK_CIVIES and, for a computer leader, stance 3 (set_stance(3, 0));
+		// every other type clears the bit. (Found in 21'23'34: the Bark 0/16 of the dock, `unit_masks2` 0 -> 4 at boundary 2,318.)
+		if (type_is(*u.ptype, 0x143, false)) {
+			u.unit_masks2 |= umask2::kAttackCivies;
+			if (!(L.flags & leaderflag::kHuman)) u.stance = 3;
+		} else {
+			u.unit_masks2 &= ~umask2::kAttackCivies;
+		}
 	}
 	// TODO(frame-spec 8.1): Supplies / Heroes / Caravans / Specials registration.
 	if (u.ptype->unit_flags2 & 4) u.unit_masks |= umask::kPacked;  // packer types start packed
@@ -418,7 +426,9 @@ void unit_init(Game& g, Unit& u, int32_t who, int32_t type, int32_t o, int32_t x
 	update_speed(g, u);
 	object_update_seen(g, u, false);
 	if ((g.leaders[size_t(who)].flags & 0xc) != leaderflag::kHuman) u.unit_masks |= umask::kAiControl;
-	g.leaders[size_t(who)].units_built++;
+	// LeaderData.units_built (+0x808): Unit::init @612100 counts only the types with a control cost (the animals, the gulls and the
+	// zero-cost units do not; Objects::init_unit's follower undo takes the count back for the counted types alone).
+	if (u.ptype->control_cost != 0) g.leaders[size_t(who)].units_built++;
 }
 
 namespace {

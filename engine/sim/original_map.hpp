@@ -54,6 +54,7 @@ struct ArraySpec {
 	std::function<void(OriginalShadow&, dw::Rec*, int32_t)> bind_child;
 	bool keep_size = false;                            // do not touch the container's size / increment (only the length)
 	bool simple = false;                               // SimpleArray: the capacity doubles (10, 20, 40, ...) when the length outgrows it
+	int32_t first_size = 4;                            // simple: the capacity of a container the engine creates (4 for a SimpleArray<int>; 5 for the MiningList that BuildData::BuildData allocates)
 	std::function<void(std::vector<uint8_t>&)> block;  // SimpleArray: the element block (stride * count bytes)
 	bool grow_only = false;                            // the length is max(the recorded length, count): records the engine has not created stay as recorded
 };

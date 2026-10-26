@@ -1204,8 +1204,11 @@ void do_strafe(Game& g, Unit& u, Order& S) {
 	int32_t gx = -1, gy = -1;
 	int32_t to = S.ox, twho = S.whom;
 	const int32_t respond = RON_K(g, "aircraft_respond_range");
+	const bool animal = is_animal_who(u.who);  // vslot +0x30 is_animal (the dock gulls)
+	if (animal) animal_think_bird(g, u, S);   // vslot +0x180 at the top of Unit::do_strafe @5eab00 (a no-op for ordinary units)
 	if (S.returning == 0) {
-		const bool ally_path = twho >= 0 && is_ally(g, u.who, twho);
+		// (twho < 0 || is_animal || !is_ally) takes the target-validity branch; only an ordinary unit follows an ally's object.
+		const bool ally_path = twho >= 0 && !animal && is_ally(g, u.who, twho);
 		if (ally_path) {
 			// Following an allied object (a rebase onto a friendly unit): retarget its captain when it is gone.
 			Object* Tt = slot(g, to, twho);
@@ -1263,6 +1266,18 @@ void do_strafe(Game& g, Unit& u, Order& S) {
 			}
 		} else {
 			if (!valid_target(g, u, to, twho, nullptr)) {
+				if (animal) {
+					// @5eab00: an animal whose target is gone thinks (think_bird(order, 1)) and re-runs its orders.
+					// (The original recurses without end if the target never comes back; the dock closes its gull with the dock,
+					// so it cannot happen there. One level here, so a stray case ends instead of overflowing the stack.)
+					static thread_local int again = 0;
+					animal_think_bird(g, u, S);
+					if (!u.alive() || again > 0) return;
+					again++;
+					work(g, u);
+					again--;
+					return;
+				}
 				if (is_missile_type(T)) {
 					object_die(g, u, 0, -1, 0.0f);
 					return;
@@ -1315,7 +1330,12 @@ void do_strafe(Game& g, Unit& u, Order& S) {
 	// 4. the fire gate; 5. the wrap-up.
 	bool fire_path = false;
 	if (u.recharging == 0 && valid_target(g, u, to, twho, nullptr)) fire_path = true;
-	if (!fire_path) {
+	if (animal) {
+		// @5eab00 (the branch of `is_animal() != 0` after do_air_physics): an animal never fires, it only plays WALK (LAB_005eb0cd)
+		// and goes on to the wrap-up. The dock gulls (gaia GULLBIRD strafing their dock) circle without a shot: the engine's
+		// shot at frame 2,134 of 21'23'34 drew the attack variant and restarted the walk three frames later, 3 draws the original never made.
+		unit_set_anim(g, u, kCharWalk, 0, 1);
+	} else if (!fire_path) {
 		bool walk = false;
 		if (to >= 0 && twho >= 0) {
 			const Object* tg = slot(g, to, twho);

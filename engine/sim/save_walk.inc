@@ -230,7 +230,7 @@ template <class Ar> void walk(Ar& ar, CollBlock& v) {
 }
 
 template <class Ar> void walk(Ar& ar, Region& v) {
-	FIELDS(ar, v.region, v.size, v.rank, v.flags, v.borders, v.climate, v.fertile, v.common_factor, v.goody_factor, v.coastal, v.coast);
+	FIELDS(ar, v.region, v.size, v.rank, v.flags, v.borders, v.climate, v.fertile, v.common_factor, v.goody_factor, v.coastal, v.coast, v.scouted, v.scout_mark);
 }
 
 template <class Ar> void walk(Ar& ar, ScenarioData& v) {
@@ -389,7 +389,7 @@ static_assert(sizeof(QueueItem) == 20, "QueueItem changed: update its walk() in 
 static_assert(sizeof(GatherPoint) == 12, "GatherPoint changed: update its walk() in save_walk.inc");
 static_assert(sizeof(WData) == 28, "WData changed: update its walk() in save_walk.inc");
 static_assert(sizeof(CollBlock) == 100, "CollBlock changed: update its walk() in save_walk.inc");
-static_assert(sizeof(Region) == 80, "Region changed: update its walk() in save_walk.inc");
+static_assert(sizeof(Region) == 88, "Region changed: update its walk() in save_walk.inc");
 static_assert(sizeof(ScenarioData) == 8536, "ScenarioData changed: update its walk() in save_walk.inc");
 static_assert(sizeof(ScenarioData::Goal) == 56, "ScenarioData::Goal changed: update its walk() in save_walk.inc");
 static_assert(sizeof(ScenarioData::Group) == 64, "ScenarioData::Group changed: update its walk() in save_walk.inc");

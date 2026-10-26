@@ -31,7 +31,10 @@ int32_t census_region(const Game& g, const Unit& u) {
 	const int32_t xo = unit_get_inside(g, u, &xw);  // get_inside: the outermost container (garrisoned units are chained)
 	const Object* c = xo >= 0 ? g.object(xw, xo) : nullptr;
 	if (!c) return 0;
-	if (c->ptype->domain != 1 || c->is_unit || !type_is(*c->ptype, ptype::kDock, false)) return tregion_at(g, c->x, c->y);
+	// Leader::plan_strategy @6ba1e0: the footprint scan is for a SHIP (the unit's own domain 1) inside a dock; every other garrisoned unit (a citizen in a dock)
+	// takes the region of the container's cell like the code at LAB_006ba214. (21'23'34, boundary 3,002: a citizen inside the dock is in region 2 there and was
+	// counted in sea region 65 here, which `reg_active` does not count for a land unit.)
+	if (u.ptype->domain != 1 || c->ptype->domain != 1 || c->is_unit || !type_is(*c->ptype, ptype::kDock, false)) return tregion_at(g, c->x, c->y);
 	const World& w = g.world;
 	const Type& T = *c->ptype;
 	const int32_t cxt = tcoord_of(c->x) * 0xc0 + ((T.x_size & 1) ? 0x60 : 0);
@@ -176,7 +179,7 @@ void leader_plan_strategy(Game& g, int32_t who) {
 		if (!up || !up->alive() || up->o_up >= 0) continue;
 		Unit& u = *up;
 		if ((u.unit_masks & umask::kDecoy) || u.ptype->control_cost == 0) continue;
-		const int32_t R = census_region(g, u);
+		int32_t R = census_region(g, u);  // (a citizen in a boat takes the region of the boat's destination below, as the original's register does)
 		const int32_t dom = u.ptype->domain;
 		L.active++;
 		int32_t s = obj_attack(g, u) / 10;
@@ -248,6 +251,11 @@ void leader_plan_strategy(Game& g, int32_t who) {
 						const int32_t r2 = g.world.in_w(wcoord_of(a->x), wcoord_of(a->y))
 						                       ? g.world.w(wcoord_of(a->x), wcoord_of(a->y)).region
 						                       : -1;
+						// Leader::plan_strategy @6ba5a0..@6ba6d5 keeps the destination's region in the same register that `reg_active[R]` is
+						// counted with a few lines further down (LAB_006baea3): a land citizen aboard a boat that is going to a land region
+						// counts in that region's `reg_active` (21'23'34 boundary 3,002: `reg_active[2]` +1), a destination in a sea region
+						// leaves the citizen out.
+						R = r2;
 						if (r2 >= 0) {
 							if (r2 < 64) L.reg_xport_peasants[size_t(r2)]++;
 							L.xport_peasants++;

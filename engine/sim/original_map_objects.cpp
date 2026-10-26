@@ -554,6 +554,10 @@ const ClassMap& map_build() {
 			if (step == step_mining && base == 0x98) {
 				spec.count = int32_t(bd->gather_from.size());
 				spec.child = &map_tcoord();
+				// BuildData::BuildData @62f370 allocates 5 entries and the list's increment is -1 (ArrayBaseSimpleCopy::increase_size doubles the size): the
+				// capacity of a camp's or mine's list is 5, 10, 20, 40, 80, ... (every list of the saves: 46 tiles -> 80, 83 -> 160, 226 -> 320)
+				spec.simple = true;
+				spec.first_size = 5;
 			} else if (step == step_gather && base == 0xb8) {
 				spec.count = int32_t(bd->gather.size());
 				spec.child = &map_gather_point();

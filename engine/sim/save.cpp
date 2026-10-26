@@ -44,14 +44,14 @@ using SearchPtr = std::unique_ptr<SavedSearch, SavedSearchDel>;
 static_assert(sizeof(PathNode) == 40 && sizeof(SavedSearch) == 176, "the pathfinder search changed: update walk_search()");
 static_assert(sizeof(ObjectList) == 64, "ObjectList changed: update walk_objects()");
 static_assert(sizeof(Groups) == 1282084, "Groups changed: update walk_groups()");
-static_assert(sizeof(Regions) == 10248, "Regions changed: update the REGN section in walk_body()");
+static_assert(sizeof(Regions) == 11272, "Regions changed: update the REGN section in walk_body()");
 // 1647392 + 16 (+ 32: Game::herds with its padding): Game::original (the original-save shadow, sim/original_save.hpp) is derived state the native save never writes.
 // + 9192: Game::ctl (sim/control.hpp: TurnControl speed / pause, the control groups, cheat counters, chat lines) is console state no simulation code reads;
 // the original saves its hotkey groups, the native save does not (docs/sim-implementation.md, "Orders and commands, second pass").
 // + 120: World::roads (the road candidates and the Roads sweep cursor, sim/roadgraph.hpp), saved in the world section.
 // + 80: Game::nukes (sim/nukes.hpp), saved in section NUKE.
 // + 192 + 10 * 128: Game::docks (8 vectors of Dock) and Leader::reg_docks (+ dock_mark, which fits the padding) in each of the 10 leader slots, saved in the CITY and LEAD sections.
-static_assert(sizeof(Game) == 1657592 + 120 + 80 + 192 + 10 * 128, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
+static_assert(sizeof(Game) == 1657592 + 120 + 80 + 192 + 10 * 128 + 1024, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
 // 1608 + 8 + 16 + 16: ScriptHost::ctw (the Conquer the World campaign the scripts run for, sim/ctw.hpp) is a run-time link, ctw_owned the loaded battle's
 // copy of that campaign and battle_token the campaign's liveness check of the battle; the native battle save writes the campaign as its own section (CTWB), not through the script walk.
 // + 24: ScriptHost::tileset (get_tileset), derived from the scenario by script_host_load on every load, not saved (docs/save-format.md 4).
