@@ -1,0 +1,8 @@
+re/decomp/f18b
+Unit::unpack_merchant
+Unit::think_merchant
+Unit::think_fish
+Unit::think
+Unit::add_cast_order
+SpellType::cast_pack
+SpellType::cast_unpack

@@ -116,7 +116,8 @@ void muzzle_offset(const Game& g, const Guy& gy, int32_t piece, const ReleaseEve
 	if (!g.anims->attach_position(piece, e.node, e.anim, e.frame, pos)) return;
 	float pscale = 1.0f, ox = 0, oy = 0;
 	if (!g.anims->track(piece, &pscale, &ox, &oy)) pscale = 1.0f;
-	const float s = kGuyScale * pscale;
+	// get_position's last step: build_scale (3.0, @c062d0) for a building piece, guy_scale * the RData scale for a unit piece.
+	const float s = piece >= gpiece::kFirstBuild && piece < gpiece::kFirstBird ? 3.0f : kGuyScale * pscale;
 	const float deg_f = fast_angle_to_degrees_f(int32_t(uint32_t(gy.angle) + 0x80000000u));
 	float v[3];
 	if ((e.node & 3) < restrictions && pivot_deg) {
@@ -1392,13 +1393,95 @@ void cavarch_fight(Game& g, Unit& u) {
 void build_process_attack(Game& g, Build& b) {
 	// The attack part of Build::process @61edf0 (ACTIVE buildings).
 	if (b.ptype->attack == 0) return;
+	int32_t tox = -1, twho = -1;  // the target the turret follows (EDI / EBX at @61eefe)
+	bool follow = true;
 	if (b.attack_ox < 0 || b.attack_whom < 0) {
-		if ((b.o + g.frame) % 32 == 0) build_do_attack(g, b);
-		else if (b.near_o >= 0 && b.near_who >= 0 && is_in_range(g, b, b.near_o, b.near_who, 0)) build_do_attack(g, b);
+		if ((b.o + g.frame) % 32 == 0) {
+			build_do_attack(g, b);
+			tox = b.attack_ox;
+			twho = b.attack_whom;
+		} else if (b.near_o < 0) {
+			follow = false;  // @61ef00: near_o < 0 skips the turret too
+		} else if (b.near_who >= 0 && is_in_range(g, b, b.near_o, b.near_who, 0)) {
+			build_do_attack(g, b);
+			tox = b.attack_ox;
+			twho = b.attack_whom;
+		} else {
+			tox = b.near_o;
+			twho = b.near_who;
+		}
 	} else {
 		build_do_attack(g, b);
+		tox = b.attack_ox;
+		twho = b.attack_whom;
 	}
-	// TODO(combat-spec 4.13.1): anti-air turret angle (job_counter) stepping.
+	// @61ef0f: an anti-air building turns its turret (job_counter, +0x48) towards the target, at most 0x38e38e3 (5 degrees) a frame.
+	if (follow && tox >= 0 && has_objmask(b, objmask::kAntiAir)) {
+		const Object* t = twho >= 0 ? g.object(twho, tox) : nullptr;
+		if (t && t->alive()) {
+			uint32_t ang = find_angle(t->x - b.x, t->y - b.y);
+			const uint32_t d = ang - uint32_t(b.job_counter);
+			uint32_t a = 0u - d;
+			if (a > 0x7fffffffu && d != 0x80000000u) a = ~a;
+			if (a >= 0x38e38e3u) ang = uint32_t(b.job_counter) + (d < 0x80000000u ? 0x38e38e3u : 0u - 0x38e38e3u);
+			b.job_counter = int32_t(ang);
+		}
+	}
+}
+
+// Wall::inc_time @63fb60, the air-defence part: the turret animation clock in Build.recharging (+0x7a) and its fire events. The art of
+// an AA building (type 0x20b / 0x20c / 0x20d, DEFAULT-AGE0 piece) is the <UNIT> of the same name (GraphicPieces::verify_load @906550 calls
+// init_unit_data for it, not init_build_data): F8 = AnimationPacket::get_game_frames(CHAR_WALK = "Unpack", 8) = 20 frames and
+// F12 = get_game_frames(CHAR_ATTACK2 = "Attack1", 12) = 10 (3 when the action has no animation). The counter runs 0 .. F8 - 1 while
+// a target is near (aim up), then through 0, -1 .. -F12 (the firing animation: its release events (FlakShell at 200 ms = frame 2) fire at
+// cur_time = -recharging), back to -1 while the target stays, and counts down to 0 without one.
+void build_aa_clock(Game& g, Build& b) {
+	if (!has_objmask(b, objmask::kAntiAir) || type_is(*b.ptype, 521, true) || type_is(*b.ptype, 522, true)) return;
+	if (g.anims && g.anims->has_packet(b.gpiece)) {  // data_pieces[gpiece]->packets[0x13] (null: the clock is skipped)
+		const int32_t F8 = g.anims->frames(b.gpiece, kCharWalk), F12 = g.anims->frames(b.gpiece, kCharAttack2);
+		int32_t rc = b.recharging;
+		bool decrement = false;
+		if (b.near_o < 0 || (b.build_masks & 0x8000u)) {
+			if (rc < 0) rc = F8 - 1;
+			if (rc >= 1) decrement = true;
+		} else if (rc >= 0 && rc < F8 - 1) {
+			rc++;
+		} else if (b.attack_ox < 0) {
+			rc = F8 - 1;
+		} else {
+			if (rc >= 0) rc = 0;
+			if (rc <= -F12) rc = -1;
+			else decrement = true;
+		}
+		if (decrement) rc--;
+		b.recharging = int16_t(rc);
+	}
+	if (b.recharging >= 0 || (b.build_masks & 0x8000u) || !g.anims) return;
+	// GraphicEvents::execute_game_events (anim 0xc, cur_time = -recharging, last_time = cur_time - 1) on the building's piece: the release
+	// events with a target (ox / whom = +0x7c / +0x81) start a shot at the building plus the muzzle offset of the node (plain branch: no
+	// pivots; the package angle is 0x20000000).
+	const auto* evs = g.anims->release_events(b.gpiece);
+	if (!evs) return;
+	const int32_t cur_time = -int32_t(b.recharging), last_time = cur_time - 1;
+	for (const ReleaseEvent& e : *evs) {
+		if (e.anim != kCharAttack2 || !(last_time < e.frame) || !(e.frame <= cur_time)) continue;
+		if (b.attack_whom == -1 || b.attack_ox == -1) continue;
+		Guy pseudo;
+		pseudo.angle = 0x20000000u;
+		int32_t off[3];
+		muzzle_offset(g, pseudo, b.gpiece, e, g.anims->pivot_restrictions(b.gpiece), nullptr, off);
+		AmmoPackage p;
+		p.who = b.who;
+		p.o = b.o;
+		p.ox = b.attack_ox;
+		p.whom = b.attack_whom;
+		p.x = b.x + off[0];
+		p.y = b.y + off[1];
+		p.z = b.z + off[2];
+		p.gpiece = e.ammo;
+		p.angle = uint32_t(e.node);
+		add_ammo(g, p);
+	}
 }
 
 int32_t build_do_attack(Game& g, Build& b) {

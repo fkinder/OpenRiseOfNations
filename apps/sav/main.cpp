@@ -968,6 +968,87 @@ void solve_single_byte(const PartTrace& tr, uint32_t want, const char* part_name
 		}
 	}
 	if (!shown) std::printf("      (not a single changed byte)\n");
+	if (const char* po = std::getenv("RON_SOLVE_OBJ")) {  // RON_SOLVE_OBJ=who,o: two changed bytes (|e| <= 255) anywhere in the ranges of that object
+		int pw = 0, pob = 0;
+		if (std::sscanf(po, "%d,%d", &pw, &pob) == 2) {
+			std::vector<int64_t> pos;
+			for (const auto& r : tr.ranges)
+				if (r.who == pw && r.o == pob)
+					for (size_t k = 0; k < r.len; ++k) pos.push_back(int64_t(r.begin + k));
+			if (std::getenv("RON_SOLVE_OBJ_DUMP")) {
+				for (const auto& r : tr.ranges)
+					if (r.who == pw && r.o == pob) {
+						const int fn = d.step_function(r.step);
+						int sum = 0;
+						std::printf("      range %s step %d begin %zu len %zu sum-from-end-weight %lld bytes:", fn >= 0 ? d.function_name(fn) : "?", r.step, r.begin, r.len, (long long)(N - int64_t(r.begin)));
+						for (size_t z = 0; z < r.len; ++z) { sum += tr.bytes[r.begin + z]; if (z < 64) std::printf(" %02x", tr.bytes[r.begin + z]); }
+						std::printf(" ... sum %d\n", sum);
+					}
+			}
+			int hits2 = 0;
+			for (size_t a1 = 0; a1 < pos.size() && hits2 < 40; ++a1)
+				for (size_t a2 = a1 + 1; a2 < pos.size() && hits2 < 40; ++a2) {
+					const int64_t w1 = N - pos[a1], w2 = N - pos[a2];
+					const int64_t dw_ = ((w1 - w2) % M + M) % M;
+					if (dw_ == 0) continue;
+					int64_t d1 = ((db - da * w2) % M + M) % M * modpow(dw_, M - 2, M) % M;
+					if (d1 > M / 2) d1 -= M;
+					int64_t d2 = ((da - d1) % M + M) % M;
+					if (d2 > M / 2) d2 -= M;
+					if (d1 == 0 || d2 == 0 || d1 < -255 || d1 > 255 || d2 < -255 || d2 > 255) continue;
+					const int b1 = tr.bytes[size_t(pos[a1])], b2 = tr.bytes[size_t(pos[a2])];
+					if (b1 + d1 < 0 || b1 + d1 > 255 || b2 + d2 < 0 || b2 + d2 > 255) continue;
+					auto where = [&](int64_t pp) {
+						for (const auto& r : tr.ranges) if (size_t(pp) >= r.begin && size_t(pp) < r.begin + r.len) { const int fn = d.step_function(r.step); std::printf("%s step %d +%zu", fn >= 0 ? d.function_name(fn) : "?", r.step, size_t(pp) - r.begin); return; }
+					};
+					std::printf("      pair: "); where(pos[a1]); std::printf(" %02x%+lld, ", b1, (long long)d1); where(pos[a2]); std::printf(" %02x%+lld\n", b2, (long long)d2);
+					++hits2;
+				}
+			std::printf("      (%d pair candidates in %zu bytes of %d/%d)\n", hits2, pos.size(), pw, pob);
+			// Copy search: one window (1, 2 or 4 bytes) of the object replaced by (a) the value of another window of the same width anywhere in the
+			// object (+- 0..2), (b) a constant (0, 1, -1, 0xff.., 0x80000000).
+			struct Win { int64_t pos; int wdt; uint32_t v; const char* fn; int step; size_t off; };
+			std::vector<Win> wins;
+			for (const auto& r : tr.ranges)
+				if (r.who == pw && r.o == pob)
+					for (size_t off = 0; off < r.len; ++off)
+						for (int wdt : {1, 2, 4}) {
+							if (off + size_t(wdt) > r.len) continue;
+							uint32_t v = 0;
+							for (int k = 0; k < wdt; ++k) v |= uint32_t(tr.bytes[r.begin + off + size_t(k)]) << (8 * k);
+							const int fn = d.step_function(r.step);
+							wins.push_back({int64_t(r.begin + off), wdt, v, fn >= 0 ? d.function_name(fn) : "?", r.step, off});
+						}
+			auto delta_of = [&](const Win& dst, uint32_t nv, int64_t* ra, int64_t* rb) {
+				int64_t sa = 0, sb = 0;
+				for (int k = 0; k < dst.wdt; ++k) {
+					const int e = int((nv >> (8 * k)) & 0xff) - int((dst.v >> (8 * k)) & 0xff);
+					sa += e;
+					sb += int64_t(e) * (N - (dst.pos + k));
+				}
+				*ra = ((sa % M) + M) % M;
+				*rb = ((sb % M) + M) % M;
+			};
+			int hits3 = 0;
+			for (const Win& dst : wins) {
+				const uint32_t mask = dst.wdt == 4 ? 0xffffffffu : (1u << (8 * dst.wdt)) - 1;
+				std::vector<std::pair<uint32_t, std::string>> cands = {{0u, "0"}, {1u, "1"}, {mask, "-1"}, {0x80000000u & mask, "min"}, {0xffu & mask, "0xff"}};
+				for (const Win& src : wins) {
+					if (src.wdt != dst.wdt || src.pos == dst.pos) continue;
+					for (int dl = -2; dl <= 2; ++dl) cands.push_back({(src.v + uint32_t(dl)) & mask, std::string("copy ") + src.fn + " step " + std::to_string(src.step) + " +" + std::to_string(src.off) + " " + std::to_string(dl)});
+				}
+				for (const auto& c : cands) {
+					int64_t sa, sb;
+					delta_of(dst, c.first, &sa, &sb);
+					if (sa == da && sb == db && c.first != dst.v && hits3 < 40) {
+						std::printf("      copy: %s step %d +%zu (%d bytes, %u) := %s (%u)\n", dst.fn, dst.step, dst.off, dst.wdt, dst.v, c.second.c_str(), c.first);
+						++hits3;
+					}
+				}
+			}
+			std::printf("      (%d copy/constant candidates)\n", hits3);
+		}
+	}
 	// A whole column: the same byte of every object of one walk step off by the same e (a counter every object keeps).
 	{
 		std::map<std::pair<int, size_t>, std::pair<int64_t, int64_t>> col;  // (step, byte in range) -> (count, weight sum)
@@ -1048,6 +1129,95 @@ void solve_single_byte(const PartTrace& tr, uint32_t want, const char* part_name
 		}
 	}
 }
+
+// RON_FOOT_SEARCH=1 (with --solve-at B and a differing `world`): which single guy, moved by up to +-3 ucoord cells, makes the CollBlock footprints (the 96-byte
+// bitmaps of the world stream) account for the part's Adler delta. The stream positions of the blocks come from the trace.
+void footprint_search(sim::Game& game, const PartTrace& tr, uint32_t want) {
+	const int64_t M = 65521, N = int64_t(tr.bytes.size());
+	const uint32_t have = adler_of(tr.bytes);
+	const int64_t tda = ((int64_t(want & 0xffff) - (have & 0xffff)) % M + M) % M, tdb = ((int64_t(want >> 16) - (have >> 16)) % M + M) % M;
+	sim::World& w = game.world;
+	std::vector<size_t> begins;
+	for (const auto& r : tr.ranges) if (r.step == 1351 && r.len == 96) begins.push_back(r.begin);
+	std::vector<size_t> blk_begin(w.coll_blocks.size(), size_t(-1));
+	size_t k = 0, bad = 0;
+	for (int32_t wy = 0; wy < w.ys; ++wy)
+		for (int32_t wx = 0; wx < w.xs; ++wx) {
+			const int32_t bi = w.w(wx, wy).block;
+			if (bi < 0) continue;
+			if (k < begins.size()) {
+				blk_begin[size_t(bi)] = begins[k];
+				if (std::memcmp(&tr.bytes[begins[k]], w.coll_blocks[size_t(bi)].bytes.data(), 96) != 0) ++bad;
+			}
+			++k;
+		}
+	std::printf("    footprint search: %zu blocks in the world, %zu block ranges in the stream, %zu blocks differ from the trace (row-major scan); target a=%lld b=%lld\n", k, begins.size(), bad, (long long)tda, (long long)tdb);
+	auto bit_set = [&](int32_t X, int32_t Y, int32_t* blk, size_t* byte_pos, uint8_t* mask) -> int {  // 1 set, 0 clear, -1 no block
+		if (!w.in_u(X, Y)) return -1;
+		const int32_t bi = w.w(X >> 4, Y >> 4).block;
+		if (bi < 0) return -1;
+		const int32_t idx = (X % 16) * 16 + (Y % 16);
+		*blk = bi; *byte_pos = blk_begin[size_t(bi)] + size_t(idx >> 3); *mask = uint8_t(1u << (idx & 7));
+		return (w.coll_blocks[size_t(bi)].bytes[size_t(idx >> 3)] & *mask) ? 1 : 0;
+	};
+	int hits = 0;
+	struct Single { int64_t da, db; int who, o, gi, dux, duy; };
+	std::vector<Single> singles;
+	for (int who = 0; who < 8; ++who)
+		for (int32_t o = 0; o < game.objects[size_t(who)].unit_mark; ++o) {
+			const sim::Unit* u = game.unit(who, o);
+			if (!u || !u->alive() || u->inside_up >= 0) continue;
+			const int32_t r = std::min(u->ptype->new_block_radius, 10);
+			if (r == 0) continue;
+			for (int gi = 0; gi < int(u->guy_mark) && size_t(gi) < u->guys.size(); ++gi) {
+				const int32_t oux = u->guys[size_t(gi)].x / 48, ouy = u->guys[size_t(gi)].y / 48;
+				for (int dux = -3; dux <= 3; ++dux)
+					for (int duy = -3; duy <= 3; ++duy) {
+						if (!dux && !duy) continue;
+						const int32_t nux = oux + dux, nuy = ouy + duy;
+						int64_t da = 0, db = 0;
+						bool ok = true;
+						auto cell = [&](int32_t X, int32_t Y, bool set) {
+							int32_t bi; size_t pos; uint8_t mask;
+							const int c = bit_set(X, Y, &bi, &pos, &mask);
+							if (c < 0) { if (set && w.in_u(X, Y)) ok = false; return; }
+							if (set == (c == 1)) return;
+							const int64_t e = set ? int64_t(mask) : -int64_t(mask);
+							da += e;
+							db += e * (N - int64_t(pos));
+						};
+						for (int32_t X = oux - r; X <= oux + r && ok; ++X)
+							for (int32_t Y = ouy - r; Y <= ouy + r; ++Y)
+								if (std::abs(X - nux) > r || std::abs(Y - nuy) > r) cell(X, Y, false);
+						for (int32_t X = nux - r; X <= nux + r && ok; ++X)
+							for (int32_t Y = nuy - r; Y <= nuy + r; ++Y)
+								if (std::abs(X - oux) > r || std::abs(Y - ouy) > r) cell(X, Y, true);
+						if (!ok) continue;
+						if (((da % M) + M) % M == tda && ((db % M) + M) % M == tdb && hits < 40) {
+							++hits;
+							std::printf("      FOOT HIT: unit %d/%d guy %d cell (%d,%d) -> (%d,%d) (d %+d,%+d) r %d\n", who, o, gi, oux, ouy, nux, nuy, dux, duy, r);
+						}
+						if (da != 0 || db != 0) singles.push_back({((da % M) + M) % M, ((db % M) + M) % M, who, o, gi, dux, duy});
+					}
+			}
+		}
+	std::printf("    footprint search: %d hit(s) among %zu single-guy moves\n", hits, singles.size());
+	std::multimap<std::pair<int64_t, int64_t>, size_t> idx;
+	for (size_t i = 0; i < singles.size(); ++i) idx.insert({{singles[i].da, singles[i].db}, i});
+	int phits = 0;
+	for (size_t i = 0; i < singles.size() && phits < 60; ++i) {
+		const int64_t ra = ((tda - singles[i].da) % M + M) % M, rb = ((tdb - singles[i].db) % M + M) % M;
+		auto rg = idx.equal_range({ra, rb});
+		for (auto it = rg.first; it != rg.second && phits < 60; ++it) {
+			const Single& a1 = singles[i]; const Single& a2 = singles[it->second];
+			if (it->second <= i || (a1.who == a2.who && a1.o == a2.o && a1.gi == a2.gi)) continue;
+			++phits;
+			std::printf("      FOOT PAIR: %d/%d g%d (%+d,%+d) + %d/%d g%d (%+d,%+d)\n", a1.who, a1.o, a1.gi, a1.dux, a1.duy, a2.who, a2.o, a2.gi, a2.dux, a2.duy);
+		}
+	}
+	std::printf("    footprint search: %d pair hit(s)\n", phits);
+}
+
 
 
 int g_shift_part = -1;
@@ -1662,12 +1832,34 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 		std::printf("  muzzle check: %d ammo in flight; plain exact %d xy-only %d none %d; turret exact %d xy-only %d none %d\n", n, exact[0], xy[0], none[0], exact[1], xy[1], none[1]);
 	}
 
+	if (std::getenv("RON_AMMO")) {  // RON_AMMO=1: every ammo of the loaded save
+		for (size_t i = 0; i < game->ammo.size(); ++i) {
+			const sim::Ammo& a = game->ammo[i];
+			if (!a.in_use()) continue;
+			const sim::Object* sh = game->object(a.who, a.o);
+			std::printf("  AMMO %zu flags %02x piece %d from %d/%d (type %d) -> %d/%d time %u/%u accuracy %d graph_index %d splash %d start (%d,%d,%d) end (%d,%d,%d)\n", i, unsigned(a.flags), a.gpiece, a.who, a.o, sh ? sh->type : -1, a.whom, a.ox, a.cur_time, a.total_time, int(a.accuracy), a.graph_index, a.splash_area, a.sx, a.sy, a.sz, a.ex, a.ey, a.ez);
+		}
+	}
+	if (std::getenv("RON_SCAN_PACKERS")) {  // every unit of the loaded save with a pack / unpack CAST order, with the whole order list
+		for (int who = 0; who < sim::kNumLeaders; ++who)
+			for (int o = 0; o < game->objects[size_t(who)].unit_mark; ++o) {
+				const sim::Unit* tu = game->unit(who, o);
+				if (!tu || !tu->alive()) continue;
+				bool hit = false;
+				for (const sim::Order& od : tu->orders) if (od.type == sim::kCastSpell && od.spell >= 0x28b && od.spell <= 0x292) hit = true;
+				if (!hit) continue;
+				std::printf("  PK %d/%d type %d at %d,%d masks %08x/%08x spell_time %d idle %d orders_xy %d,%d tol %d dang %08x ang %08x:", who, o, tu->type, tu->x, tu->y, unsigned(tu->unit_masks), unsigned(tu->unit_masks2), int(tu->spell_time), int(tu->idle), tu->orders_x, tu->orders_y, int(tu->tolerance), unsigned(tu->dest_angle), unsigned(tu->angle));
+				for (const sim::Order& od : tu->orders)
+					std::printf(" [t%d fl%02x x%d y%d ang%08x dest%d tol%d pause%d retry%d att%d timer%d facing%d dx%d dy%d lx%d ly%d cx%d cy%d ox%d oy%d offx%d offy%d | spell%d paid%d ox%d wh%d uid%x]", int(od.type), unsigned(od.flags), od.x, od.y, unsigned(od.angle), od.dest, od.tolerance, od.pause, od.retry, od.attempts, od.timer, od.facing, od.dest_x, od.dest_y, od.last_x, od.last_y, od.coll_x, od.coll_y, od.orig_x, od.orig_y, int(od.off_x), int(od.off_y), od.spell, od.paid, od.ox, od.whom, unsigned(od.uid));
+				std::printf("\n");
+			}
+	}
 	if (std::getenv("RON_AA")) {  // RON_AA=1: the air-defence buildings (types 523 - 525) of the loaded save with their animation clock (BuildData.recharging) and target state
 		for (int who = 0; who < 8; ++who)
 			for (int o = sim::kBuildBase; o < game->objects[size_t(who)].build_mark; ++o) {
 				const sim::Build* b = game->build(who, o);
 				if (!b || !b->alive() || b->type < 523 || b->type > 525) continue;
-				std::printf("  AA %d/%d type %d recharging %d near %d/%d attack %d/%d masks %04x flags %02x\n", who, o, b->type, int(b->recharging), int(b->near_o), int(b->near_who), int(b->attack_ox), int(b->attack_whom), unsigned(b->build_masks), unsigned(b->flags));
+				std::printf("  AA %d/%d type %d recharging %d near %d/%d attack %d/%d masks %04x flags %02x gpiece %d jc %08x founder %d age %d\n", who, o, b->type, int(b->recharging), int(b->near_o), int(b->near_who), int(b->attack_ox), int(b->attack_whom), unsigned(b->build_masks), unsigned(b->flags), int(b->gpiece), unsigned(b->job_counter), int(b->founder), int(b->max_age));
 			}
 	}
 
@@ -1916,6 +2108,41 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 							}
 					}
 				}
+				if (const char* ue = std::getenv("RON_UEXP")) {
+					// experiment: RON_UEXP="who:o@boundary:op,op,.." applies edits to one unit before the sums of that boundary. ops: fl<i>=<hex> (order i flags),
+					// m^=<hex> / m2^=<hex> (unit_masks / unit_masks2 xor), idle=<n>, wait=<n>, pop<i> (erase order i), spell_time=<n>, paid<i>=<n>
+					int uw = 0, uo = 0, at = 0, n = 0;
+					if (std::sscanf(ue, "%d:%d@%d:%n", &uw, &uo, &at, &n) == 3 && f == at) {
+						sim::Unit* tu = game->unit(uw, uo);
+						std::string ops(ue + n);
+						size_t pos = 0;
+						while (tu && pos <= ops.size()) {
+							size_t e = ops.find(',', pos);
+							std::string op = ops.substr(pos, e == std::string::npos ? std::string::npos : e - pos);
+							pos = e == std::string::npos ? ops.size() + 1 : e + 1;
+							unsigned v = 0; int i = 0;
+							if (std::sscanf(op.c_str(), "fl%d=%x", &i, &v) == 2 && size_t(i) < tu->orders.size()) tu->orders[size_t(i)].flags = uint8_t(v);
+							else if (std::sscanf(op.c_str(), "m^=%x", &v) == 1) tu->unit_masks ^= v;
+							else if (std::sscanf(op.c_str(), "m2^=%x", &v) == 1) tu->unit_masks2 ^= v;
+							else if (std::sscanf(op.c_str(), "idle=%d", &i) == 1) tu->idle = uint8_t(i);
+							else if (std::sscanf(op.c_str(), "wait=%d", &i) == 1) tu->waiting = int8_t(i);
+							else if (std::sscanf(op.c_str(), "spell_time=%d", &i) == 1) tu->spell_time = int16_t(i);
+							else if (std::sscanf(op.c_str(), "pop%d", &i) == 1 && size_t(i) < tu->orders.size()) tu->orders.erase(tu->orders.begin() + i);
+							else if (std::sscanf(op.c_str(), "paid%d=%d", &i, &n) == 2 && size_t(i) < tu->orders.size()) tu->orders[size_t(i)].paid = n;
+							else if (std::sscanf(op.c_str(), "dang=%x", &v) == 1) tu->dest_angle = v;
+							else if (std::sscanf(op.c_str(), "ang=%x", &v) == 1) tu->angle = v;
+							else if (std::sscanf(op.c_str(), "ox=%d", &i) == 1) tu->orders_x = i;
+							else if (std::sscanf(op.c_str(), "oy=%d", &i) == 1) tu->orders_y = i;
+							else if (std::sscanf(op.c_str(), "tol=%d", &i) == 1) tu->tolerance = i;
+							else if (std::sscanf(op.c_str(), "qt=%d", &i) == 1) tu->queue_time = i;
+							else if (std::sscanf(op.c_str(), "rare=%d", &i) == 1) tu->rare = i;
+							else if (std::sscanf(op.c_str(), "good_obj=%d", &i) == 1) tu->good_obj = int16_t(i);
+							else if (std::sscanf(op.c_str(), "m3^=%x", &v) == 1) tu->unit_masks ^= v;
+							else std::printf("  UEXP: unknown op %s\n", op.c_str());
+						}
+						std::printf("  UEXP applied to %d/%d at %d\n", uw, uo, at);
+					}
+				}
 				if (const char* bt = std::getenv("RON_B14")) {  // RON_B14=who,o,B : brute force the position of one building at boundary B against `builds`
 					int bw = 0, bo = 0, bB = 0;
 					std::sscanf(bt, "%d,%d,%d", &bw, &bo, &bB);
@@ -1932,6 +2159,86 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 									if (gr.ok && gr.v[1] == it->second[1]) std::printf("  B14 HIT builds: dx %d dy %d (x %d y %d) z %d (dz %d)\n", dx * 96, dy * 96, b->x, b->y, b->z, dz);
 								}
 						b->x = x0; b->y = y0; b->z = z0;
+					}
+				}
+				if (const char* ub = std::getenv("RON_UBF")) {  // RON_UBF=who,o,B : single-member perturbations of one unit (and its orders) at boundary B against `units`
+					int uw = 0, uo = 0, uB = 0;
+					std::sscanf(ub, "%d,%d,%d", &uw, &uo, &uB);
+					if (f == uB) {
+						sim::Unit* u = game->unit(uw, uo);
+						const std::deque<sim::Order> saved_orders = u->orders;
+						const uint32_t saved_masks = u->unit_masks, saved_masks2 = u->unit_masks2, saved_angle = u->angle, saved_dang = u->dest_angle;
+						int tried = 0, hits = 0;
+						struct Pert { std::string what; int64_t da, db; };
+						std::vector<Pert> perts;
+						int64_t base_a = 0, base_b = 0;
+						const int64_t MM = 65521;
+						auto ab_of = [&](int64_t* ra, int64_t* rb) {
+							sim::EngineProvider er(*game);
+							PartTrace tr;
+							if (!trace_part(er, 0, tr)) return false;
+							const uint32_t h = adler_of(tr.bytes);
+							*ra = h & 0xffff;
+							*rb = h >> 16;
+							return true;
+						};
+						ab_of(&base_a, &base_b);
+						const int64_t want_a = it->second[0] & 0xffff, want_b = it->second[0] >> 16;
+						const int64_t tA = ((want_a - base_a) % MM + MM) % MM, tB = ((want_b - base_b) % MM + MM) % MM;
+						auto test = [&](const std::string& what) {
+							int64_t a = 0, b = 0;
+							++tried;
+							if (ab_of(&a, &b)) {
+								perts.push_back({what, ((a - base_a) % MM + MM) % MM, ((b - base_b) % MM + MM) % MM});
+								if (a == want_a && b == want_b) { std::printf("  UBF HIT: %s\n", what.c_str()); ++hits; }
+							}
+							u->orders = saved_orders;
+						};
+						auto vals32 = [](int64_t cur) { return std::vector<int64_t>{0, 1, -1, 2, cur + 1, cur - 1, cur + 2, cur - 2, 0xffff, 255, 0x80000000LL, 3}; };
+						// Unit-level scalars.
+						#define UBF_I(field, ty) { const auto old_ = u->field; for (int64_t v : vals32(int64_t(old_))) { if (ty(v) == old_) continue; u->field = ty(v); test(std::string(#field) + "=" + std::to_string(v)); } u->field = old_; }
+						UBF_I(idle, uint8_t) UBF_I(waiting, int8_t) UBF_I(tolerance, int32_t) UBF_I(queue_time, int32_t) UBF_I(orders_x, int32_t) UBF_I(orders_y, int32_t)
+						UBF_I(los_x, int32_t) UBF_I(los_y, int32_t) UBF_I(spell_time, int16_t) UBF_I(mana_burn, int16_t) UBF_I(recharging, uint8_t) UBF_I(rare, int32_t)
+						UBF_I(good_obj, int16_t) UBF_I(doober, int16_t) UBF_I(cara, int16_t) UBF_I(supply, int16_t) UBF_I(myspeed, int16_t) UBF_I(myarmor, int16_t)
+						UBF_I(form, int8_t) UBF_I(form_mod, int8_t) UBF_I(full, int8_t) UBF_I(safe, int8_t) UBF_I(play, int8_t) UBF_I(path_recursion, uint8_t) UBF_I(stance, int8_t)
+						UBF_I(collide, int16_t) UBF_I(collide_o, int16_t) UBF_I(collide_guy, int16_t) UBF_I(collide_who, int8_t) UBF_I(collide_frame, int32_t) UBF_I(damage_frame, int32_t)
+						UBF_I(attrition, int16_t) UBF_I(num_queued, int16_t) UBF_I(trench_angle, uint32_t) UBF_I(air_alt, int32_t) UBF_I(group, int16_t) UBF_I(hold_frames, uint16_t)
+						UBF_I(healing, int16_t) UBF_I(near_o, int16_t) UBF_I(near_who, int16_t) UBF_I(targeted, int8_t) UBF_I(visible, int8_t) UBF_I(damage_frac, int8_t)
+						#undef UBF_I
+						for (uint32_t cand : {saved_angle, uint32_t(0), saved_dang, saved_angle + 0x80000000u}) { if (cand == saved_dang) continue; u->dest_angle = cand; test("dest_angle=" + std::to_string(cand)); }
+						u->dest_angle = saved_dang;
+						for (int b = 0; b < 32; ++b) { u->unit_masks = saved_masks ^ (1u << b); test("unit_masks^bit" + std::to_string(b)); u->unit_masks = saved_masks; u->unit_masks2 = saved_masks2 ^ (1u << b); test("unit_masks2^bit" + std::to_string(b)); u->unit_masks2 = saved_masks2; }
+						// Orders.
+						for (size_t oi = 0; oi < saved_orders.size(); ++oi) {
+							const std::string pre = "order" + std::to_string(oi) + ".";
+							sim::Order& od = u->orders[oi];
+							for (int b = 0; b < 8; ++b) { od.flags ^= uint8_t(1u << b); test(pre + "flags^bit" + std::to_string(b)); }
+							#define UBF_O(field) for (int64_t v : vals32(int64_t(od.field))) { if (int32_t(v) == int32_t(od.field)) continue; od.field = decltype(od.field)(v); test(pre + #field + "=" + std::to_string(v)); }
+							UBF_O(x) UBF_O(y) UBF_O(dest) UBF_O(tolerance) UBF_O(pause) UBF_O(retry) UBF_O(attempts) UBF_O(timer) UBF_O(facing) UBF_O(dest_x) UBF_O(dest_y)
+							UBF_O(last_x) UBF_O(last_y) UBF_O(coll_x) UBF_O(coll_y) UBF_O(orig_x) UBF_O(orig_y) UBF_O(off_x) UBF_O(off_y) UBF_O(ox) UBF_O(whom) UBF_O(uid)
+							UBF_O(spell) UBF_O(paid) UBF_O(oxx) UBF_O(whose) UBF_O(id) UBF_O(form_id) UBF_O(in_group) UBF_O(newform) UBF_O(delay) UBF_O(def_x) UBF_O(def_y)
+							UBF_O(mandatory) UBF_O(defensive) UBF_O(in_range) UBF_O(ever_in_range) UBF_O(new_ord) UBF_O(find) UBF_O(wait) UBF_O(started) UBF_O(loaded) UBF_O(g_tx) UBF_O(g_ty) UBF_O(build_type)
+							#undef UBF_O
+							for (uint32_t cand : {uint32_t(0), saved_angle, saved_dang, saved_orders[oi].angle + 0x80000000u}) { if (cand == saved_orders[oi].angle) continue; od.angle = cand; test(pre + "angle=" + std::to_string(cand)); }
+						}
+						// Dropping or duplicating a node, swapping the two nodes.
+						for (size_t oi = 0; oi < saved_orders.size(); ++oi) { u->orders.erase(u->orders.begin() + long(oi)); test("erase order" + std::to_string(oi)); }
+						if (saved_orders.size() >= 2) { std::swap(u->orders[0], u->orders[1]); test("swap orders 0,1"); }
+						std::printf("  UBF: %d perturbations of %d/%d at %d, %d hits (target delta a=%lld b=%lld)\n", tried, uw, uo, uB, hits, (long long)tA, (long long)tB);
+						// Pairs and triples whose (da, db) add up to the target (additive when the bytes are disjoint).
+						std::map<std::pair<int64_t, int64_t>, std::pair<size_t, size_t>> pairsum;
+						int shown = 0;
+						for (size_t i = 0; i < perts.size() && shown < 30; ++i)
+							for (size_t j = i + 1; j < perts.size() && shown < 30; ++j) {
+								if (perts[i].da == 0 && perts[i].db == 0) continue;
+								const int64_t sa = (perts[i].da + perts[j].da) % MM, sb = (perts[i].db + perts[j].db) % MM;
+								if (sa == tA && sb == tB) { std::printf("  UBF PAIR: %s + %s\n", perts[i].what.c_str(), perts[j].what.c_str()); ++shown; }
+								pairsum[{sa, sb}] = {i, j};
+							}
+						for (size_t k = 0; k < perts.size() && shown < 30; ++k) {
+							auto f2 = pairsum.find({((tA - perts[k].da) % MM + MM) % MM, ((tB - perts[k].db) % MM + MM) % MM});
+							if (f2 != pairsum.end() && f2->second.first != k && f2->second.second != k) { std::printf("  UBF TRIPLE: %s + %s + %s\n", perts[k].what.c_str(), perts[f2->second.first].what.c_str(), perts[f2->second.second].what.c_str()); ++shown; }
+						}
 					}
 				}
 				if (const char* gt = std::getenv("RON_G14")) {  // RON_G14=who,o,B : brute force the clock members of guy 0 of that unit at boundary B against `guys` and `units`
@@ -2030,6 +2337,18 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 						if (sim::Build* b = game->build(dw, dob))
 							std::printf("build %d/%d type %d (%s) frame %d: flags %02x masks %04x inside_down %d/%d launch_timer %d launch_list %zu recharging %d queued %d damage %d myhits %d city %d\n", dw, dob, b->type, b->ptype ? sim::to_utf8(b->ptype->type_name).c_str() : "?", game->frame, b->flags, unsigned(b->build_masks), b->inside_down, b->inside_down_who, b->launch_timer, b->launch_list.size(), b->recharging, b->queued, b->damage, b->myhits, b->city);
 					}
+				}
+				if (const char* nb = std::getenv("RON_NEAR_AT")) {  // RON_NEAR_AT=F,x0,y0,x1,y1: every unit inside that box before frame F (who/o type x y orders)
+					int nf = 0, nx0 = 0, ny0 = 0, nx1 = 0, ny1 = 0;
+					if (std::sscanf(nb, "%d,%d,%d,%d,%d", &nf, &nx0, &ny0, &nx1, &ny1) == 5 && f == nf)
+						for (int nw = 0; nw < 9; ++nw)
+							for (int32_t no = 0; no < game->objects[size_t(nw)].unit_mark; ++no) {
+								const sim::Unit* nu = game->unit(nw, no);
+								if (!nu || !nu->alive() || nu->x < nx0 || nu->x > nx1 || nu->y < ny0 || nu->y > ny1) continue;
+								std::printf("  NEAR f%d %d/%d type %d at (%d,%d) in %d group %d orders", nf, nw, no, nu->type, nu->x, nu->y, nu->inside_up, nu->group);
+								for (const sim::Order& od : nu->orders) std::printf(" [t%d %d,%d]", int(od.type), od.x, od.y);
+								std::printf("\n");
+							}
 				}
 				if (const char* du = std::getenv("RON_DUMP_UNIT_AT")) {  // RON_DUMP_UNIT_AT=who,o (+ RON_SEARCH_AT): the engine's unit with every Unit member and its guys, at that boundary
 					if (f == (std::getenv("RON_SEARCH_AT") ? std::atoll(std::getenv("RON_SEARCH_AT")) : start + 1)) {
@@ -2692,6 +3011,7 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 						if (got.v[k] == it->second[size_t(k)]) continue;
 						PartTrace tr;
 						if (trace_part(ep, k, tr)) solve_single_byte(tr, it->second[size_t(k)], dw::kCheckPartNames[k]);
+						if (k == 11 && std::getenv("RON_FOOT_SEARCH")) footprint_search(*game, tr, it->second[size_t(k)]);
 						if (std::getenv("RON_OBJ_LIST")) {  // (who, o) of every object the part's stream walked, with its first byte offset
 							std::set<std::pair<int, int>> seen_o;
 							for (const auto& r : tr.ranges) if (seen_o.insert({r.who, r.o}).second && (r.who == 0 || r.who == 1)) std::printf("      obj %d/%d at %zu\n", r.who, r.o, r.begin);
@@ -3464,6 +3784,32 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 						const sim::Build* b = fr.who >= 0 && fr.o >= 0 ? game->build(fr.who, fr.o) : nullptr;
 						int bare = 0; for (auto& row : fr.percent) for (float p : row) bare += p <= 0.0f ? 1 : 0;
 						std::printf("  FARM f%d #%zu valid %d who %d o %d type %d bld %s flags %x bare %d\n", int(f), i, int(fr.valid), int(fr.who), int(fr.o), int(fr.farm_type), b ? (b->alive() ? "alive" : "dead") : "none", b ? unsigned(b->flags) : 0u, bare);
+					}
+				}
+			}
+			if (const char* ut = std::getenv("RON_UNIT_TRACE")) {  // RON_UNIT_TRACE=who:o:F0:F1: one line per frame (before its do_frame): the unit's state and order list
+				int uw = 0, uo = 0, f0 = 0, f1 = 0;
+				if (std::sscanf(ut, "%d:%d:%d:%d", &uw, &uo, &f0, &f1) == 4 && f >= f0 && f <= f1 && uo < 0) {
+					// o < 0: every unit of leader `uw` with a pack / unpack CAST order (0x28b..0x292) or the packed bit that is moving or casting
+					for (int o2 = 0; o2 < game->objects[size_t(uw)].unit_mark; ++o2) {
+						const sim::Unit* tu = game->unit(uw, o2);
+						if (!tu || !tu->alive()) continue;
+						bool hit = false;
+						for (const sim::Order& od : tu->orders) if (od.type == sim::kCastSpell && od.spell >= 0x28b && od.spell <= 0x292) hit = true;
+						if (!hit) continue;
+						std::printf("  UT f%d %d/%d type %d at %d,%d masks %08x spell_time %d idle %d [rare %d good_obj %d doober %d cara %d tol %d qt %d ox %d oy %d los %d,%d dang %08x ang %08x coll %d cf %d df %d] orders", int(f), uw, o2, tu->type, tu->x, tu->y, unsigned(tu->unit_masks), int(tu->spell_time), int(tu->idle), int(tu->rare), int(tu->good_obj), int(tu->doober), int(tu->cara), int(tu->tolerance), int(tu->queue_time), tu->orders_x, tu->orders_y, tu->los_x, tu->los_y, unsigned(tu->dest_angle), unsigned(tu->angle), int(tu->collide), tu->collide_frame, tu->damage_frame);
+						for (const sim::Order& od : tu->orders) std::printf(" [%d fl%02x sp%d pd%d]", int(od.type), unsigned(od.flags), od.spell, od.paid);
+						if (!tu->guys.empty()) std::printf(" | guy0 anim %d t %u/%u", int(tu->guys[0].cur_anim), unsigned(tu->guys[0].cur_time), unsigned(tu->guys[0].end_time));
+						std::printf("\n");
+					}
+				} else if (std::sscanf(ut, "%d:%d:%d:%d", &uw, &uo, &f0, &f1) == 4 && f >= f0 && f <= f1) {
+					const sim::Unit* tu = game->unit(uw, uo);
+					if (!tu || !tu->alive()) std::printf("  UT f%d %d/%d dead\n", int(f), uw, uo);
+					else {
+						std::printf("  UT f%d %d/%d type %d at %d,%d on_map %d masks %08x/%08x spell_time %d mana_burn %d recharging %d idle %d wait %d orders", int(f), uw, uo, tu->type, tu->x, tu->y, int(tu->on_map()), unsigned(tu->unit_masks), unsigned(tu->unit_masks2), int(tu->spell_time), int(tu->mana_burn), int(tu->recharging), int(tu->idle), int(tu->waiting));
+						for (const sim::Order& od : tu->orders) std::printf(" [%d fl%02x x%d y%d sp%d pd%d ox%d wh%d]", int(od.type), unsigned(od.flags), od.x, od.y, od.spell, od.paid, od.ox, od.whom);
+						if (!tu->guys.empty()) std::printf(" | guy0 anim %d t %u/%u", int(tu->guys[0].cur_anim), unsigned(tu->guys[0].cur_time), unsigned(tu->guys[0].end_time));
+						std::printf("\n");
 					}
 				}
 			}

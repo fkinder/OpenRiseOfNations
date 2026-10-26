@@ -1,0 +1,6 @@
+re/decomp/f18b
+OrdersMemManager::get_obj
+MoveOrder::clear
+Unit::add_move_facing_order
+MoveOrder::MoveOrder
+UnitOrder::clear

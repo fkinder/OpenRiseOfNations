@@ -1,0 +1,7 @@
+re/decomp/f18b
+GraphicPieces::init_build_data
+GraphicPieces::init_build_events
+GraphicPieces::init_build_map
+AnimationPacket::get_game_frames
+GraphicPieces::init_scaffold_timing
+GraphicPieces::verify_load

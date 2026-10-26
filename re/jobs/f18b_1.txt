@@ -1,0 +1,7 @@
+re/decomp/f18b
+Wall::inc_time
+Build::process
+Build::inc_time
+Build::do_attack
+Build::fire.*
+Build::init.*

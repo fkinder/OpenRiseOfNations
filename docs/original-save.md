@@ -514,9 +514,30 @@ New diagnostics (all env-gated, `apps/sav`, in the style of 6.9 - 6.16):
 - `RON_PAIR_VERIFY=p,q`: a pair-search hit (`RON_PAIR_SEARCH`) counts only if it also makes parts p and q equal.
 
 Findings: the `Build.recharging` diff (24 of 44 compare-next pairs) is the air-defence turret clock of `Wall::inc_time` @63fb60 (85 of 101 AA buildings sit at 0, the
-rest 9 - 91 or negative); it needs `F8`/`F12` of the AA graphics events, which building_graphics.xml does not carry (the BUILD entries are stubs), so it stays open.
+rest 9 - 91 or negative); it needs `F8`/`F12` of the AA graphics events, which building_graphics.xml does not carry (the BUILD entries are stubs): **closed in 6.18b** (the art is the `<UNIT>` of the same name).
 The `Region.flags 0x80`, `Build.frame_started`, herd-position and WData `who/val/was_seen` leads of 6.16 are load artifacts: the replay's embedded save is written at
 `Game::run` start after a load, and region cursors and several lists are not saved, so the next-boundary compare shows them without a simulation cause.
+
+### 6.18b Eighteenth pass, part B (2026-10-26): the air-defence building clock, the unpack facing
+
+- **Air-defence clock closed.** The `Build.recharging` (+0x7a) of the AA buildings (523 Air Defense Gun, 524 Radar Air Defense, 525 SAM Installation) is the animation clock of `Wall::inc_time` @63fb60 (combat-spec 4.13.4). Its `F8` / `F12`
+  are not the 3 of the stub `<BUILD>` entries: `GraphicPieces::verify_load` @906550 loads the DEFAULT / age 0 build pieces of types 0x20b / 0x20c / 0x20d with `init_unit_data`, i.e. from the `<UNIT name="AIRDEFENSEGUN-DEFAULT-AGE0">` of
+  unit_graphics.xml: F8 = frames of CHAR_WALK (the "Unpack" animation) = 20, F12 = frames of CHAR_ATTACK2 = 10 (SAM 20 / 20). The saved values in 23'12'35 (0/2110: 13 counting down without a target; 0/2111: 19 = F8 - 1 held with a target near)
+  are what fixed F8 = 20. The first difference of `builds` in 23'12'35 moved from boundary 83,421 (S+1) to 83,445 (S+25, downstream of `units` 83,427). Over the 44 compare-next pairs the Build.recharging differences of AA buildings drop from 14 (six pairs)
+  to 4 (three pairs), all of them in pairs where the aircraft / target state diverged first; the other Build.recharging differences (gather counters of woodcutters / mines / wells, the Terra Cotta timer) are not this clock.
+- **The 21'23'34 packer transients are not timing.** The four boundaries 4,466 / 4,826 / 4,874 / 4,886 are exactly the boundaries where a packed fishing boat (type 317, owner 1: 1/28, 1/25, 1/24, 1/20) sits in the [MOVE_TO][CAST UNPACK] state `Unit::unpack_merchant` @6038e0
+  creates (the state lasts 3 - 7 frames, so every period contains one boundary): the facing of that MOVE_TO is the angle to the tile CORNER (`tx * 192 - x`, `ty * 192 - y`), not to the order's own target point (+0x18), and `update_action` copies it into `Unit.dest_angle`.
+  Fixed (`engine/sim/packers.cpp`); `units` of 21'23'34 now matches through 5,594 (first difference 5,600, the 15-unit line formation).
+- **Corpse `cur_frame`**: `DeathObj::inc_time` @8d5240 (called by `Objects::inc_time` for every valid DeathObj) does `cur_frame (+0x40) += 1`; the only other writers are `DeathObj::init` (0) and `clear` (-1); the presentation functions
+  (`DeathObjOut::draw`, `draw_underlay`, `inc_bleed`, `clear_anim_hints`) never write it. It is simulation state and part of `deaths`; nothing in it is presentation-driven.
+
+New diagnostics (env-gated, `apps/sav`; **note**: in zsh an unquoted `env $v prog` passes a variable list as one variable, set several variables in the command line instead):
+- `RON_UNIT_TRACE=who:o:F0:F1`: one line per frame (before its `do_frame`) of one unit: position, masks, spell_time, idle, rare / good_obj, orders_x/y, dest_angle, the order list and guy 0; with `o = -1` every unit of `who` that has a pack / unpack CAST order.
+- `RON_UEXP=who:o@B:ops`: edit one unit before the sums of boundary B (`fl<i>=hex`, `m^=hex`, `m2^=hex`, `idle=`, `wait=`, `spell_time=`, `paid<i>=`, `pop<i>`, `dang=`, `ang=`, `ox=`, `oy=`, `tol=`, `qt=`, `rare=`, `good_obj=`); `--verbose` lists the
+  mismatching boundaries of each part (`grep "part units "`), which is how a single transient is tested.
+- `RON_UBF=who,o,B` (with `--replay`): ~1,500 single-member perturbations of one unit and its orders at boundary B, each hashed against `units`; then every pair and triple whose Adler delta (a, b) adds up to the target delta.
+- `RON_SOLVE_OBJ=who,o` (with `--solve-at`): two changed bytes inside one object, plus the copy / constant search; `RON_SOLVE_OBJ_DUMP=1` lists the hashed ranges of that object with their byte sums.
+- `RON_SCAN_PACKERS=1`, `RON_AMMO=1`: the units with a pack / unpack cast and the in-flight ammo of the loaded save; `RON_AA` also prints the gpiece, the turret angle (`job_counter`), the founder and the age.
 
 ## 7. What blocks exact checksums
 

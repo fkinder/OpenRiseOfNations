@@ -1,0 +1,5 @@
+re/decomp/f18b
+LinkListBase<UnitOrder.*::add
+LinkListBase<UnitOrder.*::remove_current
+LinkListBase<UnitOrder.*::prev
+LinkListBase<UnitOrder.*::tail

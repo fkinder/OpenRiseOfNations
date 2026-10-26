@@ -336,7 +336,7 @@ units" flag, econ_trade.cpp:128).
 `Unit::find_merchant_spot(x, y, r, *tx, *ty)` @603ab0: `calc_gather(.., x, y)` must be non-zero, then for `i < radius[r]` over the square spiral (`move_x/move_y`, compass.hpp):
 `(tx, ty) = tile + (move_x[i], move_y[i])` in bounds, `good_merchant_spot`, `!invalid_loc(tx, ty)`, `!detect_unit_collision(tx*192, ty*192, 1, 1)` -> first hit.
 `Unit::unpack_merchant(r)` @6038e0 (from `think_merchant` / `think`): `find_merchant_spot` fails -> 0; else `unit_masks &= ~kAutoExplore`; `add_cast_order(-1, -1, -1, -1, 0x28c, QUEUE_NEW, explicit 0)`;
-then a MOVE_TO order to `(tx*192 + 0x18, ty*192 + 0x18)` is inserted in front (it runs first, UNPACK after arrival); returns 1.
+then a MOVE_TO order to `(tx*192 + 0x18, ty*192 + 0x18)` is inserted in front (it runs first, UNPACK after arrival); returns 1. **The facing of that order** (`MoveOrder.angle`, copied by `update_action` into `Unit.dest_angle` while the move runs) is `find_angle(tx*192 - x, ty*192 - y)` of the tile CORNER (asm @603964 / @603970), not of the order's own target point (+0x18): with the +0x18 the `units` hash differs for exactly the frames a packer spends in its [MOVE_TO][CAST] state (the transients at 4,466 / 4,826 / 4,874 / 4,886 of 21'23'34).
 Idle auto-unpack and PACKER_NEVER gating in `think_attack`: combat-spec §4 step 2 and §5 step 4; the cast is `add_cast_order(.., 652, QUEUE_FIRST, 0)`.
 `Unit::do_guard` @5e5c70 (guard order idle counter `+0x24`, incremented each call): a PACKED packer (`unit_flags & 4`, `get_packer_stance() == AUTO`, not `is_unpacking`) with
 `idle >= (is(0x7b Machine Gun) ? 30 : 70)` does `add_cast_order(-1,-1,-1,-1, 0x28c, QUEUE_FIRST, 0)` and returns; otherwise `set_anim(CHAR_DEFAULT, 0, 1)`.

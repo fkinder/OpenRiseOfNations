@@ -865,7 +865,7 @@ void build_process(Game& g, Build& b) {
 void wall_inc_time(Game& g, Build& b) {
 	// Wall::inc_time @63fb60: hit points grow with construction progress.
 	if (!(b.flags & objflag::kActive)) wall_update_hits(g, b, false);
-	// TODO(combat-spec 4.13.4): air-defence turret events.
+	if (b.flags & objflag::kActive) build_aa_clock(g, b);  // the air-defence turret clock (combat_fight.cpp)
 }
 
 // ---------------------------------------------------------------- DISBAND (4.9)

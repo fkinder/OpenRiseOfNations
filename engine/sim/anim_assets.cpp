@@ -499,6 +499,15 @@ std::string AssetAnimSource::piece_name(int32_t piece) const {
 		const std::string& g = size_t(t) < graph_.size() ? graph_[size_t(t)] : std::string();
 		return g + "-TYPE" + std::to_string((piece - kFirstBird) % 3);
 	}
+	// GraphicPieces::verify_load @906550: a building piece of the DEFAULT style, age 0 block (piece - first_build_piece < 0x81) whose type is
+	// 0x20b / 0x20c / 0x20d (Air Defense Gun, Radar Air Defense, SAM Installation) is loaded by init_unit_data from the <UNIT> of the same
+	// name (unit_graphics.xml "AIRDEFENSEGUN-DEFAULT-AGE0": its animations, release events and model), not by init_build_data; the
+	// <BUILD> entries of building_graphics.xml for them are stubs. Wall::inc_time reads the turret clock from these animations.
+	if (piece >= kFirstBuild && piece < kFirstBuild + 0x81) {
+		const int32_t t = piece - kFirstBuild + kFirstBuildType;
+		if ((t == 0x20b || t == 0x20c || t == 0x20d) && size_t(t) < graph_.size() && !graph_[size_t(t)].empty()) return graph_[size_t(t)] + "-DEFAULT-AGE0";
+		return std::string();
+	}
 	if (piece < kFirstUnit || piece >= kTotalUnit) return std::string();
 	if (piece >= kTotalUnit - 6) return kMerchantSpecial[piece - (kTotalUnit - 6)];
 	const int32_t t = piece % kPerStyle + 50;                 // GraphicPieces::get_type @902540
@@ -723,7 +732,8 @@ bool AssetAnimSource::attach_position(int32_t piece, int32_t node, int32_t anim,
 				const size_t ni = size_t(md->slots[size_t(node)]);
 				if (ni < world.size()) {
 					Vec3 p = world[ni].t;
-					if (node < 4 || node > 7) {
+					// init_position @901820: the pivot node's translation is subtracted only for a unit piece (gpiece type != 1).
+					if ((node < 4 || node > 7) && !(piece >= gpiece::kFirstBuild && piece < gpiece::kFirstBird)) {
 						const int pv = md->slots[size_t(4 + (node & 3))];
 						if (pv >= 0 && size_t(pv) < world.size()) {
 							p.x -= world[size_t(pv)].t.x;

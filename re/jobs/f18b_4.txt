@@ -1,0 +1,4 @@
+re/decomp/f18b
+AnimationPacket::init_animation
+AnimationPacket::AnimationPacket
+AnimMgr::force_load

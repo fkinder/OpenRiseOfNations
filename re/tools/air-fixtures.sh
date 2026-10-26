@@ -26,7 +26,7 @@ check "crash: no debris left at frame 120" $((! $?))
 # 2. The strafing impact slide: the two shots of one release (nodes of both parities) land on either side of the heading, no longer
 #    on the same point.
 out="$(RON_COMBAT_TRACE=1 "$sim" "$game" "$korea" --frames 380 --digest-every 0 --combat-every 1000 --scramble 0:113@20 --flight 0:123,124@103:6@60 2>&1)"
-pairs="$(grep -E '^f[0-9]+ ammo [0-9]+ from 0:12[34] -> 6:103 piece 23 ' <<<"$out" | head -4 | sed -E 's/.* end \(([0-9]+,[0-9]+)\).*/\1/' | sort -u | wc -l | tr -d ' ')"
+pairs="$(grep -E '^f[0-9]+ ammo [0-9]+ from 0:12[34] \(type [0-9]+\) -> 6:103 piece 23 ' <<<"$out" | head -4 | sed -E 's/.* end \(([0-9]+,[0-9]+)\).*/\1/' | sort -u | wc -l | tr -d ' ')"
 check "slide: shots of one strafing run end on different points ($pairs distinct)" $((pairs >= 3 ? 0 : 1))
 
 # 3. Bird flocks: Objects::add_flock makes the asked number of flock birds, they fly their four waypoints and are gone after landing at the last.

@@ -212,6 +212,13 @@ Used by AI bombers and by missiles (add_strafe_order converts a building-targete
   `mana_burn == 0` (a plane with orders and burnt fuel aborts the whole attempt) and gives it `add_air_patrol_order(x, y, container, 1, ...)`. (A carrier that fires at something scrambles one fighter.)
 - Anti-air buildings: Air Defense Gun / Radar Air Defense (unitrules AA units are separate): upgrade by craft **0x299** ("Upgrade", GRAPH GORADAR, COST2 6t/8m, JOB_TIME 300, prereq Industrial Age):
   `SpellType::cast` @676ce0: `cast_target.set_type(current_upgrade(AIRDEFENSE 523))` (production-spec §RADARSPELL 665 also resolves to it).
+- **The turret clock of the AA buildings** (523 Air Defense Gun, 524 Radar Air Defense, 525 SAM Installation; `Wall::inc_time` @63fb60, combat-spec 4.13.4) reads `F8 = get_game_frames(8)` and `F12 = get_game_frames(12)` from the building piece's
+  AnimationPacket. The `<BUILD name="AIRDEFENSEGUN-DEFAULT-AGE0" anim="">` entries of building_graphics.xml are stubs (a stub's packet would give the default 3 for both), but `GraphicPieces::verify_load` @906550 does not hand
+  these pieces (types 0x20b / 0x20c / 0x20d, the DEFAULT style / age 0 block, `piece - first_build_piece < 0x81`) to `init_build_data`: it calls `init_unit_data` on them, so the art is the `<UNIT name="AIRDEFENSEGUN-DEFAULT-AGE0">` of
+  unit_graphics.xml (model, animations, release events), and the actions 8 / 12 are the unit actions CHAR_WALK ("AirDefGun Unpack": 1353 ms = **F8 20** frames; Radar 20; SAM "SAM Default" 20) and CHAR_ATTACK2 ("AirDefGun Attack1": 660 ms =
+  **F12 10**; Radar 10; SAM Attack1 20). The saved clock values of 23'12'35 (13 counting down without a target, 19 = F8 - 1 held with a target near) are the proof. The RELEASEEVENT of that unit (FlakShell at 200 ms = frame 2, node 0; SAM: three
+  "SAM Rocket" at frames 1 / 4 / 9) fires from the clock (`engine/sim/combat_fight.cpp` `build_aa_clock`): a shot every F12 = 10 frames per gun while the target stays, started at the building + the muzzle offset of the node (`get_position` of a
+  building piece: `build_scale` 3.0 instead of `guy_scale * scale`, and `init_position` does not subtract the pivot node for gpiece type 1).
 
 ## 8. Launch: `Object::do_launch()` @64f3b0 and the base commands
 

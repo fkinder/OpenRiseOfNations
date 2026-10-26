@@ -1,0 +1,4 @@
+re/decomp/f18b
+GraphicPieces::init_unit_data
+GraphicPieces::init_unit_events
+GraphicPieces::init_piece_ranges

@@ -1,0 +1,6 @@
+re/decomp/f18b
+GraphicPieces::unit_node_from_gpiece
+GraphicPieces::get_type
+GraphicPieces::build_node_from_gpiece
+GraphicPieces::get_build_gpiece
+GraphicPieces::verify_load.*

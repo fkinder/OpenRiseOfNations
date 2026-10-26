@@ -249,6 +249,7 @@ void guy_execute_events(Game& g, Unit& u, Guy& gy);  // Guy::execute_events @5d9
 // GraphicPieces::get_position @90b750 for a release event of the guy's piece (the muzzle offset added to the shot's start; sim/combat_fight.cpp).
 void guy_muzzle_offset(const Game& g, const Guy& gy, const ReleaseEvent& e, int32_t out[3]);
 void build_process_attack(Game& g, Build& b);         // the attack part of Build::process @61edf0
+void build_aa_clock(Game& g, Build& b);              // the air-defence part of Wall::inc_time @63fb60
 int32_t build_do_attack(Game& g, Build& b);           // Build::do_attack @6228f0
 int32_t get_garrison_arrows(const Game& g, const Build& b);  // BuildData::get_garrison_arrows @62e3d0
 int32_t get_base_garrison_arrows(const Game& g, const Build& b);  // BuildData::get_base_garrison_arrows @62e340

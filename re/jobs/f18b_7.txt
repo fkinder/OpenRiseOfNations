@@ -1,0 +1,4 @@
+re/decomp/f18b/dis
+Wall::inc_time
+Objects::add_ammo
+GraphicPieces::get_position

@@ -128,8 +128,9 @@ int32_t unpack_merchant_spot(Game& g, Unit& u, int32_t r) {
 	if (!find_merchant_spot(g, u, u.x, u.y, r, &tx, &ty)) return 0;
 	u.unit_masks &= ~umask::kAutoExplore;
 	add_cast_order(g, u, -1, -1, -1, -1, 0x28c, kQueueNew, false);
-	const int32_t mx = tx * 0xc0 + 0x18, my = ty * 0xc0 + 0x18;
-	const uint32_t a = find_angle(mx - u.x, my - u.y);
+	// The facing is find_angle(corner - unit) with the tile CORNER (tx * 0xc0, ty * 0xc0; asm @603964 / @603970 subtract the unit's y / x from
+	// the corner before the +0x18 of the order's own x / y), not the order's target point.
+	const uint32_t a = find_angle(tx * 0xc0 - u.x, ty * 0xc0 - u.y);
 	add_move_facing_order(g, u, tx * 4, ty * 4, a, 1, false, kQueueFirst, false, -1, -1, -1, false);
 	clear_partial_path(u);
 	update_action(g, u);
