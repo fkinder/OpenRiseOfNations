@@ -1,0 +1,6 @@
+re/decomp/f18
+Unit::kill_current_path
+Unit::add_group_move_order
+Unit::clear_partial_path
+Objects::find_ordered_collision
+Objects::find_collision

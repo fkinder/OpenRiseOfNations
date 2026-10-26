@@ -1,0 +1,6 @@
+re/decomp/f18
+OrdersMemManager::get_obj
+OrdersMemManager::give_obj
+OrdersMemManager::init
+OrdersMemManager::clear
+OrdersMemManager::cycle

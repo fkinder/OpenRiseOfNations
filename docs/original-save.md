@@ -518,6 +518,33 @@ rest 9 - 91 or negative); it needs `F8`/`F12` of the AA graphics events, which b
 The `Region.flags 0x80`, `Build.frame_started`, herd-position and WData `who/val/was_seen` leads of 6.16 are load artifacts: the replay's embedded save is written at
 `Game::run` start after a load, and region cursors and several lists are not saved, so the next-boundary compare shows them without a simulation cause.
 
+### 6.18 Eighteenth pass, part A (2026-10-26): the wall of the 15-unit line-formation move at 5,594 (21'23'34)
+
+Three passes had deferred it: at 5,594 player 1 issues a MOVE_TO to a 15-unit group (5 squads of three, line formation, `form = 0`, `width = 50`); `guys` / `units` differed at 5,600, `world` at 5,606.
+**Closed.** The cause is one line of `ObjectsData::find_unit_ordered_with_radius` @658ef0 (`search.cpp`): the asm measures the distance to the unit's *order target*
+(`Unit +0x70 / +0x74` = `orders_x / orders_y`, `MOV EAX,[ESI+0x74] / [ESI+0x70]` @658fdc / @658fe5), the engine used the unit's *position*. `UnitType::find_nearby_spot` @61de70 calls it for every candidate spot when
+its leader argument is >= 0, `nocheck` is 0 and the `use_coll` shortcut does not apply (`uber != 0`, or a filter other than NOT_ME / CAN_COLLIDE): the captain of a relocated squad (`Group::action_move_near` @704990,
+`find_nearby_spot(slot0, 0xc0, 0x480, -1, angle, NOT_ME, ..., uber = 1)`) must find room for the whole squad *and* keep clear of the slots already handed to the other captains. Captain 1/38's slot (11852,59413)
+sat on the Barracks, so it was relocated around slot 0 (12697,59602): the original rejects all 31 directions of the first ring (r0 = 0xc0; each lies within the exclusion radius `block_radius + (uber_size - 1) * guy_spacing / 2 + 0x30`
+of the order target of 1/17 or its neighbours), the engine (positions: nobody stood there yet) accepted the first, (12744,59400). The original's spot is the first of the second ring (r0 = 0xc0 + (0x480 - 0xc0) / 8 = 300): **(12744,59304)**,
+and the followers 1/39, 1/40 are placed beside it ((12888,59352), (12600,59256) instead of (12888,59448), (12600,59352)). That is all: `guys`, `units` and `world` match through 8,330 / 8,336 afterwards.
+
+How it was found (the method is worth keeping):
+- `RON_TRACE_FORM=1` (`groups.cpp`): one line per member of every `Group::action_move_near` with its slot, the validity test of the slot and of slot 0 (`UnitData::invalid_loc`), the relocation flag and the final target. The 15 units are listed in
+  sim-implementation "eighteenth pass, part A".
+- The `world` part is a precise filter: it holds the 16x16-bit `CollBlock` footprint of every guy (48-unit cells) and the object-list heads, so a variant that changes any position by a cell or a speed by one breaks it at 5,600. With the formation code
+  as is, `world` matched at 5,600 and `guys` did not: every error was below a cell. Variants of the three branches that no earlier segment had ever run (the "behind" branch of `Unit::do_group_move` with its half speed, the relocation, the ungroup on an invalid
+  slot position) were tried; those that kept `world` were adjusted one unit at a time (`RON_TGT`-style offsets of one final target) and the **additive** Adler deltas (a, b) of (`units`, `guys`) of all single-unit variants combined (pairs, triples); one variant
+  (1/38's target 2 cells north) made all four residues equal, which named the ring (r0 = 300, first direction) and from it the `find_unit_ordered_with_radius` distance. Branch coverage (`clang -fprofile-instr-generate`, lines run between frame 5,587 and 5,600 and never before) showed
+  that the only new `engine/sim` lines were those three branches; a corpus count (45 replays, `GMTAG` lines of `do_group_move`) showed that the "behind" branch, the relocation and the lost-slot ungroup never run before a replay's first divergence anywhere else.
+- `RON_FOOT_SEARCH=1` (with `--solve-at B`, `apps/sav`): the CollBlock stream positions of the world trace, then every single guy moved by up to +-3 cells (and pairs of such moves) against the world delta. (Negative on this wall: the world delta at 5,606 is not a footprint move.)
+- `RON_NEAR_AT=F,x0,y0,x1,y1` (`apps/sav`, at a boundary): every unit inside a box with its orders.
+
+Result on `21'23'34`: fully equal boundaries 932 -> 1,083 of 3,056; first differences `units` 5,600 -> 7,220, `guys` 5,600 -> 8,336, `world` 5,606 -> 8,342, `builds` 5,750 -> 8,354, `groups` 5,954 -> 8,828, `leaders` 5,912 -> 9,134, `cities` 6,404 -> 6,506,
+`ammo` 6,896 -> **matches to the end**, `deaths` 7,094 unchanged; `items` end -> 12,782 (earlier, explained below). Over the 45 replays 1,140 -> 1,291 fully equal boundaries.
+The new frontier of `21'23'34`: `cities` 6,506 (alone: every other part matches through 6,517), `deaths` 7,094, `units` 7,220, `guys` 8,336 (the boundary after player 0's MOVE_TO of the lone type-324 unit 0/18 with `set_angle` at 8,330; not verified to be its cause).
+`items` 12,782: the `ever_seen` byte (`Item +0x20`) of ruin item 4 has player 0's bit set in the engine four frames earlier than in the original (player 0's villager 0/64 reaches the ruin's line of sight at 12,778); it follows `units` 7,220, the part had matched before only by luck.
+
 ### 6.18b Eighteenth pass, part B (2026-10-26): the air-defence building clock, the unpack facing
 
 - **Air-defence clock closed.** The `Build.recharging` (+0x7a) of the AA buildings (523 Air Defense Gun, 524 Radar Air Defense, 525 SAM Installation) is the animation clock of `Wall::inc_time` @63fb60 (combat-spec 4.13.4). Its `F8` / `F12`

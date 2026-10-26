@@ -1,0 +1,4 @@
+re/decomp/f18/fu
+ObjectsData::find_unit_ordered_with_radius
+ObjectsData::find_unit_with_radius
+ObjectsData::find_unit_ordered

@@ -1167,6 +1167,8 @@ void group_action_move_near(Game& g, Group& gr, int32_t x, int32_t y, int32_t to
 		if (tx >= w.xs * 0x300) tx = xmax;
 		if (ty >= w.ys * 0x300) ty = ymax;
 		reloc = flag;
+		static const bool trace_form = std::getenv("RON_TRACE_FORM") != nullptr;  // per member: slot, validity of the slot, relocation (pass 18)
+		const int32_t tx0 = tx, ty0 = ty;
 		if (i > 0) {
 			const int32_t ri = w.get_tregion(tcoord_of(tx), tcoord_of(ty));
 			const int32_t r0 = w.get_tregion(tcoord_of(F.to_x[0]), tcoord_of(F.to_y[0]));
@@ -1231,6 +1233,13 @@ void group_action_move_near(Game& g, Group& gr, int32_t x, int32_t y, int32_t to
 				}
 			}
 		}
+		if (trace_form)
+			std::printf("  FORM f%d grp %d i %d unit %d/%d type %d cap %d(o_up %d) slot0 (%d,%d) slot (%d,%d) -> (%d,%d) invalid(slot)=%d invalid(slot0)=%d reloc %d->%d ang %08x\n",
+			            int(g.frame), int(gr.id), int(i), int(u.who), int(u.o), int(u.type), int(captain), int(u.o_up),
+			            int(F.to_x[0]), int(F.to_y[0]), int(tx0), int(ty0), int(tx), int(ty),
+			            int(unit_invalid_loc(g, u, tcoord_of(tx0), tcoord_of(ty0), false, false, false, false, false)),
+			            int(unit_invalid_loc(g, u, tcoord_of(F.to_x[0]), tcoord_of(F.to_y[0]), false, false, false, false, false)),
+			            int(flag), int(reloc), unsigned(angle));
 		QueuePos qq = q;
 		if (q == kQueueNew && (u.ptype->unit_flags2 & 4) && is_packing(u) && !u.orders.empty()) {
 			const Order keep = u.orders.front();

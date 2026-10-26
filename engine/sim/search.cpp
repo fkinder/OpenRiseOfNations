@@ -132,7 +132,9 @@ int32_t find_unit_ordered_with_radius(const Game& g, int32_t x, int32_t y, int32
 		if (!u || !u->alive()) continue;
 		if (!pass_filter(g, search, co, o, who, filter)) continue;
 		if (!move_family(u->order_type())) continue;
-		const int32_t d = vector_dist(u->x - x, u->y - y);
+		// The distance is to the unit's ORDER TARGET (Unit +0x70 / +0x74 = orders_x / orders_y, @658fdc / @658fe5), not to its position: a
+		// squad's slot that another captain has already been given blocks the spots around it (Group::action_move_near's relocation).
+		const int32_t d = vector_dist(u->orders_x - x, u->orders_y - y);
 		const int32_t br = u->ptype->big_radius;
 		if (d <= br) return co;
 		const int32_t e = d - br;

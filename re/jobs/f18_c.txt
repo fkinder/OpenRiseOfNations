@@ -1,0 +1,6 @@
+re/decomp/f18/dis
+GroupMoveOrder::clear
+GroupMoveOrder::walk_data
+MoveOrder::clear
+MoveOrder::walk_data
+GroupOrder::clear
