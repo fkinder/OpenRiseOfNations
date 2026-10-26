@@ -1013,7 +1013,7 @@ the Mouse pane's `scroll_speed = 6`, drag-military on); Esc = Cancel, Return = O
 
 | Pane | What is wired | Not offered (no feature behind it in the port) |
 |---|---|---|
-| **Game** | Game Speed 0..3 (Very Slow..Fast; the game steps with SPEED_UP / SPEED_DOWN commands, a multiplayer game keeps the host's), Difficulty Level 0..5 (the lists' AI difficulty), Help Message Detail 0..3 (0 = help boxes off), Show Advanced Options, Show Research Progress Bars | message duration, auto citizen / delay, building stances, friend / foe colours, auto transport, abilities as group, city names, start paused, auto deploy / all-clear / combine, record games |
+| **Game** | laid out as optionswin.xml GAMEPANE (2026-10-25): **Auto Citizen** (Idle / Build / Gather / Build and Gather radio group = `LEADER_OPTIONS` peasants stance 3 / 2 / 0 / 1) and **Auto Citizen Delay** (0..5, `peasants_wait`), **Building Stances** (the default stance of new military buildings and units, 0..5), Scouts Auto Transport (option flag 1), Siege units deploy when idle (flag 3), Record games, Game Speed 0..3 (Very Slow..Fast; the game steps with SPEED_UP / SPEED_DOWN commands, a multiplayer game keeps the host's), Difficulty Level 0..5 (the lists' AI difficulty), Help Message Detail 0..3 (0 = help boxes off), **Message Duration** 0..10 (`message_length`), Show Advanced Options, Show Research Progress Bars | friend / foe colours, abilities as group, city names, start paused, auto all-clear / combine, disable cross-network play (no feature behind them) |
 | **Hotkeys** | the whole key map (`keymap_table.inc`: 293 rows), filter All / Commands / Build Mode / Building / Unit / City, labels from options.xml NAME or the type name (TRAIN, BUILD, RESEARCH ...), a key capture box, Assign / Remove, the list of commands bound to the key in the box (a shared key is flagged), Esc and F10 refused | mouse buttons and the wheel as keys (the table's `Mouse*` entries show but are not captured), Import / Export (commented out in the XML) |
 | **Mouse** | Map Scroll Speed 0..12 (`speed_option`: 0.33 .. 5; applied to the edge scroll), Drag-Select Prefer Military | left-click interface, one-click garrison, right-click execute |
 | **Graphics** | window mode (windowed / full screen: `toggleFullScreen`), the streamlined interface (the display button's layout), the window's resolution as a read-only line | the resolution list and the render-element switches (the Metal renderer has no such levels; the window resizes freely) |
@@ -1021,8 +1021,9 @@ the Mouse pane's `scroll_speed = 6`, drag-military on); Esc = Cancel, Return = O
 | **Player** | the interface language (en, de, es, fr, it: the next start; `uistr::choose` reads it after `--lang` and `RON_LANG`) | profiles and player names |
 
 **Preferences file**: `~/Library/Application Support/OpenRiseOfNations/preferences.txt` (`RON_PREFS=path` overrides it for tests): `key = value` lines
-(`game_speed difficulty help_detail advanced_menu progress_bars scroll_speed prefer_military fx_volume music_volume music_in_game music_in_menu
-streamlined fullscreen language`) and `hotkey.NAME|mode|ctx|param = KEY` for each rebound entry. A key missing from the file keeps the window's own value
+(`game_speed difficulty help_detail advanced_menu progress_bars message_length auto_citizen auto_citizen_delay building_stance auto_transport
+auto_deploy record_games scroll_speed prefer_military fx_volume music_volume music_in_game music_in_menu streamlined fullscreen language`, and
+`score_window` once the Alt+Shift+0 / Alt+Shift+1 keys have been used) and `hotkey.NAME|mode|ctx|param = KEY` for each rebound entry. A key missing from the file keeps the window's own value
 (so a fresh install behaves as before, including a scroll step of 1.0 until `scroll_speed` is saved); a saved file names every key. Applied at start:
 `loadProfile` (speed, help, advanced, progress bars, prefer military, streamlined), `startInteractive` (volumes, in-game music), the front end's
 `startInteractive` (volumes, menu music), `main()` (`keymap::apply_overrides`, before any screen), the app delegate (full screen), `edgeScroll` (scroll
@@ -1040,10 +1041,22 @@ pixels; `snap:NAME` writes `<snapshot>_NAME.png`); in a game `RON_GAME_MENU=3` s
 done, "Toggle Help" flagged as sharing it), `_filter.png`, `_mouse.png`, `_graphics.png`, `_combo.png`, `_sound.png`, `_player.png`, `ui4_ingame_options.png`,
 `ui4_ingame_menu.png`. A scripted run (slider click, check box, key capture, Assign, OK) wrote the expected file and `hotkey.OPTION_SLOWER|0|-1|-1 = Ctrl+Z`.
 
+**The settings with a feature behind them (2026-10-25).** `message_length` feeds `scriptview::set_message_length` (messages last `message_length * 45`
+ticks, the banners `message_length * 400 + 500` ms; `script_view.mm` had the constant 5). The Auto Citizen stance / delay, the building stance and the two
+option flags are the fields of the simulation's `LEADER_OPTIONS` command (`opt_peasants`, `opt_peasants_wait`, `opt_buildings`, `options_flags` bits 1 and 3,
+which `Unit::init` / `Build::start` read): `MapRenderer issueLeaderOptions:` sends the command (through `_cm.issue_leader_options`, so a recording and the other
+machines follow) when OK is pressed and once at the start of every game (`notifyFrame`, frame <= 30), and only when a value differs from the leader's current
+one; the page shows the leader's own values first (`Host::live`). `RON_UIX_TRACE=1` prints `[opts] leader options peasants=3 wait=4 buildings=2 flags=0x8` and
+the values the sim holds afterwards. `record_games` gates the Recorded Games folder of multiplayer games (`lobby.mm` `start_recording`: off = no `.rcx`; an
+explicit `--mp-record` path still records). The score window (`Options::exec` 0x87 / 0x90: Alt+Shift+1 = `stat_mode` 0 and prefs bit 4 set, Alt+Shift+0 =
+bit cleared) is the `score_window` preference: `OPTION_STAT_NORMAL` shows it (also after a `ui_hide_score`), `OPTION_STAT_OFF` hides it, both play `S_PREF_CHANGE`
+and are saved; without the key in the file the game decides as before (Conquer the World, multiplayer). The other `OPTION_STAT_*` modes (economy, market,
+military ... diplomacy columns) are not ported. Not offered: profiles and player names, the unfinished switches listed above.
+
 ### 15.4 Still open after this pass
 
 - The unit-acknowledgement sounds for the card's toggles; the card's latched look is subtle (no separate "on" art found in `IFaceButton`).
-- Options: the unwired settings of the table above, profiles / player names, a mouse-button capture in the Hotkeys pane, `Host::sound` in a game.
+- Options: the unwired settings of the table above (friend / foe colours, city names, start paused, abilities as group, all-clear, combine), profiles / player names, a mouse-button capture in the Hotkeys pane, `Host::sound` in a game.
 - The clicks of the game menu's "Options" item could not be driven by the `--mouse` harness (it does not reach the menu); the page itself was exercised through
   `RON_GAME_MENU=3`, the front end's scripted run and by reading each pane.
 
@@ -1174,8 +1187,16 @@ From the decompiles (`Options::do_auto_explore`, `set_air_repeat`, `do_transport
 plays them on the effects channel when the command was accepted. The state is read before the command because the command runs later in a lockstep game.
 `RON_UIX_TRACE=1` prints `[uix] sound S_KEY -> file` (also headless, where nothing plays). Checked: europe seat 0, `--key Ctrl+E@5 --key Ctrl+E@12 --key H@20`:
 `AUTO_EXPLORE_ACK` -> toggleon, `AUTO_EXPLORE_OFF` -> toggleoff, `HALT_ACK`; with `RON_CARRIER_TEST=0:0` and `E@5 / E@12`: `REPEAT_ORDERS_ON_ACK` then `_OFF_ACK`.
-Not wired: `TRANSPORT_ON_ACK` / `_OFF_ACK` (the port has no transport toggle on the card), `BACK_TO_WORK_ACK`, `SCRAMBLE_ACK`, `RECALL_AIRCRAFT_ACK` /
-`RETURN_TO_BASE_ACK` (the card buttons exist but the sounds were not added in this pass), the `S_PREF_CHANGE` of the Options toggles.
+Added 2026-10-25: `SCRAMBLE_ACK` (`Options::scramble_aircraft`, after the command is accepted), `RECALL_AIRCRAFT_ACK` for a building group's recall (the airbase card) and
+`RETURN_TO_BASE_ACK` for the planes' own recall / return (`Options::recall_aircraft` chooses by a flag of the selection group that the port reads as "buildings
+selected"), `BACK_TO_WORK_ACK` (the new BACK_TO_WORK button, below) and `S_PREF_CHANGE` (the Help Text Detail key and the Advanced Options key print the original's
+"Help Text Detail: LOW" / "Advanced Options: ON" lines, #3006 / #3010 + #2806 + #2807..#2809 / #2782 / #2780, and play it; the Options page itself keeps its
+`OPTIONS_*` sounds, `Options::do_toggle` is the in-game key path). Checked with `RON_UIX_TRACE=1`: a carrier (`RON_CARRIER_TEST=0:0`) `Y` prints `recall issued` and
+`sound S_RETURN_TO_BASE_ACK`; `E` still gives `S_REPEAT_ORDERS_ON_ACK`.
+**BACK_TO_WORK** (`OPTION_BACK_TO_WORK`, Shift+J; card slot (1,3) next to EJECT_ALL, offered when citizens or militia are inside the building,
+`BuildOut::make_options` @00629ed0) issues `EJECTALL` with `back_to_work` (the citizens inside resume their orders; `Options::do_back_to_work`). Not wired:
+`TRANSPORT_ON_ACK` / `_OFF_ACK` (the port has no transport toggle on the card: the sim has `SET_TRANSPORT`, `Options::do_transport` is the whole unit-mask card
+button of a scout and the card does not offer it yet; the Options page's "Scouts Auto Transport" is the leader option, not that toggle).
 
 ## 17. The victory clocks and endings on screen (2026-10-25)
 
@@ -1208,8 +1229,8 @@ effects channel (`platform/audio`, unchanged). `post` now plays the sound of a b
 
 `String::parse` has overloads (String x n, int x m): the digit of `$NUMBERn` counts among the numbers, every other placeholder among the strings, so
 `notices::fill_typed(text, strings, numbers)` replaces `fill` for templates that mix both. (The old plunder line "City of $CITYNAME0 captured. Plunder: +$NUMBER0
-$GOODTYPE1" printed the city name for the number; fixed.) Not done: the ally tribute lines of `Leader::defeat` (#2307 "+N Good received from X!", `S_RECEIVED_TRIBUTE`:
-the inheritance has no event yet) and `say_full_name` (the leader's name or nation is used).
+$GOODTYPE1" printed the city name for the number; fixed.) The ally tribute lines of `Leader::defeat` are done (17.7). The names in the victory-clock, wonder and tech lines are `LeaderData::say_full_name`
+(17.7), the defeat / resignation lines keep the player's name (`get_name`).
 
 ### 17.2 The clocks in the bar (`main.mm` `gameTimers`, `hud_extra.mm` `draw_timers`)
 
@@ -1217,8 +1238,7 @@ the inheritance has no event yet) and `say_full_name` (the leader's name or nati
 against the decompile this pass: the **territory** clock (kind 3, drawn while a leader's `popwin_timer` runs, `popwin_timer - (frame - stamp)` clipped at 0) and the **time
 limit** (kind 5: `limit * 900 - frame`) were right. Added: **musical chairs** (kind 7 `musical_timer`: `chairs[chairs] * 900 - (frame - Game.musical_chairs)`, red / yellow
 flashing digits under 450 frames), the time limit's flashing digits (red / yellow under 120 frames, white / yellow under 300, by `graphic_tick & 8`; with team style 3 the barbarian
-icon, kind 6, shows for those last frames) through `hud::Timer::tint`. The wonder clock still shows the leader whose clock runs (the original shows the leader that
-`Game::wonder_winning` names, also when a World Government cancels the clock, and writes the net points over the icon).
+icon, kind 6, shows for those last frames) through `hud::Timer::tint`. The wonder clock follows `Game::wonder_winning` since 2026-10-25 (17.7).
 
 ### 17.3 The end-game window (`endgame.*`, `main.mm` kind 2 of the game menu)
 
@@ -1289,8 +1309,141 @@ index order the winner's allies defeat the others (type 5, two losers: "by conqu
 
 ### 17.6 Open
 
-- The wonder clock's icon overlays the net points in the original (`draw_game_timer` case 0 writes `get_wonder_net` over the icon in the team colour, font 18) and the HUD line "Wonders (N icon): M:SS" next to it; the port writes the count left of the clock.
-- The territory victory and the standard-rules territory clock were not reached by any headless run (the AI games never hold the goal share): the code follows the decompile, the messages are
-  covered by the event table only and `endgame_clocks.png` draws the icon.
+- The `OPTION_STAT_*` modes of the score window other than the ranking (economy, market, military, library, technology, groups, diplomacy, wonders), the
+  stat window's diplomacy columns, the replay ("View Playback", another pass) and the Steam stats behind "Game Stats".
 - Sudden death, tech race, a score victory in a team game and the team-style sentences are transcribed but not run on screen.
-- The ally tribute lines of `Leader::defeat`, `say_full_name`, the stat window's diplomacy columns and its preference, the replay ("View Playback") and the Steam stats behind "Game Stats".
+- `MessageWin::add_message`'s `Color*` argument (`&RED` at every call site) goes to `MessageWin::add_event` (the ping of a located message); the text colour is
+  `next_message_color` (LIGHT_GREY unless `set_message_color` ran first). The port still prints the victory lines in red as section 17.1 says; if the
+  original really shows them grey, `Note::argb` of those lines is the one place to change.
+
+### 17.7 The clocks and endings on screen, the tribute lines (2026-10-25)
+
+- **The wonder clock over the icon.** `IFaceMainBase::draw_game_timer` case 0 writes `LeaderData::get_wonder_net` over the icon: font 18 (default style), the
+  leader's team colour, a black shadow at +1,+1, centred (`Buffer::write_cent_l`) in a box the icon's size that starts 5 px left of the icon
+  (`hud_extra.mm` `draw_timers`; the old count was drawn left of the plate). The clock's leader is `Game::wonder_winning` (`gameTimers`, kind 0, only under the
+  standard victory rules): the best net points at or over the goal, allies sharing a tie by wonder value, `wonder_timer` frames (map scaled) minus the time since
+  that leader's stamp, 0 under a World Government. The line to the left of the plate is `draw_timers`' "Wonders (N #ICON46): M:SS" (#2030 + #2031 + net + #2032 +
+  `#ICON` 46 + #2033 + the timer, in the team text colour, font 12, with the 17 x 17 `wonder` piece of icon_texs.xml between the two halves). Checked:
+  `RON_TIMER_TEST="3:300:1,5:90,0:341:2:12"` at 1024 / 1440 / 1920 and a real `--random 12,4,1,8 --all-ai --frames 14900` game (the pyramid with "1" on it, the red
+  4:52 plate, "Wonders (1 ^): 4:52"): `re/previews/ui5_wonder_clock_real.png`, `ui5_clocks_*.png`.
+- **The territory victory, rendered.** The AI games never keep the goal share, so `RON_TERRITORY_AT=N[:M]` (`harnessEndings`) cuts `world_total_land` from frame N,
+  every frame, to what the biggest territory holds divided by the goal: that leader holds exactly the goal (30% + 5% per setting) and the real
+  `process_victory` code runs: `kPopStart` at frame 2000 ("Russians controls 30% of the world!" + "You will lose unless you take control of more territory!" in
+  red, the `territory_timer` banner "Territory Victory: 4:34", the territory icon with its 4:32 plate), then what the real sim does on this map: a rival crosses the goal at frame 3286
+  ("Russians no longer controls 30% of the world." in red, the plate gone: the halt), the clock restarts at 3795, the warning at 1800 frames left (frame 4925: the
+  same two red lines again, the plate at 1:59), the second warning at 5825 and the victory at frame 6726 (`--random 12,4,1,8 --all-ai`: "You lost to a territory
+  victory." with the skull banner, game time 7:28, the red defeat list at the left; with `--play 6`: "You won a territory victory!"). `RON_TERRITORY_AT=2000:3200` restores the
+  land at 3200 for a clean halt. The harness prints `frame N: territory event K leader L value V` for the clock's events. Snapshots `ui5_territory_start.png`, `_banner`,
+  `_clock.png` (frame 4230), `_halt.png` (frame 3292), `_warning.png` (4935), `_defeat.png` (6735), `_victory.png`. The banner text had lost the blank after the colon in the XML table: `notices.mm` adds it.
+- **The ally tribute lines** (`Leader::defeat` @6ecb00): in a multiplayer game that goes on, a defeated leader's stockpile is shared among his live allies (the
+  simulation does it: `leader_defeat`, `bucket_add`) and the viewer, when he is one of them, reads "+N Good received from X!" (#2307
+  `+$NUMBER0 $GOODTYPE0 received from $PRESIDENTRONALDREAGAN1!`, red, `S_RECEIVED_TRIBUTE`) for every good both leaders have except Knowledge, N =
+  `scale_tribute(stock / allies)`. The sim clears the stockpile in the same call and the event has no payload, so `notices.mm` reads the stockpile the previous
+  update saw (`prev_buckets_`; at game speed the figure can differ from the exact one by the gathering of the frames in between: an event with the shares in
+  `leader_defeat` would make it exact). Harness `RON_TRIBUTE_AT=N`: allies the viewer with the next leader, gives him a stockpile and the multiplayer bit,
+  defeats him a frame later: `+232 Food`, `+145 Timber`, `+70 Wealth received from Dutch!` (age-1 leaders have no metal or oil): `ui5_tribute_lines.png`.
+- **`say_full_name`** (@6ebe90) = the player's name + " (" (#2198) + the tribe's name + ")" (#2199); the port uses it where the decompile does: the wonder / territory
+  clock messages (`GameDaemon::process_victory`), wonder started / completed (`Build::start` / `activate`), a finished tech (`Leader::gain_tech`) and the diplomacy
+  line of `Leader::set_diplo` between two other leaders (#2337 war, #2338 alliance broken, #2339 peace, #2340 alliance; told only to a viewer who has met both
+  (`treaties & 1`), in the original's DARK_ORANGE, `S_OTHER_NATION_DIPLO`; before, every change was told to everybody with other texts). A leader without a player name
+  shows the nation alone. `Leader::ally_diplo`'s "War declared with X!" / "Alliance cancelled with X!" (#2341 / #2342, the viewer's allies) are not in the event
+  log and stay open.
+- **Layout pass** (every `--menu` screen and the HUD at 1024 x 768, 1440 x 900, 1920 x 1080, every PNG read): main, tutorials, skirmish, skirmish setup, scenarios,
+  quit popup, multiplayer, lobby, options: nothing clipped or overlapping; the HUD (resources, the top bar, the clocks column, the minimap, the card, the selection
+  panel, the wonder line) fits at all three sizes. Findings left to their owners (`ctw_ui.mm`, not edited): the "[ ] Different battle map each time" line sits on the
+  bottom frame of the description box at 1024 and 1440 (y = 392 against a frame ending at 420), and the "Moderate" difficulty label is wider than its
+  button at 1440 / 1920 (`ui5_menu_*`).
+
+## 18. Recorded Games and the playback viewer (2026-10-25)
+
+The original's playback viewer, inside the app: a **Recorded Games** screen on the Main Menu, the game window playing a `.rcx` back with the HUD as an observer, a bar with the
+speed, pause, seat, fog and timeline controls and a live "in sync / out of sync at frame N" indicator, the End-game window's **View Playback** button, and `ronmap --playback`.
+The engine side is `engine/net/playback.*` (docs/multiplayer-spec.md 8.9); `apps/map-mac/recplay.*` is the list scanner and the bar; `main.mm` drives it.
+
+### 18.1 Pieces
+
+| Where | What |
+|---|---|
+| `engine/net/playback.{hpp,cpp}` | `Playback`: opens a `.rcx` (`Kind::Original` / `NativeSave` / `NativeRandom`), builds the start game (`make_start`: rules, art, the original's prologue and game script, the room's names and handicaps), then `bind` / `step` / `run_to` drive ONE game with the recording's packages and compare its CHECK_SUMS (`sync()`). `playback_summary` is the header-only read of the list. `ron-net replay` builds the start game of each of its lockstep instances through the same `make_start`; `ron-net playback FILE` and `ronmap --playback FILE` print the same report. |
+| `apps/map-mac/recplay.{hpp,mm}` | `Scanner` (the folder's `.rcx` files at once, newest first, headers read on a thread, so the screen opens at once and the rows fill in), `Viewer` (the bar: drawing, rectangles for the hit tests, speeds, seats, seek state), `clock_text`. |
+| `frontend.mm` | the `Recorded Games` screen (`kRecorded`, `showScreen:@"recorded"`), Main Menu item 6 of 8 (the help box and the ribbon window moved 24 px down for the eighth button), the host call `frontEndPlayRecording:`. |
+| `main.mm` | `+playbackWithDevice:` (builds the recording's map the way a random or scenario game does, then the recording's start state replaces the game), `pbStep` / `pbTick` / `pbSeek`, the bar's mouse and key handling, `--playback`. `mp::CommandSink::discard` (lobby.h) drops what the HUD issues: an observer's orders go nowhere. |
+| `endgame.*` | `Screen::set_playback`: the View Playback button is enabled for a game that was recorded. |
+
+### 18.2 The Recorded Games screen
+
+Main Menu > **Recorded Games**: the folder `mp::default_record_dir()` names (`~/Library/Application Support/OpenRiseOfNations/Recorded Games/Multi`; `RON_RECORD_DIR` points it elsewhere),
+searched recursively, newest first. One row per file: the file name, then `date | map style, size | N players: nations | duration | original game | why it cannot be watched`.
+The detail line fills in while the headers are read. **Watch** (or Return, or a double click) plays the row; **Open File...** asks for any `.rcx` (`RON_REC_PICK=PATH` answers the chooser in tests) and plays it.
+Only the folder the app records into is ever listed; the original's own recordings (`re/oracle`, gitignored test data) are opened only through a path somebody gives (Open File..., `--playback`).
+Recordings of the original game are listed and marked `original game`: they play and check in `ronmap --playback` / `ron-net playback` (the check sums agree up to the engine's own fidelity frontier), but their map
+is not a scenario or a setup text the renderer can build, so **Watch** says so instead of opening a window (18.7). A single-player file without a start state, a Conquer the World battle and a file that does not parse
+are listed with the reason.
+
+### 18.3 Watching
+
+The game window opens on the recording's start state with the camera on the first human seat and the whole map visible; nothing the viewer orders is sent anywhere
+(`CommandSink::discard`; the HUD still works as the watched seat's: resources, selection, minimap, messages from `notices`). The bar (top centre, under the resource strip):
+
+| Control | Does |
+|---|---|
+| `\|<` / Home | back to the first frame (the start state is built again) |
+| Pause / Play / Replay (P, the HUD's pause button) | stop and resume the stepping; after the end, Replay restarts |
+| `-` `+` (the keys of OPTION_SLOWER / OPTION_FASTER) | speed 1/2x, 1x, 2x, 4x, 8x, Max (as many frames as fit in 12 ms of each display frame); 1x is the normal 15 frames a second |
+| `<` `>` / Tab, Shift+Tab | the watched seat (the leader the HUD, fog and messages follow: `console.play`, which never feeds the simulation) |
+| `Fog: on` / `Whole map` (F) | the watched seat's fog, or everything |
+| timeline (click or drag) / `[` `]` | jump: forward runs the recording on in slices of the display frame ("Seeking..."), backward builds the start state again first; `[` `]` are 30 s |
+| right of the timeline | `in sync` (green), `out of sync at frame N` (red; the fill of the timeline turns red), `No check sums` (a recording without CHECK_SUMS rows) |
+| Exit | back to the list |
+
+The game menu (F10 / Esc) has Resume Playback, Restart, Options, Return to Main Menu, Quit; Save / Load are refused (the game belongs to the recording). When the last package has run the bar shows
+`End of the recording.` and Replay.
+
+Speed is the viewer's own: a recorded PAUSE or SPEED_* is not executed (they are presentation), and the end-game window is not offered.
+
+### 18.4 View Playback (End-game window)
+
+`Screen::enabled(2)` is true when the game that ended is a multiplayer game with a recording on disk (`mp::Runtime::record_path()` names the file the Recorder flushes after every package, so it can be read at once;
+after an out-of-sync recovery it is the newest segment, which embeds the snapshot and so starts at that frame). The button asks the app (`onPlayRecording`) to open the recording at frame 0 in a new game window; failing
+that shows an alert and leaves the game as it was. Single-player games are not recorded: the button stays disabled there.
+
+### 18.5 Commands
+
+```
+ronmap [GAME] --menu recorded [--snapshot out.png]               # RON_RECORD_DIR=DIR picks the folder
+ronmap [GAME] --playback FILE.rcx                                # opens the window on the recording
+ronmap [GAME] --playback FILE.rcx --frames N [--snapshot out.png [--size WxH]] [--pb-seat WHO] [--pb-fog]
+        # headless: N frames after the start (no --frames with --snapshot: to the end), the check-sum report, the picture; --pb-seat WHO the leader whose seat the HUD shows,
+        # --pb-fog that seat's fog; --mouse down:X,Y@0 / up clicks the bar (the first mouse event lays it out)
+ronmap [GAME] --playback ORIGINAL.rcx [--frames N]               # a recording of the original game: played and checked, nothing drawn (prints the same report as ron-net playback)
+ron-net playback FILE.rcx [--frames N] [--all-verbs] [--no-art] [--save out.ronsave]
+RON_GAME_MENU_AFTER=2 RON_GAME_MENU_CLICK=2 ronmap --host ... --mp-record F.rcx --snapshot x.png     # the end-game window after the run; clicks View Playback (prints "[view playback] PATH")
+```
+
+### 18.6 Results (`re/previews/`, gitignored; 1280 x 800)
+
+A short native recording made with two headless machines (`ronmap --host 17813 --humans 2 --random 18,0,7,2 --frames 1200 --mp-bot --mp-record F.rcx --snapshot x.png`, and `--join` with `--mp-bot`; East Indies, Tiny, 2 players, 1:20; kept as
+`re/previews/playback_native_example.rcx`):
+
+| Snapshot | Shows |
+|---|---|
+| `playback_main_menu.png` | the Main Menu with the eighth button, Recorded Games |
+| `playback_recorded_games.png` | the list (`RON_RECORD_DIR` with two copies of the example): name, date, map style and size, the nations, duration; Open File..., Back, Watch |
+| `playback_frame0.png` / `playback_frame400.png` / `playback_frame1200.png` | `--playback F --frames 0 / 400 / 1200`: the Mongols' (host) view with the whole map; 0:00, 0:26, 1:20 on the timeline; `in sync` from the first compared turn (67 and 200 boundaries, all 15 parts equal) |
+| `playback_seat2_fog.png` | `--frames 600` then clicks on the bar's `>` and `Fog`: the Greeks' seat (guest), its resources and messages, the camera on its city, its fog on the minimap |
+| `playback_seek_back.png` | frame 900, then a click on the timeline at 20 %: the start state is built again and run to 0:15 (`in sync` again, the HUD clock 0:00:15) |
+| `playback_endgame_view_playback.png` | `RON_GAME_MENU_AFTER=2` after a recorded two-machine game: View Playback enabled (white); with `RON_GAME_MENU_CLICK=2` the click prints `[view playback] PATH` and opens that file |
+
+Checks: `ron-net replay` of the original recording 2026.08.30 21'23'34 still gives 320 fully equal turns with `units` first differing at 1,928; `ronmap --playback` and `ron-net playback` of it print the same first
+out-of-sync frame (1,928, per part as `ron-net replay`); the native recording plays in sync to the end (200 of 200 boundaries); the real-time path (`RON_PB_TICKS=N,SPEED,DT` runs `pbTick` N times) steps 59 frames in 60 display
+frames at 1x, 235 at 4x and 1,078 at Max (60 slices of 12 ms) and the whole recording in 3,000 slices; `ron-check` 0 failures, `ron-ui-check check` 0, `ronmap --ctw-selftest` 75/75, `ron-net selftest` 106/106.
+Not run: the window itself (a recording opened from the list in a real window, a click on Open File..., the timeline drag): every code path under them is the same one the harness drives, only the event delivery differs.
+
+### 18.7 Open
+
+- **Recordings of the original game cannot be watched**: the start state is the original's save (`load_original_save`), which holds no terrain art and no scenario file for a random map (the original regenerates it
+  from the setup in the stream). `ronmap --playback` and `ron-net playback` run and check them; drawing them needs a renderer that builds terrain from the loaded `World` instead of from a scenario.
+- Conquer the World battle recordings (the campaign is part of the start state) are listed as not watchable; a recording that starts from a recovery snapshot plays from the snapshot.
+- The viewer's players' names come from the game's leaders; the original's recordings keep names out of every printout (`ReplayPlayer::name`).
+- A drop package (the clear `P` record) is not executed by the direct player: the lockstep session's drop agreement acts on the game through `Session::apply_drop`, the viewer only reads the packages.
+

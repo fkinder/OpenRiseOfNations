@@ -1,0 +1,2 @@
+re/decomp/names
+__EDARK_ORANGE|__ELIGHT_GREY

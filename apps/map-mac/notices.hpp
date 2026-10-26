@@ -6,6 +6,7 @@
 // install's translated_strings.xml entries (the decompiled call sites address them by offset).
 #pragma once
 
+#include <array>
 #include <functional>
 #include <string>
 #include <unordered_map>
@@ -69,6 +70,8 @@ private:
 	size_t events_seen_ = 0;
 	bool have_prev_ = false;
 	std::unordered_map<int64_t, Obj> prev_;
+	std::array<std::array<int32_t, 6>, 8> prev_buckets_{};  // every leader's stockpile as the last update saw it (the tribute lines of Leader::defeat)
+	bool have_buckets_ = false;
 	int wonder_stop_frame_ = -1;                   // the victory-clock stop sound plays once per pass (frame)
 	std::unordered_map<int64_t, int> last_alert_;  // per city: the frame of its last attack warning (the banner needs 400 quiet frames)
 };

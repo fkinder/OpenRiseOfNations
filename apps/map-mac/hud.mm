@@ -73,6 +73,15 @@ bool Hud::init(const ron::GameFiles& files, const ron::IfaceLayout& layout, std:
 		error = "interface.xml lacks a HUD window";
 		return false;
 	}
+	// icon_texs.xml: the 17 x 17 inline icons of text (#ICONn, 1-based); the wonder clock's line uses #ICON46.
+	try {
+		int n = 0;
+		const ron::XmlElement idoc = ron::parse_xml(files.read_text("Data/icon_texs.xml"));
+		ron::for_each_element(idoc, "IFACETEX", [&](const ron::XmlElement& e) {
+			if (++n == 46) wonder_icon_ = ron::iface_piece(e);
+		});
+	} catch (const std::exception&) {
+	}
 	// options.xml: one OPTION per OptionIndex, with its command-card icon.
 	const ron::XmlElement doc = ron::parse_xml(ron::read_localised(files, "options.xml", uistr::language()));
 	ron::for_each_element(doc, "OPTION", [&](const ron::XmlElement& e) {

@@ -446,10 +446,12 @@ int run_option(Ctx& c, int option, int object, Mods m) {
 			return 1;
 		}
 		case kOptScramble:
-			if (!objs.empty()) issue(c, "scramble", [&] { return c.cm->issue_scramble(*c.game, objs); });
+			if (!objs.empty() && issue(c, "scramble", [&] { return c.cm->issue_scramble(*c.game, objs); })) play(c, "SCRAMBLE_ACK");  // Options::scramble_aircraft
 			return 1;
 		case kOptRecall: case kOptReturn:
-			if (!objs.empty()) issue(c, "recall", [&] { return c.cm->issue_recall(*c.game, objs); });
+			// Options::recall_aircraft: RECALL_AIRCRAFT_ACK for the buildings' recall (the airbase card), RETURN_TO_BASE_ACK for the
+			// planes' own return order.
+			if (!objs.empty() && issue(c, "recall", [&] { return c.cm->issue_recall(*c.game, objs); })) play(c, units.empty() ? "RECALL_AIRCRAFT_ACK" : "RETURN_TO_BASE_ACK");
 			return 1;
 		case kOptRepeat: {
 			// Options::set_air_repeat: buildings take BUILDMASK 0x80, a carrier (units) UNITMASK 0x200000. The sound is chosen from the

@@ -97,6 +97,7 @@
 #include "render/renderstate.hpp"
 #include "render/terrain_mesh.hpp"
 #include "sim/ai.hpp"
+#include "sim/fog.hpp"
 #include "sim/victory.hpp"
 #include "sim/combat.hpp"
 #include "sim/anim_assets.hpp"
@@ -128,9 +129,9 @@
 #include "uix.hpp"
 #include "assets/strings.hpp"
 #include "sim/capture.hpp"
-#include "audio.hpp"
 #include "net/playback.hpp"
 #include "recplay.hpp"
+#include "audio.hpp"
 #include "sim/script_ui.hpp"
 #include "renderer.hpp"
 #include "ui.hpp"
@@ -538,7 +539,6 @@ static bool debug_skip(const char* pass) {
 - (BOOL)mpRunHeadless:(int)frames;
 - (void)mpTypeScript:(const std::vector<std::pair<int, std::string>>&)lines;  // --mp-type: lines typed into the chat box through the key handler
 - (void)mpClose;  // headless: waits for the other machines, then ends the session (closes the recording)
-@end
 // Playback of a recording (recplay.hpp, engine/net/playback.hpp, docs/ui-port.md section 18): a game of this port's recording, driven by its packages.
 + (instancetype)playbackWithDevice:(id<MTLDevice>)device gameDir:(NSString*)dir playback:(std::shared_ptr<ron::net::Playback>)pb error:(NSString* __autoreleasing*)error;
 @property(nonatomic, readonly) BOOL playbackActive;
@@ -548,6 +548,7 @@ static bool debug_skip(const char* pass) {
 - (void)pbSelectSeat:(int)index;
 - (void)pbSelectWho:(int)who;   // the seat of the leader `who`
 - (void)harnessGameMenuChoose:(int)i;   // headless tests: the button i of the game menu / end-game window, as a click would
+@end
 
 // ---- HUD data adapter: the console player's numbers for the resource panel and the top strip, from the production view
 // (sim::leader_view: stockpiles, population in use / cap, cities / limit, age). Income rates and the commerce cap belong
@@ -690,10 +691,10 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	std::shared_ptr<mp::Runtime> _mp;    // a multiplayer game's lockstep session (null in a single-player game)
 	BOOL _mpEnded;
 	int32_t _mpFrame;
-	ron::sim::GameView _prevView, _curView;
 	std::unique_ptr<recplay::Viewer> _pbv;   // playing a recording: its Playback, the viewing seat, the speed, the bar
 	BOOL _pbScrub;                           // the timeline is being dragged
 	int64_t _pbScrubFrame;
+	ron::sim::GameView _prevView, _curView;
 	std::unordered_map<int64_t, size_t> _prevIndex;  // sim_key(who, o) -> index in _prevView.units
 	std::map<std::pair<int, int>, int> _scenarioGraphic;  // (who, o) -> unit graphic from the scenario resolution
 	std::map<int32_t, int> _typeGraphic;                 // sim type -> fallback graphic (units created in game)
@@ -809,6 +810,8 @@ static hud::Resources hud_resources(const ron::sim::Game* g, int who) {
 	std::string _cardMessage;    // IFaceMarket's text over the card (a Market without the right to trade)
 	int _flashMask, _flashTick;  // Console::flash_resource_flags / _stamp (graphic ticks): the rows that turn red
 	int _speed;                  // TurnControl speed: 0 Very Slow .. 4 Hyper Fast (default 2 Normal)
+	BOOL _leaderOptsSent;        // the Options page's LEADER_OPTIONS went out for this game (-issueLeaderOptions:)
+	int _scoreWin;               // the score window's preference: 0 the game decides, 1 hidden, 2 shown (Alt+Shift+0 / Alt+Shift+1)
 	BOOL _progressButtons;       // pref 0x40: one button per production in progress
 	// Formation drag (Console::on_right_up, ui-spec 4.1): a right drag with own units selected moves them to the press point
 	// facing the drag direction in the chosen formation and spacing; a left press cycles the formation, the wheel the spacing.
@@ -1494,6 +1497,61 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 			if (i != me && (_game->leaders[size_t(i)].flags & ron::sim::leaderflag::kActive)) ron::sim::leader_defeat(*_game, i, 0, me, 0);
 		}
 	}
+	// RON_TRIBUTE_AT=N: the ally tribute lines of Leader::defeat. At frame N the viewer allies with the next live leader, who is given a
+	// stockpile and the multiplayer bit (the sim shares a defeated leader's goods among his allies only in a multiplayer game); one frame
+	// later that leader is conquered, so the viewer reads "+N Good received from X!" (the notifier reads the stockpile the frame before).
+	static const int tribute = getenv("RON_TRIBUTE_AT") ? std::atoi(getenv("RON_TRIBUTE_AT")) : -1;
+	if (tribute >= 0 && (_game->frame == tribute || _game->frame == tribute + 1)) {
+		static int victim = -1;
+		if (_game->frame == tribute) {
+			victim = -1;
+			for (int i = 0; i < 8 && victim < 0; i++) {
+				if (i != me && (_game->leaders[size_t(i)].flags & 3u) == 3u) victim = i;
+			}
+			if (victim >= 0) {
+				ron::sim::leader_set_diplo(*_game, me, victim, 2);
+				ron::sim::leader_set_diplo(*_game, victim, me, 2);
+				_game->multiplayer = true;
+				const std::array<int32_t, 6> goods = {400, 250, 120, 0, 90, 60};
+				_game->leaders[size_t(victim)].bucket = goods;
+			}
+		} else if (victim >= 0) {
+			ron::sim::leader_defeat(*_game, victim, 0, me, 0);
+		}
+	}
+	// RON_TERRITORY_AT=N[:M]: from frame N the world's land is cut every frame to what the leader with the biggest territory holds divided by
+	// the goal (the territory goal of the game rules, 30% + 5% per setting), so that leader controls exactly the goal and a rival with less than
+	// the goal / his territory stays below it:
+	// the territory clock of GameDaemon::process_victory starts for real (events, warnings, the end-game window 3600 frames later);
+	// with :M the land is restored at frame M (the clock halts). The map, the units and the clock arithmetic are the simulation's own.
+	static const char* terr = getenv("RON_TERRITORY_AT");
+	if (terr) {
+		static int saved_land = 0, pinned = -1;
+		int at = -1, off = -1;
+		std::sscanf(terr, "%d:%d", &at, &off);
+		if (_game->frame == at) {
+			int bt = 0, second = 0;
+			for (int i = 0; i < 8; i++) {
+				if ((_game->leaders[size_t(i)].flags & 3u) != 3u) continue;
+				const int t = ron::sim::get_team_terr(*_game, i);
+				if (t > bt) second = bt, bt = t, pinned = i;
+				else if (t > second) second = t;
+			}
+			saved_land = _game->world_total_land;
+			std::fprintf(stderr, "frame %d: territory harness: leader %d holds %d, runner-up %d, goal %d%%\n", _game->frame, pinned, bt, second,
+			             30 + 5 * int(_game->info.popwin));
+		}
+		if (pinned >= 0 && _game->frame >= at && (off < 0 || _game->frame < off)) {  // pinned every frame: the AI's growth cannot lose the goal
+			const int bt = ron::sim::get_team_terr(*_game, pinned);
+			if (bt > 0) _game->world_total_land = std::max(1, bt * 100 / (30 + 5 * int(_game->info.popwin)));
+		}
+		if (off >= 0 && _game->frame == off && saved_land > 0) _game->world_total_land = saved_land;
+		static size_t seen_events = 0;  // the clock's events by frame, to pick the frames worth a snapshot
+		for (; seen_events < _game->events.size(); seen_events++) {
+			const ron::sim::GameEvent& e = _game->events[seen_events];
+			if (e.kind >= 20 && e.kind <= 22) std::fprintf(stderr, "frame %d: territory event %d leader %d value %d\n", e.frame, e.kind, e.who, e.value);
+		}
+	}
 	// RON_CAMERA_EVENT="select_object:WHO:O@FRAME" / "hide_score@FRAME": posts the no-op camera ScriptEvent the builtins post
 	// (select_object, ui_hide_score), so the consumer in script_view runs end to end on a scenario that has scripts.
 	static const char* ev = getenv("RON_CAMERA_EVENT");
@@ -1517,6 +1575,10 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 
 - (void)stepSimulation:(int)frames {
 	if (!_game) return;
+	if (_pbv) {  // a recording: its packages decide what runs at each frame
+		[self pbStep:frames];
+		return;
+	}
 	if (_mp) {  // a multiplayer game: the session decides when a frame runs
 		[self mpStep:frames];
 		return;
@@ -1576,10 +1638,6 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 			std::fprintf(stderr, "multiplayer: cannot continue the saved game: %s\n", err.c_str());
 			_mpEnded = YES;
 			return;
-	if (_pbv) {  // a recording: its packages decide what runs at each frame
-		[self pbStep:frames];
-		return;
-	}
 		}
 	}
 	// the camera starts on this player's own seat
@@ -1753,64 +1811,6 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 	_ui.text_centered(f, text, r, 0xFFFFE070u, 0xFF000000u);
 }
 
-// The messages, banners and pings the simulation's frame caused (notices.hpp), for the local seat.
-- (void)notifyFrame {
-	if (!_game || !_sviewOn) return;
-	notices::Env env;
-	env.game = _game.get(), env.view = &_curView, env.me = [self localPlayer];
-	env.type_name = [self](int t) { return [self typeName:t]; };
-	env.nation = [self](int who) {
-		if (!_simRules || who < 0 || who >= int(_game->leaders.size())) return std::string();
-		const int tr = _game->leaders[size_t(who)].tribe;
-		return tr >= 0 && size_t(tr) < _simRules->tribes.size() ? ron::sim::to_utf8(_simRules->tribes[size_t(tr)].name) : std::string();
-	};
-	env.leader = [self, nation = env.nation](int who) {
-		const std::string& n = _game->leaders[size_t(who)].name;
-		return n.empty() ? nation(who) : n;
-	};
-	std::vector<notices::Note> notes;
-	_notifier.update(env, notes);
-	if (notes.empty()) return;
-	const scriptview::Env senv = [self scriptEnv];
-	const scriptview::Callbacks cb = [self scriptCallbacks];
-	for (const notices::Note& n : notes) {
-		if (n.kind == notices::Note::Flash) {  // Console::flash_resource_flags / _stamp: the panel rows turn red for 8 ticks
-			_flashMask = n.goods, _flashTick = int(_timeMs / 66.0);
-			continue;
-		}
-		if (_scriptLog) std::printf("  f%-5d NOTE %s \"%s\"%s\n", _game->frame, n.kind == notices::Note::Notice ? "notice" : "message", n.text.c_str(), n.located ? " (located)" : "");
-		_sview.post(n, senv, cb);
-	}
-}
-
-// GROUP + MOVE_TO from leader `who`'s seat, executed at once (several process_turn calls per frame are allowed; each
-// package is stamped with one seat, so one owner per call).
-- (BOOL)issueMoveWho:(int)who objects:(const std::vector<int32_t>&)objs x:(int32_t)x y:(int32_t)y {
-	if (!_game) return NO;
-	_cm.play = who;
-	_cm.play_who = who;
-	if (!_cm.issue_move_to(*_game, objs, x, y)) return NO;
-	_cm.process_turn(*_game);
-	return YES;
-}
-
-// The ground point under a drawable pixel: invert screenOf on the terrain (a few fixed-point steps for the height).
-- (simd_float2)groundAt:(CGPoint)p {
-	const CGSize size = [self drawSize];
-	const float upp = units_per_pixel(_zoom, float(size.width));
-	const float R = (float(p.x) - float(size.width) / 2) * upp, U = (float(size.height) / 2 - float(p.y)) * upp;
-	float h = 0, x = _lookAt.x, y = _lookAt.y;
-	for (int it = 0; it < 4; it++) {
-		const float diff = R / kRight.x;                          // dx - dy
-		const float sum = (kUp.z * (h - _lookAt.z) - U) / -kUp.x;  // dx + dy
-		x = _lookAt.x + (sum + diff) / 2;
-		y = _lookAt.y + (sum - diff) / 2;
-		h = std::max(0.0f, _terrain.sample_height(std::clamp(x, 0.0f, _mesh.width), std::clamp(y, 0.0f, _mesh.height)));
-	}
-	return simd_make_float2(x, y);
-}
-
-// The object under a drawable point for the air orders: the nearest drawn unit within 30 px, else the building whose footprint
 // ---------------------------------------------------------------- playback of a recording (recplay.hpp, engine/net/playback.hpp)
 
 + (instancetype)playbackWithDevice:(id<MTLDevice>)device gameDir:(NSString*)dir playback:(std::shared_ptr<ron::net::Playback>)pb error:(NSString* __autoreleasing*)error {
@@ -2142,6 +2142,71 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 	return YES;
 }
 
+// The messages, banners and pings the simulation's frame caused (notices.hpp), for the local seat.
+- (void)notifyFrame {
+	if (_game && !_leaderOptsSent) {  // a new game: the Options page's LEADER_OPTIONS, once, while it is still young
+		_leaderOptsSent = YES;
+		const prefs::Prefs& P = prefs::get();  // (loadProfile covers the interactive app; a headless run reads the file here)
+		if (P.has("message_length")) scriptview::set_message_length(P.message_length);
+		if (!_scoreWin && P.has("score_window")) _scoreWin = 1 + P.score_window;
+		if (_game->frame <= 30) [self issueLeaderOptions:P];
+	}
+	if (!_game || !_sviewOn) return;
+	notices::Env env;
+	env.game = _game.get(), env.view = &_curView, env.me = [self localPlayer];
+	env.type_name = [self](int t) { return [self typeName:t]; };
+	env.nation = [self](int who) {
+		if (!_simRules || who < 0 || who >= int(_game->leaders.size())) return std::string();
+		const int tr = _game->leaders[size_t(who)].tribe;
+		return tr >= 0 && size_t(tr) < _simRules->tribes.size() ? ron::sim::to_utf8(_simRules->tribes[size_t(tr)].name) : std::string();
+	};
+	env.leader = [self, nation = env.nation](int who) {
+		const std::string& n = _game->leaders[size_t(who)].name;
+		return n.empty() ? nation(who) : n;
+	};
+	std::vector<notices::Note> notes;
+	_notifier.update(env, notes);
+	if (notes.empty()) return;
+	const scriptview::Env senv = [self scriptEnv];
+	const scriptview::Callbacks cb = [self scriptCallbacks];
+	for (const notices::Note& n : notes) {
+		if (n.kind == notices::Note::Flash) {  // Console::flash_resource_flags / _stamp: the panel rows turn red for 8 ticks
+			_flashMask = n.goods, _flashTick = int(_timeMs / 66.0);
+			continue;
+		}
+		if (_scriptLog) std::printf("  f%-5d NOTE %s \"%s\"%s\n", _game->frame, n.kind == notices::Note::Notice ? "notice" : "message", n.text.c_str(), n.located ? " (located)" : "");
+		_sview.post(n, senv, cb);
+	}
+}
+
+// GROUP + MOVE_TO from leader `who`'s seat, executed at once (several process_turn calls per frame are allowed; each
+// package is stamped with one seat, so one owner per call).
+- (BOOL)issueMoveWho:(int)who objects:(const std::vector<int32_t>&)objs x:(int32_t)x y:(int32_t)y {
+	if (!_game) return NO;
+	_cm.play = who;
+	_cm.play_who = who;
+	if (!_cm.issue_move_to(*_game, objs, x, y)) return NO;
+	_cm.process_turn(*_game);
+	return YES;
+}
+
+// The ground point under a drawable pixel: invert screenOf on the terrain (a few fixed-point steps for the height).
+- (simd_float2)groundAt:(CGPoint)p {
+	const CGSize size = [self drawSize];
+	const float upp = units_per_pixel(_zoom, float(size.width));
+	const float R = (float(p.x) - float(size.width) / 2) * upp, U = (float(size.height) / 2 - float(p.y)) * upp;
+	float h = 0, x = _lookAt.x, y = _lookAt.y;
+	for (int it = 0; it < 4; it++) {
+		const float diff = R / kRight.x;                          // dx - dy
+		const float sum = (kUp.z * (h - _lookAt.z) - U) / -kUp.x;  // dx + dy
+		x = _lookAt.x + (sum + diff) / 2;
+		y = _lookAt.y + (sum - diff) / 2;
+		h = std::max(0.0f, _terrain.sample_height(std::clamp(x, 0.0f, _mesh.width), std::clamp(y, 0.0f, _mesh.height)));
+	}
+	return simd_make_float2(x, y);
+}
+
+// The object under a drawable point for the air orders: the nearest drawn unit within 30 px, else the building whose footprint
 // centre is within 450 world units (as commandAttackAt). Returns false with tw = to = -1 when there is none.
 - (void)objectAtDrawable:(CGPoint)p who:(int&)tw object:(int&)to {
 	tw = to = -1;
@@ -3070,6 +3135,7 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 		[self groupNameKey:event];
 		return;
 	}
+	if (_pbv && [self pbKey:event]) return;
 	if (event.keyCode == 109 && !_inPopup) {  // F10: the game menu
 		[self openGameMenu:1];
 		return;
@@ -3135,7 +3201,6 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 			_selected.clear(), _selectedBuilds.clear();
 			break;
 		case 'h': case 'H': _hudOn = !_hudOn; break;
-	if (_pbv && [self pbKey:event]) return;
 		case 'p': case 'P':
 			if (!(sp && sp->pause_disabled)) [self togglePause];  // pause_disable
 			break;
@@ -3991,6 +4056,9 @@ static double footprintMb() {
 		if (own && active && ron::sim::num_inside(*_game, *b, 1) > 0 && !ron::sim::can_carry_domain(*_game, *b, ron::sim::kDomainAir)) {
 			int gx, gy;
 			if (!free_slot(3, &gx, &gy)) gx = 2, gy = 3;
+			// BACK_TO_WORK (1,3): citizens (50) or militia (66) inside, next to EJECT_ALL (BuildOut::make_options @00629ed0).
+			if (ron::sim::count_inside(*_game, *b, ron::sim::kCountType, ron::sim::ptype::kPeasants) != 0 || ron::sim::count_inside(*_game, *b, ron::sim::kCountType, 66) != 0)
+				opt(hud::kOptBackToWork, 1, 3, true);
 			opt(hud::kOptEjectAll, std::min(gx, 2), 3, true);
 		}
 		{
@@ -4027,10 +4095,22 @@ static double footprintMb() {
 			ms = cl->items[3].data[0];
 		return std::max(1, (ms / 2 + g.world.xs * k) / ms);
 	};
+	// IFaceMainBase::draw_timers (standard victory rules): the wonder clock shows the leader Game::wonder_winning names (the best net
+	// wonder points at or over the goal; allies share the tie), with `wonder_timer` map-scaled frames minus the time since that
+	// leader's stamp, 0 under a World Government, and the net points (LeaderData::get_wonder_net) over the icon.
+	if (g.info.victory == 0) {
+		const int w = ron::sim::wonder_winning(g);
+		if (w >= 0 && w < 8) {
+			const ron::sim::Leader& WL = g.leaders[size_t(w)];
+			int left = map_scaled(constant("wonder_timer"));
+			if (WL.wonderwin_timer) left -= g.frame - WL.wonderwin_stamp;
+			if (left < 0 || ron::sim::has_preq(g, w, ron::sim::ptype::kGlobalGovernmentBonus)) left = 0;
+			out.push_back({0, left, WL.color, ron::sim::get_wonder_net(g, w)});
+		}
+	}
 	for (int i = 0; i < 8; i++) {
 		const ron::sim::Leader& L = g.leaders[size_t(i)];
 		if ((L.flags & 3u) != 3u) continue;
-		if (L.wonderwin_timer) out.push_back({0, map_scaled(constant("wonder_timer")) - (g.frame - L.wonderwin_stamp), L.color, -1});
 		if (L.popwin_timer) out.push_back({3, map_scaled(constant("popwin_timer")) - (g.frame - L.popwin_stamp), L.color, -1});
 		if (L.lost_capital_timer && g.info.elimination == 1)
 			out.push_back({1, ron::sim::game_retake_capital(g, i) - (g.frame - L.lost_capital_stamp), L.color, -1});
@@ -4939,6 +5019,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	// MessageWin, AnimNotice, ScreenArrowSpline, the modal windows (docs/ui-port.md "Script UI").
 	if (_sviewOn) _sview.draw(_ui, [self pres], [self scriptEnv]);
 	[self drawMpStatus];
+	[self drawPlaybackBar];
 	[self drawGroupNameDialog];
 	[self drawGameMenu];
 	_ui.encode(enc);
@@ -5019,7 +5100,6 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		[self say:"Could not load the game"];
 		return NO;
 	}
-	[self drawPlaybackBar];
 }
 
 // Everything the renderer derived from the simulation that a replaced Game (a loaded save, an out-of-sync recovery) invalidates.
@@ -5037,6 +5117,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	_fogUploaded = NO;
 	_gameEventsSeen = _game->events.size();
 	_notifier.reset(*_game);
+	_leaderOptsSent = NO;
 	_terrFrame = -100000;
 	const ron::sim::ScriptPresentation* p = [self pres];
 	_logSeq = p && p->next_seq > 0 ? p->next_seq - 1 : 0;
@@ -5073,6 +5154,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 
 - (std::vector<std::string>)gameMenuItems {
 	if (_gameMenu == 2) return _endgame.items();  // Examine Map, Game Stats, View Playback, Quit (EndGameWin)
+	if (_pbv) return {"Resume Playback", "Restart", "Options", "Return to Main Menu", "Quit"};
 	if (_mp) return {"Resume Game", "Save Game", "Resign", "Options", "Return to Main Menu", "Quit"};  // a multiplayer save is synchronized (no loading mid-game)
 	return {"Resume Game", "Save Game", "Load Game", "Options", "Return to Main Menu", "Quit"};
 }
@@ -5084,6 +5166,13 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	_pressing = _boxing = _hudPress = _rightPress = NO;
 	if (kind == 2 && _game) [self openEndGame];
 	if (kind == 3) [self openOptions];  // harness: RON_GAME_MENU=3 shows the Options page
+}
+
+// The file the game in this window is being recorded into (a multiplayer game; the Recorder flushes every package, so it can be read at once), or nil.
+- (NSString*)recordingPath {
+	if (!_mp || _mp->record_path().empty()) return nil;
+	NSString* path = @(_mp->record_path().c_str());
+	return [[NSFileManager defaultManager] fileExistsAtPath:path] ? path : nil;
 }
 
 // EndGameWin::exec: the window for the decided game. Return answers Quit (EndGameWin::on_key_click), Esc Examine Map.
@@ -5109,6 +5198,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	}
 	_gmHover = 3;
 	_overOffered = YES;
+	_endgame.set_playback(!_pbv && _mp && self.onPlayRecording && [self recordingPath] != nil);   // View Playback: a game that was recorded
 	if (_sviewOn) _sview.clear_notices();
 	if (getenv("RON_ENDGAME_STATS")) _endgame.show_stats(true);  // snapshots: the score table
 }
@@ -5154,7 +5244,6 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	_ui.next_layer();
 	const int tf = _ui.font(24, -1), bf = _ui.font(14, -1);
 	_ui.text_centered(tf, _gameMenu == 2 ? "Game Over" : "Game Menu", {x, x + w, y + pad - 6, y + pad - 6 + titleH}, 0xFFFFFFFF, 0xFF000000);
-	if (_pbv) return {"Resume Playback", "Restart", "Options", "Return to Main Menu", "Quit"};
 	for (size_t i = 0; i < items.size(); i++) {
 		const int by = y + pad + titleH + int(i) * (bh + gap);
 		const ron::IfaceRect r{x + pad, x + pad + bw, by, by + bh};
@@ -5168,13 +5257,6 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		if (p[0].valid()) _ui.expander(p[0], p[1], p[2], r);
 		else _ui.fill(float(r.l), float(r.t), float(r.w()), float(r.h()), rm::argb(255, 70, 70, 70));
 		_ui.next_layer();
-// The file the game in this window is being recorded into (a multiplayer game; the Recorder flushes every package, so it can be read at once), or nil.
-- (NSString*)recordingPath {
-	if (!_mp || _mp->record_path().empty()) return nil;
-	NSString* path = @(_mp->record_path().c_str());
-	return [[NSFileManager defaultManager] fileExistsAtPath:path] ? path : nil;
-}
-
 		_ui.text_centered(bf, items[i], r, 0xFFFFFFFF, 0xFF000000);
 	}
 }
@@ -5198,7 +5280,14 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 			_gmHover = _gmPress = -1;
 			return;
 		}
-	_endgame.set_playback(!_pbv && _mp && self.onPlayRecording && [self recordingPath] != nil);   // View Playback: a game that was recorded
+		if (a == A::Playback) {  // the recording of the game that just ended, from its first frame
+			NSString* path = [self recordingPath];
+			if (path && self.onPlayRecording) {
+				_gameMenu = 0;
+				self.onPlayRecording(path);
+			}
+			return;
+		}
 		if (a != A::Examine && a != A::Quit && a != A::Continue) return;
 		_gameMenu = 0;
 		_lastFrame = 0;
@@ -5219,6 +5308,11 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	}
 	_gameMenu = 0;
 	_lastFrame = 0;  // no catch-up after the pause
+	if (it == "Restart" && _pbv) {
+		[self pbSeek:_pbv->pb->start_frame()];
+		_paused = NO;
+		return;
+	}
 	if (it == "Resign") {
 		if (_mp) _mp->resign();
 		return;
@@ -5277,17 +5371,28 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	}
 }
 
+// LEADER_OPTIONS (OptionsWinGame::do_save -> CommandManager::issue_leader_options): the Auto Citizen stance and delay, the default
+// stance of buildings and the transport / deploy option flags go to the simulation as a command, so a recording and the other
+// machines follow. Only what differs from the leader's current options is sent.
+- (void)issueLeaderOptions:(const prefs::Prefs&)p {
+	const int me = [self localPlayer];
+	if (!_game || me < 0 || me >= int(_game->leaders.size())) return;
+	const ron::sim::Leader& L = _game->leaders[size_t(me)];
+	const int32_t peasants = p.has("auto_citizen") ? p.auto_citizen : L.opt_peasants;
+	const int32_t wait = p.has("auto_citizen_delay") ? p.auto_citizen_delay : L.opt_peasants_wait;
+	const int32_t buildings = p.has("building_stance") ? p.building_stance : L.opt_buildings;
+	uint32_t flags = L.options_flags;
+	if (p.has("auto_transport")) flags = (flags & ~2u) | (p.auto_transport ? 2u : 0u);  // bit 1: the transport option
+	if (p.has("auto_deploy")) flags = (flags & ~8u) | (p.auto_deploy ? 8u : 0u);         // bit 3: packers (siege units) deploy when idle
+	if (peasants == L.opt_peasants && wait == L.opt_peasants_wait && buildings == L.opt_buildings && flags == L.options_flags) return;
+	if (getenv("RON_UIX_TRACE")) std::fprintf(stderr, "[opts] leader options peasants=%d wait=%d buildings=%d flags=0x%x\n", peasants, wait, buildings, flags);
+	[self issueAs:me block:^bool { return _cm.issue_leader_options(peasants, wait, buildings, flags); }];
+	if (getenv("RON_UIX_TRACE")) std::fprintf(stderr, "[opts] f%d now peasants=%d wait=%d buildings=%d flags=0x%x\n", _game->frame, L.opt_peasants, L.opt_peasants_wait, L.opt_buildings, L.options_flags);
+}
+
 // What OK hands to the window: the preferences that act on a running game (the rest are read when a game or the menu starts).
 - (void)applyPrefs:(const prefs::Prefs&)p {
 	if (p.has("game_speed") && p.game_speed != _speed && !(p.game_speed >= 3 && _speed >= 3)) [self stepGameSpeedTo:p.game_speed];
-		if (a == A::Playback) {  // the recording of the game that just ended, from its first frame
-			NSString* path = [self recordingPath];
-			if (path && self.onPlayRecording) {
-				_gameMenu = 0;
-				self.onPlayRecording(path);
-			}
-			return;
-		}
 	if (p.has("help_detail")) {
 		_helpOn = p.help_detail > 0;
 		if (p.help_detail > 0) _verbosity = std::clamp(p.help_detail, 1, 3);
@@ -5297,6 +5402,8 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		[[NSUserDefaults standardUserDefaults] setBool:p.advanced_menu forKey:@"AdvancedMenu"];
 	}
 	if (p.has("progress_bars")) [self setProgressButtons:p.progress_bars];
+	if (p.has("message_length")) scriptview::set_message_length(p.message_length);
+	[self issueLeaderOptions:p];
 	if (p.has("prefer_military")) _hud.set_prefer_military(p.prefer_military);
 	if (p.has("streamlined") && _hud.opened() == p.streamlined) _hud.set_opened(!p.streamlined);
 	if (_audio && (p.has("fx_volume") || p.has("music_volume") || p.has("music_in_game"))) {
@@ -5308,11 +5415,6 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 }
 
 // Harness (RON_CARRIER_TEST=WHO:O, docs/ui-port.md 14.1): the unit becomes a Carrier (type 351) so the card's REPEAT can be looked at.
-	if (it == "Restart" && _pbv) {
-		[self pbSeek:_pbv->pb->start_frame()];
-		_paused = NO;
-		return;
-	}
 - (void)harnessCarrier:(const char*)spec {
 	int who = 0, o = 0;
 	std::sscanf(spec, "%d:%d", &who, &o);
@@ -5335,6 +5437,12 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		p.advanced_menu = me->_hud.advanced();
 		p.progress_bars = me->_progressButtons;
 		p.prefer_military = me->_hud.prefer_military();
+		if (me->_game && [me localPlayer] >= 0 && [me localPlayer] < int(me->_game->leaders.size())) {  // the leader's own options win
+			const ron::sim::Leader& L = me->_game->leaders[size_t([me localPlayer])];
+			p.auto_citizen = std::clamp(int(L.opt_peasants), 0, 3), p.auto_citizen_delay = std::clamp(int(L.opt_peasants_wait), 0, 5);
+			p.building_stance = std::clamp(int(L.opt_buildings), 0, 5);
+			p.auto_transport = (L.options_flags & 2u) != 0, p.auto_deploy = (L.options_flags & 8u) != 0;
+		}
 		p.streamlined = !me->_hud.opened();
 		if (NSWindow* w = me.view.window) p.fullscreen = (w.styleMask & NSWindowStyleMaskFullScreen) != 0;
 	};
@@ -5546,6 +5654,13 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 			if (!objs.empty()) [self playGlobal:"EJECT_ACK"];  // Options::do_eject_all
 			break;
 		}
+		case hud::kOptBackToWork: {
+			// Options::do_back_to_work: EJECTALL with back_to_work set (the citizens inside resume their orders), S_BACK_TO_WORK_ACK.
+			const std::vector<int32_t> objs = [self ownSelectedBuilds];
+			[self issueAs:me block:^bool { return _cm.issue_eject_all(*_game, objs, true); }];
+			if (!objs.empty()) [self playGlobal:"BACK_TO_WORK_ACK"];
+			break;
+		}
 		case hud::kOptTrain: case hud::kOptResearch: {
 			// Options::exec: QUEUE_UP (Shift x5 on TRAIN).
 			const std::vector<int32_t> objs = [self ownSelectedBuilds];
@@ -5637,6 +5752,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	const BOOL shift = (m & NSEventModifierFlagShift) != 0;
 	auto own_units = [&] { return !_selected.empty() && _selected.front().first == me; };
 	auto own_builds = [&] { return !_selectedBuilds.empty() && _selectedBuilds.front().first == me; };
+	if (_pbv && (o == "OPTION_SLOWER" || o == "OPTION_FASTER")) {  // the viewer's own speeds
+		[self pbSpeedStep:o == "OPTION_FASTER" ? 1 : -1];
+		return 1;
+	}
 	if (_mp && (o == "OPTION_SLOWER" || o == "OPTION_FASTER")) {  // SPEED_UP / SPEED_DOWN through the session: every machine changes together
 		_mp->speed_step(o == "OPTION_FASTER" ? 1 : -1);
 		return 1;
@@ -5684,8 +5803,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	if (o == "OPTION_TOGGLE_IFACE_INFRA") return _hud.toggle_panel(2), 1;
 	if (o == "OPTION_TOGGLE_HELP") {  // Help Text Detail: LOW / MEDIUM / HIGH
 		_verbosity = param >= 1 && param <= 3 ? param : _verbosity % 3 + 1;
-		static const char* names[4] = {"", "Low", "Medium", "High"};
-		[self say:std::string("Help text detail: ") + names[_verbosity]];
+		// Options::exec 0x7e: "Help Text Detail: " (#3006) + LOW / MEDIUM / HIGH (#2807..#2809), S_PREF_CHANGE.
+		static const char* names[4] = {"", "LOW", "MEDIUM", "HIGH"};
+		[self say:[self locString:3006 fallback:"Help Text Detail: "].append([self locString:2806 + _verbosity fallback:names[_verbosity]])];
+		[self playGlobal:"PREF_CHANGE"];
 		return 1;
 	}
 	if (o == "OPTION_NEXT_MESSAGE" || o == "OPTION_PREV_MESSAGE") {
@@ -5707,6 +5828,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	}
 	if (o == "OPTION_EJECT_ALL") {  // J: the selected buildings (or carriers) let their garrison out
 		if (own_builds()) [self runOption:hud::kOptEjectAll object:-1 modifiers:m];
+		return 1;
+	}
+	if (o == "OPTION_BACK_TO_WORK") {  // Shift+J: the citizens inside the selected buildings go back to work
+		if (own_builds()) [self runOption:hud::kOptBackToWork object:-1 modifiers:m];
 		return 1;
 	}
 	if (o == "OPTION_DISBAND") {
@@ -5752,10 +5877,6 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	// The cycle keys: OPTION_CYCLE_BUILDING/type (zoom), OPTION_NOZOOM_BUILDING, OPTION_ALL_BUILDING and the unit kinds.
 	struct Cyc {
 		const char* name;
-	if (_pbv && (o == "OPTION_SLOWER" || o == "OPTION_FASTER")) {  // the viewer's own speeds
-		[self pbSpeedStep:o == "OPTION_FASTER" ? 1 : -1];
-		return 1;
-	}
 		const char* what;
 		BOOL zoom, all, building;
 	};
@@ -5780,10 +5901,23 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		if (!_gameMenu && !_inPopup) [self openGameMenu:3];
 		return 1;
 	}
+	if (o == "OPTION_STAT_NORMAL" || o == "OPTION_STAT_OFF") {  // Options::exec 0x87 / 0x90: the score window (prefs bit 4, stat_mode 0)
+		const bool on = o == "OPTION_STAT_NORMAL";
+		_scoreWin = on ? 2 : 1;
+		if (on) _sview.show_score();
+		prefs::Prefs& P = prefs::get();
+		P.score_window = on ? 1 : 0, P.present.insert("score_window");
+		prefs::save();
+		[self playGlobal:"PREF_CHANGE"];
+		return 1;
+	}
 	if (o == "OPTION_TOGGLE_ADVANCED") {  // the bar's Advanced Options button (pref 0x2: the card's stance / formation / patrol rows)
 		_hud.set_advanced(!_hud.advanced());
 		[[NSUserDefaults standardUserDefaults] setBool:_hud.advanced() forKey:@"AdvancedMenu"];
-		[self say:_hud.advanced() ? "Advanced orders on" : "Advanced orders off"];
+		// Options::do_toggle (pref 0x2): "Advanced Options" (#3010) + ": " (#2806) + ON / OFF (#2782 / #2780), S_PREF_CHANGE.
+		[self say:[self locString:3010 fallback:"Advanced Options"] + [self locString:2806 fallback:": "] +
+		              [self locString:_hud.advanced() ? 2782 : 2780 fallback:_hud.advanced() ? "ON" : "OFF"]];
+		[self playGlobal:"PREF_CHANGE"];
 		return 1;
 	}
 	{
@@ -6165,6 +6299,7 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 		return;
 	}
 	if (_gnameSlot >= 0) return;  // the group name dialog: keys only
+	if (_pbv && !right && [self pbBarClick:p]) return;
 	if (_sviewOn && [self modalMouse:p up:NO]) return;
 	if ([self hudVisible] && [self groupPanelClick:p right:right rename:(m & NSEventModifierFlagShift) != 0]) return;
 	if ([self hudVisible] && _hud.captures(int(p.x), int(p.y))) {
@@ -6190,6 +6325,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 
 - (void)uiMouseDragged:(CGPoint)p right:(BOOL)right delta:(CGPoint)d {
 	_mouse = p;
+	if (_pbScrub) {
+		[self pbBarDrag:p];
+		return;
+	}
 	if (_gameMenu == 3 && _optPage) {
 		_optPage->mouse_drag(int(p.x), int(p.y));
 		return;
@@ -6224,6 +6363,10 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 
 - (void)uiMouseUp:(CGPoint)p right:(BOOL)right modifiers:(NSEventModifierFlags)m {
 	_mouse = p;
+	if (_pbScrub) {
+		[self pbBarRelease:p];
+		return;
+	}
 	if (_gameMenu == 3 && _optPage) {
 		if (!right) _optPage->mouse_up(int(p.x), int(p.y));
 		return;
@@ -6299,7 +6442,6 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	if (_placeType >= 0 && !([self hudVisible] && _hud.captures(int(p.x), int(p.y)))) {
 		const simd_float2 g = [self groundAt:[self toDrawable:p]];
 		[self previewPlacementAtWorldX:g.x y:g.y];
-	if (_pbv && !right && [self pbBarClick:p]) return;
 	}
 }
 
@@ -6325,10 +6467,6 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 - (void)uiScrollWheel:(NSEvent*)e at:(CGPoint)p {
 	if (_gameMenu == 3 && _optPage) {
 		_optPage->wheel(double(e.scrollingDeltaY), int(p.x), int(p.y));
-	if (_pbScrub) {
-		[self pbBarDrag:p];
-		return;
-	}
 		return;
 	}
 	if (_gameMenu) return;
@@ -6363,10 +6501,6 @@ static std::pair<const char*, const char*> option_help_key(int option) {
 	const NSPoint wp = [self.view convertPoint:[win mouseLocationOutsideOfEventStream] fromView:nil];
 	const NSRect b = self.view.bounds;
 	if (!NSPointInRect(wp, b)) return;
-	if (_pbScrub) {
-		[self pbBarRelease:p];
-		return;
-	}
 	const float x = float(wp.x), y = float(b.size.height - wp.y), W = float(b.size.width), H = float(b.size.height);
 	static const float speeds[7] = {48, 32, 24, 16, 12, 9, 8};
 	const float option = prefs::get().has("scroll_speed") ? prefs::scroll_factor(prefs::get().scroll_speed) : 1.0f;  // speed_option of the Options page
@@ -6850,6 +6984,10 @@ static int group_key_order(int i) { return (i + 1) % kGroupKeys; }  // panel / f
 		_ui.begin(_uiW, _uiH, 1.0f);
 		[self drawGameMenu];
 	}
+	if (_pbv && _uiReady && !_pbv->laid_out()) {  // no frame has been drawn: lay the playback bar out for its hit tests
+		_ui.begin(_uiW, _uiH, 1.0f);
+		[self drawPlaybackBar];
+	}
 	if (kind == "move") [self uiMouseMoved:p];
 	else if (kind == "down") [self uiMouseDown:p right:NO modifiers:0 clicks:1];
 	else if (kind == "rdown") [self uiMouseDown:p right:YES modifiers:0 clicks:1];
@@ -6924,6 +7062,8 @@ static int group_key_order(int i) { return (i + 1) % kGroupKeys; }  // panel / f
 		if (P.has("progress_bars")) [self setProgressButtons:P.progress_bars];
 		if (P.has("prefer_military")) _hud.set_prefer_military(P.prefer_military);
 		if (P.has("streamlined")) _hud.set_opened(!P.streamlined);
+		if (P.has("message_length")) scriptview::set_message_length(P.message_length);
+		_scoreWin = P.has("score_window") ? 1 + P.score_window : 0;
 	}
 	_profile[0] = _hud.panel_flags(), _profile[1] = _hud.minilib_open(), _profile[2] = _verbosity, _profile[3] = _progressButtons, _profile[4] = _speed;
 }
@@ -6984,10 +7124,6 @@ static int group_key_order(int i) { return (i + 1) % kGroupKeys; }  // panel / f
 	}
 }
 
-	if (_pbv && _uiReady && !_pbv->laid_out()) {  // no frame has been drawn: lay the playback bar out for its hit tests
-		_ui.begin(_uiW, _uiH, 1.0f);
-		[self drawPlaybackBar];
-	}
 // AppKit key codes -> Windows virtual keys for Game::keystate (key_down reads VkKeyScan of a character).
 static int vk_of(NSEvent* e) {
 	switch (e.keyCode) {
@@ -7101,7 +7237,7 @@ static int vk_of(NSEvent* e) {
 	env.game = _game.get();
 	env.hud = _hudOn ? &_hud : nullptr;
 	env.hud_visible = [self hudVisible];
-	env.score_window = _ctwBuild || _mp || getenv("RON_SCORE_WIN") != nullptr;  // StatWin (docs/ui-port.md section 17.4)
+	env.score_window = _scoreWin ? _scoreWin == 2 : (_ctwBuild || _mp || getenv("RON_SCORE_WIN") != nullptr);  // StatWin (docs/ui-port.md section 17.4)
 	env.game_over_line = _gameMenu != 2;
 	__weak MapRenderer* weakSelf = self;
 	env.project = [weakSelf](float wx, float wy, float& x, float& y) {
@@ -7807,6 +7943,11 @@ static int vk_of(NSEvent* e) {
 			else [weakSelf showMenu:nil];
 		});
 	};
+	r.onPlayRecording = ^(NSString* path) {   // View Playback of the end-game window
+		dispatch_async(dispatch_get_main_queue(), ^{
+			[weakSelf playRecordingAt:path inGame:YES];
+		});
+	};
 	[r updateTitle];
 	[r startInteractive];
 	[self.window makeFirstResponder:self.view];
@@ -7855,6 +7996,49 @@ static int vk_of(NSEvent* e) {
 		self.menu = nil;
 		[self attachGame:r];
 	});
+}
+
+// Recorded Games (recplay.hpp): the recording at `path` from its first frame, in the game window. A failure from the menu shows on the menu; from the
+// end-game window of a game that was just recorded (`inGame`) it is an alert and the game stays.
+- (void)frontEndPlayRecording:(NSString*)path {
+	[self.menu setBusy:@"Loading the recording…"];
+	[self.view draw];
+	dispatch_async(dispatch_get_main_queue(), ^{
+		[self playRecordingAt:path inGame:NO];
+	});
+}
+
+- (void)playRecordingAt:(NSString*)path inGame:(BOOL)inGame {
+	std::string perr;
+	std::shared_ptr<ron::net::Playback> pb(ron::net::Playback::open(path.UTF8String, self.gameDir.UTF8String, perr).release());
+	NSString* err = nil;
+	MapRenderer* r = nil;
+	if (!pb) err = @(perr.c_str());
+	else r = [MapRenderer playbackWithDevice:self.device gameDir:self.gameDir playback:pb error:&err];
+	if (!r) {
+		NSString* text = [NSString stringWithFormat:@"Could not play the recording: %@", err ?: @"unknown error"];
+		if (inGame) {
+			[self alert:@"Recorded game" text:text];
+		} else {
+			[self.menu setBusy:nil];
+			[self.menu showError:text];
+		}
+		return;
+	}
+	const CGSize ds = self.view.drawableSize;
+	const float scale = float(self.window.backingScaleFactor > 0 ? self.window.backingScaleFactor : 1);
+	[r setUiWidth:int(ds.width) height:int(ds.height) scale:scale];
+	[self.menu stopAudio];
+	self.view.frontEnd = nil;
+	self.menu = nil;
+	[self attachGame:r];
+	__weak MapAppDelegate* weakSelf = self;
+	r.onExit = ^(BOOL quit) {   // back to the list of recordings
+		dispatch_async(dispatch_get_main_queue(), ^{
+			if (quit) [NSApp terminate:nil];
+			else [weakSelf showMenu:@"recorded"];
+		});
+	};
 }
 
 // A multiplayer game from the lobby (lobby.h): the same map on every machine (the host's seed), played through the lockstep session.
@@ -7943,11 +8127,6 @@ static int vk_of(NSEvent* e) {
 			r = [MapRenderer ctwBattleWithDevice:self.device gameDir:self.gameDir build:build error:&err];
 		}
 		if (!r) {
-	r.onPlayRecording = ^(NSString* path) {   // View Playback of the end-game window
-		dispatch_async(dispatch_get_main_queue(), ^{
-			[weakSelf playRecordingAt:path inGame:YES];
-		});
-	};
 			[self.menu setBusy:nil];
 			[self.menu showError:[NSString stringWithFormat:@"Could not prepare the battle: %@", err ?: @"unknown error"]];
 			[self.menu showScreen:@"multiplayer"];
@@ -7998,49 +8177,6 @@ static int vk_of(NSEvent* e) {
 
 // ---- Conquer the World (ctw_ui.h): the campaign's own battles run in the game window like any other game; its end brings
 // the front end back to the strategic map with the outcome applied.
-// Recorded Games (recplay.hpp): the recording at `path` from its first frame, in the game window. A failure from the menu shows on the menu; from the
-// end-game window of a game that was just recorded (`inGame`) it is an alert and the game stays.
-- (void)frontEndPlayRecording:(NSString*)path {
-	[self.menu setBusy:@"Loading the recording…"];
-	[self.view draw];
-	dispatch_async(dispatch_get_main_queue(), ^{
-		[self playRecordingAt:path inGame:NO];
-	});
-}
-
-- (void)playRecordingAt:(NSString*)path inGame:(BOOL)inGame {
-	std::string perr;
-	std::shared_ptr<ron::net::Playback> pb(ron::net::Playback::open(path.UTF8String, self.gameDir.UTF8String, perr).release());
-	NSString* err = nil;
-	MapRenderer* r = nil;
-	if (!pb) err = @(perr.c_str());
-	else r = [MapRenderer playbackWithDevice:self.device gameDir:self.gameDir playback:pb error:&err];
-	if (!r) {
-		NSString* text = [NSString stringWithFormat:@"Could not play the recording: %@", err ?: @"unknown error"];
-		if (inGame) {
-			[self alert:@"Recorded game" text:text];
-		} else {
-			[self.menu setBusy:nil];
-			[self.menu showError:text];
-		}
-		return;
-	}
-	const CGSize ds = self.view.drawableSize;
-	const float scale = float(self.window.backingScaleFactor > 0 ? self.window.backingScaleFactor : 1);
-	[r setUiWidth:int(ds.width) height:int(ds.height) scale:scale];
-	[self.menu stopAudio];
-	self.view.frontEnd = nil;
-	self.menu = nil;
-	[self attachGame:r];
-	__weak MapAppDelegate* weakSelf = self;
-	r.onExit = ^(BOOL quit) {   // back to the list of recordings
-		dispatch_async(dispatch_get_main_queue(), ^{
-			if (quit) [NSApp terminate:nil];
-			else [weakSelf showMenu:@"recorded"];
-		});
-	};
-}
-
 - (std::shared_ptr<ctwui::Session>)frontEndCtwSession {
 	return _ctwSession;
 }
@@ -8249,6 +8385,10 @@ int main(int argc, const char* argv[]) {
 		bool census = false;
 		int mpHostPort = 0, mpHumans = 2, mpDiverge = -1;  // --host PORT / --join HOST:PORT: one machine of a lockstep game (lobby.h), headless
 		std::string mpJoin, mpRecord, mpLoad, mpSave;
+		int pb_seat = -1;      // --pb-seat WHO: the leader whose seat the playback shows (default: the first human seat); --pb-fog: with that seat's fog (default: the whole map)
+		bool pb_fog = false;
+		NSString* playback_path = nil;   // --playback FILE: a recording of this port, played by its packages (docs/ui-port.md section 18)
+		bool frames_given = false;
 		std::vector<std::pair<std::string, uint32_t>> mpActs;  // --mp-act what@turn,...
 		bool mpBot = false, mpPublic = false;                      // --public: the host prints how players outside the LAN can reach it
 		std::vector<std::pair<int, std::string>> mpTypes;            // --mp-type "TEXT@FRAME": typed into the chat box through the key handler
@@ -8298,6 +8438,12 @@ int main(int argc, const char* argv[]) {
 				std::sscanf(argv[++i], "%f,%f", &atX, &atY);
 			} else if (a == "--snapshot" && more) {
 				snapshot = @(argv[++i]);
+			} else if (a == "--pb-seat" && more) {
+				pb_seat = std::atoi(argv[++i]);
+			} else if (a == "--pb-fog") {
+				pb_fog = true;
+			} else if (a == "--playback" && more) {
+				playback_path = @(argv[++i]);
 			} else if (a == "--load-game" && more) {
 				load_game = @(argv[++i]);
 			} else if (a == "--save-game" && more) {
@@ -8385,10 +8531,6 @@ int main(int argc, const char* argv[]) {
 				simulate = false;
 			} else if (a == "--seed" && more) {
 				seed = uint32_t(std::strtoul(argv[++i], nullptr, 0));
-		int pb_seat = -1;      // --pb-seat WHO: the leader whose seat the playback shows (default: the first human seat); --pb-fog: with that seat's fog (default: the whole map)
-		bool pb_fog = false;
-		NSString* playback_path = nil;   // --playback FILE: a recording of this port, played by its packages (docs/ui-port.md section 18)
-		bool frames_given = false;
 			} else if (a == "--perf" && more) {
 				perf_frames = std::atoi(argv[++i]);  // N more headless frames, timed: simulation step and rendered frame (after --frames)
 			} else if (a == "--long-run" && more) {
@@ -8396,6 +8538,7 @@ int main(int argc, const char* argv[]) {
 				long_run = std::atoi(v.c_str());
 				if (v.find(',') != std::string::npos) long_run_prefix = [NSString stringWithUTF8String:v.c_str() + v.find(',') + 1];
 			} else if (a == "--frames" && more) {
+				frames_given = true;
 				sim_frames = std::atoi(argv[++i]);
 			} else if (a == "--move" && more) {
 				// WHO:o1,o2,...@X,Y[@FRAME]
@@ -8438,12 +8581,6 @@ int main(int argc, const char* argv[]) {
 			} else if (a == "--ui-scale" && more) {
 				ui_scale = float(std::atof(argv[++i]));
 			} else if ((a == "--select" || a == "--select-build") && more && std::strchr(argv[i + 1], '@')) {
-			} else if (a == "--pb-seat" && more) {
-				pb_seat = std::atoi(argv[++i]);
-			} else if (a == "--pb-fog") {
-				pb_fog = true;
-			} else if (a == "--playback" && more) {
-				playback_path = @(argv[++i]);
 				// WHO:o1,o2,...@FRAME: a selection made at FRAME (the scripts see it from then on)
 				const std::string spec = argv[++i];
 				TimedSelect t;
@@ -8538,7 +8675,6 @@ int main(int argc, const char* argv[]) {
 			} else if (a == "--ctw-selftest") {
 				ctwSelftest = true;
 			} else if (a == "--ctw-sim" && more) {
-				frames_given = true;
 				ctwSim = true;
 				ctwCampaign = @(argv[++i]);
 			} else if (a == "--ctw-saveload" && more) {
@@ -9032,6 +9168,8 @@ int main(int argc, const char* argv[]) {
 				for (const auto& act : mpActs) rt->add_act(act.first, act.second);
 				[r attachMultiplayer:rt loaded:mpLoaded];
 			}
+		} else if (playback) {
+			r = [MapRenderer playbackWithDevice:device gameDir:gameDir playback:playback error:&error];
 		} else {
 			r = random_spec ? [MapRenderer randomGameWithDevice:device gameDir:gameDir setup:nullptr spec:random_spec error:&error]
 			                : [[MapRenderer alloc] initWithDevice:device gameDir:gameDir scenario:scenario simulate:simulate seed:seed error:&error];
@@ -9070,11 +9208,27 @@ int main(int argc, const char* argv[]) {
 			std::fprintf(stderr, "--load-game failed\n");
 			return 1;
 		}
+		if (r.playbackActive && (frames_given || snapshot)) {  // headless: the recording runs to the frame asked for (default: its end), then the report
+			r.onPlayRecording = ^(NSString* path) { std::printf("[view playback] %s\n", path.UTF8String); };
+			if (pb_seat >= 0) [r pbSelectWho:pb_seat];
+			r.fogOn = pb_fog;
+			[r pbRunHeadless:frames_given ? sim_frames : -1];
+			if (!snapshot) {
+				std::fflush(stdout);
+				return 0;
+			}
+			sim_frames = 0;
+		}
 		if (r.multiplayer && !mpTypes.empty()) [r mpTypeScript:mpTypes];
 		if (r.multiplayer && ![r mpRunHeadless:sim_frames]) {
 			std::fprintf(stderr, "the multiplayer game did not run to frame %d\n", sim_frames);
 			[r mpClose];
 			return 3;
+		}
+		if (r.multiplayer) {   // tests: the end-game window after the run (RON_GAME_MENU_AFTER=2), and a click on one of its buttons (RON_GAME_MENU_CLICK=2: View Playback)
+			r.onPlayRecording = ^(NSString* path) { std::printf("[view playback] %s\n", path.UTF8String); };
+			if (const char* t = getenv("RON_GAME_MENU_AFTER")) [r openGameMenu:std::atoi(t)];
+			if (const char* c = getenv("RON_GAME_MENU_CLICK")) [r harnessGameMenuChoose:std::atoi(c)];
 		}
 		if (ctwMpSess && ctwMpRoom) {
 			// the battle is decided (or adjudicated by the units left): the host's outcome moves the host's campaign, the guests copy the result
@@ -9168,8 +9322,6 @@ int main(int argc, const char* argv[]) {
 				else if (opt == "--recall-group") [r recallGroup:std::atoi(v.c_str())];
 				else if (![r regroupGroup:std::atoi(v.c_str())]) std::fprintf(stderr, "--regroup %s issued nothing\n", v.c_str());
 			}
-		} else if (playback) {
-			r = [MapRenderer playbackWithDevice:device gameDir:gameDir playback:playback error:&error];
 			if (f < sim_frames) [r stepSimulation:1];
 		}
 		if (ctwSess) {
@@ -9205,19 +9357,3 @@ int main(int argc, const char* argv[]) {
 	}
 	return 0;
 }
-		if (r.playbackActive && (frames_given || snapshot)) {  // headless: the recording runs to the frame asked for (default: its end), then the report
-			r.onPlayRecording = ^(NSString* path) { std::printf("[view playback] %s\n", path.UTF8String); };
-			if (pb_seat >= 0) [r pbSelectWho:pb_seat];
-			r.fogOn = pb_fog;
-			[r pbRunHeadless:frames_given ? sim_frames : -1];
-			if (!snapshot) {
-				std::fflush(stdout);
-				return 0;
-			}
-			sim_frames = 0;
-		}
-		if (r.multiplayer) {   // tests: the end-game window after the run (RON_GAME_MENU_AFTER=2), and a click on one of its buttons (RON_GAME_MENU_CLICK=2: View Playback)
-			r.onPlayRecording = ^(NSString* path) { std::printf("[view playback] %s\n", path.UTF8String); };
-			if (const char* t = getenv("RON_GAME_MENU_AFTER")) [r openGameMenu:std::atoi(t)];
-			if (const char* c = getenv("RON_GAME_MENU_CLICK")) [r harnessGameMenuChoose:std::atoi(c)];
-		}

@@ -421,6 +421,7 @@ private:
 	bool infinite_hit(int x, int y, const State& s) const;  // the selection panel's INFINITE toggle (OPTION_INFINITE)
 
 	const ron::IfaceLayout* layout_ = nullptr;
+	ron::IfacePiece wonder_icon_;  // icon_texs.xml entry 46 ("wonder", the #ICON46 of the wonder clock's line)
 	const ron::XmlElement *base_el_ = nullptr, *res_el_ = nullptr, *sel_el_ = nullptr, *opt_el_ = nullptr, *mini_el_ = nullptr,
 	                      *rm_el_ = nullptr, *btn_el_ = nullptr;
 	int chat_mode_ = -1;      // the chat line: -1 closed

@@ -7,6 +7,7 @@
 #include <cmath>
 
 #include "sim/ai.hpp"
+#include "sim/economy.hpp"
 #include "sim/production.hpp"
 #include "sim/victory.hpp"
 
@@ -90,6 +91,7 @@ std::string Notifier::loc(int index, const char* expect, const char* fallback) c
 void Notifier::reset(const ron::sim::Game& g) {
 	events_seen_ = g.events.size();
 	have_prev_ = false;
+	have_buckets_ = false;
 	prev_.clear();
 	last_alert_.clear();
 }
@@ -100,6 +102,14 @@ void Notifier::update(const Env& env, std::vector<Note>& out) {
 	const int me = env.me;
 	auto nation = [&](int who) { return env.leader ? env.leader(who) : env.nation ? env.nation(who) : std::string(); };
 	auto type_name = [&](int t) { return env.type_name ? env.type_name(t) : std::string(); };
+	// LeaderData::say_full_name @6ebe90: the player's name, " (" (#2198), the tribe's name, ")" (#2199). Machine leaders without a
+	// player name of their own show just the nation.
+	auto full_name = [&](int who) {
+		const std::string nat = env.nation ? env.nation(who) : std::string();
+		const std::string ldr = env.leader ? env.leader(who) : nat;
+		if (ldr.empty() || ldr == nat) return nat.empty() ? ldr : nat;
+		return ldr + loc(2198, " (", " (") + nat + loc(2199, ")", ")");
+	};
 	auto find_build = [&](int who, int o) -> const BuildView* {
 		for (const BuildView& b : env.view->builds) {
 			if (b.who == who && b.o == o) return &b;
@@ -229,7 +239,7 @@ void Notifier::update(const Env& env, std::vector<Note>& out) {
 			}
 		} else if (e.kind == 9 && e.frame >= 1 && e.other != 0 && e.who == me) {  // tech researched
 			Note n;
-			n.text = loc_or(2298, "researched", "$BOZOTHECLOWN0 has researched $TECHNAME1", {nation(e.who), type_name(e.value)});
+			n.text = loc_or(2298, "researched", "$BOZOTHECLOWN0 has researched $TECHNAME1", {full_name(e.who), type_name(e.value)});
 			out.push_back(n);
 		} else if (e.kind == 10 && e.frame >= 1) {  // age advanced: who = the leader, value = the new age count
 			if (e.who == me && e.value >= 1 && e.value <= 7) {
@@ -248,11 +258,11 @@ void Notifier::update(const Env& env, std::vector<Note>& out) {
 			n.argb = kWhite, n.located = true, n.x = float(e.x), n.y = float(e.y), n.ping = 2;
 			const std::string name = type_name(e.value);
 			if (e.kind == 11) {
-				n.text = loc_or(96, "started a wonder", "$KINGTUT0 has started a wonder: $WONDERNAME1!", {nation(e.who), name});
+				n.text = loc_or(96, "started a wonder", "$KINGTUT0 has started a wonder: $WONDERNAME1!", {full_name(e.who), name});
 				out.push_back(n);
 			} else {
 				n.text = e.who == me ? loc_or(107, "completed", "$WONDERNAME0 completed!", {name})
-				                     : loc_or(109, "completed a wonder", "$PRESIDENTCLINTON0 has completed a wonder: $WONDERNAME1!", {nation(e.who), name});
+				                     : loc_or(109, "completed a wonder", "$PRESIDENTCLINTON0 has completed a wonder: $WONDERNAME1!", {full_name(e.who), name});
 				out.push_back(n);
 				Note b;
 				b.kind = Note::Notice, b.image = "wonder_notice", b.text = n.text;
@@ -270,6 +280,22 @@ void Notifier::update(const Env& env, std::vector<Note>& out) {
 			const std::string na = nation(e.who), nb = nation(e.other);
 			Note n;
 			n.argb = kWhite;
+			if (e.who != me && e.other != me) {
+				// Leader::set_diplo @6ec6a0: a change between two other leaders is told to a viewer who has met both (treaties & 1),
+				// with their full names: "X and Y have gone to war / broken their alliance / made peace / made an alliance."
+				// (#2337..#2340; the original sets next_message_color to DARK_ORANGE first) and plays S_OTHER_NATION_DIPLO.
+				if (me >= 0 && me < 8 && (g.leaders[size_t(me)].treaty(e.who) & 1) && (g.leaders[size_t(me)].treaty(e.other) & 1)) {
+					const std::vector<std::string> names = {full_name(e.who), full_name(e.other)};
+					n.argb = 0xFFFF8C00u;
+					if (e.value == 0) n.text = loc_or(2337, "gone to war", "$DUBYA0 and $SADDAM1 have gone to war.", names);
+					else if (e.value == 1) n.text = e.alert == 2 ? loc_or(2338, "broken", "$DUBYA0 and $SADDAM1 have broken their alliance.", names)
+					                                              : loc_or(2339, "made peace", "$DUBYA0 and $SADDAM1 have made peace.", names);
+					else n.text = loc_or(2340, "alliance", "$DUBYA0 and $SADDAM1 have made an alliance.", names);
+					n.sound = "S_OTHER_NATION_DIPLO";
+					out.push_back(n);
+				}
+				continue;
+			}
 			if (e.value == 2) n.text = loc_or(574, "alliance", "$LEADERNAME0 has formed an alliance with $LEADERNAME1.", {na, nb});
 			else if (e.alert == 2) n.text = loc_or(2338, "broken", "$DUBYA0 and $SADDAM1 have broken their alliance.", {na, nb});
 			else if (e.value == 1 && e.alert == 0) n.text = loc_or(573, "peace", "$LEADERNAME0 has signed a peace treaty with $LEADERNAME1.", {na, nb});
@@ -288,6 +314,29 @@ void Notifier::update(const Env& env, std::vector<Note>& out) {
 				b.kind = Note::Notice, b.image = "defeat_notice", b.text = n.text;
 				out.push_back(b);
 			}
+			// Leader::defeat @6ecb00: in a multiplayer game that goes on, the loser's stockpile is shared among his live allies
+			// (an equal share each, LeaderData::scale_tribute of it, every good both have except Knowledge) and the viewer, when he is
+			// one of them, reads "+N Good received from X!" (#2307, red, S_RECEIVED_TRIBUTE) for each. The simulation clears the
+			// stockpile in the same call, so the shares come from the stockpile as the previous update saw it.
+			if (g.multiplayer && !g.game_over && e.who != me && me >= 0 && me < 8 && have_buckets_) {
+				auto live = [&](int i) { return (g.leaders[size_t(i)].flags & 3u) == 3u; };
+				int allies = 0;
+				for (int i = 0; i < 8; i++) {
+					if (i != e.who && live(i) && ron::sim::is_ally(g, i, e.who)) allies++;
+				}
+				if (allies > 0 && live(me) && ron::sim::is_ally(g, me, e.who)) {
+					for (int k = 0; k < 6; k++) {
+						if (k == 3 || !ron::sim::type_avail(g, me, k, 1) || !ron::sim::type_avail(g, e.who, k, 1)) continue;
+						const int amount = ron::sim::scale_tribute(g, e.who, prev_buckets_[size_t(e.who)][size_t(k)] / allies);
+						Note t;
+						t.argb = kRed;
+						t.text = fill_typed(loc(2307, "received from", "+$NUMBER0 $GOODTYPE0 received from $PRESIDENTRONALDREAGAN1!"),
+						                    {type_name(k), nation(e.who)}, {amount});
+						t.sound = "S_RECEIVED_TRIBUTE";
+						out.push_back(t);
+					}
+				}
+			}
 		} else if (e.kind == vk::kWonderStart || e.kind == vk::kWonderWarning) {
 			// GameDaemon::process_victory, the wonder clock: "X now has N net wonder points!" (and team) in red, then "You
 			// will lose unless ..." when the viewer is not an ally of the leader; the start always plays its sound, the
@@ -300,7 +349,7 @@ void Notifier::update(const Env& env, std::vector<Note>& out) {
 			                       : (team ? "$PRESIDENTRICHARDNIXON0 and team have $NUMBER0 net wonder points!" : "$PRESIDENTRICHARDNIXON0 has $NUMBER0 net wonder points!");
 			Note n;
 			n.argb = kRed;
-			n.text = fill_typed(loc(idx, "wonder points", fb), {nation(e.who)}, {e.other});
+			n.text = fill_typed(loc(idx, "wonder points", fb), {full_name(e.who)}, {e.other});
 			n.sound = start ? "S_WONDER_VICTORY_START" : "S_WONDER_WARNING";
 			out.push_back(n);
 			if (!ally) {
@@ -332,7 +381,7 @@ void Notifier::update(const Env& env, std::vector<Note>& out) {
 			if (e.kind == vk::kPopStop) {
 				n.text = fill_typed(team ? loc(1346, "no longer control", "$THEARTISTFORMERLYKNOWNASPRINCE0 and team no longer control $NUMBER0% of the world. ")
 				                         : loc(1347, "no longer controls", "$THEARTISTFORMERLYKNOWNASPRINCE0 no longer controls $NUMBER0% of the world. "),
-				                    {nation(e.who)}, {e.other});
+				                    {full_name(e.who)}, {e.other});
 				n.sound = "S_POP_VICTORY_HALTED";
 				out.push_back(n);
 				continue;
@@ -341,7 +390,7 @@ void Notifier::update(const Env& env, std::vector<Note>& out) {
 			if (!start && on_team) continue;
 			n.text = fill_typed(team ? loc(1348, "and team control", "$VICEPRESIDENTDANQUAYLE0 and team control $NUMBER0% of the world!")
 			                         : loc(1349, "controls", "$VICEPRESIDENTDANQUAYLE0 controls $NUMBER0% of the world!"),
-			                    {nation(e.who)}, {e.other});
+			                    {full_name(e.who)}, {e.other});
 			n.sound = start ? "S_POP_VICTORY_TIMER_BEGUN" : "S_POP_VICTORY_WARNING";
 			out.push_back(n);
 			if (!on_team) {
@@ -355,7 +404,9 @@ void Notifier::update(const Env& env, std::vector<Note>& out) {
 				char clock[16];
 				std::snprintf(clock, sizeof clock, "%d:%02d", secs / 60, secs % 60);
 				Note b;
-				b.kind = Note::Notice, b.image = "territory_timer", b.text = loc(2035, "Territory", "Territory Victory: ") + clock;
+				b.kind = Note::Notice, b.image = "territory_timer", b.text = loc(2035, "Territory", "Territory Victory: ");
+					if (!b.text.empty() && b.text.back() != ' ') b.text += ' ';  // (the table's trailing blank does not survive the XML)
+					b.text += clock;
 				out.push_back(b);
 			}
 		} else if (e.kind == vk::kTimeWarning) {
@@ -436,6 +487,8 @@ void Notifier::update(const Env& env, std::vector<Note>& out) {
 	}
 	prev_ = std::move(cur);
 	have_prev_ = true;
+	for (size_t i = 0; i < 8 && i < g.leaders.size(); i++) prev_buckets_[i] = g.leaders[i].bucket;
+	have_buckets_ = true;
 }
 
 }  // namespace notices

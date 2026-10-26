@@ -294,9 +294,9 @@ struct Page::Impl {
 		s.left_label = ll ? tr(ll) : "", s.right_label = rl ? tr(rl) : "", s.sound_preview = preview;
 		add(s);
 	}
-	void check_box(int x, int y, int w_, const char* title, std::function<int()> get, std::function<void(int)> set) {
+	void check_box(int x, int y, int w_, const char* title, std::function<int()> get, std::function<void(int)> set, int h = 22) {
 		Widget c;
-		c.kind = Kind::Check, c.r = P(x, y, w_, 22), c.title = tr(title), c.get = std::move(get), c.set = std::move(set);
+		c.kind = Kind::Check, c.r = P(x, y, w_, h), c.title = tr(title), c.get = std::move(get), c.set = std::move(set);
 		add(c);
 	}
 
@@ -305,15 +305,47 @@ struct Page::Impl {
 		open_combo = -1;
 		switch (pane) {
 			case kGame: {
-				// optionswin.xml GAMEPANE: the sliders sit in 300 x 44 areas (slider at 100,11), the switches in 270 x 22 rows.
-				slider(40, 30, 300, 44, "Game Speed", 100, 11, 96, 0, 3, [this] { return std::min(w.game_speed, 3); }, [this](int v) { w.game_speed = v; },
+				// optionswin.xml GAMEPANE: Auto Citizen (240 x 106 at 9,10), its delay (9,128), Building Stances (9,186), the switches at
+				// (260,17) and (530,17) (24 px apart; the ones with no feature behind them are left out), the four sliders at x = 360.
+				{
+					Widget a;
+					a.kind = Kind::Area, a.r = P(9, 10, 240, 106), a.title = tr("Auto Citizen");
+					add(a);
+					static const int ids[4] = {3, 2, 0, 1};  // the XML's order: Idle, Build, Gather, Build and Gather (the stance each sets)
+					static const char* names[4] = {"Idle", "Build", "Gather", "Build and Gather"};
+					for (int k = 0; k < 4; k++) {
+						const int id = ids[k];
+						check_box(9 + 24, 10 + 20 + k * 19, 158, names[k], [this, id] { return int(w.auto_citizen == id); },
+						          [this, id](int v) { if (v) w.auto_citizen = id; }, 13);
+					}
+				}
+				slider(9, 128, 240, 44, "Auto Citizen Delay", 79, 11, 71, 0, 5, [this] { return w.auto_citizen_delay; }, [this](int v) { w.auto_citizen_delay = v; },
+				       "Short", "Long");
+				{
+					Widget a;
+					a.kind = Kind::Area, a.r = P(9, 186, 240, 140), a.title = tr("Building Stances");
+					add(a);
+					static const char* names[6] = {"Aggressive", "Defensive", "Stand Ground", "Raid", "Raze", "Hold Fire"};
+					for (int k = 0; k < 6; k++) {
+						check_box(9 + 24, 186 + 20 + k * 19, 158, names[k], [this, k] { return int(w.building_stance == k); },
+						          [this, k](int v) { if (v) w.building_stance = k; }, 13);
+					}
+				}
+				int row = 0;
+				check_box(260, 17 + 24 * row++, 270, "Show Advanced Options", [this] { return int(w.advanced_menu); }, [this](int v) { w.advanced_menu = v != 0; });
+				check_box(260, 17 + 24 * row++, 270, "Scouts Auto Transport", [this] { return int(w.auto_transport); }, [this](int v) { w.auto_transport = v != 0; });
+				check_box(260, 17 + 24 * row++, 270, "Show Research Progress Bars", [this] { return int(w.progress_bars); }, [this](int v) { w.progress_bars = v != 0; });
+				row = 0;
+				check_box(530, 17 + 24 * row++, 270, "Siege units deploy when idle", [this] { return int(w.auto_deploy); }, [this](int v) { w.auto_deploy = v != 0; });
+				check_box(530, 17 + 24 * row++, 270, "Record games", [this] { return int(w.record_games); }, [this](int v) { w.record_games = v != 0; });
+				slider(360, 180, 300, 44, "Game Speed", 100, 11, 96, 0, 3, [this] { return std::min(w.game_speed, 3); }, [this](int v) { w.game_speed = v; },
 				       "Very Slow", "Fast");
-				slider(40, 100, 300, 44, "Difficulty Level", 100, 11, 96, 0, 5, [this] { return w.difficulty; }, [this](int v) { w.difficulty = v; }, "Easiest",
+				slider(360, 238, 300, 44, "Difficulty Level", 100, 11, 96, 0, 5, [this] { return w.difficulty; }, [this](int v) { w.difficulty = v; }, "Easiest",
 				       "Toughest");
-				slider(40, 170, 300, 44, "Help Message Detail", 100, 11, 96, 0, 3, [this] { return w.help_detail; }, [this](int v) { w.help_detail = v; }, "None",
+				slider(360, 296, 300, 44, "Help Message Detail", 100, 11, 96, 0, 3, [this] { return w.help_detail; }, [this](int v) { w.help_detail = v; }, "None",
 				       "High");
-				check_box(420, 34, 270, "Show Advanced Options", [this] { return int(w.advanced_menu); }, [this](int v) { w.advanced_menu = v != 0; });
-				check_box(420, 58, 270, "Show Research Progress Bars", [this] { return int(w.progress_bars); }, [this](int v) { w.progress_bars = v != 0; });
+				slider(360, 354, 300, 44, "Message Duration", 100, 11, 96, 0, 10, [this] { return w.message_length; }, [this](int v) { w.message_length = v; },
+				       "Short", "Long");
 				break;
 			}
 			case kMouse: {

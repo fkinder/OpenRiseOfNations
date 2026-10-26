@@ -2,6 +2,7 @@
 #import <Foundation/Foundation.h>
 
 #include "lobby.h"
+#include "prefs.hpp"
 
 #include <arpa/inet.h>
 #include <ifaddrs.h>
@@ -54,11 +55,11 @@ double steady_ms() {
 }  // namespace
 
 void CommandSink::process_turn(sim::Game& g) {
-	if (!net) {
 	if (discard) {
 		(*this).*Rob<LocalTag>::ptr = std::vector<sim::Command>();
 		return;
 	}
+	if (!net) {
 		sim::CommandManager::process_turn(g);
 		return;
 	}
@@ -934,6 +935,11 @@ void Runtime::record_to(const std::string& base_path) {
 
 void Runtime::start_recording() {
 	if (rec_base_.empty()) {
+		// The Options page's "Record games" (record_games): off = no file in the Recorded Games folder (an explicit path still records).
+		if (!prefs::get().record_games) {
+			rec_on_ = false;
+			return;
+		}
 		char stamp[64];
 		const std::time_t t = std::time(nullptr);
 		std::tm tm{};

@@ -47,6 +47,8 @@ void reset_pane(Prefs& p, int pane) {
 		case 0:
 			p.game_speed = d.game_speed, p.difficulty = d.difficulty, p.help_detail = d.help_detail;
 			p.advanced_menu = d.advanced_menu, p.progress_bars = d.progress_bars;
+			p.message_length = d.message_length, p.auto_citizen = d.auto_citizen, p.auto_citizen_delay = d.auto_citizen_delay;
+			p.building_stance = d.building_stance, p.auto_transport = d.auto_transport, p.auto_deploy = d.auto_deploy, p.record_games = d.record_games;
 			break;
 		case 1: p.hotkeys.clear(); break;
 		case 2: p.scroll_speed = 6, p.prefer_military = d.prefer_military; break;  // OptionsWinControl::do_reset: scroll_speed 6, drag_military on
@@ -79,6 +81,14 @@ void parse(const std::string& text, Prefs& out) {
 		else if (k == "help_detail") out.help_detail = to_int(v, 0, 3, out.help_detail);
 		else if (k == "advanced_menu") out.advanced_menu = to_bool(v, out.advanced_menu);
 		else if (k == "progress_bars") out.progress_bars = to_bool(v, out.progress_bars);
+		else if (k == "message_length") out.message_length = to_int(v, 0, 10, out.message_length);
+		else if (k == "auto_citizen") out.auto_citizen = to_int(v, 0, 3, out.auto_citizen);
+		else if (k == "auto_citizen_delay") out.auto_citizen_delay = to_int(v, 0, 5, out.auto_citizen_delay);
+		else if (k == "building_stance") out.building_stance = to_int(v, 0, 5, out.building_stance);
+		else if (k == "auto_transport") out.auto_transport = to_bool(v, out.auto_transport);
+		else if (k == "auto_deploy") out.auto_deploy = to_bool(v, out.auto_deploy);
+		else if (k == "record_games") out.record_games = to_bool(v, out.record_games);
+		else if (k == "score_window") out.score_window = to_int(v, 0, 1, out.score_window);
 		else if (k == "scroll_speed") out.scroll_speed = to_int(v, 0, 12, out.scroll_speed);
 		else if (k == "prefer_military") out.prefer_military = to_bool(v, out.prefer_military);
 		else if (k == "fx_volume") out.fx_volume = to_int(v, 0, 255, out.fx_volume);
@@ -102,6 +112,14 @@ std::string serialize(const Prefs& p) {
 	o << "help_detail = " << p.help_detail << "\n";
 	o << "advanced_menu = " << (p.advanced_menu ? 1 : 0) << "\n";
 	o << "progress_bars = " << (p.progress_bars ? 1 : 0) << "\n";
+	o << "message_length = " << p.message_length << "\n";
+	o << "auto_citizen = " << p.auto_citizen << "\n";
+	o << "auto_citizen_delay = " << p.auto_citizen_delay << "\n";
+	o << "building_stance = " << p.building_stance << "\n";
+	o << "auto_transport = " << (p.auto_transport ? 1 : 0) << "\n";
+	o << "auto_deploy = " << (p.auto_deploy ? 1 : 0) << "\n";
+	o << "record_games = " << (p.record_games ? 1 : 0) << "\n";
+	if (p.present.count("score_window")) o << "score_window = " << p.score_window << "\n";
 	o << "scroll_speed = " << p.scroll_speed << "\n";
 	o << "prefer_military = " << (p.prefer_military ? 1 : 0) << "\n";
 	o << "fx_volume = " << p.fx_volume << "\n";

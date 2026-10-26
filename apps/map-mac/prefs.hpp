@@ -19,6 +19,20 @@ struct Prefs {
 	int help_detail = 2;
 	bool advanced_menu = false;
 	bool progress_bars = false;
+	// message_duration slider 0..10 (player_profile.prefs.message_length; the messages stay message_length * 45 ticks, the notices
+	// message_length * 400 + 500 ms), the Auto Citizen stance (LEADER_OPTIONS peasants: 0 Gather, 1 Build and Gather, 2 Build, 3 Idle),
+	// its delay slider 0..5 (peasants_wait), the default Building Stances (opt_buildings 0..5), "Scouts Auto Transport" (option flag 1),
+	// "Siege units deploy when idle" (flag 3) and "Record games" (the multiplayer recorder: off = no file in Recorded Games).
+	int message_length = 5;
+	int auto_citizen = 0;
+	int auto_citizen_delay = 2;
+	int building_stance = 0;
+	bool auto_transport = false;
+	bool auto_deploy = false;
+	bool record_games = true;
+	// The score window (StatWin) the Alt+Shift+1 / Alt+Shift+0 keys show and hide (stat_mode 0 / prefs bit 4); 0 hidden, 1 shown. Absent
+	// from the file = the game decides (Conquer the World, multiplayer).
+	int score_window = 0;
 	// Mouse pane (OptionsWinControl): scroll_speed 0..12 (speed_option table), drag_military = the box select prefers soldiers.
 	int scroll_speed = 4;  // speed_option 4 = 1.0, the window's step before the page existed; OptionsWinControl::do_reset sets 6
 	bool prefer_military = true;

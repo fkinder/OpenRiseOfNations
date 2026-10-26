@@ -1,0 +1,2 @@
+re/decomp/names/dorange.txt
+00414d00-00414d30

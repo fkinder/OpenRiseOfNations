@@ -1,0 +1,3 @@
+re/decomp/msgwin
+MessageWin::(on_redraw|draw.*|set_message_color.*|add_event|exec)
+MessageWinEntry::.*

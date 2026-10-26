@@ -1,0 +1,2 @@
+re/decomp/names
+LeaderData::(get_name|say_full_name)

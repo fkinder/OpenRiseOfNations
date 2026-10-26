@@ -1,0 +1,3 @@
+re/decomp/names/callers.txt
+2
+LeaderData::say_full_name

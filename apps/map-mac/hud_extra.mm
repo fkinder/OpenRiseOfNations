@@ -30,6 +30,10 @@ IfaceRect rect_in(const ron::XmlElement& win, const char* tag, const std::string
 constexpr uint8_t kBorder[9][3] = {{255, 0, 0}, {0, 0, 255}, {188, 0, 250}, {0, 255, 0}, {255, 255, 0},
                                    {0, 255, 255}, {255, 255, 255}, {255, 128, 0}, {255, 255, 255}};
 
+// TeamColor::get_text slots (the TEAM_COLOR_TEXT_* defaults, as script_view's kText): the colour of a team's text lines.
+constexpr uint8_t kText[9][3] = {{255, 100, 100}, {70, 100, 255}, {188, 0, 250}, {0, 236, 33}, {255, 239, 55},
+                                 {0, 255, 255}, {255, 255, 255}, {255, 182, 6}, {255, 255, 255}};
+
 const int kGoodOrder[6] = {0, 1, 4, 5, 2, 3};  // IFaceMainBase::good_order: food, timber, metal, oil, wealth, knowledge
 const int kMarketGoods[4] = {0, 1, 4, 5};      // num_market_resources: without wealth and knowledge
 
@@ -242,10 +246,30 @@ void Hud::draw_timers(UiRenderer& ui, const State& s) {
 			dx += d.width;
 		}
 		if (t.count >= 0) {
-			const int f = ui.font(18, ron::kFontBold);
+			// draw_game_timer case 0: get_wonder_net written over the icon in the leader's team colour (font 18, a black shadow at +1,+1),
+			// centred (Buffer::write_cent_l) in a box the icon's size that starts 5 px left of the icon.
+			const int f = ui.font(18);
 			const std::string n = std::to_string(t.count);
 			const uint8_t* c = kBorder[std::clamp(t.who < 0 ? 8 : t.who, 0, 8)];
-			ui.text(f, n, float(bx - 6 - ui.text_width(f, n)), float(by + 2), rgb(c[0], c[1], c[2]), kBlack);
+			ui.text_centered(f, n, IfaceRect{x - 5, x - 5 + icon.width, y, y + icon.height}, rgb(c[0], c[1], c[2]), kBlack);
+		}
+		if (t.kind == 0 && t.count >= 0 && wonder_icon_.valid()) {
+			// draw_timers: "Wonders (N #ICON46): M:SS" in the leader's team text colour (font 12, a black shadow), right-aligned just left
+			// of the plate and centred on the icon's height.
+			const int f = ui.font(12);
+			const std::string a = uistr::tr("Wonders") + " (" + std::to_string(t.count) + " ", b = "): " + std::string(buf);
+			const int iw = wonder_icon_.width + 4, tw = ui.text_width(f, a) + iw + ui.text_width(f, b);
+			const ron::FontMetrics* m = ui.font_metrics(f);
+			const int fh = m ? m->font_height : 14;
+			const uint8_t* c = kText[std::clamp(t.who < 0 ? 8 : t.who, 0, 8)];
+			float lx = float(bx - 6 - tw);
+			const float ly = float(y + (icon.height - fh) / 2);
+			ui.text(f, a, lx, ly, rgb(c[0], c[1], c[2]), kBlack);
+			lx += float(ui.text_width(f, a));
+			ui.next_layer();
+			ui.add(wonder_icon_, lx, float(y + (icon.height - wonder_icon_.height) / 2));
+			ui.next_layer();
+			ui.text(f, b, lx + float(iw), ly, rgb(c[0], c[1], c[2]), kBlack);
 		}
 		y += icon.height + 2;
 		ui.next_layer();

@@ -53,6 +53,10 @@ struct Callbacks {
 	std::function<void(const std::string& file)> screenshot;
 };
 
+// The Options page's Message Duration (player_profile.prefs.message_length 0..10, default 5): the messages stay message_length * 45 ticks and
+// the banners message_length * 400 + 500 ms.
+void set_message_length(int n);
+
 class View {
 public:
 	bool init(const ron::GameFiles& files, const ron::IfaceLayout& layout, std::string& error);
@@ -110,6 +114,7 @@ public:
 	void clear_notices() { notices_.clear(); }
 	// ui_hide_score: Window::hide(stat_win).
 	bool score_hidden() const { return score_hidden_; }
+	void show_score() { score_hidden_ = false; }  // the Alt+Shift+1 key after a ui_hide_score
 
 private:
 	struct Message {

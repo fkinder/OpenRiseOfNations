@@ -23,8 +23,8 @@ namespace scriptview {
 namespace {
 
 constexpr uint32_t kWhite = 0xFFFFFFFF, kBlack = 0xFF000000, kRed = 0xFFFF0000;
-constexpr int kMessageLength = 5;                    // player_profile.prefs.message_length default
-constexpr int kStdTicks = kMessageLength * 45;       // MessageWin's standard duration (225 ticks)
+int g_message_length = 5;                            // player_profile.prefs.message_length (the Options page's Message Duration, default 5)
+int std_ticks() { return std::max(1, g_message_length * 45); }  // MessageWin's standard duration (225 ticks at the default)
 constexpr int kScrollPadX = 8, kScrollPadY = 4;      // IFaceRenderManager scroll_pad_* (ui-spec 6.5)
 
 // TeamColors::init defaults read from the exe's basecolors.obj data (TEAM_COLOR_NEON_* / TEAM_COLOR_TEXT_*), team slots
@@ -38,6 +38,8 @@ constexpr uint8_t kText[9][3] = {{255, 100, 100}, {70, 100, 255}, {188, 0, 250},
 uint32_t rgba_to_argb(uint32_t c) { return (c & 0xffu) << 24 | c >> 8; }
 
 }  // namespace
+
+void set_message_length(int n) { g_message_length = std::clamp(n, 0, 10); }
 
 bool View::init(const ron::GameFiles& files, const ron::IfaceLayout& layout, std::string& error) {
 	files_ = &files;
@@ -133,7 +135,7 @@ void View::add_message(const std::string& text, uint32_t color, int ticks, const
 	if (messages_.size() > 200) messages_.erase(messages_.begin());
 }
 
-void View::say(const std::string& text, const Env& env) { add_message(text, 0xFFFFFFFF, kStdTicks, env); }
+void View::say(const std::string& text, const Env& env) { add_message(text, 0xFFFFFFFF, std_ticks(), env); }
 
 // A message or banner the simulation caused (notices.hpp). MessageWin::add_message with a location also calls add_event: a
 // minimap ping of the note's style (a few 8-tick cycles), the ANNOUNCE_CIRCLE on the terrain and an entry Space jumps to.
@@ -146,7 +148,7 @@ void View::post(const notices::Note& n, const Env& env, const Callbacks& cb) {
 		}
 		return;
 	}
-	add_message(n.text, n.argb, n.ticks > 0 ? n.ticks : kStdTicks, env);
+	add_message(n.text, n.argb, n.ticks > 0 ? n.ticks : std_ticks(), env);
 	if (n.located) {
 		hud::Ping pg;
 		pg.x = n.x, pg.y = n.y;
@@ -210,7 +212,7 @@ void View::consume(const ScriptPresentation& p, const Env& env, const Callbacks&
 		last_seq_ = e.seq;
 		switch (e.kind) {
 		case ScriptEvent::kGameMessage:  // MessageWin::add_message (duration -1 = message_length * 45)
-			add_message(e.text, rgba_to_argb(e.color), kStdTicks, env);
+			add_message(e.text, rgba_to_argb(e.color), std_ticks(), env);
 			break;
 		case ScriptEvent::kScenarioMessage:  // add_scen_message: scenario_clock = graphic_tick
 			scen_msg_start_ = env.tick;
@@ -236,7 +238,7 @@ void View::consume(const ScriptPresentation& p, const Env& env, const Callbacks&
 		case ScriptEvent::kNotice: notices_.push_back({e.text2, e.text, env.ms}); break;
 		case ScriptEvent::kBubble:  // add_bubble_message: a bubble plus a message in the console's neon colour
 			bubbles_.push_back({e.text, float(e.x), float(e.y), env.tick, e.who});
-			add_message(e.text, neon(env, e.who), kStdTicks, env);
+			add_message(e.text, neon(env, e.who), std_ticks(), env);
 			break;
 		case ScriptEvent::kSound:
 			if (e.a >= 0 && cb.play_voice) {
@@ -523,7 +525,7 @@ void View::draw_top_centre(UiRenderer& ui, const ScriptPresentation* p, const En
 		ui.next_layer();
 	};
 	const int ff = ui.font_tag("feedback_size");
-	if (!feedback_.empty() && env.tick - feedback_start_ <= kStdTicks) {
+	if (!feedback_.empty() && env.tick - feedback_start_ <= std_ticks()) {
 		box(ff, feedback_, kRed, kBlack, 1);
 	} else if (!instructions_.empty()) {
 		box(ff, instructions_, kBlack, 0, 1);
@@ -583,7 +585,7 @@ void View::draw_bubbles(UiRenderer& ui, const ScriptPresentation* p, const Env& 
 // moves in 500 ms to half size at (w, h); 22 px bold white text with a black shadow 5 px under the icon while waiting;
 // a scroll plate behind.
 void View::draw_notices(UiRenderer& ui, const Env& env) {
-	const double delay = kMessageLength * 400 + 500;
+	const double delay = g_message_length * 400 + 500;
 	const int f = ui.font(22, ron::kFontBold);  // "22 px bold" (AnimNotice::init)
 	for (size_t i = 0; i < notices_.size();) {
 		const Notice& n = notices_[i];
