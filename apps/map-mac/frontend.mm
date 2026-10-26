@@ -2720,7 +2720,10 @@ static bool parse_port(const std::string& s, int& out) {
 	const ron::net::PlaybackSummary& s = r.summary;
 	if (!s.ok) return d + "   |   cannot be read: " + s.error;
 	auto name = [](const std::vector<std::string>& v, int i, const char* fallback) { return i >= 0 && size_t(i) < v.size() ? v[size_t(i)] : std::string(fallback); };
-	d += "   |   " + name(_lists.style, s.map_style, "Map") + ", " + name(_lists.size, s.map_size, "?");
+	if (!s.ctw_map.empty())   // a Conquer the World battle on a campaign map: the campaign and the map, not a generator style and size
+		d += "   |   " + (s.ctw_campaign.empty() ? std::string() : s.ctw_campaign + ": ") + s.ctw_map;
+	else
+		d += "   |   " + name(_lists.style, s.map_style, "Map") + ", " + name(_lists.size, s.map_size, "?");
 	d += "   |   " + std::to_string(s.players) + (s.players == 1 ? " player: " : " players: ");
 	for (size_t i = 0; i < s.tribes.size() && i < 4; i++) d += std::string(i ? ", " : "") + name(_lists.tribes, s.tribes[i], "?");
 	if (s.tribes.size() > 4) d += ", ...";

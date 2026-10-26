@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cctype>
 #include <cstring>
 
 #include "net/lobby.hpp"
@@ -75,6 +76,22 @@ bool playback_summary(const std::string& path, PlaybackSummary& out) {
 		const sim::SaveInfo info = sim::read_save_info(rp.native_save_bytes());
 		if (sim::is_random_scenario(info.scenario) && sim::parse_random_setup(info.scenario, rs)) out.map_style = rs.map_style, out.map_size = rs.map_size;
 		out.ctw_battle = sim::is_ctw_map_scenario(info.scenario) || (sim::is_random_scenario(info.scenario) && rs.ctw);
+		sim::CtwMapBattle cmb;
+		if (sim::is_ctw_map_scenario(info.scenario) && sim::parse_ctw_map_battle(info.scenario, cmb)) {
+			// "conquest/Alexander/latium.scx": the campaign is the folder, the map the file's name
+			std::string m = cmb.map;
+			std::replace(m.begin(), m.end(), '\\', '/');
+			while (m.compare(0, 2, "./") == 0) m.erase(0, 2);
+			const size_t sl = m.find_last_of('/');
+			std::string stem = sl == std::string::npos ? m : m.substr(sl + 1);
+			if (stem.size() > 4 && stem.compare(stem.size() - 4, 4, ".scx") == 0) stem.resize(stem.size() - 4);
+			if (!stem.empty()) stem[0] = char(std::toupper((unsigned char)stem[0]));
+			out.ctw_map = stem;
+			if (sl != std::string::npos && sl > 0) {
+				const size_t sl2 = m.find_last_of('/', sl - 1);
+				out.ctw_campaign = m.substr(sl2 == std::string::npos ? 0 : sl2 + 1, sl - (sl2 == std::string::npos ? 0 : sl2 + 1));
+			}
+		}
 	} else {
 		out.map_style = rp.header.setup_field(sim::kSetMapStyle), out.map_size = rp.header.setup_field(sim::kSetMapSize);
 	}
@@ -90,6 +107,171 @@ bool playback_summary(const std::string& path, PlaybackSummary& out) {
 	else if (!rp.has_save_info) out.unplayable = "The embedded save cannot be read";
 	else out.playable = true;
 	return true;
+}
+
+
+// ---------------------------------------------------------------- rivers and doobers of a loaded game
+
+namespace {
+
+// World +0x7c: the seed of the generator that made the map (kept in the original save's World record; `Game` does not keep it).
+uint32_t saved_world_seed(const sim::Game& g) {
+	if (g.original && g.original->tree) {
+		const dw::Description& d = dw::Description::get();
+		const int gid = d.find_global("world");
+		const dw::Rec* r = gid >= 0 ? g.original->tree->find_global(gid) : nullptr;
+		if (r) return uint32_t(r->read_int(0x7c, 4, false));
+	}
+	return g.seed;
+}
+
+// How many cosmetic doobers a loaded map gets. The generator counts the clumps TerrainGroups::add_doobers placed (bushes on the south /
+// east edge of forest wcoords, rocks beside mountains) and only that count reaches the renderer; a save keeps neither. The count is
+// estimated from the same edges the generator walks: a least-squares fit over twenty generated worlds (styles 6 - 20, two sizes) gives
+// 2.0 per bush edge and 0.72 per rock edge (mean error 13 %, worst 35 %; the doobers are decoration).
+int estimate_doober_count(const sim::World& w) {
+	int bush_edges = 0, rock_edges = 0;
+	for (int x = 1; x <= w.xs - 2; ++x) {
+		for (int y = 1; y <= w.ys - 2; ++y) {
+			const sim::WData& d = w.w(x, y);
+			if (d.flags & 0x1000) continue;
+			if (d.flags & 0x20) {
+				bush_edges += (y + 1 < w.ys && !(w.w(x, y + 1).flags & 0x20)) + (x + 1 < w.xs && !(w.w(x + 1, y).flags & 0x20));
+			} else if (!sim::World::is_ocean(d) && !(d.flags & 0x38)) {
+				rock_edges += ((w.w(x - 1, y).flags & 0x10) != 0) || ((w.w(x, y - 1).flags & 0x10) != 0);
+			}
+		}
+	}
+	return (20 * bush_edges + 7 * rock_edges) / 10;
+}
+
+}  // namespace
+
+// A save keeps the river tiles (tdata 0x800: the 3 x 3 tiles around every sample of the carved trough, a band about seven tiles wide) and the
+// dug heights, not the polylines the generator's river list holds. The centre line is recovered from the band: thin the tile mask to a
+// one tile skeleton (Zhang-Suen), take the longest path of each connected piece, put it in wcoords (the generator's polylines are wcoord
+// paths) and orient it source to mouth (the mouth end is the one with open water around it, then the lower one). The end at the coast is
+// continued to the nearest water wcoord, as the generator's path ends on the water cell (`ensure_ocean_end` finds the same cell).
+std::vector<std::vector<std::array<int32_t, 2>>> playback_rivers(const sim::Game& g) {
+	std::vector<std::vector<std::array<int32_t, 2>>> out;
+	const sim::World& w = g.world;
+	const int xs = w.xs, ys = w.ys, txs = xs * 4, tys = ys * 4;
+	if (xs <= 0 || ys <= 0 || w.tdata.size() != size_t(txs) * size_t(tys)) return out;
+	std::vector<uint8_t> m(size_t(txs) * size_t(tys), 0);
+	size_t count = 0;
+	for (size_t i = 0; i < m.size(); ++i) {
+		m[i] = (w.tdata[i] & sim::tmask::kRiverB) != 0;
+		count += m[i];
+	}
+	if (count < 8) return out;
+	// Zhang-Suen thinning (the border row / column of the grid never holds a skeleton pixel)
+	auto at = [&](int x, int y) -> int { return x < 0 || y < 0 || x >= txs || y >= tys ? 0 : m[size_t(y) * size_t(txs) + size_t(x)]; };
+	std::vector<size_t> del;
+	for (bool changed = true; changed;) {
+		changed = false;
+		for (int pass = 0; pass < 2; ++pass) {
+			del.clear();
+			for (int y = 0; y < tys; ++y) {
+				for (int x = 0; x < txs; ++x) {
+					if (!at(x, y)) continue;
+					const int p2 = at(x, y - 1), p3 = at(x + 1, y - 1), p4 = at(x + 1, y), p5 = at(x + 1, y + 1), p6 = at(x, y + 1), p7 = at(x - 1, y + 1),
+					          p8 = at(x - 1, y), p9 = at(x - 1, y - 1);
+					const int nb = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+					if (nb < 2 || nb > 6) continue;
+					const int seq[9] = {p2, p3, p4, p5, p6, p7, p8, p9, p2};
+					int trans = 0;
+					for (int k = 0; k < 8; ++k) trans += seq[k] == 0 && seq[k + 1] == 1;
+					if (trans != 1) continue;
+					if (pass == 0 ? (p2 * p4 * p6 || p4 * p6 * p8) : (p2 * p4 * p8 || p2 * p6 * p8)) continue;
+					del.push_back(size_t(y) * size_t(txs) + size_t(x));
+				}
+			}
+			for (size_t i : del) m[i] = 0;
+			changed = changed || !del.empty();
+		}
+	}
+	// the skeleton's pieces: BFS from any pixel to the farthest one, again from there, and the path between is the river
+	std::vector<int32_t> par(m.size(), -2), dist(m.size(), 0);
+	std::vector<uint8_t> seen(m.size(), 0);
+	std::vector<int32_t> order;
+	auto bfs = [&](int32_t start, std::vector<int32_t>& visited) -> int32_t {
+		visited.clear();
+		visited.push_back(start);
+		par[size_t(start)] = -1, dist[size_t(start)] = 0;
+		int32_t far = start;
+		for (size_t h = 0; h < visited.size(); ++h) {
+			const int32_t c = visited[h];
+			const int cx = c % txs, cy = c / txs;
+			if (dist[size_t(c)] > dist[size_t(far)]) far = c;
+			for (int dy = -1; dy <= 1; ++dy) {
+				for (int dx = -1; dx <= 1; ++dx) {
+					if ((dx || dy) && at(cx + dx, cy + dy)) {
+						const int32_t n = (cy + dy) * txs + cx + dx;
+						if (par[size_t(n)] != -2) continue;
+						par[size_t(n)] = c, dist[size_t(n)] = dist[size_t(c)] + 1;
+						visited.push_back(n);
+					}
+				}
+			}
+		}
+		return far;
+	};
+	auto reset = [&](const std::vector<int32_t>& v) {
+		for (int32_t c : v) par[size_t(c)] = -2;
+	};
+	std::vector<int32_t> v1, v2;
+	for (int32_t c = 0; c < int32_t(m.size()); ++c) {
+		if (!m[size_t(c)] || seen[size_t(c)]) continue;
+		const int32_t a = bfs(c, v1);
+		for (int32_t k : v1) seen[size_t(k)] = 1;
+		reset(v1);
+		const int32_t b = bfs(a, v2);
+		std::vector<int32_t> chain;   // pixel indexes from b back to a
+		for (int32_t k = b; k >= 0; k = par[size_t(k)]) chain.push_back(k);
+		reset(v2);
+		if (chain.size() < 6) continue;   // a speck: under two wcoords long
+		std::vector<std::array<int32_t, 2>> pts;
+		for (int32_t k : chain) {
+			const std::array<int32_t, 2> p{(k % txs) >> 2, (k / txs) >> 2};
+			if (pts.empty() || pts.back() != p) pts.push_back(p);
+		}
+		if (pts.size() < 2) continue;
+		// the mouth end: the one with more open water around it (cells off the map count as water), the lower one on a tie
+		auto wet = [&](const std::array<int32_t, 2>& p) {
+			int n = 0;
+			for (int dy = -4; dy <= 4; ++dy)
+				for (int dx = -4; dx <= 4; ++dx) {
+					const int x = p[0] + dx, y = p[1] + dy;
+					n += x < 0 || y < 0 || x >= xs || y >= ys || w.is_ocean(x, y);
+				}
+			return n;
+		};
+		auto low = [&](const std::array<int32_t, 2>& p) {
+			const int vx = std::min(p[0] * 4 + 2, g.heights.vxs - 1), vy = std::min(p[1] * 4 + 2, g.heights.vys - 1);
+			return g.heights.h.empty() ? 0.0f : g.heights.h[size_t(vy) * size_t(g.heights.vxs) + size_t(vx)];
+		};
+		const int wf = wet(pts.front()), wb = wet(pts.back());
+		if (wf > wb || (wf == wb && low(pts.front()) < low(pts.back()))) std::reverse(pts.begin(), pts.end());
+		// continue the mouth to the nearest water wcoord ahead of the path
+		const std::array<int32_t, 2> e = pts.back(), p0 = pts[pts.size() >= 4 ? pts.size() - 4 : 0];
+		if (!w.is_ocean(e[0], e[1])) {
+			const float dxn = float(e[0] - p0[0]), dyn = float(e[1] - p0[1]);
+			float best = 1e9f;
+			std::array<int32_t, 2> bp{-1, -1};
+			for (int dy = -3; dy <= 3; ++dy) {
+				for (int dx = -3; dx <= 3; ++dx) {
+					const int x = e[0] + dx, y = e[1] + dy;
+					if (x < 0 || y < 0 || x >= xs || y >= ys || !w.is_ocean(x, y)) continue;
+					if (float(dx) * dxn + float(dy) * dyn < 0) continue;
+					const float d = float(dx * dx + dy * dy);
+					if (d < best) best = d, bp = {x, y};
+				}
+			}
+			if (bp[0] >= 0) pts.push_back(bp);
+		}
+		out.push_back(std::move(pts));
+	}
+	return out;
 }
 
 // ---------------------------------------------------------------- the renderer's terrain of a loaded game
@@ -159,6 +341,10 @@ bool playback_scenario(const sim::Game& g, const ron::GameFiles& files, Scenario
 		st.num_coords = uint8_t(mr ? mr->face_wcoords : int32_t(pr.solid.size()));
 		t.mountains.push_back(st);
 	}
+	// what the generator's polylines and doober list give a random map (the save keeps neither): the rivers from the river tiles, the doobers
+	// from the generator's own hash placement with the seed the save kept
+	t.rivers = playback_rivers(g);
+	place_land_doobers(w, saved_world_seed(g), estimate_doober_count(w), t);
 	out.name = "Recording of the original game";
 	return true;
 }
@@ -176,11 +362,14 @@ std::unique_ptr<Playback> Playback::open(const std::string& path, const std::str
 		return nullptr;
 	}
 	pb->seed_ = rp.header.seed;
+	pb->ctw_battle_ = rp.header.conquest;
 	if (rp.native_save) {
 		pb->kind_ = Kind::NativeSave;
 		const sim::SaveInfo info = sim::read_save_info(rp.native_save_bytes());
 		pb->scenario_ = info.scenario;
 		pb->seed_ = info.seed;
+		sim::RandomGameSetup rs;
+		pb->ctw_battle_ = pb->ctw_battle_ || sim::is_ctw_map_scenario(info.scenario) || (sim::is_random_scenario(info.scenario) && sim::parse_random_setup(info.scenario, rs) && rs.ctw);
 	} else if (!rp.has_save && sim::is_random_scenario(sc)) {
 		pb->kind_ = Kind::NativeRandom;
 		if (!sim::parse_random_setup(sc, pb->setup_)) {
@@ -415,6 +604,20 @@ std::string Playback::sync_text() const {
 	if (!sync_.has_rows || !checking_) return std::string();
 	if (sync_.first_out_of_sync >= 0) return "out of sync at frame " + std::to_string(sync_.first_out_of_sync);
 	return sync_.compared > 0 ? "in sync" : "";
+}
+
+bool playback_state_hash(Playback& pb, uint64_t& out) {
+	if (!pb.bound()) return false;
+	uint32_t v[16];
+	if (!pb.hooks().checksums(v)) return false;
+	uint64_t h = 1469598103934665603ull;
+	auto mix = [&](uint64_t x) {
+		for (int i = 0; i < 8; ++i) h = (h ^ ((x >> (8 * i)) & 0xff)) * 1099511628211ull;
+	};
+	mix(uint64_t(uint32_t(pb.frame())));
+	for (int k = 0; k < dw::kCheckPartCount; ++k) mix(v[k]);
+	out = h;
+	return true;
 }
 
 // ---------------------------------------------------------------- the shared report

@@ -559,23 +559,7 @@ Terrain synthesize_terrain(const Game& g, const GameFiles& files, const mapgen::
 		t.rivers.push_back(r.pts);
 	}
 	// Land doobers (bushes and rocks): the generator only counts them; the placement here is cosmetic.
-	{
-		int want = std::min(res.doobers, 1200);
-		for (int i = 0, tries = 0; i < want && tries < want * 8; tries++) {
-			const uint32_t h = hash3(seed, uint32_t(tries), 0xd00be5u);
-			const int wx = int(h % uint32_t(xs)), wy = int((h >> 8) % uint32_t(ys));
-			const WData& d = w.w(wx, wy);
-			if (World::is_ocean(d) || (d.flags & (wflag::kForest | wflag::kMountain | wflag::kRiver | wflag::kCoast | wflag::kHalfLand |
-			                                       wflag::kBuilding | wflag::kRock | wflag::kOil)))
-				continue;
-			Doober db;
-			db.x = wx * 768 + int((h >> 16) % 768u);
-			db.y = wy * 768 + int((hash3(h, 1, 2) >> 4) % 768u);
-			db.kind = (h >> 28) < 4 ? 1 : 0;
-			t.doobers.push_back(db);
-			i++;
-		}
-	}
+	place_land_doobers(w, seed, res.doobers, t);
 	return t;
 }
 
@@ -799,6 +783,26 @@ void snapshot_objects(const Game& g, const RandomGameSetup& S, Scenario& sc) {
 }
 
 }  // namespace
+
+// Cosmetic land doobers (newgame.hpp): `doobers` (at most 1200) hash-placed bushes (kind 0) and rocks (kind 1) on open land of `w`.
+void place_land_doobers(const World& w, uint32_t seed, int doobers, Terrain& t) {
+	const int xs = w.xs, ys = w.ys;
+	const int want = std::min(doobers, 1200);
+	for (int i = 0, tries = 0; i < want && tries < want * 8; tries++) {
+		const uint32_t h = hash3(seed, uint32_t(tries), 0xd00be5u);
+		const int wx = int(h % uint32_t(xs)), wy = int((h >> 8) % uint32_t(ys));
+		const WData& d = w.w(wx, wy);
+		if (World::is_ocean(d) || (d.flags & (wflag::kForest | wflag::kMountain | wflag::kRiver | wflag::kCoast | wflag::kHalfLand |
+		                                       wflag::kBuilding | wflag::kRock | wflag::kOil)))
+			continue;
+		Doober db;
+		db.x = wx * 768 + int((h >> 16) % 768u);
+		db.y = wy * 768 + int((hash3(h, 1, 2) >> 4) % 768u);
+		db.kind = (h >> 28) < 4 ? 1 : 0;
+		t.doobers.push_back(db);
+		i++;
+	}
+}
 
 std::unique_ptr<Game> new_random_game(const GameFiles& files, const Rules& rules, const AnimSource* anims,
                                       const RandomGameSetup& setup, RandomExtras* extras) {

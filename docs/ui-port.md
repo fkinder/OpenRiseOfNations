@@ -1452,10 +1452,11 @@ Not run: the window itself (a recording opened from the list in a real window, a
 
 ### 18.7 Open
 
-- Rivers of an original recording are not drawn as rivers: the save holds the carved heights and the river flags of the grid, not the polylines the river mesh is built from (`Terrain::rivers` stays empty), so a river bed shows as a textured dip without its water. Doobers (bushes, small rocks) are not in the save either.
 - The viewer's players' names come from the game's leaders; the original's recordings keep names out of every printout (`ReplayPlayer::name`).
 - A drop package (the clear `P` record) is not executed by the direct player: the lockstep session's drop agreement acts on the game through `Session::apply_drop`, the viewer only reads the packages.
-- Conquer the World battle recordings play the battle only: the campaign copy the save embeds is loaded (the scripts run against it) but the viewer has no campaign screens and does not apply the outcome.
+- Conquer the World battle recordings play the battle only: the campaign copy the save embeds is loaded (the scripts run against it) but the viewer has no campaign screens and does not apply the outcome to the campaign (18.9 shows how the battle ended).
+- Rivers of an original recording are recovered from the river tiles (18.9): a gap in the saved band (a river that passes a coast, a mountain tile or a cliff is not marked there) cuts the river into pieces, each drawn as a river of its own; the doober count of an original map is an estimate (mean error 13 %).
+- No recording of the corpus that holds rivers has been drawn: the one used for the checks (2026.08.30 21'23'34, SW_Desert, SOUTHWESTMESA style) has no river at all (0 river tiles, 0 river cells). The river path is checked on generated maps and on three original saves (18.9).
 
 ### 18.8 Original recordings, Conquer the World battles, recovery segments (2026-10-25)
 
@@ -1471,3 +1472,20 @@ Checks (`re/previews/`, 1280 x 800, read): `playback_orig_f0.png` / `playback_or
 `playback_ctw_new_world_f300.png` (generated map, British), `playback_ctw_alexander_f300.png` (the campaign's Latium map, Greeks), both `in sync` over 50 boundaries; `playback_recovery_f200.png` (the segment after an OOS recovery at 409: note in the bar, in sync); `playback_list_tags.png` (the list tags).
 Recordings made with `ronmap --ctw-mp --ctw-battle new_world:auto --host 27471 --humans 1 --frames 300 --mp-bot --mp-record F.rcx` (and `alexander:auto`) and a two-process game with `--mp-diverge 400` on the guest.
 
+### 18.9 Rivers and doobers of original recordings, the list's campaign maps, battle outcomes, the seek test (2026-10-26)
+
+- **Rivers** (`playback_rivers`, `engine/net/playback.cpp`; `Terrain::rivers` of `playback_scenario`): a save keeps the river tiles (`tdata & 0x800`: the 3 x 3 tiles around every sample of the carved trough, a band about seven tiles wide) and the dug heights, never the generator's
+  polylines. The centre line is recovered from the band: the tile mask is thinned to a one-pixel skeleton (Zhang-Suen), the longest path of every connected piece is the river (a BFS from any pixel to the farthest, again from there; the spurs of the thinning fall away), the pixels are taken to wcoords
+  (a generated river is a wcoord path) and the path is oriented source to mouth (the end with more open water around it, off-map counting as water; the lower end on a tie). The mouth is continued to the nearest water wcoord ahead of the path, as the generator's path ends on the water cell. The result is
+  fed to `build_rivers` exactly as `synthesize_terrain` feeds a native game's `res.rivers` (the trough heights are in the save already). Check on generated maps (`Gen` polylines against the recovered ones, six styles x three seeds, 30 - 380 points a river): style 6 (Old World) distance
+  0.00 - 0.02 wcoords mean, 1 wcoord at most, same river count; style 14 (Great Lakes: short rivers) 0.04 - 0.16 mean, 2.2 at most, a river now and then in two pieces. Original saves (`re/oracle/Saves`, explicit paths): `current 2` 9 pieces, `DO NOT DELETE` 3 rivers of 130 / 191 / 124 points ending at (22,0), (0,73), (79,27), `curent dec 14` 2 rivers of 210 / 149 points; their meshes build (172 / 611 / 491 water quads).
+- **Doobers**: `place_land_doobers` (newgame.cpp; the hash placement `synthesize_terrain` used inline, moved out unchanged so a random game's terrain is the same) is called with the **world seed of the save** (World +0x7c, read from the walked record: `Game` does not keep it) and a count estimated from the same edges the generator walks
+  (bushes on the south / east edge of forest wcoords, rocks beside mountains: 2.0 and 0.72 per edge, a least-squares fit over twenty generated worlds, 13 % mean error, capped at 1,200 like a generated map). 21'23'34 now draws 799 bushes and rocks (it drew 0).
+- **The list**: a Conquer the World battle on a campaign map (`ctwmap:`) shows `Campaign: Map` (the folder and the file name of the map: `Alexander: Latium`) where the generator style and size were `Map, ?` (`PlaybackSummary::ctw_campaign / ctw_map`).
+- **Battle outcome**: when a Conquer the World battle recording plays to its end (also by a seek to the end) the line the final state gives goes under the timeline and into the message line (`pbBattleOutcome`): the seats the game raised victory / defeat events for ("Battle over: X won; Y was defeated", plus the battle's own victory / defeat message for the seat on screen),
+  or, when the recording stops with nobody defeated, what each side has left ("The recording ends with the battle undecided. Left: ..."). `ronmap --playback` prints it as `outcome:`. The campaign copy is not touched.
+- **Seek test**: `ronmap --playback FILE --pb-seek F1,F2` (frames after the start; headless, the exit code is the verdict): a straight run to F2, a seek to F1, the seek back to F2 (a rewind when F1 > F2: the start state is built again and run forward), and a restart (seek to the start, then to F2). The state hash
+  (`playback_state_hash`: the frame and the 15 CHECK_SUMS parts) must be the same all three times. 21'23'34 `--pb-seek 3000,1200`: `dbfd9b4b7eb85d11` three times, PASS; a generated Alexander battle `--pb-seek 250,100` PASS.
+
+Checks (`re/previews/`): `playback_orig_before_f{0,1500,3000}.png` and `playback_orig_doobers_f{0,1500,3000}.png` (21'23'34 before and after: the same frames, the dry ground now carries bushes and rocks); `playback_list_ctwmap.png` (the list row `Alexander: Latium`);
+`playback_ctw_outcome_end.png` (an Alexander battle recorded for 9,000 frames, at its end: "Battle over: Campania Council (French) was defeated" under the timeline).

@@ -108,6 +108,10 @@ inline bool is_random_scenario(const std::string& scenario) { return scenario.co
 // NATIONS 2..8, TRIBES a comma list of tribe indexes for seats 0.., "r" or -1 for random). Returns "" or an error text.
 std::string parse_random_option(const Rules& rules, const std::string& spec, RandomGameSetup& out);
 
+// The cosmetic land doobers (bushes and rocks) of a finished world, hash-placed from `seed` on open land (what a random game's terrain
+// gets); `doobers` is the count the generator reported, at most 1200 are placed. Used by the recordings of the original game as well.
+void place_land_doobers(const World& w, uint32_t seed, int doobers, Terrain& t);
+
 // Everything the renderer needs next to the Game (all optional output of new_random_game).
 struct RandomExtras {
 	mapgen::Result result;  // the generator's result (starts, rivers, mountains, empire list, draw counts)

@@ -87,6 +87,7 @@ public:
 	int64_t seek_from = 0;
 	int64_t restart_seek = -1;         // after a rewind: the frame to run to
 	bool announced_end = false;
+	std::string outcome;               // a Conquer the World battle recording at its end: how the battle ended (shown after the note)
 	std::string note;                  // a line under the timeline ("Recording starts at frame N" for a recovery segment)
 
 	// Draws the bar at the top of the screen and keeps the button rectangles for `hit`.

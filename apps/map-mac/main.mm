@@ -545,6 +545,7 @@ static bool debug_skip(const char* pass) {
 @property(nonatomic, copy) void (^onPlayRecording)(NSString* path);   // View Playback of the end-game window: the app opens the recording of the game that just ended
 - (BOOL)pbRunHeadless:(int64_t)frames;   // headless: steps the recording (frames < 0: to its end) and prints the check-sum report
 - (void)pbSeek:(int64_t)frame;
+- (int)pbSeekTest:(int64_t)f1 to:(int64_t)f2;   // headless: seek F1 then back to F2 must equal a straight run to F2 (frames after the start); 0 when it does
 - (void)pbSelectSeat:(int)index;
 - (void)pbSelectWho:(int)who;   // the seat of the leader `who`
 - (void)harnessGameMenuChoose:(int)i;   // headless tests: the button i of the game menu / end-game window, as a click would
@@ -1971,6 +1972,7 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 			v.ended = pb.at_end();
 			[self afterGameReplaced];
 			[self pbSelectSeat:v.seat];
+			if (v.ended) [self pbBattleEnded];
 		}
 		return;
 	}
@@ -2031,6 +2033,65 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 		_pbv->announced_end = true;
 		[self say:"End of the recording."];
 	}
+	[self pbBattleEnded];
+}
+
+// A Conquer the World battle recording reached its end: the line the battle's final state gives (who won, who was defeated, or the count of what
+// is left when nobody was) goes under the timeline and into the message line. The campaign is not touched: this viewer has no campaign screens.
+- (void)pbBattleEnded {
+	if (!_pbv || !_game || !_pbv->pb->ctw_battle() || !_pbv->outcome.empty()) return;
+	_pbv->outcome = [self pbBattleOutcome];
+	if (!_pbv->outcome.empty()) [self say:_pbv->outcome];
+}
+
+- (std::string)pbBattleOutcome {
+	auto join = [](const std::vector<std::string>& v) {
+		std::string t;
+		for (size_t i = 0; i < v.size(); i++) t += (i ? (i + 1 == v.size() ? " and " : ", ") : "") + v[i];
+		return t;
+	};
+	std::vector<std::string> won, lost;
+	std::array<bool, 8> seen{};
+	for (const ron::sim::GameEvent& ev : _game->events) {
+		if ((ev.kind != 2 && ev.kind != 3) || ev.who < 0 || ev.who >= 8 || seen[size_t(ev.who)]) continue;
+		seen[size_t(ev.who)] = true;
+		(ev.kind == 3 ? won : lost).push_back([self pbSeatLabel:ev.who]);
+	}
+	if (!won.empty() || !lost.empty()) {
+		std::string t = "Battle over: ";
+		if (!won.empty()) t += join(won) + " won";
+		if (!won.empty() && !lost.empty()) t += "; ";
+		if (!lost.empty()) t += join(lost) + (lost.size() == 1 ? " was defeated" : " were defeated");
+		// the script's own game-over text for the seat on screen (the victory or defeat message the battle's scripts set)
+		const ron::sim::ScriptPresentation* p = [self pres];
+		const int me = _game->local_play;
+		if (p && me >= 0 && me < 8 && seen[size_t(me)]) {
+			const bool iwon = std::find(won.begin(), won.end(), [self pbSeatLabel:me]) != won.end();
+			const std::string& msg = iwon ? p->victory_message : p->defeat_message;
+			if (!msg.empty()) t += ". " + msg;
+		}
+		return t;
+	}
+	// nobody was defeated when the recording stopped: the sides (teams) by what each has left
+	std::map<int, std::pair<std::vector<std::string>, int>> sides;
+	for (int w = 0; w < 8; w++) {
+		if (!(_game->leaders[size_t(w)].flags & ron::sim::leaderflag::kValid)) continue;
+		int alive = 0;
+		const ron::sim::ObjectList& ol = _game->objects[size_t(w)];
+		for (int32_t k = 0; k < ol.unit_mark; k++) alive += _game->unit(w, k) && _game->unit(w, k)->alive();
+		for (int32_t k = ron::sim::kBuildBase; k < ol.build_mark; k++) alive += _game->build(w, k) && _game->build(w, k)->alive();
+		const int team = _game->info.team[size_t(w)];
+		auto& side = sides[team >= 0 ? team : 100 + w];
+		side.first.push_back([self pbSeatLabel:w]);
+		side.second += alive;
+	}
+	if (sides.size() < 2) return std::string();
+	std::vector<std::pair<int, std::string>> left;   // what each side has left, the largest first
+	for (const auto& kv : sides) left.push_back({kv.second.second, join(kv.second.first)});
+	std::stable_sort(left.begin(), left.end(), [](const auto& x, const auto& y) { return x.first > y.first; });
+	std::string t = "The recording ends with the battle undecided. Left: ";
+	for (size_t i = 0; i < left.size(); i++) t += (i ? ", " : "") + left[i].second + " " + std::to_string(left[i].first);
+	return t + " units and buildings";
 }
 
 // Jumps to a frame: forward runs the recording up to it, backward builds the start state again first.
@@ -2052,6 +2113,7 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 		pb.bind(*_game);
 		[self afterGameReplaced];
 		v.ended = false, v.announced_end = false;
+		v.outcome.clear();
 		[self pbCollectSeats];
 	}
 	v.seek_to = target > pb.frame() ? target : -1;
@@ -2063,7 +2125,42 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 		v.ended = pb.at_end();
 		[self afterGameReplaced];
 		[self pbSelectSeat:v.seat];
+		if (v.ended) [self pbBattleEnded];
 	}
+}
+
+// The rewind test (--pb-seek F1,F2; frames count from the recording's start). The straight run to F2 is the reference; then the playback goes to F1,
+// comes back to F2 (a rewind when F1 > F2: the start state is built again and run forward) and restarts from the beginning to F2 once more. The state
+// hash of playback_state_hash must be the same all three times.
+- (int)pbSeekTest:(int64_t)f1 to:(int64_t)f2 {
+	if (!_pbv) return 2;
+	ron::net::Playback& pb = *_pbv->pb;
+	const int64_t base = pb.start_frame();
+	auto hash = [&](const char* what, int64_t want, uint64_t& h) {
+		const bool ok = ron::net::playback_state_hash(pb, h);
+		std::printf("  %-28s frame %d (asked %lld)  state hash %016llx%s\n", what, pb.frame(), (long long)want, (unsigned long long)h, ok ? "" : "  (cannot be hashed)");
+		return ok && (pb.frame() == want || pb.at_end());
+	};
+	if (pb.frame() != base) {
+		std::printf("seek test: the recording is not at its start (frame %d)\n", pb.frame());
+		return 2;
+	}
+	std::printf("%s: seek test, straight to +%lld, seek to +%lld, back to +%lld, restart to +%lld\n", pb.path().c_str(), (long long)f2, (long long)f1, (long long)f2, (long long)f2);
+	uint64_t straight = 0, via = 0, restart = 0, mid = 0;
+	bool ok = true;
+	[self pbSeek:base + f2];
+	ok = hash("straight run", base + f2, straight) && ok;
+	[self pbSeek:base + f1];
+	ok = hash("seek to F1", base + f1, mid) && ok;
+	[self pbSeek:base + f2];
+	ok = hash(f1 > f2 ? "back to F2 (rewound)" : "on to F2", base + f2, via) && ok;
+	[self pbSeek:base];
+	[self pbSeek:base + f2];
+	ok = hash("restart, then to F2", base + f2, restart) && ok;
+	const bool same = straight == via && straight == restart;
+	if (f1 <= f2) std::printf("  note: F1 <= F2, so the second step ran forward; only the restart rewound\n");
+	std::printf("seek test: %s\n", ok && same ? "PASS (the state at F2 is the same)" : "FAIL (the state at F2 differs or a seek missed its frame)");
+	return ok && same ? 0 : 1;
 }
 
 - (void)pbSpeedStep:(int)d {
@@ -2081,7 +2178,7 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 	s.sync = pb.sync_text();
 	const ron::net::PlaybackSync& sy = pb.sync();
 	s.sync_kind = !sy.has_rows || sy.compared == 0 ? 0 : sy.first_out_of_sync >= 0 ? 2 : 1;
-	s.name = _pbv->note;
+	s.name = _pbv->outcome.empty() ? _pbv->note : _pbv->note.empty() ? _pbv->outcome : _pbv->note + "  -  " + _pbv->outcome;
 	s.hover = _pbv->hit(int(_mouse.x), int(_mouse.y));
 	if (s.hover >= recplay::kBtnCount) s.hover = recplay::kBtnNone;
 	return s;
@@ -2164,6 +2261,7 @@ static uint64_t g_doFrameCpuNs = 0;  // thread CPU time spent in Game::do_frame 
 		for (int i = 0; i < n; i++) [self pbTick:dt modal:NO];
 		std::printf("  %d display frames at speed %s: frame %d -> %d%s\n", n, recplay::kSpeedNames[_pbv->speed], f0, _game->frame, _pbv->ended ? ", at the end" : "");
 	}
+	if (!_pbv->outcome.empty()) std::printf("  outcome: %s\n", _pbv->outcome.c_str());
 	ron::net::playback_print_sync(pb);
 	return YES;
 }
@@ -8413,6 +8511,7 @@ int main(int argc, const char* argv[]) {
 		std::string mpJoin, mpRecord, mpLoad, mpSave;
 		int pb_seat = -1;      // --pb-seat WHO: the leader whose seat the playback shows (default: the first human seat); --pb-fog: with that seat's fog (default: the whole map)
 		bool pb_fog = false;
+		int64_t pb_seek1 = -1, pb_seek2 = -1;   // --pb-seek F1,F2: the headless seek test (frames after the start)
 		NSString* playback_path = nil;   // --playback FILE: a recording of this port, played by its packages (docs/ui-port.md section 18)
 		bool frames_given = false;
 		std::vector<std::pair<std::string, uint32_t>> mpActs;  // --mp-act what@turn,...
@@ -8468,6 +8567,13 @@ int main(int argc, const char* argv[]) {
 				pb_seat = std::atoi(argv[++i]);
 			} else if (a == "--pb-fog") {
 				pb_fog = true;
+			} else if (a == "--pb-seek" && more) {
+				long long f1 = -1, f2 = -1;
+				if (std::sscanf(argv[++i], "%lld,%lld", &f1, &f2) != 2 || f1 < 0 || f2 < 0) {
+					std::fprintf(stderr, "--pb-seek F1,F2: two frame counts after the start\n");
+					return 2;
+				}
+				pb_seek1 = f1, pb_seek2 = f2;
 			} else if (a == "--playback" && more) {
 				playback_path = @(argv[++i]);
 			} else if (a == "--load-game" && more) {
@@ -8739,7 +8845,7 @@ int main(int argc, const char* argv[]) {
 				}
 			} else if (a.rfind("--", 0) == 0) {
 				std::printf("usage: %s [game-dir] [--menu [main|tutorials|skirmish|skirmish-setup|scenarios|quit-popup|ctw|ctw-map|multiplayer|mp-lobby|options|recorded]] [--snapshot out.png [--size WxH]]\n"
-				            "       ronmap [game-dir] --playback FILE.rcx [--frames N] [--pb-seat WHO] [--pb-fog] [--snapshot out.png [--size WxH]]\n"
+				            "       ronmap [game-dir] --playback FILE.rcx [--frames N] [--pb-seat WHO] [--pb-fog] [--pb-seek F1,F2] [--snapshot out.png [--size WxH]]\n"
 				            "       %s [game-dir] --random STYLE,SIZE,SEED,NATIONS[,TRIBES...] [--all-ai] [--difficulty 0..5] [--frames N] [--census] [--save-game FILE] [--snapshot out.png]\n"
 				            "       %s [game-dir] <scenario.scx> [--zoom 0..6] [--at X,Y] [--no-bloom] [--farm-time S] [--no-sim] [--seed S] "
 				            "[--move WHO:o1,o2@X,Y[@FRAME]]... [--frames N] [--load-game FILE] [--save-game FILE] [--snapshot out.png [--size WxH]]\n", argv[0], argv[0], argv[0]);
@@ -9224,6 +9330,11 @@ int main(int argc, const char* argv[]) {
 		if (load_game && ![r loadGameFrom:load_game]) {
 			std::fprintf(stderr, "--load-game failed\n");
 			return 1;
+		}
+		if (r.playbackActive && pb_seek1 >= 0) {   // the seek test: no display, the exit code is the verdict
+			const int rc = [r pbSeekTest:pb_seek1 to:pb_seek2];
+			std::fflush(stdout);
+			return rc;
 		}
 		if (r.playbackActive && (frames_given || snapshot)) {  // headless: the recording runs to the frame asked for (default: its end), then the report
 			r.onPlayRecording = ^(NSString* path) { std::printf("[view playback] %s\n", path.UTF8String); };

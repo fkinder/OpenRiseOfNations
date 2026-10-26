@@ -49,6 +49,7 @@ struct PlaybackSummary {
 	int64_t start_frame = 0, end_frame = 0;   // the first frame the playback runs from, the frame of the last package
 	bool has_check_sums = false;
 	bool ctw_battle = false;      // a Conquer the World battle (the embedded save carries the campaign copy)
+	std::string ctw_campaign, ctw_map;   // a Conquer the World battle on a campaign map ("ctwmap:"): the campaign (the folder of the map file) and the map's name
 	bool recovery = false;        // starts from an out-of-sync recovery snapshot (start_frame > 0): the recording starts there, not at frame 0
 };
 bool playback_summary(const std::string& path, PlaybackSummary& out);
@@ -92,6 +93,8 @@ public:
 	// The leader of each game slot (Player.who), as the recording's header names them.
 	const std::array<int, 8>& seat_who() const { return who_; }
 	bool has_check_sums() const { return !rows_.empty(); }
+	// A Conquer the World battle (the embedded save carries the campaign copy, or the header says so): the viewer reports how it ended.
+	bool ctw_battle() const { return ctw_battle_; }
 
 	// Where the recording starts and ends (frames). Valid after bind().
 	int64_t start_frame() const { return start_; }
@@ -168,11 +171,15 @@ private:
 	size_t next_ = 0;
 	int64_t start_ = 0;
 	bool checking_ = true;
+	bool ctw_battle_ = false;
 	PlaybackSync sync_;
 
 	void deliver();
 	void compare(int64_t frame);
 };
+
+// The river polylines (wcoords, source to mouth) recovered from a loaded game's river tiles (tdata 0x800): what Terrain::rivers holds for a generated map.
+std::vector<std::vector<std::array<int32_t, 2>>> playback_rivers(const sim::Game& g);
 
 // The scenario-shaped terrain the renderer draws a loaded game from: Scenario::terrain synthesised from the game's World (tdata / wdata),
 // its height field, its placed mountains and the tileset the original save names (OriginalShadow::tileset), the same record a random
@@ -180,6 +187,11 @@ private:
 // is no scenario file and no setup text. Objects are not part of it (the renderer draws units and buildings from the simulation's view).
 // False with `err` when the game has no tileset (not a game loaded from an original save).
 bool playback_scenario(const sim::Game& g, const ron::GameFiles& files, Scenario& out, std::string& err);
+
+// A hash of the whole state the playback has reached: the frame and the 15 CHECK_SUMS parts the lockstep compares (hooks().checksums). Two
+// playbacks of one recording at one frame must agree on it whatever way they got there (a straight run, or a seek back and forward).
+// False when the checksums cannot be computed (no game bound).
+bool playback_state_hash(Playback& pb, uint64_t& out);
 
 // Runs a recording to `frames` after its start (0: to its end) with no display and prints the report `ron-net playback` and
 // `ronmap --playback` share (kind, turns compared, per-part first differences). Returns 0 when it ran to where it was asked.
