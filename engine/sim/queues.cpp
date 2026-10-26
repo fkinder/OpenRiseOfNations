@@ -577,7 +577,8 @@ void group_action_buildmask(Game& g, Group& gr, int32_t mask, int32_t set) {
 namespace {
 
 // ObjectsData::find_any_building_at(tx, ty, search, who, filter, ...) @659180, with search = any leader and the
-// filter (0x11, production-spec 6.15) not applied: a started building, or any building of `who`, covering the tcoord.
+// filter 0x11 = FILTER_SEEN (Search::valid_filter jump entry 16 @67e1d5: vslot +0x48 is_seen(who, 0)): a started building, or
+// any building of `who`, covering the tcoord, that `who` currently sees.
 int32_t find_any_building_at(const Game& g, int32_t tx, int32_t ty, int32_t who, int32_t* who_out) {
 	if (who_out) *who_out = -1;
 	const World& w = g.world;
@@ -594,7 +595,7 @@ int32_t find_any_building_at(const Game& g, int32_t tx, int32_t ty, int32_t who,
 			const int32_t no = ob->down, nw = ob->down_who;
 			if (ow < 8 && !ob->is_unit && ob->alive() && ((ob->flags & objflag::kStarted) || ow == who)) {
 				const Footprint f = footprint(*ob->ptype, ob->x, ob->y);
-				if (f.x0 <= tx && tx < f.x0 + f.w && f.y0 <= ty && ty < f.y0 + f.h) {
+				if (f.x0 <= tx && tx < f.x0 + f.w && f.y0 <= ty && ty < f.y0 + f.h && object_is_seen(g, *ob, who, false)) {
 					if (who_out) *who_out = ow;
 					return o;
 				}
@@ -839,6 +840,10 @@ int32_t unit_come_out(Game& g, Unit& u0, int32_t param) {
 				if (find_nearby_spot(g, T, XB.x, XB.y, &rx, &ry, S + K("unit_train_distance"), S + K("unit_train_max_distance"), 0,
 				                     find_angle(tx - XB.x, ty - XB.y), kFilterAll, u.o, who, 0, 0, -1, 0, -1) == 0)
 					unit_set_new_location(g, u, rx, ry, true, true);
+				// @619365 / @619bf6: the search's output slots are copied into the "previous spot" slots ([esp+0x2c], [esp+0x54]) whether or
+				// not the search found a spot (a failed search leaves the input): the next group move's facing angle starts from here.
+				prevx = rx;
+				prevy = ry;
 			};
 			bool done = false;
 			if (bo >= 0) {
@@ -896,7 +901,7 @@ int32_t unit_come_out(Game& g, Unit& u0, int32_t param) {
 			}
 			if (!done && final_pt) {
 				int32_t uw = -1;
-				const int32_t uo = find_unit_with_radius(g, fx, fy, -1, 1, 0, u.o, who, &uw);
+				const int32_t uo = find_unit_with_radius(g, fx, fy, -1, 1, 0x11, u.o, who, &uw)  /* FILTER_SEEN */;
 				bool attacked = false;
 				if (uo >= 0) {
 					const Unit* tu = g.unit(uw, uo);
@@ -913,8 +918,12 @@ int32_t unit_come_out(Game& g, Unit& u0, int32_t param) {
 					    (is_t(g, T.where, ptype::kBarracks) || is_t(g, T.where, ptype::kStable) || is_t(g, T.where, ptype::kDock)))
 						orders = 2;
 					if (T.uber_size > 1 && slot >= 0) {
-						int32_t qx = fx, qy = fy;
-						find_nearby_spot(g, T, fx, fy, &qx, &qy, 0, -1, 0, 0x55555555u, kFilterNotMe, u.o, who, 0, 1, -1, 0, -1);
+						// @619e5c: Unit::find_nearby_spot(x = [esp+0x44], y = [esp+0x40]) searches in place on the slots the earlier spot searches
+						// left (the rally spot of the first node, or the spot of the last gather node), not on the final node itself.
+						int32_t qx = last_spot_x, qy = last_spot_y;
+						find_nearby_spot(g, T, last_spot_x, last_spot_y, &qx, &qy, 0, -1, 0, 0x55555555u, kFilterNotMe, u.o, who, 0, 1, -1, 0, -1);
+						last_spot_x = qx;
+						last_spot_y = qy;
 						group_action_move_to(g, g.groups.g[size_t(slot)], qx, qy, kQueueLast, true, find_angle(qx - prevx, qy - prevy), orders,
 						                     1, -1, -1, 0);
 					} else {

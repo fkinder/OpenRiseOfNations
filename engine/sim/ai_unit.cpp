@@ -201,8 +201,9 @@ void explore_goody(Game& g, Unit& u) {  // Unit::explore_goody @5f9780
 			best_g = gd;
 		}
 	}
-	int32_t amount = has_tribe_bonus(g, u.who, 9) ? L.science * K("spanish_ruins") + K("spanish_ruins_base")
-	                                              : L.science * K("goody_box_age") + K("goody_box");
+	// Unit::explore_goody @5f9780 reads LeaderDataEncrypt +0xf4 (epoch[3]) itself; the `science` mirror is 0 after a load.
+	int32_t amount = has_tribe_bonus(g, u.who, 9) ? L.epoch[3] * K("spanish_ruins") + K("spanish_ruins_base")
+	                                              : L.epoch[3] * K("goody_box_age") + K("goody_box");
 	if (best_g < 0) best_g = 2;
 	L.bucket[size_t(best_g)] += amount;
 	L.goody_box_resources += amount;

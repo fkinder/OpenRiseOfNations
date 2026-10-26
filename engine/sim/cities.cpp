@@ -103,10 +103,30 @@ void wall_mask_city(Game& g, Build& b, bool add, int32_t radius) {
 	}
 }
 
+// Docks::remask_docks @740c90 (BuildType::mask_me @6312a0 calls it after clearing a removed dock's BAD_PATH water, with the removed dock's
+// owner and record index): every other in-use dock record of every valid leader sets BAD_PATH again on the in-map water tcoords of
+// [x0 - 3, x0 + w + 3) x [y0 - 3, y0 + h + 3), so overlapping docks keep their share (set_bad_path counts a tile once).
+void docks_remask_docks(Game& g, int32_t who, int32_t idx) {
+	for (int32_t p = 0; p < 8; p++) {
+		if (!(g.leaders[size_t(p)].flags & leaderflag::kValid)) continue;
+		const auto& dl = g.docks[size_t(p)];
+		for (int32_t i = 0; i < LD(g, p).dock_mark && size_t(i) < dl.size(); i++) {
+			if ((p == who && i == idx) || !(dl[size_t(i)].dock_flags & 1)) continue;
+			const Build* d = dl[size_t(i)].o >= 0 ? g.build(p, dl[size_t(i)].o) : nullptr;
+			if (!d) continue;
+			const Footprint f = footprint(*d->ptype, d->x, d->y);
+			for (int32_t x = f.x0 - 3; x < f.x0 + f.w + 3; x++)
+				for (int32_t y = f.y0 - 3; y < f.y0 + f.h + 3; y++)
+					if (g.world.in_t(x, y) && g.world.is_tocean(x, y)) g.world.set_bad_path(x, y, true);
+		}
+	}
+}
+
 void wall_mask_me(Game& g, Build& b, bool add, Regen regen) {
 	int32_t radius = 0;
 	if (b.flags & objflag::kCity) radius = b.city < 0 ? get_radius(g, b.who, b.type) : city_get_radius(g, b.who, b.city);
 	mask_me(g.world, *b.ptype, b.x, b.y, add, regen, b.city >= 0);
+	if (!add && type_is(*b.ptype, ptype::kDock)) docks_remask_docks(g, b.who, b.fort);  // BuildType::mask_me: Docks::remask_docks(owner, dock index +0x78)
 	place_roads_regen(g, b, add, regen);  // the REGEN_TOTAL / REGEN_FORCE tail of BuildType::place_roads
 	if (b.flags & objflag::kCity) wall_mask_city(g, b, add, radius);
 }

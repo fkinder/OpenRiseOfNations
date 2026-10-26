@@ -2979,11 +2979,12 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 						std::unordered_map<uint64_t, std::vector<size_t>> by;
 						for (size_t i = 0; i < effs.size(); ++i) by[k2(effs[i].a, effs[i].b)].push_back(i);
 						int shown = 0;
+						const bool same_only = std::getenv("RON_PAIR_SAME") != nullptr;  // only pairs of members of the same object (RON_PAIR_SAME=1): one object with two wrong members
 						for (size_t i = 0; i < effs.size(); ++i) {
 							if (effs[i].a == target.first && effs[i].b == target.second && shown++ < 20) std::printf("    PAIR HIT (1): %s (%d,%d,%d) %+d\n", all[effs[i].mi].key.c_str(), all[effs[i].mi].id.a, all[effs[i].mi].id.b, all[effs[i].mi].id.c, effs[i].dl);
 							auto fnd = by.find(k2(((target.first - effs[i].a) % M + M) % M, ((target.second - effs[i].b) % M + M) % M));
 							if (fnd == by.end()) continue;
-							for (size_t j : fnd->second) if (j > i && effs[j].mi != effs[i].mi && shown++ < 40)
+							for (size_t j : fnd->second) if (j > i && effs[j].mi != effs[i].mi && (!same_only || (all[effs[i].mi].id.a == all[effs[j].mi].id.a && all[effs[i].mi].id.b == all[effs[j].mi].id.b)) && shown++ < (same_only ? 400 : 40))
 								std::printf("    PAIR HIT (2): %s (%d,%d,%d) %+d  and  %s (%d,%d,%d) %+d\n", all[effs[i].mi].key.c_str(), all[effs[i].mi].id.a, all[effs[i].mi].id.b, all[effs[i].mi].id.c, effs[i].dl,
 									all[effs[j].mi].key.c_str(), all[effs[j].mi].id.a, all[effs[j].mi].id.b, all[effs[j].mi].id.c, effs[j].dl);
 						}
@@ -3055,16 +3056,22 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 				}
 			}
 			if (next_frame >= 0 && f == next_frame) break;
-			if (const char* tu = std::getenv("RON_TRACE_UNIT")) {  // RON_TRACE_UNIT=who,o,F0,F1: that unit's state before each frame of the window
+			if (const char* tu_all = std::getenv("RON_TRACE_UNIT")) {  // RON_TRACE_UNIT=who,o,F0,F1[;who,o,F0,F1...]: those units' state before each frame of the window
+			  std::stringstream tus(tu_all);
+			  std::string tu_item;
+			  while (std::getline(tus, tu_item, ';')) {
+				const char* tu = tu_item.c_str();
 				int tw = 0, to = 0, t0 = 0, t1 = 0;
 				if (std::sscanf(tu, "%d,%d,%d,%d", &tw, &to, &t0, &t1) == 4 && f >= t0 && f <= t1)
 					if (const sim::Unit* u = game->unit(tw, to)) {
 						std::printf("  TU f%d %d/%d x %d y %d z %d ang %08x masks %08x in %d/%d coll %d/%d orders", int(f), tw, to, u->x, u->y, u->z, u->angle, u->unit_masks, u->inside_up, u->inside_up_who, u->collide, u->collide_frame);
 						for (const sim::Order& od : u->orders) std::printf(" [t%d %d,%d ox %d]", int(od.type), od.x, od.y, od.ox);
 						std::printf(" path %zu (size %d)", u->path.size(), u->path_size);
+						if (std::getenv("RON_TRACE_PATH")) for (const sim::PathData& pd : u->path) std::printf(" (%d,%d f%x)", pd.x, pd.y, unsigned(pd.flags));  // bottom first
 						if (!u->guys.empty()) { const sim::Guy& gy = u->guys[0]; std::printf(" guy anim %d ct %u spd %d/%d ang %08x flags %x stopped %d", gy.cur_anim, gy.cur_time, gy.last_speed, gy.avg_speed, gy.angle, unsigned(gy.guy_flags), int(gy.stopped)); }
 						std::printf("\n");
 					}
+			  }
 			}
 			if (const char* ins = std::getenv("RON_INSERT")) {
 				// experiment: RON_INSERT="F:k[,F:k..]" draws k extra numbers (k < 0: puts the generator back |k| draws) just before frame F's do_frame
@@ -3822,6 +3829,9 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 				if (mname == "unit_masks2") return int64_t(u.unit_masks2);
 				if (mname == "hold") return (u.unit_masks2 & 0x10) != 0;
 				if (mname == "type") return u.type;
+				if (mname == "cur_anim") return u.guys.empty() ? -1 : u.guys[0].cur_anim;  // guy 0: the animation (gaia animals: idle variants)
+				if (mname == "cur_time") return u.guys.empty() ? -1 : int64_t(u.guys[0].cur_time);
+				if (mname == "end_time") return u.guys.empty() ? -1 : int64_t(u.guys[0].end_time);
 				return 0;
 			};
 			int n = 0;

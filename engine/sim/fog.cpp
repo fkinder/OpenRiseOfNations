@@ -98,8 +98,10 @@ int32_t get_tower_fort_los(const Leader& L) {
 	return (b & 4) ? 2 : 1;
 }
 
-// The science epoch byte as the LOS code reads it: (epoch[3] ^ 0x63187) low byte = the science level.
-uint8_t science_byte(const Leader& L) { return uint8_t(L.science); }
+// The science epoch byte as the LOS code reads it: (epoch[3] ^ 0x63187) low byte = the science level. Read from epoch[3] itself, not from
+// the `Leader::science` mirror: the original has no mirror, and a loaded game leaves the mirror 0 until the leader gains an epoch tech
+// (Wall::update_los @63eeb0 reads LeaderDataEncrypt +0xf4 ^ 0x87 on every recompute).
+uint8_t science_byte(const Leader& L) { return uint8_t(L.epoch[3]); }
 
 // Type predicates (folded vtable slots, see CLAUDE.md on identical-COMDAT folding).
 bool type_is_fort(const Type& t) { return t.kind == Kind::Build && type_is(t, fogtype::kFort); }  // BuildTypeData::is_fort

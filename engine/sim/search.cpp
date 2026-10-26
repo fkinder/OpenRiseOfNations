@@ -7,6 +7,7 @@
 #include "sim/search.hpp"
 
 #include "sim/compass.hpp"
+#include "sim/fog.hpp"
 #include "sim/game.hpp"
 #include "sim/movement.hpp"
 #include "sim/placement.hpp"
@@ -24,10 +25,13 @@ bool valid_on_map_unit(const Object* ob) {
 
 // Search::valid_filter: only the filters the movement code passes are ported.
 bool valid_filter(const Game& g, int32_t cand_who, int32_t cand_o, int32_t o, int32_t who, int32_t filter) {
-	(void)g;
 	switch (filter) {
 	case kFilterNotMe:
 		return !(cand_o == o && cand_who == who);
+	case 0x11: {  // FILTER_SEEN (jump entry 16 @67e1d5): vslot +0x48 is_seen(who, 0)
+		const Object* ob = g.object(cand_who, cand_o);
+		return ob && object_is_seen(g, *ob, who, false);
+	}
 	default:
 		// TODO(search.obj): FILTER_TYPE .. FILTER_GOV_HERO (Search::valid_filter jump table @0067e57c). The movement
 		// callers only use FILTER_ALL and FILTER_NOT_ME.
