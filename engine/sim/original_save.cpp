@@ -1,4 +1,5 @@
 // Loading a save of the original game into the engine's Game (docs/original-save.md; sim/original_save.hpp).
+#include "sim/combat.hpp"
 #include "sim/original_save.hpp"
 #include "sim/script_host.hpp"
 #include "sim/ai.hpp"
@@ -1027,6 +1028,9 @@ void original_post_load_effects(Game& g) {
 	// playback runs them again on the loaded state and the danger map is made from the refreshed fog (is_seen of the objects).
 	calc_danger(g);
 	update_all_seen(g);
+	// GraphicEvents::init_unit_events decides per unit type whether the shot is released by the animation or fired by fight: the table the
+	// scenario loader builds in Game::load is empty after a load from an original save (the art is attached later).
+	init_fire_proj(g);
 }
 
 bool original_attach_game_script(Game& g, const GameFiles& files, const std::string& name, std::string* err) {

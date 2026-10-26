@@ -494,6 +494,10 @@ First differing boundary of `21'23'34`, before -> after: units 1,514 -> **1,622*
 - A boundary-by-boundary read of a part delta stays the tool: the `groups` delta of a squad created and then left alone is constant (a field of the creation), a `guys` delta that grows is a simulation difference, and a delta that is present only in `units` (not in `guys`) is order / path / mask state. A shell warning from the pass: `env $vars cmd` in zsh does not split `$vars`.
 - Open: guys 5,600 (player 1's 15-unit group move at 5,594: two ungroups, two stalls), the packer order nodes of the transient `units` boundaries, then the first fight; the `--compare-next` leads (`Region.flags` AnybodyHere, gaia animals' `cur_anim`, `frame_started`, `Herd` positions).
 
+### 6.16 Sixteenth pass (2026-10-26): combat counters, absolute ammo pieces, the muzzle offset
+
+`Ammo::gpiece` in a save is absolute (first_ammo_piece 0xeaf5 + index into the AMMO list; 0x100 for the aircraft wreck). `Leader` `damage_current_frame` (+0xa5e) counts the damage taken, `hits_current_frame` (+0xa5c) the attacker's hits (5 for siege against a building), a building kill adds to the owner's `deaths_current_frame` (+0xa58). A new shot starts at the guy plus the rotated, scaled muzzle offset of the release node (see sim-implementation.md item 89). After a load the `fire_proj` table has to be rebuilt (`init_fire_proj`). Details: docs/sim-implementation.md, sixteenth pass.
+
 ## 7. What blocks exact checksums
 
 State of the fidelity work (2026-10-24; the log of each fix is in docs/sim-implementation.md "Fidelity log"). **Fixed** since the first table:

@@ -15,11 +15,32 @@
 #include <unordered_set>
 #include <vector>
 
+#include <array>
+#include <map>
+#include <tuple>
+
+#include "assets/bh3.hpp"
+#include "assets/bha.hpp"
 #include "assets/files.hpp"
+#include "assets/pose.hpp"
 #include "sim/anims.hpp"
 #include "sim/rules.hpp"
 
 namespace ron::sim {
+
+// AnimObj as AnimObj::load_hier @54b700 builds it (anim_assets.cpp): the muzzle offsets pose the hierarchy from these.
+struct OKey {
+	float q[4];  // the file order (x, y, z, w) rounded to 1/1000
+	float p[3];  // rounded to 1/100
+};
+struct ONode {
+	std::vector<OKey> keys;
+	std::vector<uint16_t> times;
+	std::vector<uint8_t> flags;
+	bool constant = false;
+	uint32_t anim_time = 0;
+	std::vector<ONode> children;
+};
 
 class AssetAnimSource : public AnimSource {
 public:
@@ -39,6 +60,7 @@ public:
 	bool no_release(int32_t piece) const override;
 	bool has_skeleton(int32_t piece) const override;
 	bool has_scorch(int32_t piece) const override;
+	bool attach_position(int32_t piece, int32_t node, int32_t anim, int32_t frame, float out[3]) const override;
 	int32_t num_ammo() const override { return int32_t(ammo_.size()); }
 	uint32_t ammo_flags(int32_t ammo) const override;
 	// The AMMO piece name (effects_graphics.xml), "" out of range.
@@ -92,6 +114,14 @@ private:
 	std::vector<Entry> entries_;
 	std::vector<Ammo> ammo_;
 	mutable std::unordered_map<int32_t, int32_t> piece_unit_;  // piece -> units_ index or -1
+	// attach_position: parsed models (with their attach slots) and animations by file, and the results by (piece, node, anim, frame).
+	struct ModelData {
+		BH3Model model;
+		std::array<int, ron::kAttachSlots> slots;
+	};
+	mutable std::unordered_map<std::string, std::shared_ptr<ModelData>> models_;
+	mutable std::unordered_map<std::string, std::shared_ptr<ONode>> bhas_;
+	mutable std::map<std::tuple<int32_t, int32_t, int32_t, int32_t>, std::array<float, 4>> attach_cache_;  // [3] = 1 when an entry exists
 	std::vector<std::string> warnings_;
 };
 

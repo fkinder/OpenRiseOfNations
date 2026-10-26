@@ -7,6 +7,7 @@
 // Objects are addressed as (o, who) like the original; `Object&` arguments are the acting object ("this").
 #pragma once
 
+#include "sim/anims.hpp"
 #include <cstdint>
 
 #include "sim/objects.hpp"
@@ -53,6 +54,9 @@ constexpr int32_t kDomainGround = 0, kDomainSea = 1, kDomainAir = 2;
 // Load-time combat data: UnitTypeData.fire_proj from the art (GraphicEvents::init_unit_events @8e2520,
 // combat-spec 4.2), the ammo pool (Objects::init: 200 free slots) and the corpse slots. Called by Game::load.
 void init_combat_data(Game& g);
+// The fire_proj table alone (GraphicEvents::init_unit_events' +0x2cc per unit type, from the art): a game loaded from an original save runs it
+// after the animation source is attached (original_post_load_effects).
+void init_fire_proj(Game& g);
 
 // ---------------------------------------------------------------- stat getters (combat-spec 5.1)
 // The leader-dependent terms (nation powers, generals, heroes, rare goods, wonders, techs) are 0 here: TODO(combat-
@@ -242,6 +246,8 @@ struct AmmoPackage {
 int32_t add_ammo(Game& g, const AmmoPackage& pkg);   // Objects::add_ammo @658b10
 void ammo_inc_time_all(Game& g);                      // the Ammo pass of Objects::inc_time
 void guy_execute_events(Game& g, Unit& u, Guy& gy);  // Guy::execute_events @5d99c0 (release events only)
+// GraphicPieces::get_position @90b750 for a release event of the guy's piece (the muzzle offset added to the shot's start; sim/combat_fight.cpp).
+void guy_muzzle_offset(const Game& g, const Guy& gy, const ReleaseEvent& e, int32_t out[3]);
 void build_process_attack(Game& g, Build& b);         // the attack part of Build::process @61edf0
 int32_t build_do_attack(Game& g, Build& b);           // Build::do_attack @6228f0
 int32_t get_garrison_arrows(const Game& g, const Build& b);  // BuildData::get_garrison_arrows @62e3d0

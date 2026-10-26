@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "sim/aircraft.hpp"
 #include "sim/original_map.hpp"
 
 namespace ron::sim::omap {
@@ -423,12 +424,28 @@ const ClassMap& map_groups_global() {
 
 // ---- combat objects: the projectile pool and the corpse slots -------------------------------------------------------------
 
+constexpr int32_t kFirstAmmoPiece = 0xeaf5;
+
 const ClassMap& map_ammo() {
 	static const ClassMap m = [] {
 		ClassMap m;
 		Builder<Ammo> b(m, "Ammo", "Ammo");
 		b.walks({"AmmoData::walk_data"}).resolve([](Game& g, const Seg& s) -> Ammo* { return size_t(s.a) < g.ammo.size() ? &g.ammo[size_t(s.a)] : nullptr; });
-		b.f("flags", &Ammo::flags).f("rolling", &Ammo::rolling).f("accuracy", &Ammo::accuracy).f("gpiece", &Ammo::gpiece);
+		b.f("flags", &Ammo::flags).f("rolling", &Ammo::rolling).f("accuracy", &Ammo::accuracy);
+		// The original numbers the ammo pieces from GraphicPieces::first_ammo_piece (= first_land_doober_piece + num_land_doober_pieces,
+		// 0xeaf5 in the shipped data: a saved arrow of the "ammo 26" release event holds 60175); the simulation keeps the index into the
+		// AMMO list of effects_graphics.xml (Ammo::gpiece), so the walker converts at the file boundary.
+		b.c("gpiece",
+		    [](Ammo& a, const uint8_t* p) {
+			    int32_t v;
+			    std::memcpy(&v, p, 4);
+			    // A value below the first ammo piece is a unit piece (the aircraft wreck, saved as 0x100): the engine's kCrashPiece.
+			    a.gpiece = v >= kFirstAmmoPiece ? v - kFirstAmmoPiece : (v >= 0 ? kCrashPiece : v);
+		    },
+		    [](const Ammo& a, uint8_t* p) {
+			    const int32_t v = a.gpiece >= 0 ? a.gpiece + kFirstAmmoPiece : (a.gpiece == kCrashPiece ? 0x100 : a.gpiece);
+			    std::memcpy(p, &v, 4);
+		    });
 		b.f("sx", &Ammo::sx).f("sy", &Ammo::sy).f("sz", &Ammo::sz).f("ex", &Ammo::ex).f("ey", &Ammo::ey).f("ez", &Ammo::ez);
 		b.f("cur_time", &Ammo::cur_time).f("total_time", &Ammo::total_time).f("angle", &Ammo::angle).f("splash_area", &Ammo::splash_area);
 		b.f("index", &Ammo::index).f("graph_index", &Ammo::graph_index).f("who", &Ammo::who).f("o", &Ammo::o).f("num_guys", &Ammo::num_guys);

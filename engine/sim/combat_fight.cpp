@@ -55,6 +55,107 @@ int32_t target_z(const Object& t) {
 
 int32_t ums(const Game& g) { return g.rules->constants.at(0x4); }  // unit_move_speed
 
+// angle_to_degrees @a28e00 (unsigned arithmetic: the angle is split into quarters, eighths and finer fractions) and
+// fast_angle_to_degrees @a28f70 (the degrees of the angle's top byte, as a float).
+int32_t angle_to_degrees_u(uint32_t in) {
+	const uint32_t q = in >> 0x1e;
+	uint32_t a = in - q * 0x40000000u;
+	const uint32_t h = a >> 0x1d;
+	a = a - h * 0x20000000u;
+	const uint32_t b = a % 0x15555555u;
+	const uint32_t c = b % 0xaaaaaaau;
+	return int32_t((c % 0x38e38e3u + 0x5b05b0u) / 0xb60b60u +
+	               (c / 0x38e38e3u + ((h + q * 2u) * 3u + b / 0xaaaaaaau + (a / 0x15555555u) * 2u) * 3u) * 5u);
+}
+float fast_angle_to_degrees_f(int32_t angle) { return float(angle_to_degrees_u((uint32_t(angle >> 24) & 0xffu) << 24)); }
+
+// Transform<float>::rotate(deg, (0, 0, 1)) + fill_matrix @4214d0 (Quat::set @420c70: the degrees reduced into [0, 360), the half-degree
+// cosine / sine tables of @a29010 / @a29110, cosf((i * 0.5f) * 0.017453292f); Matrix::fill @420df0 with x = y = 0): the 3 x 3 part of the matrix.
+struct RotZ {
+	float m0, m1, m4, m5;
+};
+RotZ rot_z(int32_t deg) {
+	int32_t d = deg;
+	if (d < 0) {
+		const int32_t n = -d;
+		d = 0x167 - n % 0x168;
+	} else if (d >= 0x168) {
+		d %= 0x168;
+	}
+	static float cos_t[360], sin_t[360];
+	static bool init = false;
+	if (!init) {
+		for (int i = 0; i < 360; i++) {
+			cos_t[i] = std::cos(float(i) * 0.5f * 0.017453292f);
+			sin_t[i] = std::sin(float(i) * 0.5f * 0.017453292f);
+		}
+		init = true;
+	}
+	const float w = cos_t[d];
+	const float z = 1.0f * sin_t[d];
+	const float z2 = z + z;
+	const float zz2 = z * z2;
+	const float wz2 = w * z2;
+	RotZ r;
+	r.m0 = 1.0f - (zz2 + 0.0f);
+	r.m5 = 1.0f - (zz2 + 0.0f);
+	r.m1 = 0.0f - wz2;
+	r.m4 = wz2 + 0.0f;
+	return r;
+}
+
+// GraphicPieces::get_position @90b750 (combat-spec 4.17) for a unit piece: the muzzle offset of the release node, as the truncated
+// integers GraphicEvents::execute_game_events adds to the shot's start point. `restrictions` is has_restrictions(piece), `pivot_deg` the
+// four turret angles in degrees (null: the plain branch).
+void muzzle_offset(const Game& g, const Guy& gy, int32_t piece, const ReleaseEvent& e, int32_t restrictions, const float* pivot_deg,
+                   int32_t out[3]) {
+	out[0] = out[1] = out[2] = 0;
+	if (!g.anims) return;
+	float pos[3];
+	if (!g.anims->attach_position(piece, e.node, e.anim, e.frame, pos)) return;
+	float pscale = 1.0f, ox = 0, oy = 0;
+	if (!g.anims->track(piece, &pscale, &ox, &oy)) pscale = 1.0f;
+	const float s = kGuyScale * pscale;
+	const float deg_f = fast_angle_to_degrees_f(int32_t(uint32_t(gy.angle) + 0x80000000u));
+	float v[3];
+	if ((e.node & 3) < restrictions && pivot_deg) {
+		// The turret branch: the pivot node's position (plain, scaled) is brought back to model units, the offset (relative to the pivot)
+		// is rotated by the turret angle plus the heading and added.
+		float pp[3];
+		const bool have = g.anims->attach_position(piece, (e.node & 3) + 4, e.anim, e.frame, pp);
+		float pv[3] = {0, 0, 0};
+		if (have) {
+			const RotZ r0 = rot_z(int32_t(deg_f));
+			pv[0] = pp[0] * r0.m0 + pp[1] * r0.m4 + pp[2] * 0.0f;
+			pv[1] = pp[0] * r0.m1 + pp[1] * r0.m5 + pp[2] * 0.0f;
+			pv[2] = pp[0] * 0.0f + pp[1] * 0.0f + pp[2] * 1.0f;
+			pv[1] = -pv[1];
+			pv[0] = pv[0] * s;
+			pv[1] = s * pv[1];
+			pv[2] = pv[2] * s;
+		}
+		const float inv = 1.0f / s;
+		const float y_old = pv[1];
+		pv[0] = pv[0] * inv;
+		pv[1] = -y_old * inv;
+		pv[2] = pv[2] * inv;
+		const RotZ r = rot_z(int32_t(pivot_deg[e.node & 3] + deg_f));
+		const float vy = pv[1];
+		v[0] = pv[0] + (pos[0] * r.m0 + pos[1] * r.m4 + pos[2] * 0.0f);
+		v[1] = -((pos[0] * r.m1 + pos[1] * r.m5 + pos[2] * 0.0f) + vy);
+		v[2] = pv[2] + (pos[0] * 0.0f + pos[1] * 0.0f + pos[2] * 1.0f);
+	} else {
+		const RotZ r = rot_z(int32_t(deg_f));
+		v[0] = pos[0] * r.m0 + pos[1] * r.m4 + pos[2] * 0.0f;
+		v[1] = pos[0] * r.m1 + pos[1] * r.m5 + pos[2] * 0.0f;
+		v[2] = pos[0] * 0.0f + pos[1] * 0.0f + pos[2] * 1.0f;
+		v[1] = -v[1];
+	}
+	out[0] = int32_t(v[0] * s);
+	out[1] = int32_t(s * v[1]);
+	out[2] = int32_t(v[2] * s);
+}
+
 // ObjectsData::find_unit (Ammo::check_hit): the nearest unit to (x, y) within `radius` (domain filter: air /
 // non-air). TODO(combat-spec 4.10): the original walks its search tables; here leaders 0..8 in slot order, strict
 // nearest (the result is the same unless two units are exactly as far).
@@ -172,11 +273,11 @@ void ammo_do_damage(Game& g, Ammo& a) {
 		int32_t jx = a.ex + g.rng.get(0, 0xffff) % 41 - 20;  // @678ca7
 		int32_t jy = a.ey + g.rng.get(0, 0xffff) % 41 - 20;  // @678cc4
 		restrict_xy(g, &jx, &jy);
-		// (PUNCTURE: AmmoOut::puncture_ground, presentation)
+		// Ammo::do_damage @678060: only a PUNCTURE ammo piece (verify_ammo_flags(piece, 1): the arrows) can stick, and the jittered point only
+		// decides whether it does: the stuck arrow keeps the impact point (the two draws are made for every shot without a target).
 		const int32_t tx = tcoord_of(jx), ty = tcoord_of(jy);
-		if (world_is_valid(g, jx, jy) && g.world.in_t(tx, ty) && (g.world.t(tx, ty) & tmask::kMedium) != tmask::kWater) {
-			a.ex = jx;
-			a.ey = jy;
+		if ((ammo_gfx_flags(g, a.gpiece) & ammoflag::kPuncture) && world_is_valid(g, jx, jy) && g.world.in_t(tx, ty) &&
+		    (g.world.t(tx, ty) & tmask::kMedium) != tmask::kWater) {
 			a.flags = ammobits::kStuck;  // a stuck arrow keeps its slot 200 frames
 			a.cur_time = 0;
 			return;
@@ -334,7 +435,9 @@ void ammo_init(Game& g, Ammo& a, const AmmoPackage& pkg, int32_t index, int32_t 
 				project(a.ex, a.ey, a.angle - 0x80000000u, T->ptype->x_size * 48, &a.ex, &a.ey);
 			a.ex += off(r);  // @67c8b7
 			a.ey += off(r);  // @67c8e9
-			a.ez = target_z(*T) + (zb ? 75 : 0);
+			// Ammo::init @67bbf0: the impact height is the target OBJECT's z (+0xc; +75 when the shot is a verified ground hit), only an
+			// aircraft target uses its guy 0's z (the unit z sits on the terrain, a guy's z follows its footprint).
+			a.ez = T->z + (zb ? 75 : 0);
 			if (T->is_unit && T->ptype->domain == kDomainAir) a.ez = target_z(*T);
 			a.ez = std::max(a.ez, 0);
 		}
@@ -492,6 +595,10 @@ void init_combat_data(Game& g) {
 	g.ammo_counter = 0;
 	for (DeathObj& d : g.deaths) d = DeathObj();
 	g.range_swap_type = -1;
+	init_fire_proj(g);
+}
+
+void init_fire_proj(Game& g) {
 	g.fire_proj.assign(size_t(kNumTypes), -1);
 	// GraphicEvents::init_unit_events @8e2520 per unit type, on the piece the type's units use (variants agree in
 	// the shipped data; the first leader with an existing piece is used): rules value 1 -> first ammo piece; a
@@ -569,7 +676,7 @@ void set_in_danger(Game& g, Unit& u0, bool flag) {
 		if (Unit* c = g.unit(u->who, obj_captain(g, *u))) u = c;
 	}
 	for (int guard = 0; u && guard < kUnitLimit; guard++) {
-		for (Guy& gy : u->guys) gy.guy_flags |= 0x20;
+		for (int32_t i = 0; i < u->guy_mark && size_t(i) < u->guys.size(); i++) u->guys[size_t(i)].guy_flags |= 0x20;  // Unit::set_in_danger @5fcfb0 loops [0, guy_mark)
 		u->unit_masks |= umask::kInCombat;
 		if (u->o_down < 0) break;
 		Unit* d = g.unit(u->who, u->o_down);
@@ -664,8 +771,9 @@ int32_t add_ammo(Game& g, const AmmoPackage& pkg) {
 	ammo_init(g, g.ammo[i], pkg, int32_t(i), g.ammo_counter);
 	if (trace_on()) {
 		const Ammo& a = g.ammo[i];
-		std::fprintf(stderr, "f%d ammo %zu from %d:%d -> %d:%d piece %d flags %x total %u acc %d end (%d,%d) start (%d,%d)\n",
-		             g.frame, i, pkg.who, pkg.o, pkg.whom, pkg.ox, pkg.gpiece, a.flags, a.total_time, a.accuracy, a.ex, a.ey, a.sx, a.sy);
+		const Object* shooter = g.object(pkg.who, pkg.o);
+		std::fprintf(stderr, "f%d ammo %zu from %d:%d (type %d) -> %d:%d piece %d flags %x total %u acc %d end (%d,%d) start (%d,%d)\n",
+		             g.frame, i, pkg.who, pkg.o, shooter ? shooter->type : -1, pkg.whom, pkg.ox, pkg.gpiece, a.flags, a.total_time, a.accuracy, a.ex, a.ey, a.sx, a.sy);
 	}
 	g.ammo_counter++;
 	return int32_t(i);
@@ -675,6 +783,12 @@ void ammo_inc_time_all(Game& g) {
 	// The count is re-read: ammo created during the loop flies one tick this frame too.
 	for (size_t i = 0; i < g.ammo.size(); i++)
 		if (g.ammo[i].in_use()) ammo_inc_time(g, g.ammo[i]);
+}
+
+void guy_muzzle_offset(const Game& g, const Guy& gy, const ReleaseEvent& e, int32_t out[3]) {
+	float pivot_deg[4];
+	for (int k = 0; k < 4; k++) pivot_deg[k] = fast_angle_to_degrees_f(gy.turret_angles[size_t(k)]);
+	muzzle_offset(g, gy, gy.gpiece, e, 0, pivot_deg, out);
 }
 
 void guy_execute_events(Game& g, Unit& u, Guy& gy) {
@@ -730,9 +844,16 @@ void guy_execute_events(Game& g, Unit& u, Guy& gy) {
 		if (e.anim != cur_anim || !(last_time < e.frame) || !(uint32_t(e.frame) <= cur_time)) continue;
 		const bool gtarget = u.order_type() == kAttackGround || u.order_type() == kAirAttackGround;
 		if (!((whom != -1 && ox != -1) || gtarget)) continue;
-		// TODO(combat-spec 4.17): pivot restrictions and the muzzle offset (GraphicPieces::get_position) are not
-		// computed; the shot starts at the guy.
+		// GraphicEvents::execute_game_events @8e48e0: the shot starts at the guy plus the muzzle offset of the release node.
+		// TODO(combat-spec 4.17): pivot restrictions (init_pivot_restrictions: the turrets' gate) are not read from the data yet.
+		float pivot_deg[4];
+		for (int k = 0; k < 4; k++) pivot_deg[k] = fast_angle_to_degrees_f(gy.turret_angles[size_t(k)]);
+		int32_t off[3];
+		muzzle_offset(g, gy, gy.gpiece, e, 0, pivot_deg, off);
 		AmmoPackage p = pkg;
+		p.x += off[0];
+		p.y += off[1];
+		p.z += off[2];
 		p.gpiece = e.ammo;
 		p.angle = uint32_t(e.node);
 		add_ammo(g, p);

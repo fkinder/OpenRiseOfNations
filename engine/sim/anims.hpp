@@ -100,6 +100,15 @@ struct AnimSource {
 		(void)piece;
 		return false;
 	}
+	// GraphicPieces::init_position @901820 / the AttachPos table of get_position @90b750 (combat-spec 4.17): the world translation of the
+	// piece model's attach slot `node` (BH3 node named "ammo node i" / "node i" ...) posed at the animation `anim` at game frame `frame`
+	// (frame * 67 ms), minus the translation of its pivot node (slot 4 + (node & 3)) when there is one. False (and a zero vector) when the
+	// table has no entry: the slot is empty, the node is -1 or out of range, or the piece has no art. Float components in model units.
+	virtual bool attach_position(int32_t piece, int32_t node, int32_t anim, int32_t frame, float out[3]) const {
+		(void)piece, (void)node, (void)anim, (void)frame;
+		out[0] = out[1] = out[2] = 0.0f;
+		return false;
+	}
 	// The AMMO pieces: count and flags (ammoflag::).
 	virtual int32_t num_ammo() const { return 0; }
 	virtual uint32_t ammo_flags(int32_t ammo) const {

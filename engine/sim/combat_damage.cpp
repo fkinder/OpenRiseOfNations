@@ -519,8 +519,10 @@ void do_damage(Game& g, Object& att, int32_t ox, int32_t whom, uint32_t angle, i
 	// Leader bookkeeping (walked LeaderData).
 	bool emergency = false;
 	const int32_t add = (au && type_is_siege(*att.ptype) && !t.is_unit) ? 5 : 1;
+	// Object::do_damage @64a8e7 - 64a91e: the attacker's leader counts a hit (+0xa5c hits_current_frame), the TARGET's leader counts damage
+	// taken (+0xa5e damage_current_frame; two adjacent 16-bit fields).
 	if (att.who >= 0 && att.who < 8) g.leaders[size_t(att.who)].hits_current_frame = int16_t(g.leaders[size_t(att.who)].hits_current_frame + add);
-	if (t.who >= 0 && t.who < 8) g.leaders[size_t(t.who)].hits_current_frame = int16_t(g.leaders[size_t(t.who)].hits_current_frame + add);
+	if (t.who >= 0 && t.who < 8) g.leaders[size_t(t.who)].damage_current_frame = uint16_t(g.leaders[size_t(t.who)].damage_current_frame + add);
 	if (att.who != t.who && att.who >= 0 && att.who < 8 && t.who >= 0 && t.who < 8) {
 		g.leaders[size_t(att.who)].treaty(t.who) |= 2;
 		g.leaders[size_t(t.who)].treaty(att.who) |= 2;
@@ -555,7 +557,8 @@ void do_damage(Game& g, Object& att, int32_t ox, int32_t whom, uint32_t angle, i
 		}
 		if (whom >= 0 && whom < 8) {
 			const int16_t k = tgt_was_active_build ? 5 : 2;
-			g.leaders[size_t(whom)].kills_current_frame = int16_t(g.leaders[size_t(whom)].kills_current_frame + k);
+			// @64bbe3: the owner of the destroyed building counts a death (+0xa58 deaths_current_frame), not a kill.
+			g.leaders[size_t(whom)].deaths_current_frame = int16_t(g.leaders[size_t(whom)].deaths_current_frame + k);
 		}
 		return;
 	}
@@ -625,8 +628,8 @@ int32_t take_damage(Game& g, Object& tgt, int32_t hp, int32_t frac, int32_t deat
 	if (hp < 1 && frac < 1) frac = 1;
 	const Object* att = obj_at(g, att_o, att_who);
 	if (!quiet) {
-		// TODO(combat-spec 5.4): only when not multiplayer and difficulty < 2.
-		if (tgt.who < 8) g.leaders[size_t(tgt.who)].frame_attacked = g.frame;
+		// Object::take_damage @652020: the stamp is written only outside multiplayer (semaphore byte0 bit 2 clear) and with the game's difficulty below 2.
+		if (tgt.who < 8 && !g.multiplayer && g.info.difficulty < 2) g.leaders[size_t(tgt.who)].frame_attacked = g.frame;
 		if (tgt.damage == 0 && is_wall(tgt) && g.rnd_draw(100) < 5) {  // @6520ef
 			const bool fortlike = type_is(*tgt.ptype, 0x1bb) || type_is(*tgt.ptype, 437) || type_is(*tgt.ptype, 415);
 			if (fortlike && att && att->ptype && type_is_siege(*att->ptype)) {
@@ -663,8 +666,9 @@ int32_t take_damage(Game& g, Object& tgt, int32_t hp, int32_t frac, int32_t deat
 				g.cities[size_t(tgt.who)][size_t(b.city)].city_flags |= 0xe;
 			// TODO(garrison): the AI alarm (Group::action_alarm of the city for cities and garrison types).
 		}
-		// A destroyed building lets its garrison out (production-spec 6.11: only with someone inside).
-		if (b.inside_down >= 0 && tgt.damage >= obj_hits(g, tgt) && !can_carry_domain(g, tgt, kDomainAir))
+		// Object::take_damage @652020: a building at its hit points calls eject_contents with no test of its garrison (the call
+		// sets BUILDMASK_EJECTING at once; Build::process_ejection clears it on the next frame when nobody is inside).
+		if (tgt.damage >= obj_hits(g, tgt) && !can_carry_domain(g, tgt, kDomainAir))
 			eject_contents(g, tgt, 1, -1, 0, 1);
 		if ((b.flags & objflag::kCity) && (b.flags & objflag::kActive)) {
 			if (b.damage >= obj_hits(g, b)) {
