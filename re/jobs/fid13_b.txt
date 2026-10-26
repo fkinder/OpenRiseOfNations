@@ -1,0 +1,5 @@
+re/decomp/fid13
+Terrain::verify_land
+TileSet::is_combo_acceptable
+Wall::tile_corner
+WallData::tile_corner

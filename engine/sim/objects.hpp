@@ -270,6 +270,11 @@ struct Unit : Object {
 	// size <= length, nothing shrinks it. Not saved natively (a native load starts from the length).
 	int32_t path_size = 0;
 	uint8_t path_inc = 10;
+	// Stack<PathData>::push grows the allocation by `increment` whenever size <= length: it ends at the smallest multiple of the increment that holds
+	// the longest the stack has been. Called after every push (path_push).
+	void path_grew() {
+		while (path_size < int32_t(path.size()) && path_inc > 0) path_size += path_inc;
+	}
 	std::deque<Order> orders;    // execution order: front() = current order (head_node->prev in the original)
 	std::vector<Guy> guys;       // PtrArray<Guy>: squad_size + crew_size
 
@@ -415,5 +420,11 @@ struct DeathObj {
 	int32_t cur_frame = -1, skeleton = -1;  // skeleton: >= 0 when the guy's piece has one (lifetime + 627)
 	int8_t guy = -1;                         // crew index (guy - squad_size), -1 (0xff) for squad guys
 };
+
+// Stack<PathData>::push on Unit::path: push and grow the allocation.
+inline void path_push(Unit& u, const PathData& p) {
+	u.path.push_back(p);
+	u.path_grew();
+}
 
 }  // namespace ron::sim

@@ -21,6 +21,7 @@
 #include "sim/datawalk.hpp"
 #include "sim/game.hpp"
 #include "sim/original_map.hpp"
+#include "sim/terrain_land.hpp"
 
 namespace ron::sim {
 
@@ -33,6 +34,8 @@ struct OriginalShadow {
 	size_t walk_begin = 0, walk_end = 0;       // stream positions (after the version / after the walk)
 	std::vector<uint8_t> rules_image;          // the save's own rules block (the last bytes of the walk)
 	bool rules_equal = false;                  // the engine's rules tables write the same image
+	std::string tileset;                       // the save's TileSet name (TileSet::walk_data saves the name only)
+	TileLandInfo tile_land;                    // that tileset's weatherbase / coast base / tile counts (Terrain::object_placed)
 	std::unordered_map<const datawalk::Rec*, std::vector<omap::Segment>> segs;
 	// Index of the object images the loader bound (forward direction: engine object -> image).
 	std::vector<datawalk::Rec*> cells, cells2;  // World WData (part 5) and the block marker (part 9), by cell index

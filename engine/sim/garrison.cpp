@@ -670,13 +670,13 @@ void eject_contents(Game& g, Object& ob, int32_t kill_if_stuck, int32_t type, in
 					u->orders.push_back(carrier.orders.front());
 					carrier.orders.pop_front();
 				}
-				for (const PathData& p : carrier.path) u->path.push_back(p);
+				for (const PathData& p : carrier.path) path_push(*u, p);
 				carrier.path.clear();
 				if (!u->path.empty()) {  // the next point: no transport flag
 					PathData p = u->path.back();
 					u->path.pop_back();
 					p.flags &= ~pathflag::kTransport;
-					u->path.push_back(p);
+					path_push(*u, p);
 				}
 			}
 			if (transport_trace())

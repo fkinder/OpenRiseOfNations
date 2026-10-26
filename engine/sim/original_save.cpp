@@ -801,6 +801,17 @@ struct Loader {
 				omap::map_collblock().load_from(&cb, *br, 0);
 			});
 		});
+		// TileSet::walk_data saves the tileset's name (a String: one container event of UTF-16 characters).
+		{
+			const dw::Rec* ts = tree.find_global(d.find_global("tileset"));
+			if (ts)
+				for (const dw::Event& e : ts->ev)
+					if (e.type == 2 && e.cd && !e.cd->data.empty()) {
+						for (size_t i = 0; i + 1 < e.cd->data.size(); i += 2) sh.tileset += char(e.cd->data[i]);
+						break;
+					}
+			if (!sh.tileset.empty()) sh.tile_land = load_tile_land_info(files, sh.tileset);
+		}
 		load_leaders();
 		load_objects();
 		load_lists();

@@ -241,7 +241,7 @@ void cast_transport(Game& g, int32_t o, int32_t who) {
 		U->orders.pop_front();
 	}
 	kill_current_order(g, *Bg, false);  // kills the CAST order itself (it was first)
-	for (const PathData& p : U->path) Bg->path.push_back(p);  // the original inverts U.path and pops it into Bg.path
+	for (const PathData& p : U->path) path_push(*Bg, p);  // the original inverts U.path and pops it into Bg.path
 	U->path.clear();
 	Bg->unit_masks |= umask::kCanTransport;
 	if (!Bg->path.empty()) {  // the next point loses flag 4 when it is in the barge's region
@@ -249,7 +249,7 @@ void cast_transport(Game& g, int32_t o, int32_t who) {
 		Bg->path.pop_back();
 		// ❓ the decompile reuses the registers of the spot (sx, sy); the barge now stands there.
 		if (region_of_tile_at(g, p.x, p.y) == region_of_tile_at(g, sx, sy)) p.flags &= ~pathflag::kTransport;
-		Bg->path.push_back(p);
+		path_push(*Bg, p);
 	}
 	if (transport_trace())
 		std::fprintf(stderr, "[transport] f%d barge %d takes %zu orders (front %d), path %zu, damage %d/%d (unit %d/%d)\n", g.frame, b,

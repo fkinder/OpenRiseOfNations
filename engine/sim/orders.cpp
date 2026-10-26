@@ -360,7 +360,7 @@ void work(Game& g, Unit& u) {
 						u.path.pop_back();
 						p.x = u.x;
 						p.y = u.y;
-						u.path.push_back(p);
+						path_push(u, p);
 					}
 				}
 				done = true;

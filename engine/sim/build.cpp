@@ -1,6 +1,7 @@
 // Buildings (docs/production-spec.md sections 3.3, 4.4-4.6, 4.9, 5.3, 5.13, 8.3): Objects::init_build -> Build::init ->
 // Wall::init, Build::start, Build::activate, hit points, the leader's building counters, gather tiles, disbanding and
 // closing.
+#include "sim/terrain_land.hpp"
 #include <algorithm>
 
 #include "sim/aircraft.hpp"
@@ -653,9 +654,12 @@ void build_start(Game& g, Build& b, bool msg) {
 			}
 		}
 	}
-	// Terrain::object_placed (presentation). mask_me(1, REGEN_FORCE), the fog marks and mark_behind_tiles: the world
-	// loader applied them already for scenario buildings; the CITY bits always here.
+	// Terrain::object_placed (Wall::start @63e810, before mask_me): the land sub-type of the plain-land wcoords under the footprint (and, through
+	// verify_land, their neighbours) becomes the tileset's weatherbase; WData.land_sub is hashed by `world` (games loaded from an original save). Then
+	// mask_me(1, REGEN_FORCE), the fog marks and mark_behind_tiles: the world loader applied them already for scenario buildings; the CITY bits always here.
 	if (!g.scenario_loading) {
+		const Footprint fp = footprint(*b.ptype, b.x, b.y);
+		terrain_object_placed(g, fp.x0, fp.y0, b.ptype->x_size, b.ptype->y_size);
 		std::pair<Game*, Build*> ctx{&g, &b};
 		wall_start(g.world, *b.ptype, b.x, b.y, b.who,
 		           [](void* c) {

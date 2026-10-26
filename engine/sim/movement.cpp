@@ -313,14 +313,14 @@ int32_t go_around_building(Game& g, Unit& u, int32_t X, int32_t Y, uint32_t angl
 	const bool detour = ddx != 0 ? inv(etx, ty0) : inv(tx0, ety);
 	if (detour) {
 		const int32_t Ex = etx * 192 + 96, Ey = ety * 192 + 96;
-		u.path.push_back(PathData{Ex + adjx, Ey + adjy, 0, 0});
+		path_push(u, PathData{Ex + adjx, Ey + adjy, 0, 0});
 		const int32_t Cx = ctx * 192 + 96, Cy = cty * 192 + 96;
 		int32_t mx = (Cx + Ex) / 2, my = (Cy + Ey) / 2;
 		if (Ex - Cx > 0) mx--;
 		if (Ey - Cy > 0) my--;
-		u.path.push_back(PathData{mx, my, 0, pathflag::kAround});
+		path_push(u, PathData{mx, my, 0, pathflag::kAround});
 	}
-	u.path.push_back(PathData{ctx * 192 + 96 + adjx, cty * 192 + 96 + adjy, 0, 0});
+	path_push(u, PathData{ctx * 192 + 96 + adjx, cty * 192 + 96 + adjy, 0, 0});
 	return 1;
 }
 
@@ -442,9 +442,9 @@ int32_t find_path(Game& g, Unit& u, int32_t dx, int32_t dy) {
 							PathData q = pop(u);
 							q.flags = water_at(g, p.x, p.y) == water_at(g, q.x, q.y) ? q.flags & ~pathflag::kTransport
 							                                                         : q.flags | pathflag::kTransport;
-							u.path.push_back(q);
+							path_push(u, q);
 						}
-						u.path.push_back(p);
+						path_push(u, p);
 					}
 					if (m) {
 						m->last_x = u.x;
@@ -453,7 +453,7 @@ int32_t find_path(Game& g, Unit& u, int32_t dx, int32_t dy) {
 					PathData q = pop(u);
 					q.flags = water_at(g, u.x, u.y) == water_at(g, q.x, q.y) ? q.flags & ~pathflag::kTransport
 					                                                         : q.flags | pathflag::kTransport;
-					u.path.push_back(q);
+					path_push(u, q);
 					u.unit_masks |= umask::kPathClear;
 				}
 				return 0;
@@ -800,7 +800,7 @@ int32_t do_move(Game& g, Unit& u, Order& m, int32_t speed) {
 	// 8. Plan: W level, then T level, from the unit to the order target.
 	if (!(m.flags & orderflag::kPathed) || u.path.empty()) {
 		const PathData fin{m.x, m.y, 0, pathflag::kFinal};
-		u.path.push_back(fin);
+		path_push(u, fin);
 		auto top_is_fin = [&] {
 			if (u.path.empty()) return false;
 			const PathData& p = u.path.back();
@@ -808,9 +808,9 @@ int32_t do_move(Game& g, Unit& u, Order& m, int32_t speed) {
 		};
 		int32_t r = find_wpath(g, u.path, u.x, u.y, u.who, u.o);
 		if (r < 1) {
-			if (!top_is_fin()) u.path.push_back(fin);
+			if (!top_is_fin()) path_push(u, fin);
 			r = find_tpath(g, u.path, u.x, u.y, u.who, u.o);
-			if (r < 1 && !top_is_fin()) u.path.push_back(fin);
+			if (r < 1 && !top_is_fin()) path_push(u, fin);
 		}
 		m.flags |= orderflag::kPathed;
 		if (u.path.size() > 10) return 1;  // the unit does not move this frame
@@ -846,7 +846,7 @@ int32_t do_move(Game& g, Unit& u, Order& m, int32_t speed) {
 				p.tol = 0;
 				p.flags |= pathflag::kTransport;
 				flags = p.flags;
-				u.path.push_back(p);
+				path_push(u, p);
 			}
 		}
 		if (detect_unit_collision(g, u, top.x, top.y, false, false, 0, false, false) != 0) {
@@ -866,7 +866,7 @@ int32_t do_move(Game& g, Unit& u, Order& m, int32_t speed) {
 					PathData p = pop(u);
 					p.tol = t3;
 					flags = p.flags;
-					u.path.push_back(p);
+					path_push(u, p);
 				}
 			}
 		}
@@ -955,7 +955,7 @@ int32_t do_move(Game& g, Unit& u, Order& m, int32_t speed) {
 				if ((top.flags & pathflag::kTransport) && !u.path.empty()) {
 					PathData p = pop(u);
 					p.flags |= pathflag::kTransport;
-					u.path.push_back(p);
+					path_push(u, p);
 				}
 				if (alive) m.dest = 0;
 				return 1;

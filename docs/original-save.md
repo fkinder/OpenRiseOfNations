@@ -471,6 +471,13 @@ First differing boundary of `21'23'34`, before -> after: units 1,514 -> **1,622*
 - `ron-net replay` now runs `original_post_load_effects` and attaches the header's game script, and the network layer may execute UNITMASK: its numbers equal `ron-sav --replay`'s (320 fully equal turns on `21'23'34`).
 - Open: `units` / `guys` / `world` at 1,928 of `21'23'34` (the two builders after the Market completes; target choice, order construction, `do_build` / `do_construct`, the RNG and a hold of 1 - 6 frames are all excluded, sim-implementation item 60), then `builds` 2,036, `groups` 2,042, `cities` 2,402, `goods` 4,346.
 
+### 6.13 Thirteenth pass (2026-10-25): three missing pieces behind the 1,928 wall of 21'23'34
+
+- Reading a hash delta over a stretch of boundaries (`--solve-at B` at B, B + 6, ...): a constant `guys` delta means static wrong bytes and a right simulation; for the `units` part, `b - a*N` (N = the engine's stream length) is constant while only objects *after* the wrong bytes change length and jumps by `-a * L` when an object before them changes by L (`RON_LEN_CHANGES=part:F0:F1` lists the length changes with their stream offsets): the wrong bytes sit between two named objects.
+- A coverage-instrumented `ron-sav` (clang `-fprofile-instr-generate -fcoverage-mapping`, `llvm-cov export`) compared between the run to the last equal boundary and the run past the first divergent one lists the code regions executed only in the window; none for 1,928 / 1,934 / 2,084 means a data-dependent branch of exercised code (a missing special case), not an unported function.
+- The three fixes: `Unit::resolve_unit_collision`'s GATHER-on-a-farm early return (units 1,928 -> 2,084), `Stack<PathData>` allocation growth on every push (-> 2,138), `Terrain::object_placed` -> `land_sub` (world 1,928 -> 2,204; the tileset name is the walked `TileSet` String of the save). See sim-implementation "thirteenth pass", items 61 - 65.
+- Open: `units` / `guys` 2,138 (unit 1/14's idle animation choice, item 64c), `world` 2,204, `builds` 2,252, `groups` 2,330, `leaders` 2,438, `cities` 2,606.
+
 ## 7. What blocks exact checksums
 
 State of the fidelity work (2026-10-24; the log of each fix is in docs/sim-implementation.md "Fidelity log"). **Fixed** since the first table:

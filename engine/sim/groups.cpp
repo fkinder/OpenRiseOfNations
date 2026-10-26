@@ -1291,10 +1291,10 @@ void group_action_move_near(Game& g, Group& gr, int32_t x, int32_t y, int32_t to
 			}
 			find_wpath(g, gp, sx, sy, who, u.o);
 			if (gp.empty()) {
-				u.path.push_back(fin);
+				path_push(u, fin);
 			} else {
 				while (!gp.empty()) {
-					u.path.push_back(gp.back());
+					path_push(u, gp.back());
 					gp.pop_back();
 				}
 			}
@@ -1351,7 +1351,7 @@ void group_action_move_near(Game& g, Group& gr, int32_t x, int32_t y, int32_t to
 					if (orders != kMoveTo || unit_is_modern_infantry(g, u) || u.ptype->domain == 1 || form2 == 9)
 						push = vector_dist(u.x - Lx, u.y - Ly) < 0x600;
 				}
-				if (push) u.path.push_back({px, py, W.tol, W.flags});
+				if (push) path_push(u, {px, py, W.tol, W.flags});
 			}
 		}
 		for (int32_t i = 0; i < gr.num; i++) {
@@ -1566,7 +1566,7 @@ int32_t do_group_move(Game& g, Unit& u, Order& m) {
 	}
 	if (gr.form != kFormKeep) {
 		if (!(Wp.flags & pathflag::kFinal)) Wp.flags |= pathflag::kFinal;
-		u.path.push_back(Wp);
+		path_push(u, Wp);
 	}
 	const int32_t ds = vector_dist(T.x - u.x, T.y - u.y);
 	const int32_t dw = vector_dist(Wp.x - u.x, Wp.y - u.y);
@@ -1606,7 +1606,7 @@ int32_t do_group_move(Game& g, Unit& u, Order& m) {
 		}
 		while (!u.path.empty() && (u.path.back().flags & pathflag::kSlot)) u.path.pop_back();
 		if (u.path.empty() || (u.path.back().flags & pathflag::kFinal)) {
-			u.path.push_back(PathData{T.x, T.y, 0, pathflag::kSlot});
+			path_push(u, PathData{T.x, T.y, 0, pathflag::kSlot});
 			m.dest = 1;
 			m.dest_x = T.x;
 			m.dest_y = T.y;
@@ -1620,7 +1620,7 @@ int32_t do_group_move(Game& g, Unit& u, Order& m) {
 	}
 	int32_t reduced = 0;
 	auto follow_slot = [&]() {
-		u.path.push_back(T);
+		path_push(u, T);
 		m.dest_x = T.x;
 		m.dest_y = T.y;
 		m.in_group = 1;
@@ -1644,7 +1644,7 @@ int32_t do_group_move(Game& g, Unit& u, Order& m) {
 			} else {
 				const PathData& lt = Lu.path.back();
 				const PathData P{gr.curr_x[size_t(m.form_id & 127)] + lt.x, gr.curr_y[size_t(m.form_id & 127)] + lt.y, 0, 0};
-				u.path.push_back(P);
+				path_push(u, P);
 				m.dest_x = P.x;
 				m.dest_y = P.y;
 				m.dest = 1;

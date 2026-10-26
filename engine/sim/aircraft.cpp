@@ -771,7 +771,7 @@ int32_t do_air_physics(Game& g, Unit& u, Order& A, int32_t x, int32_t y) {
 		}
 	}
 	// 6. the goal as the only path point.
-	u.path.push_back(PathData{x, y, 0, 0});
+	path_push(u, PathData{x, y, 0, 0});
 	uint32_t facing = 0;
 	if (A.returning == 0 && A.type == kStrafe && !heli) {
 		const Object* tg = slot(g, A.ox, A.whom);

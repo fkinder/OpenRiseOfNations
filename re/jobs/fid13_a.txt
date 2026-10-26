@@ -1,0 +1,3 @@
+re/decomp/fid13
+ObjectData::is_active_build
+ObjectData::is_gather_build

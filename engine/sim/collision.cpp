@@ -15,11 +15,14 @@
 #include "sim/movement.hpp"
 #include "sim/orders.hpp"
 #include "sim/pathfinder.hpp"
+#include "sim/production.hpp"
 #include "sim/search.hpp"
 #include "sim/spells.hpp"
 #include "sim/trig.hpp"
 
 namespace ron::sim {
+
+bool build_covers_tile(const Build& b, int32_t tx, int32_t ty);  // construct.cpp
 
 namespace {
 
@@ -437,9 +440,19 @@ void resolve_unit_collision(Game& g, Unit& u, int32_t x, int32_t y) {
 	}
 	Order* act = update_action(g, u);
 	const OrderType act_t = act ? act->type : kOrderNone;
+	// LAB_005fa057 of Unit::resolve_unit_collision @5f9d30: a GATHER action whose target is an active flat-gather building (a farm; BuildType vslot
+	// +0x94, FLAT_GATHER) covering the unit's own tile drops the current order (the walk) and returns; the unit works where it stands.
+	auto gather_on_flat = [&]() -> bool {
+		if (!act || act->type != kGather) return false;
+		const Object* T = (act->ox >= 0 && act->whom >= 0) ? g.object(act->whom, act->ox) : nullptr;
+		if (!T || T->is_unit || !(T->flags & objflag::kValid) || !(T->flags & objflag::kActive)) return false;  // ObjectData::is_active_build
+		const Build& B = static_cast<const Build&>(*T);
+		if (!is_flat_gather(*B.ptype) || !build_covers_tile(B, tcoord_of(u.x), tcoord_of(u.y))) return false;
+		kill_current_order(g, u, false);
+		return true;
+	};
 	if (bw == u.who) {
-		// TODO(gather): a GATHER action whose target is an active wall-type building covering my tile ->
-		// kill_current_order, return.
+		if (gather_on_flat()) return;
 	} else if (act) {
 		if (order_is_targeted(act->type)) {
 			if (act->ox == bo && act->whom == bw) {
@@ -494,7 +507,7 @@ void resolve_unit_collision(Game& g, Unit& u, int32_t x, int32_t y) {
 				}
 			}
 		} else {
-			// TODO(gather): the GATHER wall check (only reachable for targeted orders; nothing to do here).
+			if (gather_on_flat()) return;  // (a non-targeted action goes to LAB_005fa057 as well)
 		}
 	}
 
@@ -529,7 +542,7 @@ void resolve_unit_collision(Game& g, Unit& u, int32_t x, int32_t y) {
 				}
 			}
 			if (ok) {
-				u.path.push_back(PathData{X * 48 + 24, Y * 48 + 24, 0, pathflag::kFine});
+				path_push(u, PathData{X * 48 + 24, Y * 48 + 24, 0, pathflag::kFine});
 				Order* m = update_order(u);
 				if (m && order_is_move(m->type)) {
 					m->dest_x = X * 48 + 24;
@@ -596,7 +609,7 @@ void resolve_unit_collision(Game& g, Unit& u, int32_t x, int32_t y) {
 		if ((p.flags & pathflag::kFinal) || !(p.tol < 0x60 || (p.flags & pathflag::kFine) || blocked)) break;
 		if (u.path.empty()) break;  // the original would re-read the stale bottom entry forever
 	}
-	u.path.push_back(p);
+	path_push(u, p);
 	unit_set_new_location(g, u, ucoord_of(u.x) * 48 + 24, ucoord_of(u.y) * 48 + 24, true, false);
 	const bool fast = act_t == kAttack && b && action_type(*b) == kAttack;
 	const int32_t r = find_upath(g, u.path, u.who, u.o, fast);
