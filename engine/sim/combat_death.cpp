@@ -311,7 +311,7 @@ int32_t add_death(Game& g, int32_t who, int32_t o, int32_t guy, int32_t anim, in
 	d.valid = 1;
 	d.cur_frame = 0;
 	d.guy = guy < u.ptype->squad_size ? int8_t(-1) : int8_t(guy - u.ptype->squad_size);
-	d.skeleton = g.anims && g.anims->has_skeleton(d.gpiece) ? 1 : -1;
+	d.skeleton = g.anims ? g.anims->skeleton_gpiece(d.gpiece) : -1;  // DeathObj +0x44 = GraphicPieces::get_skeleton_gpiece (a gpiece number, -1 none)
 	d.first_frame = g.frame;
 	if (!g.anims || !g.anims->piece_exists(d.gpiece) || !g.anims->has_packet(d.gpiece)) {
 		// No model, or "No Animation Packet Defined": no corpse.

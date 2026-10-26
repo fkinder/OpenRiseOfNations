@@ -342,6 +342,9 @@ AssetAnimSource::AssetAnimSource(const GameFiles& files, const Rules& rules) : f
 	std::unordered_map<std::string, int32_t> ammo_by_name;  // uppercase name -> first piece (String == ignores case)
 	{
 		const XmlElement doc = ron::parse_xml(files.read_text("Data/effects_graphics.xml"));
+		int32_t shadows = 0;
+		ron::for_each_element(doc, "SHADOW", [&](const XmlElement&) { shadows++; });
+		first_skeleton_piece_ = 0xeabd + shadows;
 		ron::for_each_element(doc, "AMMO", [&](const XmlElement& a) {
 			Ammo am;
 			am.name = a.get("name");
@@ -360,11 +363,15 @@ AssetAnimSource::AssetAnimSource(const GameFiles& files, const Rules& rules) : f
 	}
 	// <SKELETON> / <SCORCH> names (GraphicPieces skeleton_names / scorch_names; String == ignores case).
 	std::unordered_map<std::string, int32_t> skeletons, scorches;
+	std::vector<std::string> skeleton_names;  // in element order (duplicates kept: the lookup finds the first match, the index counts them all)
 
 	// ---- graphics pieces (unit_graphics.xml ROOT > UNITS > UNIT).
 	{
 		const XmlElement doc = ron::parse_xml(files.read_text("Data/unit_graphics.xml"));
-		ron::for_each_element(doc, "SKELETON", [&](const XmlElement& e) { skeletons.emplace(upper(e.get("name")), 1); });
+		ron::for_each_element(doc, "SKELETON", [&](const XmlElement& e) {
+			skeletons.emplace(upper(e.get("name")), 1);
+			skeleton_names.push_back(upper(e.get("name")));
+		});
 		ron::for_each_element(doc, "SCORCH", [&](const XmlElement& e) { scorches.emplace(upper(e.get("name")), 1); });
 		const XmlElement* root = doc.child("ROOT");
 		const XmlElement* list = root ? root->child("UNITS") : nullptr;
@@ -384,6 +391,12 @@ AssetAnimSource::AssetAnimSource(const GameFiles& files, const Rules& rules) : f
 			// error, skipped). Later duplicates overwrite.
 			art.ids.assign(size_t(kNumUnitAnims), -1);
 			art.skeleton = skeletons.count(upper(u.get("skeleton"))) != 0;
+			if (!u.get("skeleton").empty())
+				for (size_t sk = 0; sk < skeleton_names.size(); sk++)
+					if (skeleton_names[sk] == upper(u.get("skeleton"))) {
+						art.skeleton_index = int32_t(sk);
+						break;
+					}
 			art.scorch = scorches.count(upper(u.get("scorch"))) != 0;
 			// GraphicEvents::init_unit_events @8e2520: RELEASEEVENT (event type 1), INSTANTHIT, NORELEASE.
 			for (const XmlElement& c : u.children) {
@@ -678,6 +691,11 @@ bool AssetAnimSource::no_release(int32_t piece) const {
 bool AssetAnimSource::has_skeleton(int32_t piece) const {
 	const UnitArt* a = art(piece);
 	return a && a->model_ok && a->skeleton;
+}
+
+int32_t AssetAnimSource::skeleton_gpiece(int32_t piece) const {
+	const UnitArt* a = art(piece);
+	return a && a->model_ok && a->skeleton_index >= 0 ? first_skeleton_piece_ + a->skeleton_index : -1;
 }
 
 bool AssetAnimSource::has_scorch(int32_t piece) const {

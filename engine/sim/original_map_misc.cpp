@@ -176,6 +176,7 @@ const ClassMap& map_city() {
 			const City* c = city_of(const_cast<Game&>(g), s);
 			if (!c) return false;
 			spec.count = int32_t(c->vans.size());
+			spec.fixed_size = c->vans_cap;  // the allocation City::init / ArrayBase::add / the load left (City::vans_cap); increment -1, flags 0
 			spec.child = &map_caravan_link();
 			const int32_t a = s.a, bb = s.b;
 			spec.child_id = [a, bb](int32_t i) { return Seg{a, bb, i}; };
@@ -441,9 +442,10 @@ const ClassMap& map_ammo() {
 			    std::memcpy(&v, p, 4);
 			    // A value below the first ammo piece is a unit piece (the aircraft wreck, saved as 0x100): the engine's kCrashPiece.
 			    a.gpiece = v >= kFirstAmmoPiece ? v - kFirstAmmoPiece : (v >= 0 ? kCrashPiece : v);
+			    a.crash_piece = (v >= 0 && v < kFirstAmmoPiece) ? v : 0;
 		    },
 		    [](const Ammo& a, uint8_t* p) {
-			    const int32_t v = a.gpiece >= 0 ? a.gpiece + kFirstAmmoPiece : (a.gpiece == kCrashPiece ? 0x100 : a.gpiece);
+			    const int32_t v = a.gpiece >= 0 ? a.gpiece + kFirstAmmoPiece : (a.gpiece == kCrashPiece ? a.crash_piece : a.gpiece);
 			    std::memcpy(p, &v, 4);
 		    });
 		b.f("sx", &Ammo::sx).f("sy", &Ammo::sy).f("sz", &Ammo::sz).f("ex", &Ammo::ex).f("ey", &Ammo::ey).f("ez", &Ammo::ez);
@@ -468,7 +470,18 @@ const ClassMap& map_death() {
 		b.walks({"DeathObjData::walk_data"}).resolve([](Game& g, const Seg& s) -> DeathObj* { return size_t(s.a) < g.deaths.size() ? &g.deaths[size_t(s.a)] : nullptr; });
 		b.f("valid", &DeathObj::valid).f("first_frame", &DeathObj::first_frame).f("cur_anim", &DeathObj::anim).f("x", &DeathObj::x);
 		b.f("y", &DeathObj::y).f("z", &DeathObj::z).f("who", &DeathObj::who).f("o", &DeathObj::o).f("gpiece", &DeathObj::gpiece);
-		b.f("ammo_gpiece", &DeathObj::ammo_piece).f("ammo_angle", &DeathObj::deg).f("new_angle", &DeathObj::angle);
+		// DeathObj +0x24 holds the ammo's gpiece in the original numbering (Objects::add_death @653b60 passes the Ammo +8 value: first_ammo_piece + the AMMO index), -1 for none.
+		b.c("ammo_gpiece",
+		    [](DeathObj& d, const uint8_t* p) {
+			    int32_t v;
+			    std::memcpy(&v, p, 4);
+			    d.ammo_piece = v >= kFirstAmmoPiece ? v - kFirstAmmoPiece : v;
+		    },
+		    [](const DeathObj& d, uint8_t* p) {
+			    const int32_t v = d.ammo_piece >= 0 ? d.ammo_piece + kFirstAmmoPiece : d.ammo_piece;
+			    std::memcpy(p, &v, 4);
+		    });
+		b.f("ammo_angle", &DeathObj::deg).f("new_angle", &DeathObj::angle);
 		b.f("turret_angles", &DeathObj::turret_angles);
 		b.f("cur_frame", &DeathObj::cur_frame).f("skel_gpiece", &DeathObj::skeleton).f("node_flags", &DeathObj::node_flags).f("unit_crew", &DeathObj::guy);
 		m.audited = [](const Game& g, const Seg& s, const Entry& e) {

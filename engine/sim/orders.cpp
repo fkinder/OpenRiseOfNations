@@ -12,6 +12,7 @@
 #include "sim/economy.hpp"
 #include "sim/game.hpp"
 #include "sim/garrison.hpp"
+#include "sim/combat_internal.hpp"
 #include "sim/guys.hpp"
 #include "sim/movement.hpp"
 #include "sim/spells.hpp"
@@ -534,7 +535,17 @@ void check_idle(Game& g, Unit& u) {
 		u.idle = uint8_t(idle + 1);
 		if (u.idle == 4 && (u.unit_masks & umask::kEntrenched)) unit_set_angle(g, u, u.trench_angle, false);
 	}
-	// TODO(orders-spec 6.1): marines entrench, cloak particles (UI).
+	// @603324: a marine that has stood still long enough digs in (GraphicEvents::add_entrench is presentation).
+	static const bool old_idle_m = std::getenv("RON_OLD_IDLE") != nullptr;
+	if (!old_idle_m && (u.unit_masks2 & umask2::kMarines) && RON_K(g, "americans_marine_entrench") <= int32_t(u.idle) && !(u.unit_masks & umask::kEntrenched)) {
+		u.unit_masks |= umask::kEntrenched;
+		u.unit_masks2 |= umask2::kMarineEntrench;
+		u.trench_angle = u.angle;
+	}
+	// @603390: the cover bit of a cloaker (Unit::work sets BlowCover on every order of a unit with flag 0x40000) is dropped again once the unit has idled 10 frames
+	// (the cloak particles of the else branches are presentation).
+	static const bool old_idle = std::getenv("RON_OLD_IDLE") != nullptr;  // developer aid: without the BlowCover drop / marine entrench (digest A/B runs)
+	if (!old_idle && (u.unit_masks & (umask::kBlowCover | umask::kCoverBlown)) == umask::kBlowCover && u.idle >= 10) u.unit_masks &= ~umask::kBlowCover;
 	if (!(u.flags & objflag::kIdling)) {
 		u.flags |= objflag::kIdling | objflag::kNewThink;
 		const int32_t t = u.type;

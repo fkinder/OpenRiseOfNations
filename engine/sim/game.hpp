@@ -306,7 +306,10 @@ struct City {
 	uint8_t was_capital_flags = 0;
 	std::array<uint8_t, 3> space{};  // +0x69: free building squares of size 2..4 (AI census)
 	std::array<uint8_t, 6> ter{};
-	std::vector<std::array<int16_t, 2>> vans;  // CaravanLink {cara, who} (Array, capacity 10)
+	std::vector<std::array<int16_t, 2>> vans;  // CaravanLink {cara, who} (Array<CaravanLink> at +0x74)
+	// The array's allocation (+0x7c, hashed with the header of a non-empty array): City::init @737050 allocates 10 slots, City::close 0, a load
+	// leaves what it read (0 for an empty array, the saved size otherwise), ArrayBase::add @46e550 grows by `size` (4 from 0; increment -1) when full.
+	int32_t vans_cap = 0;
 	std::string name;           // file-only
 	bool valid() const { return (city_flags & cityflag::kValid) != 0; }
 };

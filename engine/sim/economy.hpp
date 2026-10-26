@@ -19,6 +19,7 @@ namespace ron::sim {
 
 class Game;
 struct CaravanRec;
+struct City;
 struct Group;
 struct Leader;
 
@@ -221,6 +222,8 @@ int32_t unpack_merchant(Game& g, Unit& u, int32_t mode);  // Unit::unpack_mercha
 int32_t caravans_init(Game& g, int32_t who, int32_t o);  // Caravans::init_caravan @73e1f0
 void caravans_close(Game& g, int32_t who, int32_t slot); // Caravans::close_caravan @73e350
 int32_t trade_value(const Game& g, int32_t ca, int32_t pa, int32_t cb, int32_t pb);  // Caravan::trade_value @73d9d0
+void city_set_granary_byte(Game& g, int32_t who, City& ct);  // the granary / lumber-mill enhancer bytes (+0x56 / +0x57) as Build::activate and City::calc_gather set them
+void city_set_lumber_byte(Game& g, int32_t who, City& ct);
 void city_compute_trade(Game& g, int32_t who, int32_t c);   // City::compute_trade @739640
 void city_new_caravan(Game& g, int32_t who, int32_t c, int32_t pl, int32_t pc);  // City::new_caravan @739750
 int32_t city_get_empty_trade_routes(const Game& g, int32_t who, int32_t c, int32_t p, int32_t pc);  // @7395c0

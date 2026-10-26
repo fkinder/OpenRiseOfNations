@@ -148,12 +148,19 @@ int32_t get_score_value(const Game& g, int32_t type) {
 }
 
 int32_t get_kill_value(const Game& g, int32_t type, int32_t who) {
-	// UnitTypeData::get_kill_value @61d3d0: + (support costs) x (num_units + num_queued) of the victim's owner.
-	// TODO(economy): num_queued (production queues) is not tracked yet (0).
+	// UnitTypeData::get_kill_value @61d3d0: + (support costs) x (num_units (+0x56fe) + num_queued (+0x5a22)) of the victim's owner.
+	// BuildTypeData::get_kill_value @639790: + (support costs) x build_support_factor x (num_queued (+0x5a22) + num_buildings (+0x5222)) of the owner.
 	const int32_t sv = get_score_value(g, type);
+	static const bool old_kill = std::getenv("RON_OLD_KILLVALUE") != nullptr;  // developer aid: without the queued units / buildings (digest A/B runs)
+	if (!old_kill && who >= 0 && who < kNumLeaders && type >= kBuilds && type < kEndBuilds) {
+		const Type& bt = g.type(type);
+		const Leader& L = g.leaders[size_t(who)];
+		return (bt.support_cost[0] + bt.support_cost[1]) * RON_K(g, "build_support_factor") * (int32_t(L.num_queued[size_t(type)]) + int32_t(L.num_buildings[size_t(type - kBuilds)])) + sv;
+	}
 	if (who < 0 || who >= kNumLeaders || type < kUnits || type >= kEndUnits) return sv;
 	const Type& t = g.type(type);
-	return (t.support_cost[0] + t.support_cost[1]) * int32_t(g.leaders[size_t(who)].num_units[size_t(type - kUnits)]) + sv;
+	const int32_t queued = old_kill ? 0 : int32_t(g.leaders[size_t(who)].num_queued[size_t(type)]);
+	return (t.support_cost[0] + t.support_cost[1]) * (int32_t(g.leaders[size_t(who)].num_units[size_t(type - kUnits)]) + queued) + sv;
 }
 
 int32_t sum_rules_cost(const Game& g, int32_t type) {
@@ -393,8 +400,11 @@ bool damage_warnings(Game& g, Object& att, Object& t, int32_t hp_int, bool siege
 		}
 		city_build = &b;
 	} else if (Unit* tu = as_unit(&t); tu && is_worker_type(tu->type)) {
-		// A worker under fire counts as a raid on the city it is working for.
-		if (const Order* act = get_action(*tu); act && order_is_targeted(act->type) && act->ox >= 0 && act->whom == whom) {
+		static const bool old_raidw = std::getenv("RON_OLD_RAIDW") != nullptr;  // developer aid: any targeted order named a city (digest A/B runs)
+		// A worker under fire counts as a raid on the city it is working for. Object::do_damage @64aa86 asks the worker's action for vslot +0xe4
+		// (get_gather_order; the GatherOrder tables are the only UnitOrder vtables that fill slot 57): only a GATHER order names a city (a REPAIR
+		// or BUILD order does not, although they are TargetOrders; 22'03'19 boundary 27,323: a repairing peasant hit by a unit across the border).
+		if (const Order* act = get_action(*tu); act && (old_raidw ? order_is_targeted(act->type) : act->type == kGather) && act->ox >= 0 && act->whom == whom) {
 			Build* wb = g.build(whom, act->ox);
 			if (wb && wb->alive() && is_build_active(*wb) && wb->city >= 0) city_build = wb;
 		}
@@ -706,7 +716,11 @@ int32_t take_damage(Game& g, Object& tgt, int32_t hp, int32_t frac, int32_t deat
 	float deg = 0.0f;
 	if (am) {
 		gpiece = am->gpiece;
-		deg = float(int32_t((uint64_t(find_angle(am->ex - am->sx, am->ey - am->sy)) * 360u) >> 32));  // presentation
+		// @652d79 - @652dec: the shot's direction (a building: as is; a unit: relative to the heading of its first guy, Guy +0x18), in whole degrees
+		// (angle_to_degrees @a28e00), as a float into DeathObj +0x28 (ammo_angle, hashed in `deaths`).
+		uint32_t shot = find_angle(am->ex - am->sx, am->ey - am->sy);
+		if (tu && !tu->guys.empty()) shot -= tu->guys[0].angle;
+		deg = float(angle_to_degrees_exact(shot));
 	}
 	const bool decoy = tu && (tu->unit_masks & umask::kDecoy);
 	if (tu) {

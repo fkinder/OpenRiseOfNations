@@ -56,6 +56,7 @@ struct ArraySpec {
 	bool simple = false;                               // SimpleArray: the capacity doubles (10, 20, 40, ...) when the length outgrows it
 	int32_t first_size = 4;                            // simple: the capacity of a container the engine creates (4 for a SimpleArray<int>; 5 for the MiningList that BuildData::BuildData allocates)
 	std::function<void(std::vector<uint8_t>&)> block;  // SimpleArray: the element block (stride * count bytes)
+	int32_t fixed_size = -1;                           // >= 0: the container's allocation is this (hdr.size), with increment -1 and flags 0 (City::vans)
 	bool grow_only = false;                            // the length is max(the recorded length, count): records the engine has not created stay as recorded
 };
 

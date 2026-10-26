@@ -3,6 +3,7 @@
 // closing.
 #include "sim/terrain_land.hpp"
 #include <algorithm>
+#include <cstdlib>
 
 #include "sim/aircraft.hpp"
 #include "sim/compass.hpp"
@@ -839,10 +840,19 @@ void build_activate_full(Game& g, Build& b, bool loading, bool msg, bool count) 
 		const bool in_city = b.city >= 0;
 		City* ct = in_city ? &g.cities[size_t(who)][size_t(b.city)] : nullptr;
 		if (is_t(g, t, ptype::kGranary)) {
-			if (ct) ct->city_flags |= cityflag::kHasGranary;  // (the enhancer byte: City::calc_gather)
+			if (ct) {  // Build::activate @623e20: the flag, then the enhancer byte (+0x56) at once (not at the next Leader::calc_gather)
+				ct->city_flags |= cityflag::kHasGranary;
+				static const bool old_gran = std::getenv("RON_OLD_GRANARY") != nullptr;  // developer aid (digest A/B runs)
+				if (!old_gran) city_set_granary_byte(g, who, *ct);
+				l.flags |= leaderflag::kRecompute;
+			}
 		} else if (is_t(g, t, ptype::kLumberMill)) {
 			l.flags |= leaderflag::kRecompute;
-			if (ct) ct->city_flags |= cityflag::kHasLumber;  // (the enhancer byte: City::calc_gather)
+			static const bool old_gran_l = std::getenv("RON_OLD_GRANARY") != nullptr;
+			if (ct) {  // the flag, then the enhancer byte (+0x57) at once
+				ct->city_flags |= cityflag::kHasLumber;
+				if (!old_gran_l) city_set_lumber_byte(g, who, *ct);
+			}
 		} else if (is_t(g, t, ptype::kSmelter) || is_t(g, t, ptype::kRefinery)) {
 			l.flags |= leaderflag::kRecompute;
 		} else if (is_t(g, t, ptype::kTemple)) {

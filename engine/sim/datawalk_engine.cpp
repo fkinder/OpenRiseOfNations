@@ -115,7 +115,13 @@ bool EngineProvider::container(dw::Obj o, const dw::Site& site, dw::ContainerHea
 		const int32_t old_len = hdr.length;
 		hdr.length = a.spec.grow_only ? std::max(old_len, a.spec.count) : a.spec.count;
 		a.length = hdr.length;
-		if (hdr.length > 0 && !a.spec.keep_size) {
+		if (hdr.length > 0 && a.spec.fixed_size >= 0) {
+			hdr.size = std::max(a.spec.fixed_size, hdr.length);
+			hdr.increment = -1;
+			hdr.flags = 0;
+			std::memcpy(hdr.tail, &hdr.size, 4);
+			std::memcpy(hdr.tail + 4, &hdr.increment, 2);
+		} else if (hdr.length > 0 && !a.spec.keep_size) {
 			// An Array family keeps its allocation: the capacity grows only when the length outgrows it.
 			if (a.spec.simple) {
 				if (old_len == 0 && hdr.size == 0) hdr.increment = -1;

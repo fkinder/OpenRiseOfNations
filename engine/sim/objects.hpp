@@ -399,7 +399,8 @@ struct Ammo {
 	uint8_t flags = 0;  // ammobits:: (flags & 3: slot in use)
 	int8_t rolling = 0;
 	int16_t accuracy = 0;
-	int32_t gpiece = -1;  // ammo piece: index into the AMMO list (the original's gpiece - first_ammo_piece)
+	int32_t gpiece = -1;  // ammo piece: index into the AMMO list (the original's gpiece - first_ammo_piece); aircraft::kCrashPiece for a wreck
+	int32_t crash_piece = 0;  // a wreck (Ammo::init_crash @67b800): the dying plane's own piece, vslot +0x34 of the unit (Ammo +0x8, hashed)
 	int32_t sx = 0, sy = 0, sz = 0, ex = 0, ey = 0, ez = 0;
 	uint32_t cur_time = 0, total_time = 0;
 	uint32_t angle = 0;

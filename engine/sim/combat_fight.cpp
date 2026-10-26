@@ -370,22 +370,26 @@ void ammo_init(Game& g, Ammo& a, const AmmoPackage& pkg, int32_t index, int32_t 
 		    !has_objmask(*T, objmask::kMissile)) {
 			// Anti-air rolls: the target's band, the low one while it strafes / returns close to its target or base.
 			const bool low = unit_is_flying_low(g, static_cast<const Unit&>(*T));
-			if (has_objmask(*sh, objmask::kAntiAir)) {
+			// @67bf91 - @67c164: has_objmask(0x80000000) of the SHOOTER selects the roll: a shooter WITH the mask (and not itself an air unit, `CMP type+0x218, 2`
+			// @67bfe1) makes the single roll @67c00c against its own fly_low / fly_high; a shooter WITHOUT it (JZ @67bfbd -> @67c05b) rolls twice, first against the
+			// TARGET's value (@67c079, a miss when r1 >= it) and then against its own (@67c0ba / @67c126). (Pass 19: the engine had the two branches swapped.)
+			static const bool old_aa_rolls = std::getenv("RON_OLD_AAROLL") != nullptr;  // developer aid: the pre-pass-19 branch order (digest A/B runs)
+			if (old_aa_rolls ? !has_objmask(*sh, objmask::kAntiAir) : has_objmask(*sh, objmask::kAntiAir)) {
 				if (sh->ptype->domain != kDomainAir) {
-					const int32_t r1 = g.rng.get(0, 0xffff) % 100;  // @67c079
-					const int32_t Tv = low ? T->ptype->fly_low : T->ptype->fly_high;
-					if (r1 >= Tv) {
-						a.flags |= ammobits::kNoDamage;
-					} else {
-						const int32_t r2 = g.rng.get(0, 0xffff) % 100;  // @67c0ba / @67c126
-						const int32_t Sv = low ? sh->ptype->fly_low : sh->ptype->fly_high;
-						if (!(r2 < Sv)) a.flags |= ammobits::kNoDamage;
-					}
+					const int32_t r = g.rng.get(0, 0xffff) % 100;  // @67c00c
+					const int32_t Sv = low ? sh->ptype->fly_low : sh->ptype->fly_high;
+					if (!(r < Sv)) a.flags |= ammobits::kNoDamage;
 				}
 			} else {
-				const int32_t r = g.rng.get(0, 0xffff) % 100;  // @67c00c
-				const int32_t Sv = low ? sh->ptype->fly_low : sh->ptype->fly_high;
-				if (!(r < Sv)) a.flags |= ammobits::kNoDamage;
+				const int32_t r1 = g.rng.get(0, 0xffff) % 100;  // @67c079
+				const int32_t Tv = low ? T->ptype->fly_low : T->ptype->fly_high;
+				if (r1 >= Tv) {
+					a.flags |= ammobits::kNoDamage;
+				} else {
+					const int32_t r2 = g.rng.get(0, 0xffff) % 100;  // @67c0ba / @67c126
+					const int32_t Sv = low ? sh->ptype->fly_low : sh->ptype->fly_high;
+					if (!(r2 < Sv)) a.flags |= ammobits::kNoDamage;
+				}
 			}
 		}
 	}

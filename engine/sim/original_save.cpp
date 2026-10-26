@@ -388,6 +388,7 @@ struct Loader {
 					for (const dw::Event& e : cr->ev) {
 						if (e.type != 2 || e.step != step_vans || !e.cd) continue;
 						v[i].vans.assign(e.cd->elems.size(), {0, 0});
+						v[i].vans_cap = e.cd->elems.empty() ? 0 : e.cd->size;  // Array<CaravanLink>::walk_data on load: an empty array frees its list and zeroes the size
 						for (size_t k = 0; k < e.cd->elems.size(); ++k) {
 							if (!e.cd->elems[k]) continue;
 							sh.bind(e.cd->elems[k], omap::map_caravan_link(), who, int32_t(i), int32_t(k));

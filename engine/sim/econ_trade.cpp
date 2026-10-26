@@ -547,6 +547,12 @@ int32_t city_get_empty_trade_routes(const Game& g, int32_t who, int32_t c, int32
 	return n;
 }
 
+static void city_add_van(City& ct, int32_t cara, int32_t who) {
+	// ArrayBase<CaravanLink>::add @46e550: a full array (length >= size) calls increase_size(increment -1) @489280: size += size, or 4 from an empty allocation.
+	if (int32_t(ct.vans.size()) >= ct.vans_cap) ct.vans_cap += ct.vans_cap != 0 ? ct.vans_cap : 4;
+	ct.vans.push_back({int16_t(cara), int16_t(who)});
+}
+
 void add_trade_order(Game& g, Unit& u, int32_t ox, int32_t whom, int32_t oxx, int32_t whose, QueuePos q, bool expl) {
 	// Unit::add_trade_order @5e4dc0
 	if (q == kQueueNew) clear_orders(g, u);
@@ -793,8 +799,8 @@ int32_t do_trade(Game& g, Unit& u, Order& ord) {
 			std::swap(a_city, b_city);
 			std::swap(a_pl, b_pl);
 		}
-		g.cities[size_t(a_pl)][size_t(a_city)].vans.push_back({u.cara, int16_t(u.who)});
-		g.cities[size_t(b_pl)][size_t(b_city)].vans.push_back({u.cara, int16_t(u.who)});
+		city_add_van(g.cities[size_t(a_pl)][size_t(a_city)], u.cara, u.who);
+		city_add_van(g.cities[size_t(b_pl)][size_t(b_city)], u.cara, u.who);
 		rec.city2 = int16_t(a_city);
 		rec.whom = int16_t(a_pl);
 		rec.city3 = int16_t(b_city);

@@ -895,6 +895,12 @@ bool trace_part(dw::Provider& p, int part, PartTrace& out) {
 		}
 		return true;
 	}
+	if (part == 13 || part == 14 || part == 12) {  // the global-function parts: rules (Game::walk_rules_data), scenario_data, script_run_time
+		const char* gname = part == 12 ? "game" : part == 13 ? "scenario_data" : "run_time_env";
+		const char* fname = part == 12 ? "Game::walk_rules_data" : part == 13 ? "ScenarioData::walk_data" : "RunTimeEnv::walk_data";
+		w.walk(fname, p.global(gid(gname)), gid(gname), 0);
+		return true;
+	}
 	if (part == 11) {
 		dw::Obj world = p.global(gid("world"));
 		if (i32(world, 8) > 0) w.walk("World::walk_data", world, gid("world"), 0, {{"part", -1}});
@@ -935,6 +941,31 @@ void solve_single_byte(const PartTrace& tr, uint32_t want, const char* part_name
 	const uint32_t have = adler_of(tr.bytes);
 	int64_t da = ((int64_t(want & 0xffff) - (have & 0xffff)) % M + M) % M, db = ((int64_t(want >> 16) - (have >> 16)) % M + M) % M;
 	std::printf("    solve %s: %lld bytes hashed, delta a=%lld b=%lld\n", part_name, (long long)N, (long long)da, (long long)db);
+	if (const char* at = std::getenv("RON_AT")) {  // RON_AT=off,off,..: the labelled ranges holding those stream offsets
+		for (const char* q = at; *q;) {
+			char* e = nullptr;
+			const long long off = std::strtoll(q, &e, 10);
+			if (e == q) break;
+			for (const auto& r : tr.ranges) if (int64_t(r.begin) <= off && off < int64_t(r.begin + r.len)) {
+				const int fn = d.step_function(r.step);
+				std::printf("      AT %lld: %d/%d %s at %zu len %zu\n", off, r.who, r.o, fn >= 0 ? d.function_name(fn) : "?", r.begin, r.len);
+			}
+			q = *e == ',' ? e + 1 : e;
+		}
+	}
+	if (const char* ro = std::getenv("RON_RANGE_OF")) {  // RON_RANGE_OF=who,o: the stream offsets of that object's hashed ranges
+		int rw = -1, rob = -1;
+		std::sscanf(ro, "%d,%d", &rw, &rob);
+		for (const auto& r : tr.ranges) if (r.who == rw && r.o == rob) {
+			const int fn = d.step_function(r.step);
+			std::printf("      RANGE_OF %d/%d %s at %zu len %zu\n", rw, rob, fn >= 0 ? d.function_name(fn) : "?", r.begin, r.len);
+		}
+	}
+	if (std::getenv("RON_SOLVE_DUMP") && N <= 20000) {  // the stream and the original's hash, for offline hypothesis tests
+		std::printf("    SOLVE_DUMP %s want %08x have %08x bytes ", part_name, want, have);
+		for (uint8_t c : tr.bytes) std::printf("%02x", c);
+		std::printf("\n");
+	}
 	int shown = 0;
 	for (int e = -255; e <= 255 && shown < 12; ++e) {
 		if (e == 0) continue;
@@ -1619,6 +1650,9 @@ std::map<int64_t, std::map<std::vector<uint32_t>, int>> all_check_sums(const std
 std::map<std::string, int64_t> g_rng_sites;
 sim::Game* g_trace_game = nullptr;
 int g_trace_until = -1;
+std::vector<std::array<int, 3>> g_drops;
+bool g_rng_quick = false;
+int g_drop_last = -1, g_drop_count = 0;
 int g_ins_frame = -1, g_ins_n = -1, g_ins_k = 0, g_ins_count = 0, g_ins_last = -1;  // RON_INSERT_N="F:n:k": k extra draws just before the n-th (1-based) draw of frame F
 void rng_hook_fn() {
 	if (g_trace_game && g_ins_frame >= 0 && g_trace_game->frame != g_ins_last) { g_ins_last = g_trace_game->frame; g_ins_count = 0; }
@@ -1627,6 +1661,18 @@ void rng_hook_fn() {
 		for (int i = 0; i < g_ins_k; ++i) sd = sd * 0x19660Du + 0x3C6EF35Fu;
 		g_trace_game->rng.reseed(sd);
 	}
+	if (g_trace_game && !g_drops.empty()) {  // RON_DROP_N="F:n:m[,F:n:m..]": m draws less consumed before the n-th (1-based) draw of frame F
+		if (g_drop_last != g_trace_game->frame) { g_drop_last = g_trace_game->frame; g_drop_count = 0; }
+		++g_drop_count;
+		for (const auto& d : g_drops)
+			if (d[0] == g_trace_game->frame && d[1] == g_drop_count) {
+				const uint32_t ainv = [] { uint32_t x = 0x19660Du; for (int i = 0; i < 5; ++i) x *= 2 - 0x19660Du * x; return x; }();
+				uint32_t sd = g_trace_game->rng.seed();
+				for (int i = 0; i < d[2]; ++i) sd = (sd - 0x3C6EF35Fu) * ainv;
+				g_trace_game->rng.reseed(sd);
+			}
+	}
+	if (g_rng_quick) return;
 	void* fr[10];
 	const int n = backtrace(fr, 10);
 	std::string key;
@@ -2035,6 +2081,13 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 #ifdef RON_RNG_PROFILE_HOOK
 	if (std::getenv("RON_RNG_PROFILE")) sim::g_rng_hook = rng_hook_fn;
 	if (const char* tr = std::getenv("RON_RNG_TRACE")) { g_trace_game = game.get(); g_trace_until = std::atoi(tr); }
+	if (const char* dn = std::getenv("RON_DROP_N")) {
+		g_trace_game = game.get();
+		std::stringstream dss(dn);
+		std::string dt;
+		while (std::getline(dss, dt, ',')) { std::array<int, 3> d{0, 0, 0}; if (std::sscanf(dt.c_str(), "%d:%d:%d", &d[0], &d[1], &d[2]) == 3) g_drops.push_back(d); }
+		g_rng_quick = std::getenv("RON_RNG_QUICK") != nullptr;
+	}
 	if (const char* in = std::getenv("RON_INSERT_N")) { g_trace_game = game.get(); std::sscanf(in, "%d:%d:%d", &g_ins_frame, &g_ins_n, &g_ins_k); }
 #endif
 	// RON_FISH_TIMELINE=1 (with --compare-next): see fish_timeline() below
@@ -2072,6 +2125,60 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 				int rp = 0, r0 = 0, r1 = 0;
 				if (std::sscanf(rb0, "%d:%d:%d", &rp, &r0, &r1) == 3 && f == r0) { sim::EngineProvider e0(*game); g_rb_snap = PartTrace(); trace_part(e0, rp, g_rb_snap); }
 			}
+				if (const char* td = std::getenv("RON_TRACE_DIFF")) {  // RON_TRACE_DIFF=part:B0:B1: the labelled bytes of part `part` that changed between boundaries B0 and B1 (same stream length)
+					static PartTrace td0;
+					int tp = 0, tb0 = 0, tb1 = 0;
+					if (std::sscanf(td, "%d:%d:%d", &tp, &tb0, &tb1) == 3 && (f == tb0 || f == tb1)) {
+						sim::EngineProvider etd(*game);
+						PartTrace t1;
+						if (trace_part(etd, tp, t1)) {
+							if (f == tb0) td0 = std::move(t1);
+							else if (t1.bytes.size() != td0.bytes.size()) {
+								std::printf("  TRACE_DIFF: stream length %zu -> %zu\n", td0.bytes.size(), t1.bytes.size());
+								std::map<std::pair<int, int>, size_t> l0, l1;
+								for (const PartTrace::R& r : td0.ranges) l0[{r.who, r.o}] += r.len;
+								for (const PartTrace::R& r : t1.ranges) l1[{r.who, r.o}] += r.len;
+								for (const auto& kv : l0) { auto it = l1.find(kv.first); if (it == l1.end() || it->second != kv.second) std::printf("    object %d/%d: %zu -> %zu bytes\n", kv.first.first, kv.first.second, kv.second, it == l1.end() ? size_t(0) : it->second); }
+								for (const auto& kv : l1) if (!l0.count(kv.first)) std::printf("    object %d/%d: new, %zu bytes\n", kv.first.first, kv.first.second, kv.second);
+							}
+							if (true) {  // aligned by (who, o, step, occurrence): the byte lengths of single objects may differ
+								const dw::Description& dd = dw::Description::get();
+								std::map<std::tuple<int, int, int, int>, std::pair<size_t, size_t>> idx0;  // -> (begin, len) in td0
+								{ std::map<std::tuple<int, int, int>, int> occ; for (const PartTrace::R& r : td0.ranges) { const int k = occ[{r.who, r.o, r.step}]++; idx0[{r.who, r.o, r.step, k}] = {r.begin, r.len}; } }
+								std::map<std::tuple<int, int, int>, int> occ1;
+								for (const PartTrace::R& r : t1.ranges) {
+									const int k = occ1[{r.who, r.o, r.step}]++;
+									auto it0 = idx0.find({r.who, r.o, r.step, k});
+									if (it0 == idx0.end()) { std::printf("  TDIFF %d/%d step %d #%d: new range of %zu bytes\n", r.who, r.o, r.step, k, r.len); continue; }
+									if (it0->second.second != r.len) { std::printf("  TDIFF %d/%d step %d #%d: length %zu -> %zu\n", r.who, r.o, r.step, k, it0->second.second, r.len); continue; }
+									size_t first = r.len, last = 0;
+									for (size_t q = 0; q < r.len; ++q) if (t1.bytes[r.begin + q] != td0.bytes[it0->second.first + q]) { if (first == r.len) first = q; last = q; }
+									if (first == r.len) continue;
+									const int fn = dd.step_function(r.step);
+									std::printf("  TDIFF %d/%d %s step %d range+%zu..%zu of %zu:", r.who, r.o, fn >= 0 ? dd.function_name(fn) : "?", r.step, first, last, r.len);
+									for (size_t q = first; q <= last && q < first + 16; ++q) std::printf(" %02x->%02x", td0.bytes[it0->second.first + q], t1.bytes[r.begin + q]);
+									std::printf("\n");
+								}
+							}
+						}
+					}
+				}
+			if (const char* ld = std::getenv("RON_LDR_DUMP")) {  // RON_LDR_DUMP=who:F0:F1: the leader's score fields before each frame of [F0, F1]
+				int lw = 0, l0 = 0, l1 = 0;
+				if (std::sscanf(ld, "%d:%d:%d", &lw, &l0, &l1) == 3 && f >= l0 && f <= l1) {
+					const sim::Leader& L = game->leaders[size_t(lw)];
+					std::printf("  LDR f%d who %d score %d combat %d wonders %d research %d upgrades %d economy %d buildings %d units %d territory %d pop %d explored %d units_killed %d kills_cf %d\n", int(f), lw, L.score, L.score_combat, L.score_wonders, L.score_research, L.score_upgrades, L.score_economy, L.score_buildings, L.score_units, L.score_territory, L.score_pop, L.score_explored, int(L.units_killed), int(L.kills_current_frame));
+				}
+			}
+			if (const char* rs = std::getenv("RON_RNG_SKIP")) {  // RON_RNG_SKIP=F:k: before frame F the generator is moved k draws (k < 0: back); experiment for a draw-count offset
+				int rf = 0, rk = 0;
+				if (std::sscanf(rs, "%d:%d", &rf, &rk) == 2 && f == rf) {
+					const uint32_t a = 0x19660Du, c = 0x3C6EF35Fu, ainv = [] { uint32_t x = 0x19660Du; for (int i = 0; i < 5; ++i) x *= 2 - 0x19660Du * x; return x; }();
+					uint32_t sd = game->rng.seed();
+					for (int i = 0; i < std::abs(rk); ++i) sd = rk > 0 ? sd * a + c : (sd - c) * ainv;
+					game->rng.reseed(sd);
+				}
+			}
 			auto it = expect.find(f);
 			if (it != expect.end()) {
 				if (baseline && f == start + 1) std::printf("  (reverted %lld member values)\n", (long long)sim::revert_members(*game, *baseline, revert));
@@ -2108,7 +2215,7 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 							}
 					}
 				}
-				if (const char* ue = std::getenv("RON_UEXP")) {
+				for (const char* ue_name : {"RON_UEXP", "RON_UEXP2", "RON_UEXP3"}) if (const char* ue = std::getenv(ue_name)) {
 					// experiment: RON_UEXP="who:o@boundary:op,op,.." applies edits to one unit before the sums of that boundary. ops: fl<i>=<hex> (order i flags),
 					// m^=<hex> / m2^=<hex> (unit_masks / unit_masks2 xor), idle=<n>, wait=<n>, pop<i> (erase order i), spell_time=<n>, paid<i>=<n>
 					int uw = 0, uo = 0, at = 0, n = 0;
@@ -2129,6 +2236,7 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 							else if (std::sscanf(op.c_str(), "spell_time=%d", &i) == 1) tu->spell_time = int16_t(i);
 							else if (std::sscanf(op.c_str(), "pop%d", &i) == 1 && size_t(i) < tu->orders.size()) tu->orders.erase(tu->orders.begin() + i);
 							else if (std::sscanf(op.c_str(), "paid%d=%d", &i, &n) == 2 && size_t(i) < tu->orders.size()) tu->orders[size_t(i)].paid = n;
+							else if (std::sscanf(op.c_str(), "oflags^=%x", &v) == 1) tu->flags ^= v;
 							else if (std::sscanf(op.c_str(), "dang=%x", &v) == 1) tu->dest_angle = v;
 							else if (std::sscanf(op.c_str(), "ang=%x", &v) == 1) tu->angle = v;
 							else if (std::sscanf(op.c_str(), "ox=%d", &i) == 1) tu->orders_x = i;
@@ -2348,6 +2456,60 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 								std::printf("  NEAR f%d %d/%d type %d at (%d,%d) in %d group %d orders", nf, nw, no, nu->type, nu->x, nu->y, nu->inside_up, nu->group);
 								for (const sim::Order& od : nu->orders) std::printf(" [t%d %d,%d]", int(od.type), od.x, od.y);
 								std::printf("\n");
+							}
+				}
+				if (std::getenv("RON_VANS_SCAN") && f == (std::getenv("RON_SEARCH_AT") ? std::atoll(std::getenv("RON_SEARCH_AT")) : start + 1)) {  // the Array<CaravanLink> headers of every valid city at that boundary (as the engine hashes them)
+					sim::EngineProvider evs(*game);
+					PartTrace tv;
+					if (trace_part(evs, 8, tv)) {
+						const dw::Description& dd = dw::Description::get();
+						for (const PartTrace::R& r : tv.ranges) {
+							const int fn = dd.step_function(r.step);
+							if (fn < 0 || std::strcmp(dd.function_name(fn), "Array<CaravanLink>::walk_data") != 0 || r.len == 8) continue;
+							const sim::City* vc = (r.who >= 0 && r.who < 8 && r.o >= 0 && size_t(r.o) < game->cities[size_t(r.who)].size()) ? &game->cities[size_t(r.who)][size_t(r.o)] : nullptr;
+							std::printf("  VANS %d/%d len %zu:", r.who, r.o, r.len);
+							if (vc && r.len == 4 && tv.bytes[r.begin + 0] != 0) { /* marker handled below */ }
+							for (size_t k = 0; k < r.len; ++k) std::printf(" %02x", tv.bytes[r.begin + k]);
+							if (vc) std::printf("  [flags %04x o %d pop %d ct %d]", vc->city_flags, vc->o, vc->pop, int(vc->vans.size()));
+							std::printf("\n");
+						}
+					}
+				}
+				if (const char* dd = std::getenv("RON_DEATH_DUMP")) {  // RON_DEATH_DUMP=F0:F1: every valid corpse before each frame of [F0, F1)
+					int d0 = 0, d1 = 0;
+					if (std::sscanf(dd, "%d:%d", &d0, &d1) == 2 && f >= d0 && f < d1)
+						for (size_t di = 0; di < game->deaths.size(); ++di) {
+							const sim::DeathObj& d = game->deaths[di];
+							if (!d.valid) continue;
+							std::printf("  DEATH f%d #%zu first %d anim %d xy %d,%d z %d unit %d/%d gpiece %d ammo_gp %d deg %.4f angle %08x turret %08x,%08x,%08x,%08x cur %d skel %d nf %04x guy %d\n", int(f), di, d.first_frame, d.anim, d.x, d.y, d.z, d.who, d.o, d.gpiece, d.ammo_piece, double(d.deg), unsigned(d.angle),
+								unsigned(d.turret_angles[0]), unsigned(d.turret_angles[1]), unsigned(d.turret_angles[2]), unsigned(d.turret_angles[3]), d.cur_frame, d.skeleton, unsigned(uint16_t(d.node_flags)), int(d.guy));
+						}
+				}
+				if (const char* aa = std::getenv("RON_AMMO_DUMP")) {  // RON_AMMO_DUMP=F0:F1: every ammo in use before each frame of [F0, F1)
+					int a0 = 0, a1 = 0;
+					if (std::sscanf(aa, "%d:%d", &a0, &a1) == 2 && f >= a0 && f < a1)
+						for (size_t ai = 0; ai < game->ammo.size(); ++ai) {
+							const sim::Ammo& a = game->ammo[ai];
+							if (!a.in_use()) continue;
+							const sim::Unit* u0 = game->unit(a.who, a.o);
+							std::printf("  AMMO f%d #%zu flags %02x piece %d from %d/%d (type %d) -> %d/%d time %u/%u acc %d idx %d gidx %d start (%d,%d,%d) end (%d,%d,%d)\n", int(f), ai, unsigned(a.flags), a.gpiece, a.who, a.o, u0 ? u0->type : -1, a.whom, a.ox, unsigned(a.cur_time), unsigned(a.total_time), int(a.accuracy), a.index, a.graph_index, a.sx, a.sy, a.sz, a.ex, a.ey, a.ez);
+						}
+				}
+				if (const char* cd = std::getenv("RON_CITY_DUMP")) {  // RON_CITY_DUMP=F0:F1: every valid city's members before each frame of [F0, F1), only when they change
+					int c0 = 0, c1 = 0;
+					static std::map<std::string, std::string> last_city;
+					if (std::sscanf(cd, "%d:%d", &c0, &c1) == 2 && f >= c0 && f < c1)
+						for (int cw = 0; cw < 8; ++cw)
+							for (size_t ci = 0; ci < game->cities[size_t(cw)].size(); ++ci) {
+								const sim::City& c = game->cities[size_t(cw)][ci];
+								if (!c.valid()) continue;
+								char buf[600];
+								std::snprintf(buf, sizeof buf, "fl %04x reg %d xy %d,%d stamps a%d r%d rd%d c%d as%d cs%d tw %d,%d,%d,%d,%d,%d,%d,%d sc %d port %d pd %d tv %d cn %d g%d l%d s%d r%d free %d busy %d gath %d pop %d who %d race %d fnd %d pl %d oc %d land %d filled %d bord %d ocf %d dock %d wcf %d space %d,%d,%d ter %d,%d,%d,%d,%d,%d vans %zu",
+									c.city_flags, c.reg, c.x, c.y, c.attack_stamp, c.raid_stamp, c.reduce_stamp, c.capture_stamp, c.assimilation_timer, c.capture_strength,
+									c.traded_with[0], c.traded_with[1], c.traded_with[2], c.traded_with[3], c.traded_with[4], c.traded_with[5], c.traded_with[6], c.traded_with[7],
+									c.scouted, c.in_port, c.peasant_dist, c.trade_val, c.conquest_node, c.granary, c.lumber_mill, c.smelter, c.refinery, c.free, c.busy, c.gatherers, c.pop, c.who, c.race, c.founder, c.plundered, c.ocean, c.land, c.filled, c.bordering, c.ocean_filled, c.dock_tile, c.was_capital_flags, c.space[0], c.space[1], c.space[2], c.ter[0], c.ter[1], c.ter[2], c.ter[3], c.ter[4], c.ter[5], c.vans.size());
+								const std::string key = std::to_string(cw) + "/" + std::to_string(ci);
+								if (last_city[key] != buf) { std::printf("  CITY f%d %s %s\n", int(f), key.c_str(), buf); last_city[key] = buf; }
 							}
 				}
 				if (const char* du = std::getenv("RON_DUMP_UNIT_AT")) {  // RON_DUMP_UNIT_AT=who,o (+ RON_SEARCH_AT): the engine's unit with every Unit member and its guys, at that boundary
@@ -2960,7 +3122,7 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 								auto label = [&](int64_t at) {
 									static char buf[96];
 									buf[0] = 0;
-									for (const auto& r : t1.ranges) if (size_t(at) >= r.begin && size_t(at) < r.begin + r.len) { std::snprintf(buf, sizeof buf, "%d/%d+%zu", r.who, r.o, size_t(at) - r.begin); break; }
+									for (const auto& r : t1.ranges) if (size_t(at) >= r.begin && size_t(at) < r.begin + r.len) { { const int fnl = dw::Description::get().step_function(r.step); std::snprintf(buf, sizeof buf, "%d/%d %s+%zu", r.who, r.o, fnl >= 0 ? dw::Description::get().function_name(fnl) : "?", size_t(at) - r.begin); } break; }
 									return std::string(buf);
 								};
 								auto f2 = pairs.find(k2(ta, tb));
@@ -3007,7 +3169,7 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 				}
 				all_match += m == dw::kCheckPartCount;
 				if (f == g_solve_at) {
-					for (int k : {0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11}) {
+					for (int k : {0, 1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}) {
 						if (got.v[k] == it->second[size_t(k)]) continue;
 						PartTrace tr;
 						if (trace_part(ep, k, tr)) solve_single_byte(tr, it->second[size_t(k)], dw::kCheckPartNames[k]);
@@ -3809,6 +3971,12 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 						std::printf("  UT f%d %d/%d type %d at %d,%d on_map %d masks %08x/%08x spell_time %d mana_burn %d recharging %d idle %d wait %d orders", int(f), uw, uo, tu->type, tu->x, tu->y, int(tu->on_map()), unsigned(tu->unit_masks), unsigned(tu->unit_masks2), int(tu->spell_time), int(tu->mana_burn), int(tu->recharging), int(tu->idle), int(tu->waiting));
 						for (const sim::Order& od : tu->orders) std::printf(" [%d fl%02x x%d y%d sp%d pd%d ox%d wh%d]", int(od.type), unsigned(od.flags), od.x, od.y, od.spell, od.paid, od.ox, od.whom);
 						if (!tu->guys.empty()) std::printf(" | guy0 anim %d t %u/%u", int(tu->guys[0].cur_anim), unsigned(tu->guys[0].cur_time), unsigned(tu->guys[0].end_time));
+						if (std::getenv("RON_UT_FULL")) {
+							std::printf(" | ang %08x dang %08x coll %d/%d/%d cf %d path", unsigned(tu->angle), unsigned(tu->dest_angle), int(tu->collide), int(tu->collide_o), int(tu->collide_guy), int(tu->collide_frame));
+							for (const sim::Order& od : tu->orders) std::printf(" ord[dest %d dxy %d,%d coll %d,%d ang %08x]", od.dest, od.dest_x, od.dest_y, od.coll_x, od.coll_y, unsigned(od.angle));
+							for (const sim::PathData& pd : tu->path) std::printf(" (%d,%d t%d f%x)", pd.x, pd.y, pd.tol, pd.flags);
+							if (!tu->guys.empty()) { const sim::Guy& gy = tu->guys[0]; std::printf(" | guy x %d y %d spd %d/%d des %d,%d dang %08x ang %08x last %d,%d", gy.x, gy.y, int(gy.last_speed), int(gy.avg_speed), gy.des_x, gy.des_y, unsigned(gy.des_angle), unsigned(gy.angle), gy.last_x, gy.last_y); }
+						}
 						std::printf("\n");
 					}
 				}

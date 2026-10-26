@@ -566,6 +566,27 @@ New diagnostics (env-gated, `apps/sav`; **note**: in zsh an unquoted `env $v pro
 - `RON_SOLVE_OBJ=who,o` (with `--solve-at`): two changed bytes inside one object, plus the copy / constant search; `RON_SOLVE_OBJ_DUMP=1` lists the hashed ranges of that object with their byte sums.
 - `RON_SCAN_PACKERS=1`, `RON_AMMO=1`: the units with a pack / unpack cast and the in-flight ammo of the loaded save; `RON_AA` also prints the gpiece, the turret angle (`job_counter`), the founder and the age.
 
+### 6.19 Nineteenth pass (2026-10-26): the caravan-link allocation, the DeathObj numbering, `check_idle`, the worker raid, the AA rolls, the wreck piece, the kill values
+
+First differences of `21'23'34` before -> after: `cities` 6,506 -> 8,606, `deaths` 7,094 -> **matches to the end**, `units` 7,220 -> 8,336 (`guys` 8,336, `world` 8,342, `builds` 8,354, `groups` 8,828, `leaders` 9,134, `items` 12,782 unchanged: all downstream of the lone boat 0/18 that starts a MOVE_TO with an explicit facing at 8,330, still open); fully equal boundaries 1,083 -> 1,388 of 3,056, over the 45 replays 1,291 -> 1,656.
+Every fix is a small rule found from a single-part delta (details and addresses: docs/sim-implementation.md, nineteenth pass, items 116 - 127):
+
+- `cities` 6,506: the first trade route of the game adds a link to two cities and the hashed `Array<CaravanLink>` header holds the **allocation** (`size`): 4 for a capital that came from a load (an empty array frees its list on load), 10 for a city founded in the game (`City::init` allocates 10). `City::vans_cap`, 6,506 was a 6-byte-sum delta on city 0/1 (`size` 4 vs 10).
+- `cities` 8,030: `Build::activate` stores the granary / lumber-mill byte at once. `cities` 27,323 (22'03'19): a repairing peasant is not a raid on its city (only GATHER orders are: vslot +0xe4 of the order).
+- `deaths` 7,094: three fields of `DeathObj`: the skeleton piece (0xead1 + index), the ammo piece in the original numbering, the shot's angle relative to the victim's heading.
+- `units` 7,220: `Unit::check_idle` drops BLOW_COVER after 10 idle frames (two squad members at 7,220, a third at 7,226: `a = -32`, then `-48`, i.e. a byte of `unit_masks` lower by 16 in three units).
+- `ammo` 83,150 (23'12'05): the anti-air roll branches; `ammo` 83,421 (23'12'35): the wreck's own piece in Ammo +8; `leaders` 27,768 / 82,651: `Leader::score_combat` (+0x44) gets `kv / 5` with the queued units / buildings in the kill value.
+
+How the cluster was found (new): `w = b * a^-1 (mod 65521)` of a part's Adler delta is the stream position of a single cluster of changes (`RON_AT=off,..` names the range holding an offset, `RON_RANGE_OF=who,o` lists one object's offsets); `RON_SOLVE_DUMP=1` prints the stream and the original's hash so a hypothesis family (every dword +-R, pairs by meet-in-the-middle) is a few lines of Python;
+a **single byte of `e = -16` in three units** (the same member, three objects) is the signature of a flag bit that the engine keeps and the original drops. `RON_TRACE_DIFF` must align by object (a stream whose objects grow cannot be compared by position). The generator-offset experiments (`RON_RNG_SKIP`, `RON_DROP_N`) are only meaningful when the dependent value has a wide range:
+a scatter of radius 5 matches by chance at about one shift in 25.
+
+New diagnostics (env-gated, `apps/sav`): `RON_CITY_DUMP=F0:F1`, `RON_DEATH_DUMP=F0:F1`, `RON_AMMO_DUMP=F0:F1`, `RON_LDR_DUMP=who:F0:F1` (every valid city / corpse / ammo / a leader's score fields before each frame, cities only when changed), `RON_VANS_SCAN=1` (+ `RON_SEARCH_AT`: the `Array<CaravanLink>` headers as hashed),
+`RON_TRACE_DIFF=part:B0:B1`, `RON_AT=off,..`, `RON_RANGE_OF=who,o`, `RON_SOLVE_DUMP=1` (with `--solve-at`; `--solve-at` now also traces `rules`, `scenario_data`, `script_run_time`), `RON_UT_FULL=1` (with `RON_UNIT_TRACE`: angles, order dest, path, guy 0), `RON_UEXP2/3` and the op `oflags^=hex`, `RON_RNG_SKIP=F:k`, `RON_DROP_N="F:n:m,.."` (+ `RON_RNG_QUICK=1`, profiling build),
+and `re/ghidra_scripts/ReadWords.java` (words of memory with the function they point to: vtable slots).
+
+**Not engine-driven**: the `scenario_data` part is the loaded shadow only (`last_razed`, `units_killed`, `builds_destroyed` are updated in `g.scen` but not hashed); `23'11'20` differs at 82,651 for that reason (the original's `last_razed[0]` = the razed Fortress 2,116).
+
 ## 7. What blocks exact checksums
 
 State of the fidelity work (2026-10-24; the log of each fix is in docs/sim-implementation.md "Fidelity log"). **Fixed** since the first table:

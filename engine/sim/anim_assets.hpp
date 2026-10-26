@@ -59,6 +59,7 @@ public:
 	int32_t instant_hit(int32_t piece) const override;
 	bool no_release(int32_t piece) const override;
 	bool has_skeleton(int32_t piece) const override;
+	int32_t skeleton_gpiece(int32_t piece) const override;
 	bool has_scorch(int32_t piece) const override;
 	bool attach_position(int32_t piece, int32_t node, int32_t anim, int32_t frame, float out[3]) const override;
 	int32_t pivot_restrictions(int32_t piece) const override;
@@ -89,6 +90,7 @@ private:
 		std::vector<PlaneRelease> planes;    // <PLANERELEASE> in file order
 		int32_t instant_hit = -1;            // <INSTANTHIT ammo>
 		bool no_release = false;             // <NORELEASE>
+		int32_t skeleton_index = -1;  // the index of the `skeleton` name among the <SKELETON> elements, -1 when it names none
 		bool skeleton = false, scorch = false;  // the attributes name a <SKELETON> / <SCORCH>
 	};
 	struct Ammo {
@@ -113,6 +115,7 @@ private:
 	std::unordered_set<std::string> build_pieces_;  // uppercase <BUILD name> of building_graphics.xml whose texture / zbuffer files exist
 	std::vector<bool> gender_packed_;   // per type index: gender slot means -PACKED (else -FEMALE)
 	std::vector<UnitArt> units_;
+	int32_t first_skeleton_piece_ = 0xeabd;  // GraphicPieces::first_skeleton_piece = first_shadow_piece 0xeabd + the <SHADOW> elements of effects_graphics.xml (init_unit_shadows @8fc580)
 	std::unordered_map<std::string, int32_t> unit_by_name_;  // uppercase <UNIT> name -> units_ (first wins)
 	std::vector<Entry> entries_;
 	std::vector<Ammo> ammo_;

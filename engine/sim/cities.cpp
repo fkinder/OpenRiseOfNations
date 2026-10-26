@@ -310,7 +310,9 @@ int32_t cities_init_city(Game& g, int32_t who, int32_t o, bool loading, bool cap
 	l.city_mark = std::max(l.city_mark, idx + 1);
 	City& ct = cl[size_t(idx)];
 	const Build& b = *g.build(who, o);
+	const int32_t van_cap = ct.vans_cap;  // City::init @737050: the vans array keeps an allocation of 10 or more, else gets one of 10
 	ct = City();
+	ct.vans_cap = std::max<int32_t>(van_cap, 10);
 	ct.city = int16_t(idx);
 	ct.o = int16_t(o);
 	ct.who = int8_t(who);
@@ -613,6 +615,7 @@ void city_close(Game& g, int32_t who, int32_t c, int32_t attacker) {
 		if (cu && cu->alive()) repath(g, *cu);
 	}
 	g.cities[size_t(who)][size_t(c)].vans.clear();
+	g.cities[size_t(who)][size_t(c)].vans_cap = 0;  // City::close frees the list and zeroes the size (@737550 end)
 }
 
 // ---------------------------------------------------------------- territory

@@ -76,7 +76,7 @@ template <class Ar> void walk(Ar& ar, City& v) {
 	FIELDS(ar, v.city_flags, v.city, v.o, v.reg, v.x, v.y, v.attack_stamp, v.raid_stamp, v.reduce_stamp, v.capture_stamp, v.assimilation_timer);
 	FIELDS(ar, v.capture_strength, v.traded_with, v.scouted, v.in_port, v.peasant_dist, v.trade_val, v.conquest_node, v.granary);
 	FIELDS(ar, v.lumber_mill, v.smelter, v.refinery, v.free, v.busy, v.gatherers, v.pop, v.who, v.race, v.founder, v.plundered, v.ocean);
-	FIELDS(ar, v.land, v.filled, v.bordering, v.ocean_filled, v.dock_tile, v.was_capital_flags, v.space, v.ter, v.vans, v.name);
+	FIELDS(ar, v.land, v.filled, v.bordering, v.ocean_filled, v.dock_tile, v.was_capital_flags, v.space, v.ter, v.vans, v.vans_cap, v.name);
 }
 
 template <class Ar> void walk(Ar& ar, Fort& v) {
@@ -144,7 +144,7 @@ template <class Ar> void walk(Ar& ar, Army& v) {
 
 template <class Ar> void walk(Ar& ar, Ammo& v) {
 	FIELDS(ar, v.flags, v.rolling, v.accuracy, v.gpiece, v.sx, v.sy, v.sz, v.ex, v.ey, v.ez, v.cur_time, v.total_time, v.angle, v.splash_area);
-	FIELDS(ar, v.index, v.graph_index, v.who, v.o, v.num_guys, v.whom, v.ox, v.traj, v.v1z, v.dx, v.bank_dx, v.bank_dy, v.start_roll_angle);
+	FIELDS(ar, v.index, v.graph_index, v.who, v.o, v.num_guys, v.whom, v.ox, v.traj, v.v1z, v.dx, v.bank_dx, v.bank_dy, v.start_roll_angle, v.crash_piece);
 }
 
 template <class Ar> void walk(Ar& ar, DeathObj& v) {
@@ -358,7 +358,7 @@ static_assert(sizeof(Leader::Deal) == 92, "Leader::Deal changed: update its walk
 static_assert(sizeof(Personality) == 96, "Personality changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Site) == 24, "Site changed: update its walk() in save_walk.inc");
 static_assert(sizeof(MakeObject) == 40, "MakeObject changed: update its walk() in save_walk.inc");
-static_assert(sizeof(City) == 160, "City changed: update its walk() in save_walk.inc");
+static_assert(sizeof(City) == 168, "City changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Fort) == 8, "Fort changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Dock) == 10, "Dock changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Wonder) == 16, "Wonder changed: update its walk() in save_walk.inc");
@@ -375,7 +375,7 @@ static_assert(sizeof(GoodObj) == 16, "GoodObj changed: update its walk() in save
 static_assert(sizeof(Game::Supply) == 6, "Game::Supply changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Game::RevealPoint) == 12, "Game::RevealPoint changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Army) == 152, "Army changed: update its walk() in save_walk.inc");
-static_assert(sizeof(Ammo) == 100, "Ammo changed: update its walk() in save_walk.inc");
+static_assert(sizeof(Ammo) == 104, "Ammo changed: update its walk() in save_walk.inc");
 static_assert(sizeof(DeathObj) == 76, "DeathObj changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Group) == 2504, "Group changed: update its walk() in save_walk.inc");
 static_assert(sizeof(FormData) == 3688, "FormData changed: update its walk() in save_walk.inc");

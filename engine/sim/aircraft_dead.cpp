@@ -55,6 +55,7 @@ void add_crash_ammo(Game& g, Unit& u, int32_t guy_index) {
 	a.graph_index = graph_index;
 	a.num_guys = 1;
 	a.gpiece = kCrashPiece;
+	a.crash_piece = gy.gpiece;  // Ammo +0x8 = the unit's vslot +0x34 (its piece), not a constant
 	// start_roll_angle: the bank of a plane in a strafing / patrolling / bombing run (STRAFE, AIR_PATROL, AIR_ATTACK_GROUND).
 	a.start_roll_angle = 0;
 	if (const Order* f = u.front()) {

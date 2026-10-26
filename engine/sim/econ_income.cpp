@@ -699,11 +699,21 @@ void calc_city_resources(Game& g, int32_t who, int32_t c, int32_t* out) {
 
 }  // namespace
 
+void city_set_granary_byte(Game& g, int32_t who, City& ct) {
+	// The two lines at the head of City::calc_gather @737c60, which Build::activate @623e20 repeats at once for a granary (city_flags |= 0x200, then +0x56).
+	ct.granary = (ct.city_flags & cityflag::kHasGranary) ? uint8_t(KA(g, "granary_bonus", get_granary(g, who) - 1)) : 0;
+}
+
+void city_set_lumber_byte(Game& g, int32_t who, City& ct) {
+	// The same for a lumber mill (city_flags |= 0x400, then +0x57).
+	ct.lumber_mill = (ct.city_flags & cityflag::kHasLumber) ? uint8_t(KA(g, "lumbermill_bonus", get_lumbermill(g, who) - 1)) : 0;
+}
+
 void city_calc_gather(Game& g, int32_t who, int32_t c, int32_t* out) {
 	// City::calc_gather @737c60: the enhancer bytes first (the decompile shows the tables shifted by one array).
 	City& ct = g.cities[size_t(who)][size_t(c)];
-	ct.granary = (ct.city_flags & cityflag::kHasGranary) ? uint8_t(KA(g, "granary_bonus", get_granary(g, who) - 1)) : 0;
-	ct.lumber_mill = (ct.city_flags & cityflag::kHasLumber) ? uint8_t(KA(g, "lumbermill_bonus", get_lumbermill(g, who) - 1)) : 0;
+	city_set_granary_byte(g, who, ct);
+	city_set_lumber_byte(g, who, ct);
 	ct.smelter = city_count_buildings(g, who, c, ptype::kSmelter, 0, 1) != 0
 	                 ? uint8_t(KA(g, "smelter_bonus", get_smelter(g, who) - 1))
 	                 : 0;

@@ -96,6 +96,11 @@ struct AnimSource {
 		(void)piece;
 		return false;
 	}
+	// UnitRDataStruct +0x20 `skeleton`: GraphicPieces::first_skeleton_piece (0xeabd + the number of <SHADOW> elements) + the index of the unit's
+	// `skeleton` name among the <SKELETON> elements (String == ignores case), else -1 (GraphicPieces::init_unit_data @8f4290). DeathObj +0x44.
+	virtual int32_t skeleton_gpiece(int32_t piece) const {
+		return has_skeleton(piece) ? 1 : -1;
+	}
 	virtual bool has_scorch(int32_t piece) const {
 		(void)piece;
 		return false;
