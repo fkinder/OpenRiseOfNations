@@ -1,0 +1,7 @@
+re/decomp/fid12
+Dock::init
+Dock::close
+Docks::close_dock
+Docks::close
+Docks::init
+Dock::Dock

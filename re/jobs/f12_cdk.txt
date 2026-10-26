@@ -1,0 +1,5 @@
+re/decomp/fid12/callers_dock.txt
+2
+Docks::remask_docks
+Docks::init_dock
+Docks::close_dock

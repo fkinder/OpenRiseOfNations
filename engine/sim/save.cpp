@@ -50,7 +50,8 @@ static_assert(sizeof(Regions) == 10248, "Regions changed: update the REGN sectio
 // the original saves its hotkey groups, the native save does not (docs/sim-implementation.md, "Orders and commands, second pass").
 // + 120: World::roads (the road candidates and the Roads sweep cursor, sim/roadgraph.hpp), saved in the world section.
 // + 80: Game::nukes (sim/nukes.hpp), saved in section NUKE.
-static_assert(sizeof(Game) == 1657592 + 120 + 80, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
+// + 192 + 10 * 128: Game::docks (8 vectors of Dock) and Leader::reg_docks (+ dock_mark, which fits the padding) in each of the 10 leader slots, saved in the CITY and LEAD sections.
+static_assert(sizeof(Game) == 1657592 + 120 + 80 + 192 + 10 * 128, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
 // 1608 + 8 + 16 + 16: ScriptHost::ctw (the Conquer the World campaign the scripts run for, sim/ctw.hpp) is a run-time link, ctw_owned the loaded battle's
 // copy of that campaign and battle_token the campaign's liveness check of the battle; the native battle save writes the campaign as its own section (CTWB), not through the script walk.
 // + 24: ScriptHost::tileset (get_tileset), derived from the scenario by script_host_load on every load, not saved (docs/save-format.md 4).
@@ -614,7 +615,7 @@ void walk_body(Ar& top, Game& g, bool has_scripts, std::vector<uint8_t>* battle)
 	top.section("NUKE", [&](auto& ar) { fields(ar, g.nukes); });  // explosions in progress, the sunk tiles, the embargo stamps (version 10)
 	top.section("HGHT", [&](auto& ar) { fields(ar, g.heights.h); });  // the terrain height grid: buildings terraform it (TerrainOut::terraform_for_building)
 	top.section("CITY", [&](auto& ar) {
-		fields(ar, g.cities, g.forts, g.wonder_records, g.unbuilt_cities, g.unbuilt_forts, g.unbuilt_wonders, g.wonders,
+		fields(ar, g.cities, g.forts, g.docks, g.wonder_records, g.unbuilt_cities, g.unbuilt_forts, g.unbuilt_wonders, g.wonders,
 		       g.terra_cotta_total, g.world_pop, g.world_cities, g.starting, g.supplies, g.caravans, g.farms,
 		       g.hold_doobers);
 	});

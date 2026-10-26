@@ -1,0 +1,4 @@
+re/decomp/fid12
+LeaderData::is_peace
+Game::current_age
+LeaderData::get_target

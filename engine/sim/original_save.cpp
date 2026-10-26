@@ -408,6 +408,8 @@ struct Loader {
 		};
 		simple("forts", "PtrArray<Fort>::walk_data", omap::map_forts_lists(), omap::map_fort(), [&](int w, size_t n) { g.forts[size_t(w)].assign(n, Fort()); },
 		       [&](int w, size_t i) -> void* { return i < g.forts[size_t(w)].size() ? &g.forts[size_t(w)][i] : nullptr; });
+		simple("docks", "PtrArray<Dock>::walk_data", omap::map_docks_lists(), omap::map_dock(), [&](int w, size_t n) { g.docks[size_t(w)].assign(n, Dock()); },
+		       [&](int w, size_t i) -> void* { return i < g.docks[size_t(w)].size() ? &g.docks[size_t(w)][i] : nullptr; });
 		simple("wonders", "PtrArray<Wonder>::walk_data", omap::map_wonders_lists(), omap::map_wonder(), [&](int w, size_t n) { g.wonder_records[size_t(w)].assign(n, Wonder()); },
 		       [&](int w, size_t i) -> void* { return i < g.wonder_records[size_t(w)].size() ? &g.wonder_records[size_t(w)][i] : nullptr; });
 		simple("supplies", "PtrArray<Supply>::walk_data", omap::map_supplies_lists(), omap::map_supply(), [&](int w, size_t n) { g.supplies[size_t(w)].assign(n, Game::Supply()); },

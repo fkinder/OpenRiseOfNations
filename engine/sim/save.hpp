@@ -19,7 +19,7 @@
 
 namespace ron::sim {
 
-constexpr uint32_t kSaveVersion = 11;  // 11: CaravanRec::road / making_road / reset_road and the suspended road search (PathNode::z_val; caravan roads, economy-spec 6.4); 10: section NUKE (nuclear explosions in progress, sunk tiles, embargo stamps); 9: World::roads (the road candidates and the Roads sweep cursor); 8: Leader combat-statistics (rates, 15-second sums, frame_battle; Leader::process_event_frame); 7: Build::gpiece (WallData +0x58, the building's art piece); 6: Leader::flock_stamp (Objects::add_flock's 225-frame limit); 5: section HGHT (the terraformed height grid); 4: Leader::capital_stamp / ally_stamp (do_damage warning stamps)
+constexpr uint32_t kSaveVersion = 12;  // 12: Game::docks (the dock records) and Leader::dock_mark / reg_docks (Docks::init_dock; gull units circle the docks); 11: CaravanRec::road / making_road / reset_road and the suspended road search (PathNode::z_val; caravan roads, economy-spec 6.4); 10: section NUKE (nuclear explosions in progress, sunk tiles, embargo stamps); 9: World::roads (the road candidates and the Roads sweep cursor); 8: Leader combat-statistics (rates, 15-second sums, frame_battle; Leader::process_event_frame); 7: Build::gpiece (WallData +0x58, the building's art piece); 6: Leader::flock_stamp (Objects::add_flock's 225-frame limit); 5: section HGHT (the terraformed height grid); 4: Leader::capital_stamp / ally_stamp (do_damage warning stamps)
 
 // What the header of a save says (read_save_info) and what the loader found out (load_game).
 struct SaveInfo {

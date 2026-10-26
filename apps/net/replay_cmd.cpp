@@ -148,6 +148,17 @@ int cmd_replay(int argc, char** argv) {
 			arts.push_back(sim::load_anim_source(cache.files, *g->rules));
 			g->anims = arts.back().get();
 		}
+		// The playback prologue of ron-sav --replay: what the original's load and Game::run do before the first frame (the pens' animals,
+		// leader 9's reset, calc_danger, update_all_seen), and the game script the header names (Setup::build_game's script part).
+		sim::original_post_load_effects(*g);
+		{
+			const std::string script = sim::to_utf8(rp.header.scenario_script);
+			std::string serr;
+			if (!script.empty() && !sim::original_attach_game_script(*g, cache.files, script, &serr))
+				std::printf("  game script \"%s\" not attached: %s\n", script.c_str(), serr.c_str());
+			else if (!script.empty() && slot == seats.front())
+				std::printf("  game script \"%s\" attached\n", script.c_str());
+		}
 		net::ExecPolicy pol = policy;
 		if (has_flag(argc, argv, "--no-commands")) pol.execute = false;
 		Inst in;

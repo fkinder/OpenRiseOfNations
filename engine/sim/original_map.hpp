@@ -320,6 +320,8 @@ const ClassMap& map_caravan_link();
 const ClassMap& map_cities_lists();    // Cities: 8 PtrArray<City>
 const ClassMap& map_fort();
 const ClassMap& map_forts_lists();
+const ClassMap& map_dock();
+const ClassMap& map_docks_lists();
 const ClassMap& map_wonder();
 const ClassMap& map_wonders_lists();
 const ClassMap& map_supply();

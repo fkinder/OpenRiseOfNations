@@ -17,6 +17,7 @@
 #include "sim/movement.hpp"
 #include "sim/orders.hpp"
 #include "sim/pathfinder.hpp"
+#include "sim/roadgraph.hpp"
 #include "sim/search.hpp"
 #include "sim/trig.hpp"
 
@@ -825,8 +826,16 @@ int32_t do_move(Game& g, Unit& u, Order& m, int32_t speed) {
 		u.tolerance = top.tol;
 		uint32_t flags = top.flags;
 		if (act_t == kTradeRoute && (flags & pathflag::kRoad)) {
-			// TODO(trade): caravan road bookkeeping (TerrainOut::caravan_step off water; on a broken road
-			// Caravan::verify_road and clear 0x20 on every path entry).
+			// Unit::do_move @5f7b30 (lines 455 - 493 of the decompile): a road point of a caravan's route. Off water
+			// TerrainOut::caravan_step counts the step on the road candidates; a tile that is not a road yet but built on
+			// or blocked makes Caravan::verify_road rebuild the route, and every path entry loses its road flag.
+			const int32_t rtx = top.x / 192, rty = top.y / 192;
+			if ((g.world.t(rtx, rty) & tmask::kMedium) != tmask::kWater) roads_caravan_step(g.world, rtx, rty, g.leaders[size_t(u.who)].ally_mask);
+			const uint16_t rtd = g.world.t(rtx, rty);
+			if ((rtd & tmask::kMedium) != tmask::kRoad && (g.world.is_built_at(rtx, rty) || (rtd & tmask::kBlocked))) {
+				if (u.cara >= 0 && size_t(u.cara) < g.caravans[size_t(u.who)].size()) caravan_verify_road(g, g.caravans[size_t(u.who)][size_t(u.cara)]);
+				for (PathData& pd : u.path) pd.flags &= ~pathflag::kRoad;
+			}
 		}
 		if ((flags & pathflag::kFinal) || act_t == kTradeRoute) {
 			// A target in another region: walk it with tolerance 0 and flag 4 (u.tolerance keeps the old value).

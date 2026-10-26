@@ -26,4 +26,8 @@ void roads_road_cleared(World& w, int32_t tx, int32_t ty);
 // Roads::scan_and_kill_stray_roads @8956a0 for one frame (Game::do_frame step 21).
 void roads_scan_and_kill_stray(World& w);
 
+// TerrainOut::caravan_step @875700 (from Unit::do_move on a caravan's road point): the tile's candidate and its eight neighbours that
+// have a free reference (ref_b != 0) move one reference (ref_a++, ref_b--) and record the player's ally mask in their byte 14.
+void roads_caravan_step(World& w, int32_t tx, int32_t ty, uint8_t ally_mask);
+
 }  // namespace ron::sim

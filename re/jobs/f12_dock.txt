@@ -1,0 +1,3 @@
+re/decomp/fid12
+Docks::init_dock
+Docks::remask_docks

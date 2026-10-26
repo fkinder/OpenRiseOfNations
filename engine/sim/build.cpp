@@ -26,6 +26,8 @@ void city_regen_roads(Game& g, int32_t who, int32_t c);
 void city_close(Game& g, int32_t who, int32_t c, int32_t attacker);
 int32_t forts_init_fort(Game& g, int32_t who, int32_t o);
 void forts_close_fort(Game& g, int32_t who, int32_t idx);
+int32_t docks_init_dock(Game& g, int32_t who, int32_t o);
+void docks_close_dock(Game& g, int32_t who, int32_t idx);
 int32_t wonders_init_wonder(Game& g, int32_t who, int32_t o);
 void wonders_close_wonder(Game& g, int32_t who, int32_t idx);
 void unbuilt_remove(std::vector<Unbuilt>& v, int32_t o, int32_t who);
@@ -914,7 +916,7 @@ void build_activate_full(Game& g, Build& b, bool loading, bool msg, bool count) 
 		b.fort = int16_t(forts_init_fort(g, who, b.o));
 		unbuilt_remove(g.unbuilt_forts[size_t(who)], b.o, who);
 	} else if (type_is(*b.ptype, ptype::kDock)) {
-		// Docks::init_dock: the dock record (+0x78). TODO(docks): dock records (transport, fishing) are not kept.
+		b.fort = int16_t(docks_init_dock(g, who, b.o));  // Docks::init_dock: the dock record (+0x78)
 	}
 	if (type_is(*b.ptype, ptype::kDock) || type_is(*b.ptype, ptype::kMarket) || type_is(*b.ptype, ptype::kTemple)) {
 		l.gather_slots[2]++;
@@ -1127,6 +1129,7 @@ void build_close_production(Game& g, Build& b, int32_t dt) {
 			if (b.fort >= 0) forts_close_fort(g, who, b.fort);
 			if (!was_active) unbuilt_remove(g.unbuilt_forts[size_t(who)], b.o, who);
 		}
+		if (type_is(*b.ptype, ptype::kDock) && b.fort >= 0) docks_close_dock(g, who, b.fort);  // BuildTypeData::is_dock: Docks::close_dock(+0x78)
 		if (type_is(*b.ptype, ptype::kTemple)) regions_fix_all_borders(g);
 		if (is_wonder_type(b.type)) {
 			if (b.wonder >= 0) {

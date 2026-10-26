@@ -192,7 +192,7 @@ const ClassMap& map_leader_options() {
 std::vector<const ClassMap*> all_maps() {
 	return {&map_game(), &map_game_info(), &map_world(), &map_wdata(), &map_wdata_block(), &map_collblock(), &map_objects_header(), &map_unit(), &map_animal(),
 	        &map_build(), &map_guy(), &map_pathdata(), &map_order_node(), &map_queue_item(), &map_tcoord(), &map_gather_point(), &map_leader(),
-	        &map_leader_encrypt(), &map_site(), &map_make_object(), &map_good(), &map_item(), &map_city(), &map_caravan_link(), &map_fort(), &map_wonder(),
+	        &map_leader_encrypt(), &map_site(), &map_make_object(), &map_good(), &map_item(), &map_city(), &map_caravan_link(), &map_fort(), &map_dock(), &map_wonder(),
 	        &map_supply(), &map_caravan(), &map_caravan_road(), &map_army(), &map_group(), &map_groups_global(), &map_ammo(), &map_death(), &map_region(), &map_wcoord(),
 	        &map_regions_global(), &map_game_random(), &map_ai_speed(), &map_ai_off(), &map_armies_find_dist(), &map_queue_fail(), &map_game_daemon(),
 	        &map_constants(), &map_leader_options(), &map_order(1), &map_order(6), &map_order(7), &map_order(10), &map_order(11), &map_order(12), &map_order(14),

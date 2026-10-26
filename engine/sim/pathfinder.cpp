@@ -18,6 +18,8 @@
 
 namespace ron::sim {
 
+int32_t get_target(const Game& g, int32_t who);  // LeaderData::get_target @6da000 (sim/ai.hpp)
+
 // ---------------------------------------------------------------- containers
 
 void free_saved_search(SavedSearch* s) { delete s; }
@@ -412,12 +414,34 @@ int32_t calc_cost(Game& g, int32_t x1, int32_t y1, int32_t x2, int32_t y2, int32
 				}
 			}
 			if (is_fleeing(u)) extra = mul32(extra, 3);
-			// TODO(movement-spec 8.1): rush rules (+500 for cells of non-allies before the rush age) are not simulated.
+			{
+				// PathFinder::calc_cost @684e50 (decompile lines 392 - 405): while the rush rule holds (Game::current_age < rushrules, and for the
+				// timed rules (>= 9) before frame minutes * 900), a cell of a leader who is not an ally costs 500 more.
+				const int32_t rr = g.info.rush_rules;
+				if (rr != 0 && owner >= 0 && !is_ally(g, P, owner)) {
+					int32_t cur = 0;
+					for (int32_t j = 0; j < 8; j++) {
+						if ((g.leaders[size_t(j)].flags & leaderflag::kValid) && g.leaders[size_t(j)].age > cur) cur = g.leaders[size_t(j)].age;
+					}
+					bool rush = cur < rr;
+					if (rush && rr >= 9) {
+						const CategoryList* cl = g.rules ? g.rules->category_list("rush_rules") : nullptr;
+						const int32_t mins = cl && size_t(rr) < cl->items.size() ? cl->items[size_t(rr)].data[0] : 0;
+						rush = g.frame < mins * 900;
+					}
+					if (rush) extra = add32(extra, 500);
+				}
+			}
 			if (step != 0x300) team = false;
 		}
 		if (team && (pf.army || pf.worker)) {
-			// TODO(movement-spec 8.1): team style (+5000 for cells of players at peace for team styles 0/8/11, or of
-			// players other than the target for style 2) is not simulated. Note team style 0 is likely the default.
+			// PathFinder::calc_cost (decompile lines 407 - 426): team styles 0, 8 and 11 add 5000 for a cell of a leader at peace with the
+			// pathing unit's owner (LeaderData::is_peace: neither at war nor allied both ways), style 2 for a cell of any leader that is neither
+			// the owner's target nor the owner itself.
+			const uint8_t ts = g.info.team_style;
+			const int32_t co = w.w(wx2, wy2).who;
+			if ((ts == 0 || ts == 8 || ts == 11) && co >= 0 && !is_ally(g, P, co) && !is_enemy(g, P, co)) extra = add32(extra, 5000);
+			if (ts == 2 && co >= 0 && co != get_target(g, P) && co != P) extra = add32(extra, 5000);
 		}
 	}
 

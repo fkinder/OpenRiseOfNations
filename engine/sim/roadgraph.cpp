@@ -838,6 +838,29 @@ void roads_road_cleared(World& w, int32_t tx, int32_t ty) {
 	r.road_cleared(tx, ty);
 }
 
+void roads_caravan_step(World& w, int32_t tx, int32_t ty, uint8_t ally_mask) {
+	// TerrainOut::caravan_step @875700. Candidate words: [2] = rotation | unknown << 8 | ref_a << 16 | ref_b << 24 (rotation 10 = unset),
+	// [3] = support_codes | byte14 << 16 | is_terrain_creation << 24.
+	auto step = [&](int32_t x, int32_t y) -> bool {
+		if (!w.in_t(x, y) || w.roads.slot.size() != size_t(w.size)) return false;
+		const int32_t s = w.roads.slot[w.wi(x >> 2, y >> 2)];
+		if (s < 0) return false;
+		uint32_t* cell = &w.roads.words[size_t(s) * RoadStore::kWords];
+		if (cell[0] == 0) return false;  // CoordInfo.num_roads
+		uint32_t* c = cell + 1 + 4 * ((x & 3) + 4 * (y & 3));
+		if ((c[2] & 0xff) == 10) return false;
+		uint32_t ref_a = (c[2] >> 16) & 0xff, ref_b = c[2] >> 24;
+		if (ref_b == 0) return false;
+		ref_a = (ref_a + 1) & 0xff;
+		ref_b--;
+		c[2] = (c[2] & 0xffffu) | (ref_a << 16) | (ref_b << 24);
+		c[3] |= uint32_t(ally_mask) << 16;
+		return true;
+	};
+	if (!step(tx, ty)) return;
+	for (int k = 1; k <= 8; k++) step(tx + move_x[k], ty + move_y[k]);
+}
+
 void roads_scan_and_kill_stray(World& w) {
 	Roads r(w);
 	r.scan_stray();

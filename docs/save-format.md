@@ -1,4 +1,4 @@
-# Save format (native, version 11)
+# Save format (native, version 12)
 
 The engine's own save format for its simulation state: `engine/sim/save.hpp` / `save.cpp` (API and the section walks),
 `save_archive.hpp` (the writer / reader), `save_walk.inc` (the member lists, generated). It is **not** the original game's
@@ -68,6 +68,8 @@ a section whose layout differs from this build's (`N bytes were not read`, or ru
 reported with the section name. The version is bumped on any layout change; there is no migration (a save loads only into
 the build that wrote it, and only against the same rules tables: the hash in `META` is checked).
 
+Version 12: `Game::docks` (section `CITY`, after `forts`: `Dock` = dock, o, reg, dock_flags, who, gull_o; the dock records `Docks::init_dock` keeps, sim-implementation.md twelfth pass, item 58) and `Leader::dock_mark` (LeaderData +0x42c) / `reg_docks` (+0x135e, int16[64]) in the leader walk. The seagulls of the docks are gaia units of slot 9 (saved natively, not in the original's saves).
+
 Version 11: `CaravanRec` (section `CITY`, `Game::caravans`) carries the route's road (`road`, `road_size`: the `Stack<PathData>` and its allocation), `making_road`, `reset_road` and the suspended road search (`trees`: a `SavedSearch` like `Unit::openlist`, with `search_dir0` / `search_gx` / `search_gy` / `search_count`); `PathNode::z_val` (the road searches' terrain height) joins the nodes of every saved search. Economy-spec 6.4.
 
 Version 10: section `NUKE` (`Game::nukes`, sim/nukes.hpp): the nuclear explosions in progress (`NukeBlast`: centre, radii, start frame, shooter, the objects already hurt), the list of tiles `terraform_for_nuke` has sunk (TerrainOut +0x4bd4) and `stamp[8]` (LeaderData +0x7b4, the frame of the leader's last detonation, which starts its trade embargo); docs/nukes-spec.md. `Leader::nukes_used` / `missiles_used` were already walked.
@@ -100,7 +102,7 @@ reads gzip and plain files alike (`gzopen` on a plain file). Writing goes to `<p
 | `GOOD` | `goods`, `items` (`GoodObj`) |
 | `NUKE` | `nukes` (`NukeState`: `blasts` with their hit lists, `craters`, `stamp`; version 10) |
 | `HGHT` | `heights.h` (the terrain height grid: `TerrainOut::terraform_for_building` flattens it under every new building, sim-implementation.md fidelity log item 32; version 5) |
-| `CITY` | `cities`, `forts`, `wonder_records`, `unbuilt_*`, `wonders`, `terra_cotta_total`, `world_pop`, `world_cities`, `starting`, `supplies`, `caravans`, `farms`, `hold_doobers` |
+| `CITY` | `cities`, `forts`, `docks`, `wonder_records`, `unbuilt_*`, `wonders`, `terra_cotta_total`, `world_pop`, `world_cities`, `starting`, `supplies`, `caravans`, `farms`, `hold_doobers` |
 | `GRUP` | the 512 `Group`s, `last_group`, `proc_group`, the global `forms`, `grouppath`, `group_cols` |
 | `PATH` | `PathFinder`: tunables, request state and the pathfinder's own search trees (the valid-answer cache and block snapshot a returning `find_upath` leaves behind are behaviour) |
 | `COMB` | `ammo` pool, `ammo_counter`, the 100 `deaths` (corpses), `range_swap_type` / `range_swap_value` |

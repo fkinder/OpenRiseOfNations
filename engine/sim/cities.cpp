@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "sim/aircraft.hpp"
+#include "sim/guys.hpp"
 #include "sim/heroes.hpp"
 #include "sim/roads.hpp"
 #include "sim/ai.hpp"
@@ -14,6 +16,8 @@
 #include "sim/territory.hpp"
 
 namespace ron::sim {
+
+void repath(Game& g, Unit& u);  // Unit::repath @5e29b0 (sim/orders.hpp; cities.cpp stays free of that header's other declarations)
 
 namespace {
 
@@ -579,7 +583,16 @@ void city_close(Game& g, int32_t who, int32_t c, int32_t attacker) {
 	}
 	calc_pop_cap(g, who);
 	g.cities[size_t(who)][size_t(c)].o = -1;
-	// TODO(caravans): every caravan in `vans` with a live unit gets Unit::repath; the list is freed.
+	// City::close @737550 (end): every caravan route of the city whose record is in use and whose unit is alive repaths; the list is freed.
+	for (const std::array<int16_t, 2>& link : g.cities[size_t(who)][size_t(c)].vans) {
+		const int32_t cw = link[1], ci = link[0];
+		if (cw < 0 || cw >= 8 || ci < 0 || size_t(ci) >= g.caravans[size_t(cw)].size()) continue;
+		const CaravanRec& r = g.caravans[size_t(cw)][size_t(ci)];
+		if (!(r.caravan_flags & 1)) continue;
+		Unit* cu = g.unit(cw, r.o);
+		if (cu && cu->alive()) repath(g, *cu);
+	}
+	g.cities[size_t(who)][size_t(c)].vans.clear();
 }
 
 // ---------------------------------------------------------------- territory
@@ -664,6 +677,72 @@ void forts_close_fort(Game& g, int32_t who, int32_t idx) {
 	f.fort_flags = 0;
 	Leader& l = LD(g, who);
 	while (l.fort_mark > 0 && !(fl[size_t(l.fort_mark - 1)].fort_flags & 1)) l.fort_mark--;
+}
+
+// Docks::init_dock @740fc0 -> Dock::init @740a80 (Build::activate, any dock-family building). The record takes the first free slot below the leader's
+// dock_mark, else the allocated record at the mark, else a new one; `reg_docks[region]` counts the dock; and a seagull (gaia GULLBIRD, type 404) is
+// created a tile and a half up-left of the building: its facing is one of seven directions drawn from game_random, and it strafes the dock.
+int32_t docks_init_dock(Game& g, int32_t who, int32_t o) {
+	constexpr int32_t kGullBird = 404;
+	Leader& l = LD(g, who);
+	auto& dl = g.docks[size_t(who)];
+	int32_t idx = -1;
+	for (int32_t i = 0; i < l.dock_mark && size_t(i) < dl.size(); i++) {
+		if (!(dl[size_t(i)].dock_flags & 1)) {
+			idx = i;
+			break;
+		}
+	}
+	if (idx < 0) {
+		if (size_t(l.dock_mark) < dl.size()) idx = l.dock_mark;
+		else {
+			dl.emplace_back();
+			idx = int32_t(dl.size()) - 1;
+		}
+	}
+	l.dock_mark = std::max(l.dock_mark, idx + 1);
+	Dock& d = dl[size_t(idx)];
+	const Build* b = g.build(who, o);
+	if (!b) return idx;
+	d.dock = int16_t(idx);
+	d.who = int8_t(who);
+	d.o = int16_t(o);
+	d.dock_flags = 1;
+	const int32_t wx = wcoord_of(b->x), wy = wcoord_of(b->y);
+	d.reg = g.world.in_w(wx, wy) ? g.world.w(wx, wy).region : 0;
+	if (d.reg >= 0 && d.reg < 64) l.reg_docks[size_t(d.reg)]++;
+	const int32_t gull = init_unit(g, kGaiaWho, kGullBird, b->x - 0xc0, b->y - 0xc0, -1, -1, -1);
+	if (gull >= 0) {
+		const uint32_t r = uint32_t(g.rnd_draw(7));
+		if (Unit* gu = g.unit(kGaiaWho, gull)) {
+			unit_set_angle(g, *gu, r * 0xaaaaaaau - 0x40000000u, false);
+			add_strafe_order(g, *gu, o, who, -1, -1, 1, kQueueNew, false);
+		}
+	}
+	d.gull_o = int16_t(gull);
+	return idx;
+}
+
+// Docks::close_dock @740f50 -> Dock::close @7409f0 (Build::close of a dock-family building).
+void docks_close_dock(Game& g, int32_t who, int32_t idx) {
+	auto& dl = g.docks[size_t(who)];
+	if (idx < 0 || size_t(idx) >= dl.size()) return;
+	Dock& d = dl[size_t(idx)];
+	const Build* b = d.o >= 0 ? g.build(who, d.o) : nullptr;
+	if (b && b->alive() && d.reg >= 0 && d.reg < 64) LD(g, who).reg_docks[size_t(d.reg)]--;
+	d.dock_flags &= uint8_t(~1);
+	d.o = -1;
+	d.reg = 0;
+	const int32_t gull = d.gull_o;
+	d.who = int8_t(-1);
+	if (gull >= 0) {
+		if (Unit* gu = g.unit(kGaiaWho, gull)) {
+			if (gu->alive()) unit_close(g, *gu, 0, -1, 0.0f);
+		}
+	}
+	d.gull_o = -1;
+	Leader& l = LD(g, who);
+	while (l.dock_mark > 0 && size_t(l.dock_mark) <= dl.size() && !(dl[size_t(l.dock_mark - 1)].dock_flags & 1)) l.dock_mark--;
 }
 
 // Wonders::init_wonder @73c860 (Wonder::get_timer @73c660 for the timer).

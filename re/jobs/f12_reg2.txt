@@ -1,0 +1,8 @@
+re/decomp/fid12
+Region::Region
+Regions::Regions
+Regions::init
+Regions::clear_all
+Region::release
+Region::fix_borders
+Regions::fix_all_borders

@@ -216,6 +216,7 @@ const ClassMap& map_cities_lists() {
 
 namespace {
 Fort* fort_of(Game& g, const Seg& s) { auto& v = g.forts[size_t(s.a & 7)]; return size_t(s.b) < v.size() ? &v[size_t(s.b)] : nullptr; }
+Dock* dock_of(Game& g, const Seg& s) { auto& v = g.docks[size_t(s.a & 7)]; return size_t(s.b) < v.size() ? &v[size_t(s.b)] : nullptr; }
 Wonder* wonder_of(Game& g, const Seg& s) { auto& v = g.wonder_records[size_t(s.a & 7)]; return size_t(s.b) < v.size() ? &v[size_t(s.b)] : nullptr; }
 Game::Supply* supply_of(Game& g, const Seg& s) { auto& v = g.supplies[size_t(s.a & 7)]; return size_t(s.b) < v.size() ? &v[size_t(s.b)] : nullptr; }
 CaravanRec* caravan_of(Game& g, const Seg& s) { auto& v = g.caravans[size_t(s.a & 7)]; return size_t(s.b) < v.size() ? &v[size_t(s.b)] : nullptr; }
@@ -236,6 +237,24 @@ const ClassMap& map_fort() {
 const ClassMap& map_forts_lists() {
 	static const ClassMap m = make_player_lists("forts", "PtrArray<Fort>::walk_data", &map_fort,
 	                                            [](const Game& g, int32_t who) { return int32_t(g.forts[size_t(who)].size()); });
+	return m;
+}
+
+const ClassMap& map_dock() {
+	static const ClassMap m = [] {
+		ClassMap m;
+		Builder<Dock> b(m, "Dock", "Dock");
+		b.walks({"Dock::walk_data"}).resolve([](Game& g, const Seg& s) { return dock_of(g, s); });
+		// (gull_o is only walked when saving to a file and is -1 after a load)
+		b.f("dock", &Dock::dock).f("o", &Dock::o).f("reg", &Dock::reg).f("dock_flags", &Dock::dock_flags).f("who", &Dock::who);
+		m.finish();
+		return m;
+	}();
+	return m;
+}
+const ClassMap& map_docks_lists() {
+	static const ClassMap m = make_player_lists("docks", "PtrArray<Dock>::walk_data", &map_dock,
+	                                            [](const Game& g, int32_t who) { return int32_t(g.docks[size_t(who)].size()); });
 	return m;
 }
 

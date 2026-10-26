@@ -191,6 +191,7 @@ void Game::load(const GameFiles& files, const Scenario& s, const Rules& r, uint3
 	}
 	for (auto& c : cities) c.clear();
 	for (auto& c : forts) c.clear();
+	for (auto& c : docks) c.clear();
 	for (auto& c : wonder_records) c.clear();
 	for (auto& c : unbuilt_cities) c.clear();
 	for (auto& c : unbuilt_forts) c.clear();
@@ -603,6 +604,13 @@ void Game::do_frame() {
 		if (!(l.flags & leaderflag::kActive)) continue;
 		l.pop_issues = 0;
 		l.retarget_budget = 0;
+		// Leaders::process_all @6ed2a0: flag 0x40000 is cleared and set again every frame when some other valid leader that is not an ally both ways
+		// has special forces (flag 0x20000, Leader::track_unit_type).
+		l.flags &= ~0x40000u;
+		for (int32_t j = 0; j < 8; j++) {
+			const Leader& o = leaders[size_t(j)];
+			if ((o.flags & leaderflag::kValid) && j != who && (l.diplos(j) != 2 || o.diplos(who) != 2) && (o.flags & 0x20000u)) l.flags |= 0x40000u;
+		}
 		leader_gather(*this, who);
 		if (l.flags & leaderflag::kCalcWallStats) {
 			l.flags &= ~leaderflag::kCalcWallStats;
@@ -617,7 +625,25 @@ void Game::do_frame() {
 		// 6 TODO(frame-spec 4): taunts.
 		l.flags &= ~leaderflag::kIdlePeasant;
 	}
-	// 9 TODO: rush-rules war declaration.
+	// 9 Game::do_frame @591ef0 (decompile lines 199 - 258): a timed rush rule (rushrules >= 9: no war for N minutes) ends at frame N * 900:
+	// every valid, non-neutral leader forgets its attrition warning stamp (+0x1f4) and goes to war with every other valid, non-neutral leader
+	// that is neither allied nor already an enemy (Leader::set_diplo(j, 0); both directions), unless the team style is 0, 8 or 11 (free
+	// teams). The warning message and sound are presentation.
+	if (info.rush_rules > 8 && rules) {
+		const CategoryList* cl = rules->category_list("rush_rules");
+		const int32_t mins = cl && size_t(info.rush_rules) < cl->items.size() ? cl->items[size_t(info.rush_rules)].data[0] : 0;
+		if (frame == mins * 900 && info.team_style != 0 && info.team_style != 8 && info.team_style != 11) {
+			for (int32_t i = 0; i < 8; i++) {
+				if (!(leaders[size_t(i)].flags & leaderflag::kValid)) continue;
+				leaders[size_t(i)].attrition_warn_stamp = 0;
+				if (is_neutral(*this, i)) continue;
+				for (int32_t j = 0; j < 8; j++) {
+					if (!(leaders[size_t(j)].flags & leaderflag::kValid) || is_neutral(*this, j)) continue;
+					if (i != j && !is_ally(*this, i, j) && !is_enemy(*this, i, j)) leader_set_diplo(*this, i, j, 0);
+				}
+			}
+		}
+	}
 	if (!editor) leaders_strategy_all(*this);  // 10 (sim/ai.hpp)
 	game_daemon_process_all(*this);  // 11
 	if (!editor) armies_process_all(*this);  // 12 (sim/ai.hpp)

@@ -128,6 +128,10 @@ const ClassMap& map_leader() {
 		b.f("defeat_stamp", &Leader::defeat_stamp).f("ally_mask", &Leader::ally_mask);
 		b.c("team_color", [](Leader& l, const uint8_t* p) { scalar_load(l.color, p, 1, false); },
 		    [](const Leader& l, uint8_t* p) { scalar_emit(l.color, p, 1); });
+		// dock_mark (+0x42c) and reg_docks (+0x135e, ushort[64]): the dock records' high mark and the docks per land region (no labels in the walker's raw block).
+		b.raw(0x42c, 4, "dock_mark", [](Leader& l, const uint8_t* p) { scalar_load(l.dock_mark, p, 4, true); },
+		      [](const Leader& l, uint8_t* p) { scalar_emit(l.dock_mark, p, 4); });
+		b.raw(0x135e, 128, "reg_docks", [](Leader& l, const uint8_t* p) { arr_load(l.reg_docks, p, 2); }, [](const Leader& l, uint8_t* p) { arr_emit(l.reg_docks, p, 2); });
 		// dip[8]: Diplomacy (agree, any_offer, treaty, offers[6], dows[6], attacks[8]) = 0x5c bytes each.
 		b.raw(0x692c, 8 * 0x5c, "dip",
 		      [](Leader& l, const uint8_t* p) {

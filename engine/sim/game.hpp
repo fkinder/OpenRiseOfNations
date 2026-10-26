@@ -149,6 +149,10 @@ struct Leader {
 	int32_t pop = 0, pop_cap = 0, pop_issues = 0, control = 0, active = 0, caras = 0;
 	// Cities, forts, wonders (production-spec 5.0.2).
 	int32_t city_mine = 0, city_mark = 0, city_name = 0, fort_mark = 0, wonder_mark = 0, lost_city_stamp = 0;
+	// Docks (Docks::init_dock @740fc0 / Dock::init @740a80): dock_mark +0x42c (highest dock record in use + 1, like fort_mark) and +0x135e reg_docks
+	// (ushort[64], docks per land region, between reg_forts and reg_land).
+	int32_t dock_mark = 0;
+	std::array<int16_t, 64> reg_docks{};
 	std::array<int16_t, 64> reg_pop{};
 	// Territory (production-spec 5.10, sim/territory.hpp): +0x145e reg_terr (ushort[64], wcoords owned per land region),
 	// +0x4d4 reg_known_rares (int[64], zeroed with reg_terr at a region's fresh pass), +0x9d8 territory (sum of reg_terr
@@ -310,6 +314,12 @@ struct Fort {
 	int16_t fort = 0, o = -1, reg = 0;
 	uint8_t fort_flags = 0;  // 1 VALID
 	int8_t who = 0;
+};
+struct Dock {  // Dock (0x14): a leader's dock building; gull_o is the seagull unit (a gaia GULLBIRD circling it; -1 after a load)
+	int16_t dock = 0, o = -1, reg = 0;
+	uint8_t dock_flags = 0;  // 1 in use
+	int8_t who = 0;
+	int16_t gull_o = -1;
 };
 struct Wonder {
 	int16_t wonder = 0, o = -1;
@@ -569,6 +579,7 @@ public:
 	// ---- production state (docs/production-spec.md section 11)
 	std::array<std::vector<City>, 8> cities{};    // cities.lists[who]
 	std::array<std::vector<Fort>, 8> forts{};     // forts.lists[who]
+	std::array<std::vector<Dock>, 8> docks{};     // docks.lists[who]
 	std::array<std::vector<Wonder>, 8> wonder_records{};  // wonders.lists[who]
 	std::array<std::vector<Unbuilt>, 8> unbuilt_cities{}, unbuilt_forts{}, unbuilt_wonders{};
 	std::array<int32_t, 17> wonders{};  // Game +0x618: bit 0 = wonder type 526 + i has been completed by someone

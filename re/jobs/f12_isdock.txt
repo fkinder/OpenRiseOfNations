@@ -1,0 +1,3 @@
+re/decomp/fid12
+BuildTypeData::is_dock
+BuildTypeData::is_dock_tile

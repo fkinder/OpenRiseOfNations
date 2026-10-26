@@ -460,6 +460,17 @@ First differing boundary of `21'23'34`, before -> after: units 1,514 -> **1,622*
 - **`Build::do_bonus` @627140** is `bucket_add` of 30 (first Dock / Market / Temple), the food / timber / knowledge / metal / oil completion bonuses (docs/sim-implementation.md "eleventh pass" item 49); it moved the `leaders` delta of boundary 1,928 of `21'23'34` (a Market completes in frame 1,923) from (44, 44921) to the static (65520, 34096).
 - Open: the static `leaders` (-1) / `world` (679) deltas from boundary 1,802 of `21'23'34` (evidence and dead ends: item 52), `units` / `guys` 1,928 (the two builders of the finished Market), the first-row `leaders` of the fights (the territory recompute transient).
 
+### 6.12 Twelfth pass (2026-10-25): the rush rule's war, the dock records, the playback of ron-net
+
+- **A timed rush rule (RUSHRULES >= 9, `Category.data[0]` minutes) declares war between every pair of non-allied leaders at frame minutes * 900** (`Game::do_frame` @591ef0, before `GameDaemon::process_all`, so the danger map of frame 1,800 already sees it). It was the "static" `leaders` (a = -1) / `world` (a = 679) delta of boundary 1,802 of `21'23'34`: the game's rule is 2 minutes = 1,800 frames. With it `leaders` first differs at
+  2,054 (was 1,802) and `world` at 1,928 (the unit divergence). The lesson for the next static delta: look at the periodic events of `Game::do_frame` itself (frame % N or frame == N * 900) before the census.
+- **Dock records**: `Build::activate` of a dock creates the record, `Leader` +0x42c `dock_mark`, +0x135e `reg_docks[region]` and a seagull (gaia slot 9, not saved, not hashed) with one `game_random` draw. The `leaders` delta (a = +2, b = 45,119) of boundary 2,054 is exactly `dock_mark` and `reg_docks[4]` going 0 -> 1. `leaders` first differs at 2,438 after it.
+- `Leaders::process_all` recomputes leader flag 0x40000 every frame; `PathFinder::calc_cost` has the rush-rule (+500) and team-style (+5000) terms; the caravan call sites in `Unit::do_move` / `Object::take_damage` / `City::close` are wired (sim-implementation "twelfth pass", items 55 - 57).
+- **`Region.borders`** is not part of what the original saves (`Region::walk_data` stops at `&borders`) and is 0 after a load, so the territory is recomputed from scratch in the original too: the first-row `leaders` mismatches of the fights are not that. They come with `units` (15 of 19) and `ammo` (9 of 19) differing at the same boundary: the recorded checksums were made by the recording session, whose arrows in
+  flight the embedded save does not carry (the playback has none). Those replays cannot match the first frames.
+- `ron-net replay` now runs `original_post_load_effects` and attaches the header's game script, and the network layer may execute UNITMASK: its numbers equal `ron-sav --replay`'s (320 fully equal turns on `21'23'34`).
+- Open: `units` / `guys` / `world` at 1,928 of `21'23'34` (the two builders after the Market completes; target choice, order construction, `do_build` / `do_construct`, the RNG and a hold of 1 - 6 frames are all excluded, sim-implementation item 60), then `builds` 2,036, `groups` 2,042, `cities` 2,402, `goods` 4,346.
+
 ## 7. What blocks exact checksums
 
 State of the fidelity work (2026-10-24; the log of each fix is in docs/sim-implementation.md "Fidelity log"). **Fixed** since the first table:

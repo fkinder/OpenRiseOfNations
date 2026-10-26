@@ -1,0 +1,5 @@
+re/decomp/fid12
+Region::walk_data
+Regions::walk_data
+Region::rebuild_coords
+Regions::rebuild_coords

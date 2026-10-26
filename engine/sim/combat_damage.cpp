@@ -705,7 +705,18 @@ int32_t take_damage(Game& g, Object& tgt, int32_t hp, int32_t frac, int32_t deat
 		deg = float(int32_t((uint64_t(find_angle(am->ex - am->sx, am->ey - am->sy)) * 360u) >> 32));  // presentation
 	}
 	const bool decoy = tu && (tu->unit_masks & umask::kDecoy);
-	// TODO(caravans): Caravans::new_danger.
+	if (tu) {
+		// Object::take_damage @652020 (decompile lines 457 - 488): a land caravan that is its group's captain dies on a tile that is nobody's or not
+		// an ally's, or to a building: the routes near it restart (Caravans::new_danger).
+		const int32_t wxo = wcoord_of(tgt.x), wyo = wcoord_of(tgt.y);
+		int32_t owner = -1;
+		if (g.world.in_w(wxo, wyo)) owner = g.world.w(wxo, wyo).who;
+		const Object* attacker = att_o >= 0 && att_who >= 0 ? g.object(att_who, att_o) : nullptr;
+		if (tu->o_up < 0 && unit_is_caravan(*tu) && tu->ptype->domain == 0 &&
+		    (owner < 0 || !is_ally(g, tgt.who, owner) || (attacker && !attacker->is_unit)) && tu->cara >= 0 &&
+		    size_t(tu->cara) < g.caravans[size_t(tgt.who)].size() && (g.caravans[size_t(tgt.who)][size_t(tu->cara)].caravan_flags & 3) == 3)
+			caravans_new_danger(g, tgt.x, tgt.y, tgt.who);
+	}
 	if (is_wall(tgt)) {
 		if (tgt.who < 8) {
 			g.leaders[size_t(tgt.who)].buildings_lost++;

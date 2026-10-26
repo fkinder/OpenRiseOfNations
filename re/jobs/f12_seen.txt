@@ -1,0 +1,6 @@
+re/decomp/fid12
+BuildData::is_seen
+WallData::is_seen
+BuildData::is_now_seen
+WallData::is_now_seen
+UnitData::is_seen
