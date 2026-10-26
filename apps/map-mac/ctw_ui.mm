@@ -464,8 +464,8 @@ struct Screen::Impl {
 		}
 		// description
 		ui.next_window();
-		const IfaceRect info = R(446, 978, 100, 420);
-		b.frame(R(430, 994, 84, 436));
+		const IfaceRect info = R(446, 978, 100, 396);
+		b.frame(R(430, 994, 84, 412));
 		ui.fill(float(info.l), float(info.t), float(info.w()), float(info.h()), argb(150, 13, 11, 40), UiType::ColorBlend);
 		ui.next_layer();
 		if (auto d = sel >= 0 && size_t(sel) < stems.size() ? def_of(size_t(sel)) : nullptr) {
@@ -477,10 +477,10 @@ struct Screen::Impl {
 		}
 		// options
 		ui.next_window();
-		b.frame(R(430, 994, 450, 622));
+		b.frame(R(430, 994, 424, 628));
 		const std::vector<int> choices = nation_choices();
 		nation = choices.empty() ? 0 : std::clamp(nation, 0, int(choices.size()) - 1);
-		const int ry = 488;
+		const int ry = 464;
 		text(b, f14, "Your nation:", float(ox + 466), float(oy + ry + 5), kLabel);
 		btn(b, R(600, 630, ry, ry + 26), "<", kNationPrev, 0, choices.size() > 1);
 		text(b, f16, choices.empty() ? "" : nation_label(choices[size_t(nation)]), float(ox + 642), float(oy + ry + 4));
@@ -488,7 +488,7 @@ struct Screen::Impl {
 		text(b, f14, "Difficulty:", float(ox + 466), float(oy + ry + 42), kLabel);
 		static const char* const dn[6] = {"Easiest", "Easy", "Moderate", "Tough", "Tougher", "Toughest"};
 		for (int k = 0; k < 6; k++) {
-			const IfaceRect r = R(574 + k * 62, 574 + k * 62 + 60, ry + 38, ry + 66);
+			const IfaceRect r = R(554 + k * 66, 554 + k * 66 + 64, ry + 38, ry + 66);
 			ui.next_layer();
 			b.row(r, diff == k, hot_id == kDiff && hot_arg == k);
 			add_hit(r, kDiff, k);
@@ -497,15 +497,15 @@ struct Screen::Impl {
 		}
 		auto d = sel >= 0 && size_t(sel) < stems.size() ? def_of(size_t(sel)) : nullptr;
 		if (d && d->allow_random_nations) {
-			text(b, f14, std::string(rand_nations ? "[x] " : "[ ] ") + "Random nations", float(ox + 466), float(oy + ry + 80), kLabel);
-			add_hit(R(462, 660, ry + 76, ry + 98), kRandNations);
+			text(b, f14, std::string(rand_nations ? "[x] " : "[ ] ") + "Random nations", float(ox + 466), float(oy + ry + 72), kLabel);
+			add_hit(R(462, 660, ry + 68, ry + 90), kRandNations);
 		}
 		if (d && d->allow_random_bonuses) {
-			text(b, f14, std::string(rand_bonuses ? "[x] " : "[ ] ") + "Random bonuses", float(ox + 700), float(oy + ry + 80), kLabel);
-			add_hit(R(696, 900, ry + 76, ry + 98), kRandBonus);
+			text(b, f14, std::string(rand_bonuses ? "[x] " : "[ ] ") + "Random bonuses", float(ox + 700), float(oy + ry + 72), kLabel);
+			add_hit(R(696, 900, ry + 68, ry + 90), kRandBonus);
 		}
-		text(b, f14, std::string(vary_maps ? "[x] " : "[ ] ") + "Different battle map each time", float(ox + 462), float(oy + 392), kLabel);
-		add_hit(R(458, 760, 388, 412), kVaryMaps);
+		text(b, f14, std::string(vary_maps ? "[x] " : "[ ] ") + "Different battle map each time", float(ox + 466), float(oy + ry + 98), kLabel);
+		add_hit(R(462, 760, ry + 94, ry + 116), kVaryMaps);
 		if (!setup_msg.empty()) text(b, f12, setup_msg, float(ox + 60), float(oy + 616), kRed);
 		// bottom buttons
 		ui.next_window();
@@ -777,6 +777,18 @@ struct Screen::Impl {
 		// labels, capitals, level pips
 		ui.next_layer();
 		const int f12 = ui.font(12, -1);
+		// Names keep clear of the army discs and of each other: below the dot first, then above, to the right, to the left, below the level pips.
+		struct LabelBox { float l, t, r, b; };
+		std::vector<LabelBox> taken;
+		const float ar = std::clamp(zoom * 20.0f, 8.0f, 14.0f);
+		for (int slot = 0; slot < ctw::kSlots; slot++) {
+			for (const ctw::Piece& pc : g.pieces[size_t(slot)]) {
+				float x, y;
+				node_pos(pc.node, &x, &y);
+				const float ax = to_sx(x), ay = to_sy(y) - ar - 4, rr = ar + 5;
+				taken.push_back({ax - rr, ay - rr, ax + rr, ay + rr});
+			}
+		}
 		for (size_t n = 0; n < g.nodes.size(); n++) {
 			float x, y;
 			node_pos(int(n), &x, &y);
@@ -792,17 +804,34 @@ struct Screen::Impl {
 			}
 			const std::string name = g.node_name(int(n));
 			const int tw = ui.text_width(f12, name);
-			text(b, f12, name, sx - float(tw) / 2, sy + 8, int(n) == sel_node ? kGold : kWhite);
+			const float lh = 14, hw = float(tw) / 2;
+			const float cand[10][2] = {{sx - hw, sy + 8}, {sx - hw, sy - 8 - lh}, {sx + 8, sy - lh / 2}, {sx - 8 - float(tw), sy - lh / 2}, {sx - hw, sy + 26},
+			                           {sx + 6, sy + 7}, {sx - 6 - float(tw), sy + 7}, {sx + 6, sy - 7 - lh}, {sx - 6 - float(tw), sy - 7 - lh}, {sx - hw, sy - 22 - lh}};
+			int pick = 0;
+			float best = 1e9f;  // the first spot that is free, else the one with the least overlap
+			for (int c = 0; c < 10 && best > 0; c++) {
+				float lap = 0;
+				for (const LabelBox& o : taken) {
+					const float ow = std::min(cand[c][0] + float(tw), o.r) - std::max(cand[c][0], o.l), oh = std::min(cand[c][1] + lh, o.b) - std::max(cand[c][1], o.t);
+					if (ow > 0 && oh > 0) lap += ow * oh;
+				}
+				if (lap < best) {
+					best = lap;
+					pick = c;
+				}
+			}
+			const float lx = cand[pick][0], ly = cand[pick][1];
+			taken.push_back({lx - 1, ly, lx + float(tw) + 1, ly + lh});
+			text(b, f12, name, lx, ly, int(n) == sel_node ? kGold : kWhite);
 			if (N.level > 0 && zoom > 0.28f) {
 				const float w0 = float(N.level) * 5 - 1;
 				for (int k = 0; k < N.level; k++) ui.fill(sx - w0 / 2 + float(k) * 5, sy + 22, 4, 3, argb(235, 245, 235, 200), UiType::ColorBlend);
 			}
-			if (N.flags & ctw::kSupplyDepot) ui.fill(sx + float(tw) / 2 + 3, sy + 9, 5, 5, argb(235, 120, 220, 255), UiType::ColorBlend);
-			if (N.flags & ctw::kFortified) ui.fill(sx + float(tw) / 2 + 3, sy + 16, 5, 5, argb(235, 220, 220, 220), UiType::ColorBlend);
+			if (N.flags & ctw::kSupplyDepot) ui.fill(lx + float(tw) + 3, ly + 1, 5, 5, argb(235, 120, 220, 255), UiType::ColorBlend);
+			if (N.flags & ctw::kFortified) ui.fill(lx + float(tw) + 3, ly + 8, 5, 5, argb(235, 220, 220, 220), UiType::ColorBlend);
 		}
 		// armies
 		ui.next_layer();
-		const float ar = std::clamp(zoom * 20.0f, 8.0f, 14.0f);
 		for (int slot = 0; slot < ctw::kSlots; slot++) {
 			for (const ctw::Piece& pc : g.pieces[size_t(slot)]) {
 				float x, y;
@@ -825,21 +854,37 @@ struct Screen::Impl {
 		const int f14 = ui.font(14, -1), f16 = ui.font(16, -1);
 		const ctw::Leader& P = g.leaders[size_t(g.player_tribe)];
 		text(b, f16, g.def->name, 12, 8, kGold);
-		const std::string bar = "Round " + std::to_string(std::min(g.cur_round, g.length())) + " of " + std::to_string(g.length()) + "   " +
-		                        age_name(g.cur_age) + " Age   " + g.tribe_name(g.player_tribe) + " (" + P.name + ")   Tribute " +
-		                        std::to_string(P.tribute) + "   Territories " + std::to_string(g.num_nodes(g.player_tribe, true)) +
-		                        "   Cards " + std::to_string(P.cards.size());
-		text(b, f14, bar, float(24 + ui.text_width(f16, g.def->name)), 10, kWhite);
-		int dc_w = 0;
+		// the status line; the DEFCON / peace texts keep the right edge, so a narrow window drops the leader's name, then the age, then shrinks the font
+		const int bar_x = 24 + ui.text_width(f16, g.def->name);
+		std::string dc, tn;
+		int right_w = 0;
 		if (g.def->strategic_nukes) {
-			const std::string dc = "DEFCON " + std::to_string(g.defcon_level) + "   Missiles " + std::to_string(g.num_nukes(g.player_tribe));
-			dc_w = int(ui.text_width(f14, dc)) + 24;
-			text(b, f14, dc, float(W - 12 - dc_w + 24), 10, g.defcon_level >= 4 ? argb(255, 255, 110, 90) : kGold);
+			dc = "DEFCON " + std::to_string(g.defcon_level) + "   Missiles " + std::to_string(g.num_nukes(g.player_tribe));
+			right_w += int(ui.text_width(f14, dc)) + 20;
 		}
 		if (g.turns_no_attack > 0) {
-			const std::string tn = "Peace: " + std::to_string(g.turns_no_attack) + " more round" + (g.turns_no_attack == 1 ? "" : "s");
-			text(b, f12, tn, float(W - 12 - dc_w - ui.text_width(f12, tn)), 11, kSecondary);
+			tn = "Peace: " + std::to_string(g.turns_no_attack) + " more round" + (g.turns_no_attack == 1 ? "" : "s");
+			right_w += int(ui.text_width(f12, tn)) + 20;
 		}
+		const std::string rnd = "Round " + std::to_string(std::min(g.cur_round, g.length())) + " of " + std::to_string(g.length()) + "   ";
+		const std::string tail = "Tribute " + std::to_string(P.tribute) + "   Territories " + std::to_string(g.num_nodes(g.player_tribe, true)) +
+		                         "   Cards " + std::to_string(P.cards.size());
+		const std::string who = g.tribe_name(g.player_tribe) + " (" + P.name + ")   ", who_short = g.tribe_name(g.player_tribe) + "   ";
+		const std::string age = age_name(g.cur_age) + " Age   ";
+		const std::string variants[4] = {rnd + age + who + tail, rnd + age + who_short + tail, rnd + who_short + tail, rnd + tail};
+		const int avail = W - 12 - right_w - bar_x;
+		int bar_font = f14;
+		std::string bar = variants[3];
+		for (int v = 0; v < 4; v++) {
+			if (ui.text_width(f14, variants[v]) <= avail) {
+				bar = variants[v];
+				break;
+			}
+		}
+		if (ui.text_width(f14, bar) > avail) bar_font = f12;
+		text(b, bar_font, bar, float(bar_x), bar_font == f14 ? 10 : 11, kWhite);
+		if (!dc.empty()) text(b, f14, dc, float(W - 12 - ui.text_width(f14, dc)), 10, g.defcon_level >= 4 ? argb(255, 255, 110, 90) : kGold);
+		if (!tn.empty()) text(b, f12, tn, float(W - 12 - (dc.empty() ? 0 : int(ui.text_width(f14, dc)) + 20) - ui.text_width(f12, tn)), 11, kSecondary);
 		draw_panel(b);
 		// hint when targeting a card
 		if (target_card >= 0) {
@@ -866,9 +911,14 @@ struct Screen::Impl {
 		const int f12 = ui.font(12, -1), f14 = ui.font(14, -1), f16 = ui.font(16, -1), f18 = ui.font(18, -1);
 		static const char* const tabs[5] = {"Map", "Cards", "Diplomacy", "News", "Cold War"};
 		const int ntabs = g.def->strategic_nukes ? 5 : 4;
-		const int tw = (panel.w() - 16) / ntabs;
+		// tab widths follow the labels ("Diplomacy" and "Cold War" are wider than "Map"), spread over the panel
+		int want[5], want_sum = 0;
+		for (int i = 0; i < ntabs; i++) want_sum += want[i] = ui.text_width(f12, tabs[i]) + 22;
+		int tx = panel.l + 8;
 		for (int i = 0; i < ntabs; i++) {
-			const IfaceRect r{panel.l + 8 + i * tw, panel.l + 8 + (i + 1) * tw - 3, panel.t + 6, panel.t + 34};
+			const int tw = (panel.w() - 16) * want[i] / want_sum;
+			const IfaceRect r{tx, tx + tw - 3, panel.t + 6, panel.t + 34};
+			tx += tw;
 			btn(b, r, tabs[i], kTab, i, true, 12);
 			if (i == tab) ui.fill(float(r.l), float(r.b + 1), float(r.w()), 2, argb(255, 240, 214, 120), UiType::ColorBlend);
 		}

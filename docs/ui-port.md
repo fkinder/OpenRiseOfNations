@@ -1350,9 +1350,21 @@ index order the winner's allies defeat the others (type 5, two losers: "by conqu
   log and stay open.
 - **Layout pass** (every `--menu` screen and the HUD at 1024 x 768, 1440 x 900, 1920 x 1080, every PNG read): main, tutorials, skirmish, skirmish setup, scenarios,
   quit popup, multiplayer, lobby, options: nothing clipped or overlapping; the HUD (resources, the top bar, the clocks column, the minimap, the card, the selection
-  panel, the wonder line) fits at all three sizes. Findings left to their owners (`ctw_ui.mm`, not edited): the "[ ] Different battle map each time" line sits on the
-  bottom frame of the description box at 1024 and 1440 (y = 392 against a frame ending at 420), and the "Moderate" difficulty label is wider than its
-  button at 1440 / 1920 (`ui5_menu_*`).
+  panel, the wonder line) fits at all three sizes. The two defects found in the Conquer the World screens are fixed (below).
+- **Conquer the World layout pass** (`ctw_ui.mm`; `--menu ctw`, `--ctw CAMPAIGN --ctw-screen map|news|cards|diplomacy|attack|menu`, the Cold War map, at 1024 x 768, 1440 x 900 and 1920 x 1080, every PNG read).
+  The screens are the port's own layout (no `CTWSetup*` XML drives them), so the fixes are in the drawing code. `b.frame` draws its art inset about 16 px from the rectangle it is given
+  (the border is 16-18 px thick): content has to sit 32 px or more inside the rectangle's edge.
+  - *The "Different battle map each time" box* sat on the description frame's bottom border (y 392 against a frame ending at 420). The description frame is now `R(430, 994, 84, 412)`
+    and the options frame `R(430, 994, 424, 628)`; the box is the last row of the options frame (`ry + 98`, `ry` = 464), under Random nations / Random bonuses (`ry + 72`) where a campaign allows them.
+  - *The difficulty labels*: "Moderate" was as wide as its 60 px button. The six buttons are now 64 px wide on a 66 px pitch from x = 554 (they end at 948, inside the frame), so "Moderate" has room at all three sizes.
+  - *Territory names on the strategic map* overlapped each other and the army discs (Megale Hellas under the Sicily army, Syria / Mesopotamia, most of central Europe in Napoleon). Each name is now placed
+    below its dot as before unless that spot is taken by an army disc or an earlier name, then above, to the right, to the left, at the corners, below the level pips; if every spot overlaps, the one with the least overlap
+    wins. The supply-depot / fortified marks follow the name. (Napoleon and the Cold War at the fit zoom are still dense in Europe; the wheel zooms in.)
+  - *The side panel's tabs* had equal widths and "Diplomacy" / "Cold War" filled their buttons edge to edge; the widths now follow the label widths.
+  - *The status line* of the map (round, age, nation (leader), tribute, territories, cards) ran under the right-hand DEFCON / Missiles text of the Cold War campaign at 1024 and overwrote it. The DEFCON and the Peace
+    texts keep the right edge; the line drops "(leader)", then the age, then the nation, then shrinks to font 12 to fit what is left.
+  Not changed, found while reading: the Entire World description still shows the unexpanded `$TRIBENAME0` token (the campaign text is passed through verbatim; the original expands it with the chosen nation).
+  `ronmap --ctw-selftest` 75/75, `ron-ui-check check` 0 failures, zero warnings.
 
 ## 18. Recorded Games and the playback viewer (2026-10-25)
 
