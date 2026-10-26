@@ -1,0 +1,6 @@
+re/decomp/fid16/callers_inc.txt
+1
+Leader::inc_hit_event
+Leader::inc_damage_event
+Leader::inc_kill_event
+Leader::inc_death_event

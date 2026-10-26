@@ -1,0 +1,3 @@
+re/decomp/f17
+Guy::set_all_pivots
+Guy::reset_pivots

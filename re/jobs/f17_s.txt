@@ -1,0 +1,3 @@
+re/decomp/f17
+.*Transform.*::(init|fill_matrix|<special>|set)$
+.*Matrix.*::fill$

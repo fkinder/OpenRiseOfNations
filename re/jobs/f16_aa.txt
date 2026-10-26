@@ -1,0 +1,3 @@
+re/decomp/fid16/callers_ip.txt
+2
+GraphicPieces::init_position

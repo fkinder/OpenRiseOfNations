@@ -1,0 +1,4 @@
+re/decomp/f17
+DeathObj::clear
+DeathObjOut::inc_bleed
+DeathObjOut::.*

@@ -1,0 +1,2 @@
+re/decomp/fid16
+Group::action_move_near

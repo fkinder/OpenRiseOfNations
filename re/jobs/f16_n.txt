@@ -1,0 +1,5 @@
+re/decomp/fid16/callers_eject.txt
+1
+ObjectData::eject_contents
+Object::eject_contents
+.*::eject_contents

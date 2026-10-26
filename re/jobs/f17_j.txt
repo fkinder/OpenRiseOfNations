@@ -1,0 +1,9 @@
+re/decomp/f17
+GraphicPieces::set_unit_graph_name
+GraphicPieces::get_type
+GraphicPieces::get_position
+GraphicEvents::execute_game_events
+Guy::set_all_pivots
+Guy::set_pivot.*
+Guy::process
+Guy::set_target.*

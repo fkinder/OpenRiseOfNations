@@ -1,0 +1,7 @@
+re/decomp/f17
+DeathObj::inc_time
+DeathObj::init
+Deaths::inc_time
+Deaths::process.*
+GraphicEvents::process
+Objects::inc_time

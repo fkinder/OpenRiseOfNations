@@ -1,0 +1,5 @@
+re/decomp/fid16
+Build::activate
+Build::finished
+Build::close
+SpellType::cast_assimilate

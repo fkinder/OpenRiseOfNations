@@ -498,6 +498,26 @@ First differing boundary of `21'23'34`, before -> after: units 1,514 -> **1,622*
 
 `Ammo::gpiece` in a save is absolute (first_ammo_piece 0xeaf5 + index into the AMMO list; 0x100 for the aircraft wreck). `Leader` `damage_current_frame` (+0xa5e) counts the damage taken, `hits_current_frame` (+0xa5c) the attacker's hits (5 for siege against a building), a building kill adds to the owner's `deaths_current_frame` (+0xa58). A new shot starts at the guy plus the rotated, scaled muzzle offset of the release node (see sim-implementation.md item 89). After a load the `fire_proj` table has to be rebuilt (`init_fire_proj`). Details: docs/sim-implementation.md, sixteenth pass.
 
+### 6.17 Seventeenth pass (2026-10-26): turrets, pivot restrictions, BH3 rest quantization, DeathObj pivots
+
+The turret units (catapults, cannons, ships, AA guns, tanks) carry `<RESTRICTION node=.. minangle=.. maxangle=..>` pivots in unit_graphics.xml; the pivot of
+restriction k is model node 4+k and `GraphicPieces::has_restrictions` @90b640 is the count. A saved Guy holds `turret_angles` (+0x20), `des_turret_angles`
+(+0x30), `node_flags` (+0x96), `des_node_flags` (+0x98) and `guy_flags` bit 0x100 (has pivots); a `DeathObj` holds the four angles (+0x30), the skeleton
+(+0x44), `node_flags` (short, +0x48, 0xffff after `init`) and the crew byte (+0x4a). The `deaths` checksum covers the DeathObj pivots.
+
+New diagnostics (all env-gated, `apps/sav`, in the style of 6.9 - 6.16):
+- `RON_MUZZLE_CHECK=1|2|3`: compares the start point of every in-flight ammo of the save with the engine's muzzle offset of its shooter (1: counts, 2: lists the misses, 3: lists all).
+- `RON_TURRETS`: lists the turret units of a save with their pivot state (angles, desired angles, node flags).
+- `RON_AA`: lists the type 523 - 525 buildings (air-defence guns) with `recharging`, near/attack objects, masks and flags.
+- `RON_REGIONS` (with `--compare-next`): lists the regions whose flags or cursor differ; `RON_WLISTS=N` (with `--compare-next`): lists the WData object-chain differences.
+- `RON_ZCHECK`: the saved guy z against `find_data_z` (0 mismatches in the checked saves: z is exact).
+- `RON_PAIR_VERIFY=p,q`: a pair-search hit (`RON_PAIR_SEARCH`) counts only if it also makes parts p and q equal.
+
+Findings: the `Build.recharging` diff (24 of 44 compare-next pairs) is the air-defence turret clock of `Wall::inc_time` @63fb60 (85 of 101 AA buildings sit at 0, the
+rest 9 - 91 or negative); it needs `F8`/`F12` of the AA graphics events, which building_graphics.xml does not carry (the BUILD entries are stubs), so it stays open.
+The `Region.flags 0x80`, `Build.frame_started`, herd-position and WData `who/val/was_seen` leads of 6.16 are load artifacts: the replay's embedded save is written at
+`Game::run` start after a load, and region cursors and several lists are not saved, so the next-boundary compare shows them without a simulation cause.
+
 ## 7. What blocks exact checksums
 
 State of the fidelity work (2026-10-24; the log of each fix is in docs/sim-implementation.md "Fidelity log"). **Fixed** since the first table:

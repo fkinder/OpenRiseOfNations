@@ -1,0 +1,3 @@
+re/decomp/fid16
+GraphicPieces::init_ammo_piece_ranges
+GraphicPieces::init_piece_ranges

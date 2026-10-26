@@ -149,6 +149,7 @@ template <class Ar> void walk(Ar& ar, Ammo& v) {
 
 template <class Ar> void walk(Ar& ar, DeathObj& v) {
 	FIELDS(ar, v.valid, v.first_frame, v.anim, v.x, v.y, v.z, v.who, v.o, v.gpiece, v.ammo_piece, v.deg, v.angle, v.cur_frame, v.skeleton);
+	FIELDS(ar, v.turret_angles, v.node_flags);  // version 14
 	FIELDS(ar, v.guy);
 }
 
@@ -375,7 +376,7 @@ static_assert(sizeof(Game::Supply) == 6, "Game::Supply changed: update its walk(
 static_assert(sizeof(Game::RevealPoint) == 12, "Game::RevealPoint changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Army) == 152, "Army changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Ammo) == 100, "Ammo changed: update its walk() in save_walk.inc");
-static_assert(sizeof(DeathObj) == 60, "DeathObj changed: update its walk() in save_walk.inc");
+static_assert(sizeof(DeathObj) == 76, "DeathObj changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Group) == 2504, "Group changed: update its walk() in save_walk.inc");
 static_assert(sizeof(FormData) == 3688, "FormData changed: update its walk() in save_walk.inc");
 static_assert(sizeof(PathData) == 16, "PathData changed: update its walk() in save_walk.inc");

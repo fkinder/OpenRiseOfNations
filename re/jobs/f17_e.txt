@@ -1,0 +1,3 @@
+re/decomp/f17
+UnitData::is_modern_infantry
+ObjectData::is_modern_infantry

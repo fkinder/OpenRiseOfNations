@@ -1,0 +1,4 @@
+re/decomp/fid16
+HierObj::set_to_time
+HierObj::set_to_time_fast
+HierObj::update_transforms

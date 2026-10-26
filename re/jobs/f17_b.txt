@@ -1,0 +1,11 @@
+re/decomp/f17
+Unit::unpack_merchant
+Unit::find_merchant_spot
+Unit::think_merchant
+Unit::think_fish
+Unit::add_move_facing_order
+Unit::add_cast_order
+Unit::do_pack
+Unit::think
+Unit::work
+UnitData::good_merchant_spot

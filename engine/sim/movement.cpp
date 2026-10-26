@@ -478,9 +478,28 @@ int32_t move_step(Game& g, Unit& u, Order& m, int32_t speed) {
 	}
 	int32_t walk = kCharWalk;
 	if (u.cavarch_o >= 0 && (u.ptype->unit_flags & 0x200000)) {
-		// TODO(combat): fires-while-moving: each squad guy gets the turret target (guy +0x8e/+0x9f) and
-		// Guy::set_all_pivots; without a target node on guy 0 the target is dropped (cavarch_o = -1, guy pivots
-		// reset), else the walk animation is CHAR_ATTACKWALK.
+		// Fires-while-moving (Unit::move_step @5faf30): each squad guy gets the turret target (guy +0x8e / +0x9f) and aims (Guy::set_all_pivots).
+		// A guy 0 with no turret node assigned (des_node_flags 0) drops the target and puts every guy's first pivot back to 0 (settled when within 15
+		// degrees of it); otherwise the walk animation is CHAR_ATTACKWALK.
+		for (int32_t i = 0; i < u.guy_mark && size_t(i) < u.guys.size(); i++) {
+			Guy& gy = u.guys[size_t(i)];
+			gy.ox = u.cavarch_o;
+			gy.whom = u.cavarch_who;
+			guy_set_all_pivots(g, u, gy);
+		}
+		if (!u.guys.empty() && u.guys[0].des_node_flags == 0) {
+			u.cavarch_o = -1;
+			for (int32_t i = 0; i < u.guy_mark && size_t(i) < u.guys.size(); i++) {
+				Guy& gy = u.guys[size_t(i)];
+				uint32_t d = 0u - uint32_t(gy.turret_angles[0]);
+				gy.des_turret_angles[0] = 0;
+				if (d > 0x7fffffffu && uint32_t(gy.turret_angles[0]) != 0x80000000u) d = ~d;
+				gy.des_node_flags = int16_t(uint16_t(gy.des_node_flags) | 1u);
+				if (d < 0xaaaaaaau) gy.node_flags = int16_t(uint16_t(gy.node_flags) | 1u);
+			}
+		} else {
+			walk = kCharAttackWalk;
+		}
 	}
 	const int32_t x0 = u.x, y0 = u.y;
 	const int32_t Dx = m.dest_x - x0, Dy = m.dest_y - y0;

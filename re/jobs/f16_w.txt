@@ -1,0 +1,7 @@
+re/decomp/fid16/dis
+Transform<float>::rotate
+Transform<float>::fill_matrix
+Transform<float>::operator*
+fast_angle_to_degrees
+angle_to_degrees
+Transform<float>::Transform.*

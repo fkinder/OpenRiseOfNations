@@ -1,0 +1,3 @@
+re/decomp/fid16
+Leader::calc_gather
+Leader::fix_tech_flags

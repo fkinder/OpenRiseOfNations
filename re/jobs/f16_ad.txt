@@ -1,0 +1,4 @@
+re/decomp/fid16
+AnimObj::load_hier
+HierObj::update_transforms
+HierObj::update_all_transforms

@@ -1,0 +1,5 @@
+re/decomp/f17
+World::compute_reg_territory
+GameDaemon::check_borders
+World::compute_all_territory
+Region::fix_borders

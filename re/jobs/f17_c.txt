@@ -1,0 +1,3 @@
+re/decomp/f17
+Unit::do_gather
+UnitData::calc_gather

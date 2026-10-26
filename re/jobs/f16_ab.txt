@@ -1,0 +1,3 @@
+re/decomp/fid16
+GraphicEvents::verify_load
+GraphicEvents::init_unit_events

@@ -1,0 +1,4 @@
+re/decomp/fid16
+GraphicPieces::init_position
+GraphicPieces::init_pivot_restrictions
+GraphicPieces::has_restrictions

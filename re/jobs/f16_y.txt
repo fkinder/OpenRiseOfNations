@@ -1,0 +1,3 @@
+re/decomp/fid16/dis
+GraphicEvents::execute_game_events
+GraphicPieces::has_restrictions

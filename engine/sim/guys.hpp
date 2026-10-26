@@ -56,6 +56,8 @@ void guy_init_real(Game& g, Unit& u, Guy& gy, int32_t keep);                    
 uint32_t guy_turn_speed(const Game& g, const Unit& u, const Guy& gy, bool full);  // GuyData::turn_speed @5de340
 int32_t guy_get_speed(const Game& g, const Unit& u, const Guy& gy);                // GuyData::get_speed @5de410
 void guy_set_angle(Game& g, Unit& u, Guy& gy, uint32_t a, bool now);               // Guy::set_angle @5d9010
+void guy_reset_pivots(Game& g, Unit& u, Guy& gy, int32_t keep);                    // Guy::reset_pivots @5d8a80 (combat_fight.cpp)
+int32_t guy_set_all_pivots(Game& g, Unit& u, Guy& gy);                             // Guy::set_all_pivots @5d8bc0 (combat_fight.cpp)
 // Guy::do_turn @5d97a0 (p3 is unused by the original).
 void guy_do_turn(Game& g, Unit& u, Guy& gy, uint32_t target, uint32_t new_angle, int32_t p3, bool anim);
 // Guy::turn_towards @5d9720: returns the remaining angle (p2 is unused by the original).

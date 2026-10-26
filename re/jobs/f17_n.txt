@@ -1,0 +1,3 @@
+re/decomp/f17
+Guy::init_real
+Guy::init_crew.*

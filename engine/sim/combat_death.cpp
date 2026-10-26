@@ -305,6 +305,8 @@ int32_t add_death(Game& g, int32_t who, int32_t o, int32_t guy, int32_t anim, in
 	d.y = gy.y;
 	d.z = u.ptype->domain == kDomainSea ? 0 : find_data_z(g, d.x, d.y, 0);
 	d.angle = gy.angle;
+	d.turret_angles = gy.turret_angles;  // DeathObj::init @8d4c60 copies the guy's four pivot angles ...
+	d.node_flags = -1;                   // ... and sets the node flags (+0x48) to 0xffff
 	d.anim = anim;
 	d.valid = 1;
 	d.cur_frame = 0;

@@ -1,0 +1,3 @@
+re/decomp/fid16
+Ammo::do_damage
+Ammo::close

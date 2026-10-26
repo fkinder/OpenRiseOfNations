@@ -1,0 +1,3 @@
+re/decomp/f17/callers_initpos.txt
+3
+GraphicPieces::init_position

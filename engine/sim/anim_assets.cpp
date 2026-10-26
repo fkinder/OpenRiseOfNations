@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <functional>
 
 #include "assets/chunk.hpp"
@@ -258,6 +259,21 @@ bool is_pivot_node_name(const std::string& name) {
 	return v + 4 < ron::kAttachSlots;
 }
 
+// BH3Method::load_hier @915010: the node's parent-to-local transform is quantized when the hierarchy is built: the quaternion to 1/1000 and the
+// translation to 1/100 (truncated toward zero, the file's values), a rotation within 0.001 of the identity is dropped and so is a translation
+// below 0.01 on every axis. (Transform<float>::init keeps the quaternion as it is, normalisation included: none.)
+void quantize_rest(BH3Node& n) {
+	auto q3 = [](float f) { return float(int32_t(f * 1000.0f)) * 0.001f; };
+	auto t2 = [](float f) { return float(int32_t(f * 100.0f)) * 0.01f; };
+	Quat q{q3(n.rest.q.x), q3(n.rest.q.y), q3(n.rest.q.z), q3(n.rest.q.w)};
+	Vec3 t{t2(n.rest.t.x), t2(n.rest.t.y), t2(n.rest.t.z)};
+	if (-0.001f < q.x && q.x < 0.001f && -0.001f < q.y && q.y < 0.001f && -0.001f < q.z && q.z < 0.001f && 0.999f < q.w && q.w < 1.001f) q = Quat{0, 0, 0, 1};
+	if (-0.01f < t.x && t.x < 0.01f && -0.01f < t.y && t.y < 0.01f && -0.01f < t.z && t.z < 0.01f) t = Vec3{0, 0, 0};
+	n.rest.q = q;
+	n.rest.t = t;
+	for (BH3Node& c : n.children) quantize_rest(c);
+}
+
 void orig_pose(const BH3Node& node, const ONode* an, uint32_t ms, const Xform& parent, std::vector<Xform>& out) {
 	Xform local;
 	if (an && !is_pivot_node_name(node.name)) local = orig_sample(an, ms);
@@ -426,7 +442,48 @@ AssetAnimSource::AssetAnimSource(const GameFiles& files, const Rules& rules) : f
 			unit_by_name_.emplace(upper(u.get("name")), int32_t(units_.size()));
 			units_.push_back(std::move(art));
 		}
+		// GraphicPieces::init_pivot_restrictions @8ebfe0: every <RESTRICTION name node minangle maxangle> is added to the list of each unit type
+		// whose graph name equals `name` (String::operator== ignores case); has_restrictions counts the list. Only the count is needed for
+		// the muzzle offsets (the angle limits clamp the turret angles, which the saves carry).
+		ron::for_each_element(doc, "RESTRICTION", [&](const XmlElement& r) {
+			Restriction e;
+			e.node = r.get_int("node", -1);                        // XMLElement::get_attrib_num default -1
+			e.min = std::strtof(r.get("minangle").c_str(), nullptr);  // get_attrib_float
+			e.max = std::strtof(r.get("maxangle").c_str(), nullptr);
+			restrictions_[upper(r.get("name"))].push_back(e);
+		});
 	}
+}
+
+int32_t AssetAnimSource::pivot_restrictions(int32_t piece) const {
+	// GraphicPieces::has_restrictions @90b640: pivot_restrictions[get_type(piece) - 0x32].count.
+	int32_t t;
+	using namespace gpiece;
+	if (piece >= kFirstBird && piece < kFirstBird + kNumBird) return 0;  // bird pieces: get_type is a bird type with no entry
+	if (piece < kFirstUnit || piece >= kTotalUnit) return 0;
+	t = piece % kPerStyle + 50;  // get_type @902540 (the last unit piece is type 0x4d)
+	if (piece == kTotalUnit - 1) t = 0x4d;
+	return pivot_count(t);
+}
+
+int32_t AssetAnimSource::pivot_count(int32_t t) const {
+	if (t < 0 || size_t(t) >= graph_.size() || graph_[size_t(t)].empty()) return 0;
+	auto it = restrictions_.find(graph_[size_t(t)]);
+	return it == restrictions_.end() ? 0 : int32_t(it->second.size());
+}
+
+bool AssetAnimSource::pivot_limits(int32_t t, int32_t node, int32_t* mn, int32_t* mx) const {
+	*mn = *mx = 0;
+	if (t < 0 || size_t(t) >= graph_.size() || graph_[size_t(t)].empty()) return false;
+	auto it = restrictions_.find(graph_[size_t(t)]);
+	if (it == restrictions_.end()) return false;
+	for (const Restriction& r : it->second)
+		if (r.node == node) {
+			*mn = int32_t(r.min);
+			*mx = int32_t(r.max);
+			return true;
+		}
+	return false;
 }
 
 bool AssetAnimSource::build_piece_exists(int32_t type, int32_t style, int32_t age) const {
@@ -636,6 +693,7 @@ bool AssetAnimSource::attach_position(int32_t piece, int32_t node, int32_t anim,
 				try {
 					md = std::make_shared<ModelData>();
 					md->model = parse_bh3(read_file(files_.resolve(a->model)));
+					quantize_rest(md->model.root);
 					md->slots = attach_slots(md->model);
 				} catch (const std::exception&) {
 					md.reset();

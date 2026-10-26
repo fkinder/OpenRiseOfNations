@@ -1,0 +1,4 @@
+re/decomp/f17
+Transform<float>::operator\*
+Quat<float>::operator\*
+Matrix<float>::fill

@@ -29,6 +29,19 @@ inline uint32_t angle_diff(uint32_t a, uint32_t b) {
 	return d > 0x80000000u ? ~d : d;
 }
 
+// angle_to_degrees @00a28e00: the integer degrees [0, 360) of a binary angle (unsigned arithmetic: the angle is split into quarters, eighths and
+// finer fractions; the sum of the pieces is not exact division, e.g. 0x15555555 -> 120).
+inline int32_t angle_to_degrees_exact(uint32_t in) {
+	const uint32_t q = in >> 0x1e;
+	uint32_t a = in - q * 0x40000000u;
+	const uint32_t h = a >> 0x1d;
+	a = a - h * 0x20000000u;
+	const uint32_t b = a % 0x15555555u;
+	const uint32_t c = b % 0xaaaaaaau;
+	return int32_t((c % 0x38e38e3u + 0x5b05b0u) / 0xb60b60u +
+	               (c / 0x38e38e3u + ((h + q * 2u) * 3u + b / 0xaaaaaaau + (a / 0x15555555u) * 2u) * 3u) * 5u);
+}
+
 // C division helpers used throughout (truncating, like the original's idiv).
 inline int32_t iabs(int32_t v) { return v < 0 ? -v : v; }
 

@@ -61,6 +61,9 @@ public:
 	bool has_skeleton(int32_t piece) const override;
 	bool has_scorch(int32_t piece) const override;
 	bool attach_position(int32_t piece, int32_t node, int32_t anim, int32_t frame, float out[3]) const override;
+	int32_t pivot_restrictions(int32_t piece) const override;
+	int32_t pivot_count(int32_t type) const override;
+	bool pivot_limits(int32_t type, int32_t node, int32_t* mn, int32_t* mx) const override;
 	int32_t num_ammo() const override { return int32_t(ammo_.size()); }
 	uint32_t ammo_flags(int32_t ammo) const override;
 	// The AMMO piece name (effects_graphics.xml), "" out of range.
@@ -114,6 +117,11 @@ private:
 	std::vector<Entry> entries_;
 	std::vector<Ammo> ammo_;
 	mutable std::unordered_map<int32_t, int32_t> piece_unit_;  // piece -> units_ index or -1
+	struct Restriction {
+		int32_t node;
+		float min, max;
+	};
+	std::unordered_map<std::string, std::vector<Restriction>> restrictions_;  // uppercase RESTRICTION name -> its elements in file order (init_pivot_restrictions)
 	// attach_position: parsed models (with their attach slots) and animations by file, and the results by (piece, node, anim, frame).
 	struct ModelData {
 		BH3Model model;

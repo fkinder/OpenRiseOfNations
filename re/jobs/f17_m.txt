@@ -1,0 +1,9 @@
+re/decomp/f17
+GraphicPieces::get_restrictions
+Guy::reset_pivots
+Guy::init
+Guy::reset
+Guy::move
+Unit::set_attack
+Guy::set_target
+Guy::update_gpiece

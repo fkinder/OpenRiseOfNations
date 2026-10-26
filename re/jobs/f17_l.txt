@@ -1,0 +1,4 @@
+re/decomp/f17/callers_pivots.txt
+3
+Guy::set_all_pivots
+Guy::set_pivot_angle

@@ -417,7 +417,9 @@ struct DeathObj {
 	int32_t x = -1, y = -1, z = -1, who = -1, o = -1, gpiece = -1, ammo_piece = -1;
 	float deg = 0.0f;
 	uint32_t angle = 0;
+	std::array<int32_t, 4> turret_angles{};  // DeathObjData +0x30: the dying guy's turret angles (DeathObj::init copies Guy +0x20), hashed
 	int32_t cur_frame = -1, skeleton = -1;  // skeleton: >= 0 when the guy's piece has one (lifetime + 627)
+	int16_t node_flags = 0;                  // DeathObjData +0x48: 0 after DeathObj::clear, 0xffff (all pivots) after DeathObj::init
 	int8_t guy = -1;                         // crew index (guy - squad_size), -1 (0xff) for squad guys
 };
 

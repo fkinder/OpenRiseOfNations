@@ -1,0 +1,3 @@
+re/decomp/f17
+Build::do_attack
+Build::process

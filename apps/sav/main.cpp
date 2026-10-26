@@ -1631,6 +1631,58 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 			std::printf("  who %d type %d anim %d saved %d engine %d: %d guys\n", std::get<0>(kv.first), std::get<1>(kv.first), std::get<2>(kv.first), std::get<3>(kv.first) / 1000, std::get<3>(kv.first) % 1000, kv.second);
 	}
 
+	if (std::getenv("RON_MUZZLE_CHECK") && game->anims) {
+		// RON_MUZZLE_CHECK=1: every ammo in flight of the loaded save against the engine's muzzle offsets (GraphicEvents::execute_game_events): the shooter's guys
+		// with a release event for the ammo piece, start = guy position + offset; "exact" when (sx, sy, sz) all agree for some guy / event (a shooter that moved
+		// since the shot cannot agree). Per piece class: turret (guy_flags 0x100) or not.
+		int n = 0, exact[2] = {0, 0}, xy[2] = {0, 0}, none[2] = {0, 0};
+		for (size_t ai = 0; ai < game->ammo.size(); ++ai) {
+			const sim::Ammo& a = game->ammo[ai];
+			if (!a.in_use() || a.who < 0 || a.o < 0) continue;
+			const sim::Unit* u0 = game->unit(a.who, a.o);
+			if (!u0 || !u0->alive()) continue;
+			++n;
+			bool ex = false, exy = false, tur = false;
+			for (const sim::Guy& gy : u0->guys) {
+				const auto* evs = game->anims->release_events(gy.gpiece);
+				if (!evs) continue;
+				if (gy.guy_flags & 0x100) tur = true;
+				for (const sim::ReleaseEvent& e : *evs) {
+					if (e.ammo != a.gpiece) continue;
+					int32_t off[3];
+					sim::guy_muzzle_offset(*game, gy, e, off);
+					if (gy.x + off[0] == a.sx && gy.y + off[1] == a.sy) { exy = true; if (gy.z + off[2] == a.sz) ex = true; }
+					else if (std::getenv("RON_MUZZLE_CHECK")[0] == '3') std::printf("    cand guy %d node %d anim %d frame %d: guy (%d,%d,%d) off (%d,%d,%d) -> (%d,%d,%d) vs saved (%d,%d,%d) angle %08x turrets %08x %08x %08x %08x\n", gy.guy_num, e.node, e.anim, e.frame, gy.x, gy.y, gy.z, off[0], off[1], off[2], gy.x + off[0], gy.y + off[1], gy.z + off[2], a.sx, a.sy, a.sz, unsigned(gy.angle), unsigned(gy.turret_angles[0]), unsigned(gy.turret_angles[1]), unsigned(gy.turret_angles[2]), unsigned(gy.turret_angles[3]));
+				}
+			}
+			const int c = tur ? 1 : 0;
+			if (ex) ++exact[c]; else if (exy) ++xy[c]; else ++none[c];
+			if (!ex && std::getenv("RON_MUZZLE_CHECK")[0] == '2') std::printf("  muzzle: ammo %zu from %d/%d (type %d%s) -> %d/%d sx %d sy %d sz %d: %s\n", ai, a.who, a.o, u0->type, tur ? " turret" : "", a.whom, a.ox, a.sx, a.sy, a.sz, exy ? "xy only" : "no match");
+		}
+		std::printf("  muzzle check: %d ammo in flight; plain exact %d xy-only %d none %d; turret exact %d xy-only %d none %d\n", n, exact[0], xy[0], none[0], exact[1], xy[1], none[1]);
+	}
+
+	if (std::getenv("RON_AA")) {  // RON_AA=1: the air-defence buildings (types 523 - 525) of the loaded save with their animation clock (BuildData.recharging) and target state
+		for (int who = 0; who < 8; ++who)
+			for (int o = sim::kBuildBase; o < game->objects[size_t(who)].build_mark; ++o) {
+				const sim::Build* b = game->build(who, o);
+				if (!b || !b->alive() || b->type < 523 || b->type > 525) continue;
+				std::printf("  AA %d/%d type %d recharging %d near %d/%d attack %d/%d masks %04x flags %02x\n", who, o, b->type, int(b->recharging), int(b->near_o), int(b->near_who), int(b->attack_ox), int(b->attack_whom), unsigned(b->build_masks), unsigned(b->flags));
+			}
+	}
+
+	if (std::getenv("RON_TURRETS")) {  // RON_TURRETS=1: the units whose guy 0 carries the turret flag (0x100) in the loaded save, with their pivot state
+		for (int who = 0; who < sim::kNumLeaders; ++who)
+			for (int o = 0; o < game->objects[size_t(who)].unit_mark; ++o) {
+				const sim::Unit* u0 = game->unit(who, o);
+				if (!u0 || !u0->alive() || u0->guys.empty() || !(u0->guys[0].guy_flags & 0x100)) continue;
+				const sim::Guy& gy = u0->guys[0];
+				std::printf("  turret unit %d/%d type %d at (%d,%d) angle %08x guy angle %08x n %d turrets %08x %08x %08x %08x des %08x %08x %08x %08x node %x/%x ox %d/%d order %d cavarch %d\n", who, o, u0->type, u0->x, u0->y, unsigned(u0->angle), unsigned(gy.angle),
+				            game->anims ? game->anims->pivot_count(gy.type) : -1, unsigned(gy.turret_angles[0]), unsigned(gy.turret_angles[1]), unsigned(gy.turret_angles[2]), unsigned(gy.turret_angles[3]),
+				            unsigned(gy.des_turret_angles[0]), unsigned(gy.des_turret_angles[1]), unsigned(gy.des_turret_angles[2]), unsigned(gy.des_turret_angles[3]), unsigned(gy.node_flags), unsigned(gy.des_node_flags), int(gy.ox), int(gy.whom), int(u0->order_type()), int(u0->cavarch_o));
+			}
+	}
+
 	if (std::getenv("RON_MASK_CHECK")) {
 		// units with a given unit_masks bit (hex in RON_MASK_CHECK), by type
 		const uint32_t bit = uint32_t(std::strtoul(std::getenv("RON_MASK_CHECK"), nullptr, 16));
@@ -1710,6 +1762,20 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 		for (size_t i = 0; i < game->farms.size(); ++i) if (game->farms[i].valid) sim::farms_add_animals(*game, int32_t(i));
 	} else if (!std::getenv("RON_NO_LOAD_EFFECTS")) sim::original_post_load_effects(*game);
 	if (const char* ex = std::getenv("RON_LOAD_EXTRA")) for (int i = std::atoi(ex); i > 0; --i) game->rng.get(0, 0xffff);  // experiment: more load-time draws
+	if (std::getenv("RON_ZCHECK")) {  // RON_ZCHECK=1: every ground guy of the loaded save whose saved z differs from find_data_z(x, y)
+		int n = 0, bad = 0;
+		for (int w = 0; w < sim::kNumLeaders; ++w) for (int o = 0; o < game->objects[size_t(w)].unit_mark; ++o) {
+			sim::Unit* u = game->unit(w, o);
+			if (!u || !u->alive() || !u->ptype || u->ptype->domain != 0 || !u->on_map()) continue;
+			for (size_t gi = 0; gi < u->guys.size(); ++gi) {
+				const sim::Guy& gy = u->guys[gi];
+				const int32_t z = sim::find_data_z(*game, gy.x, gy.y, 0);
+				++n;
+				if (z != gy.z) { ++bad; if (bad <= 40) std::printf("  ZCHECK %d/%d guy %zu at (%d,%d): saved z %d engine %d (last_z %d) tile mask %04x\n", w, o, gi, gy.x, gy.y, gy.z, z, gy.last_z, unsigned(game->world.t(sim::tcoord_of(gy.x), sim::tcoord_of(gy.y)))); }
+			}
+		}
+		std::printf("  ZCHECK: %d guys, %d differ\n", n, bad);
+	}
 
 	// The game script the replay header names (the embedded save has none): "no_nukes" in the 2026.08.30 chain.
 	if (hdr && !std::getenv("RON_NO_SCRIPTS")) {
@@ -2927,7 +2993,7 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 							while (std::getline(ps2, t2, ',')) pair_pats.push_back(t2);
 						}
 						std::vector<sim::MemberChange> all = sim::members_of(*game, pair_pats);
-						struct Eff { size_t mi; int dl; int64_t a, b; };
+						struct Eff { size_t mi; int dl; int64_t a, b; uint64_t nv; };
 						std::vector<Eff> effs;
 						size_t tried = 0;
 						for (size_t i = 0; i < all.size(); ++i) {
@@ -2971,7 +3037,7 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 								const uint64_t nv = cd.second;
 								int64_t sa = 0, sb = 0;
 								for (size_t k = 0; k < n; ++k) { const int e = int((nv >> (8 * k)) & 0xff) - int(c.now[k]); sa += e; sb += int64_t(e) * (N - pos[k]); }
-								effs.push_back({i, dl, ((sa % M) + M) % M, ((sb % M) + M) % M});
+								effs.push_back({i, dl, ((sa % M) + M) % M, ((sb % M) + M) % M, nv});
 							}
 						}
 						std::printf("  pair search: %zu members tried, %zu (member, delta) effects; target (a=%lld b=%lld)\n", tried, effs.size(), (long long)target.first, (long long)target.second);
@@ -2979,12 +3045,29 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 						std::unordered_map<uint64_t, std::vector<size_t>> by;
 						for (size_t i = 0; i < effs.size(); ++i) by[k2(effs[i].a, effs[i].b)].push_back(i);
 						int shown = 0;
+						std::vector<int> verify_parts;  // RON_PAIR_VERIFY=p,q: a hit is printed only when it also makes those parts equal (the same bytes sit in several parts)
+						if (const char* pv = std::getenv("RON_PAIR_VERIFY")) { std::stringstream vs(pv); std::string vt; while (std::getline(vs, vt, ',')) verify_parts.push_back(std::atoi(vt.c_str())); }
+						auto verified = [&](std::initializer_list<size_t> idx) {
+							if (verify_parts.empty()) return true;
+							for (size_t ei : idx) {
+								const auto& cm = all[effs[ei].mi];
+								std::vector<uint8_t> nb(cm.now.size());
+								for (size_t k = 0; k < nb.size(); ++k) nb[k] = uint8_t(effs[ei].nv >> (8 * k));
+								sim::apply_member_bytes(*game, cm, nb);
+							}
+							sim::EngineProvider epv(*game);
+							const dw::CheckSumParts gv = dw::compute_check_sums(epv);
+							bool ok = gv.ok;
+							for (int vp : verify_parts) ok = ok && gv.v[size_t(vp)] == it->second[size_t(vp)];
+							for (size_t ei : idx) sim::apply_member_bytes(*game, all[effs[ei].mi], all[effs[ei].mi].now);
+							return ok;
+						};
 						const bool same_only = std::getenv("RON_PAIR_SAME") != nullptr;  // only pairs of members of the same object (RON_PAIR_SAME=1): one object with two wrong members
 						for (size_t i = 0; i < effs.size(); ++i) {
-							if (effs[i].a == target.first && effs[i].b == target.second && shown++ < 20) std::printf("    PAIR HIT (1): %s (%d,%d,%d) %+d\n", all[effs[i].mi].key.c_str(), all[effs[i].mi].id.a, all[effs[i].mi].id.b, all[effs[i].mi].id.c, effs[i].dl);
+							if (effs[i].a == target.first && effs[i].b == target.second && verified({i}) && shown++ < 20) std::printf("    PAIR HIT (1): %s (%d,%d,%d) %+d\n", all[effs[i].mi].key.c_str(), all[effs[i].mi].id.a, all[effs[i].mi].id.b, all[effs[i].mi].id.c, effs[i].dl);
 							auto fnd = by.find(k2(((target.first - effs[i].a) % M + M) % M, ((target.second - effs[i].b) % M + M) % M));
 							if (fnd == by.end()) continue;
-							for (size_t j : fnd->second) if (j > i && effs[j].mi != effs[i].mi && (!same_only || (all[effs[i].mi].id.a == all[effs[j].mi].id.a && all[effs[i].mi].id.b == all[effs[j].mi].id.b)) && shown++ < (same_only ? 400 : 40))
+							for (size_t j : fnd->second) if (j > i && effs[j].mi != effs[i].mi && (!same_only || (all[effs[i].mi].id.a == all[effs[j].mi].id.a && all[effs[i].mi].id.b == all[effs[j].mi].id.b)) && verified({i, j}) && shown++ < (same_only ? 400 : 40))
 								std::printf("    PAIR HIT (2): %s (%d,%d,%d) %+d  and  %s (%d,%d,%d) %+d\n", all[effs[i].mi].key.c_str(), all[effs[i].mi].id.a, all[effs[i].mi].id.b, all[effs[i].mi].id.c, effs[i].dl,
 									all[effs[j].mi].key.c_str(), all[effs[j].mi].id.a, all[effs[j].mi].id.b, all[effs[j].mi].id.c, effs[j].dl);
 						}
@@ -3723,6 +3806,40 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 			};
 			line("T", bt);
 			line("E", be);
+		}
+		if (const char* rl = std::getenv("RON_WLISTS")) {  // RON_WLISTS=N (with --compare-next): the first N wcoords whose object list (WData.down chain) differs: the engine's list and the next save's
+			const int limit = std::atoi(rl);
+			auto chain = [](const sim::Game& gg, int wx, int wy) {
+				std::string r;
+				const sim::WData& d = gg.world.w(wx, wy);
+				int o = d.down, ow = d.down_who;
+				for (int guard = 0; o >= 0 && guard < 64; ++guard) {
+					const sim::Object* ob = gg.object(ow, o);
+					if (!ob) { r += " ?"; break; }
+					char buf[64];
+					std::snprintf(buf, sizeof buf, " %d/%d(t%d%s)", ow, o, ob->type, ob->alive() ? "" : " dead");
+					r += buf;
+					o = ob->down;
+					ow = ob->down_who;
+				}
+				return r;
+			};
+			int shown = 0, total = 0;
+			for (int wy = 0; wy < game->world.ys; ++wy) for (int wx = 0; wx < game->world.xs; ++wx) {
+				const std::string a = chain(*game, wx, wy), b = chain(*truth, wx, wy);
+				if (a == b) continue;
+				++total;
+				if (shown++ < limit) std::printf("  WLIST (%d,%d)\n      engine:%s\n      next  :%s\n", wx, wy, a.c_str(), b.c_str());
+			}
+			std::printf("  WLIST: %d wcoords with a different object list\n", total);
+		}
+		if (std::getenv("RON_REGIONS")) {  // RON_REGIONS=1 (with --compare-next): every region whose flags / cursor differ from the next save: next save (T) and engine (E)
+			for (int ri = 0; ri < sim::Regions::kNum; ++ri) {
+				const sim::Region& a = game->regions.r[size_t(ri)];
+				const sim::Region& b = truth->regions.r[size_t(ri)];
+				if (a.flags != b.flags || a.borders != b.borders || a.size != b.size)
+					std::printf("  REGION %3d size E %d T %d flags E %02x T %02x borders E %d T %d climate %d/%d\n", ri, a.size, b.size, unsigned(a.flags), unsigned(b.flags), a.borders, b.borders, a.climate, b.climate);
+			}
 		}
 		std::vector<sim::AuditLine> d = sim::diff_mapped_state(*truth, *game);
 		std::sort(d.begin(), d.end(), [](const sim::AuditLine& x, const sim::AuditLine& y) { return x.mismatches > y.mismatches; });

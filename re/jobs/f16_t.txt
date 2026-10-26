@@ -1,0 +1,3 @@
+re/decomp/fid16
+GraphicPieces::get_position
+GraphicPieces::has_restrictions

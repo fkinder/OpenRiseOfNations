@@ -109,6 +109,24 @@ struct AnimSource {
 		out[0] = out[1] = out[2] = 0.0f;
 		return false;
 	}
+	// GraphicPieces::has_restrictions @90b640: the number of <RESTRICTION name=.. node=.. minangle=.. maxangle=..> elements of unit_graphics.xml
+	// whose name is the graph name of the piece's unit type (GraphicPieces::init_pivot_restrictions @8ebfe0): the turret pivots of the type
+	// (Cruiser: nodes 4, 5, 6 -> 3). get_position's turret branch is taken for the release nodes below this count.
+	virtual int32_t pivot_restrictions(int32_t piece) const {
+		(void)piece;
+		return 0;
+	}
+	// The same count by unit type (GraphicPieces::pivot_restrictions[type - 0x32].count) and GraphicPieces::get_restrictions @90b680: the angle limits
+	// (degrees, the float attributes truncated to int) of the type's pivot at `node` (4 + turret index); false and 0 / 0 when there is no such entry.
+	virtual int32_t pivot_count(int32_t type) const {
+		(void)type;
+		return 0;
+	}
+	virtual bool pivot_limits(int32_t type, int32_t node, int32_t* mn, int32_t* mx) const {
+		(void)type, (void)node;
+		*mn = *mx = 0;
+		return false;
+	}
 	// The AMMO pieces: count and flags (ammoflag::).
 	virtual int32_t num_ammo() const { return 0; }
 	virtual uint32_t ammo_flags(int32_t ammo) const {

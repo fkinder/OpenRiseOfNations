@@ -15,6 +15,7 @@
 #include "sim/guys.hpp"
 #include "sim/movement.hpp"
 #include "sim/orders.hpp"
+#include "sim/rules_xml.hpp"
 #include "sim/search.hpp"
 #include "sim/spells.hpp"
 #include "sim/trig.hpp"
@@ -646,14 +647,20 @@ void init_fire_proj(Game& g) {
 // ---------------------------------------------------------------- state helpers
 
 int32_t set_attack(Game& g, Unit& u, int32_t ox, int32_t whom) {
-	(void)g;
-	// @5fce70: every squad guy remembers the target. TODO(turrets): Guy::set_all_pivots for pieces with pivot
-	// restrictions (asset data).
+	// @5fce70: every squad guy remembers the target; a unit whose piece has pivot restrictions (ranged, valid target on the map) aims all its guys' turrets
+	// and returns the result of the last guy (1: every turret takes the target, the body need not turn).
 	for (int32_t i = 0; i < u.guy_mark && size_t(i) < u.guys.size(); i++) {
 		u.guys[size_t(i)].ox = int16_t(ox);
 		u.guys[size_t(i)].whom = int8_t(whom);
 	}
-	return 0;
+	if (u.guys.empty() || !g.anims || g.anims->pivot_restrictions(u.guys[0].gpiece) == 0 || u.ptype->max_range == 0 || ox < 0 || whom < 0) return 0;
+	const Object* t = g.object(whom, ox);
+	if (!t) return 0;
+	const bool on_map = !t->is_unit || static_cast<const Unit*>(t)->on_map();
+	if (!(t->alive() && on_map)) return 0;
+	int32_t r = 0;
+	for (int32_t i = 0; i < u.guy_mark && size_t(i) < u.guys.size(); i++) r = guy_set_all_pivots(g, u, u.guys[size_t(i)]);
+	return r;
 }
 
 void set_attacking(Game& g, Unit& u, int32_t whom) {
@@ -788,7 +795,90 @@ void ammo_inc_time_all(Game& g) {
 void guy_muzzle_offset(const Game& g, const Guy& gy, const ReleaseEvent& e, int32_t out[3]) {
 	float pivot_deg[4];
 	for (int k = 0; k < 4; k++) pivot_deg[k] = fast_angle_to_degrees_f(gy.turret_angles[size_t(k)]);
-	muzzle_offset(g, gy, gy.gpiece, e, 0, pivot_deg, out);
+	muzzle_offset(g, gy, gy.gpiece, e, g.anims ? g.anims->pivot_restrictions(gy.gpiece) : 0, pivot_deg, out);
+}
+
+// ---------------------------------------------------------------- turrets (combat-spec 4.17: pivot restrictions)
+
+void guy_reset_pivots(Game& g, Unit& u, Guy& gy, int32_t keep) {
+	// Guy::reset_pivots @5d8a80: the count comes from the guy's graphics piece, the limits from the unit type (Guy +8). Every turret rests at the middle of
+	// its arc (degrees_to_angle of the integer mean, the C division of the asm), half a turn further for a wrapping arc (min > max).
+	(void)u;
+	if (!g.anims) return;
+	const int32_t n = g.anims->pivot_restrictions(gy.gpiece);
+	for (int32_t k = 0; k < n && k < 4; k++) {
+		int32_t mn = 0, mx = 0;
+		g.anims->pivot_limits(gy.type, 4 + k, &mn, &mx);
+		uint32_t a = uint32_t(degrees_to_angle((mn + mx) / 2));
+		gy.des_turret_angles[size_t(k)] = int32_t(mn > mx ? a + 0x80000000u : a);
+		if (keep) gy.turret_angles[size_t(k)] = gy.des_turret_angles[size_t(k)];
+	}
+}
+
+int32_t guy_set_all_pivots(Game& g, Unit& u, Guy& gy) {
+	// Guy::set_all_pivots @5d8bc0 (asm read): aims every turret of the guy's type at the guy's target (an object, or the ground point of an ATTACK_GROUND
+	// order). Returns 0 when the type has no turrets or some turret cannot take the target (the target direction is outside the front +-45 degrees, or
+	// outside the limits of that pivot), else 1. A turret that can takes des_turret_angles = the target's direction relative to the guy's heading and sets
+	// its bit in des_node_flags; its bit in node_flags (the gate of GraphicEvents::execute_game_events) when the turret is within 15 degrees of it.
+	int32_t ret = 1;
+	if (!(gy.guy_flags & 0x100) || !g.anims) return 0;
+	const int32_t n = g.anims->pivot_count(gy.type);
+	if (n == 0) return 0;
+	gy.node_flags = 0;
+	gy.des_node_flags = 0;
+	const Object* tg = (gy.ox >= 0 && gy.whom >= 0) ? g.object(gy.whom, gy.ox) : nullptr;
+	const bool ground = u.order_type() == kAttackGround;
+	if (!(tg && (tg->flags & objflag::kValid)) && !ground) return 1;
+	int32_t tx, ty;
+	if (ground) {
+		const Order* o = u.front();
+		tx = o ? o->x : 0;
+		ty = o ? o->y : 0;
+	} else {
+		tx = tg->x;
+		ty = tg->y;
+	}
+	for (int32_t k = 0; k < n && k < 4; k++) {
+		int32_t mn = 0, mx = 0;
+		g.anims->pivot_limits(gy.type, 4 + k, &mn, &mx);
+		// get_position(gpiece, node 4 + k, anim 0, frame 0, heading = (float)angle_to_degrees(angle + 0x80000000), no pivots): the pivot node's offset
+		// (plain branch, (int) of the scaled floats).
+		int32_t off[3] = {0, 0, 0};
+		float pos[3];
+		if (g.anims->attach_position(gy.gpiece, 4 + k, 0, 0, pos)) {
+			float pscale = 1.0f, ox = 0, oy = 0;
+			if (!g.anims->track(gy.gpiece, &pscale, &ox, &oy)) pscale = 1.0f;
+			const float s = kGuyScale * pscale;
+			const RotZ r = rot_z(angle_to_degrees_exact(uint32_t(gy.angle) + 0x80000000u));
+			float v[3];
+			v[0] = pos[0] * r.m0 + pos[1] * r.m4 + pos[2] * 0.0f;
+			v[1] = pos[0] * r.m1 + pos[1] * r.m5 + pos[2] * 0.0f;
+			v[2] = pos[0] * 0.0f + pos[1] * 0.0f + pos[2] * 1.0f;
+			v[1] = -v[1];
+			off[0] = int32_t(v[0] * s);
+			off[1] = int32_t(s * v[1]);
+			off[2] = int32_t(v[2] * s);
+		}
+			const uint32_t ang = find_angle(tx - u.x - off[0], ty - u.y - off[1]);
+		const uint32_t rel = ang - gy.angle;
+		float deg = float(angle_to_degrees_exact(rel));
+		if (deg > 180.0f) deg -= 360.0f;
+		if (deg > 45.0f || deg < -45.0f) ret = 0;
+		const float fmn = float(mn), fmx = float(mx);
+		bool ok;
+		if (mn < mx) ok = !(fmn > deg) && !(deg > fmx);
+		else ok = fmn > deg ? !(deg > fmx) : true;
+		if (!ok) {
+			ret = 0;
+			continue;
+		}
+		gy.des_turret_angles[size_t(k)] = int32_t(rel);
+		uint32_t d = rel - uint32_t(gy.turret_angles[size_t(k)]);
+		if (d > 0x80000000u) d = ~d;
+		gy.des_node_flags = int16_t(uint16_t(gy.des_node_flags) | uint16_t(1u << k));
+		if (d < 0xaaaaaaau) gy.node_flags = int16_t(uint16_t(gy.node_flags) | uint16_t(1u << k));
+	}
+	return ret;
 }
 
 void guy_execute_events(Game& g, Unit& u, Guy& gy) {
@@ -844,12 +934,16 @@ void guy_execute_events(Game& g, Unit& u, Guy& gy) {
 		if (e.anim != cur_anim || !(last_time < e.frame) || !(uint32_t(e.frame) <= cur_time)) continue;
 		const bool gtarget = u.order_type() == kAttackGround || u.order_type() == kAirAttackGround;
 		if (!((whom != -1 && ox != -1) || gtarget)) continue;
+		// A turret muzzle (node below the type's pivot count) releases only once its turret has reached its aim (node_flags bit).
+		const int32_t restrictions = g.anims->pivot_restrictions(gy.gpiece);
+		if (restrictions != 0 && (e.node & 3) < restrictions && !((uint32_t(gy.node_flags) >> (e.node & 3)) & 1u)) continue;
 		// GraphicEvents::execute_game_events @8e48e0: the shot starts at the guy plus the muzzle offset of the release node.
-		// TODO(combat-spec 4.17): pivot restrictions (init_pivot_restrictions: the turrets' gate) are not read from the data yet.
+		// The release nodes below has_restrictions(piece) (the <RESTRICTION> count of the type) are turret muzzles: the offset of the pivot
+		// node plus the node's offset rotated by the turret angle (GraphicPieces::get_position's restricted branch).
 		float pivot_deg[4];
 		for (int k = 0; k < 4; k++) pivot_deg[k] = fast_angle_to_degrees_f(gy.turret_angles[size_t(k)]);
 		int32_t off[3];
-		muzzle_offset(g, gy, gy.gpiece, e, 0, pivot_deg, off);
+		muzzle_offset(g, gy, gy.gpiece, e, restrictions, pivot_deg, off);
 		AmmoPackage p = pkg;
 		p.x += off[0];
 		p.y += off[1];

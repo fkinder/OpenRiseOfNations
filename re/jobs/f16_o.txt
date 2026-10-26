@@ -1,0 +1,4 @@
+re/decomp/fid16
+Object::take_damage
+Wall::update_hits
+Object::eject_contents

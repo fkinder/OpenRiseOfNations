@@ -568,8 +568,7 @@ void guy_init_real(Game& g, Unit& u, Guy& gy, int32_t keep) {
 	if (anim_packet(g, gy) && !anim_has(g, gy, gy.cur_anim)) gy.cur_anim = 0;
 	gy.turret_angles = {};
 	gy.des_turret_angles = {};
-	// TODO(render data): Guy::reset_pivots(1) sets turret_angles / des_turret_angles from the graphics piece's pivot
-	// restrictions (degrees_to_angle of each limit).
+	guy_reset_pivots(g, u, gy, 1);  // each turret rests at the middle of its arc (Guy::reset_pivots(1) @5d8a80)
 	if (keep == 0) {
 		// bank, last_bank, pitch, last_pitch = 0 (not in Guy)
 		gy.des_x = 0;
@@ -584,7 +583,7 @@ void guy_init_real(Game& g, Unit& u, Guy& gy, int32_t keep) {
 	gy.avg_speed = 0;
 	gy.track_dx = 0;
 	gy.track_dy = 0;
-	// TODO(render data): guy_flags 0x100 (turret) when GraphicPieces::pivot_restrictions has pivots for the type.
+	if (g.anims && g.anims->pivot_restrictions(gy.gpiece) != 0) gy.guy_flags |= 0x100;  // turret: the piece's type has <RESTRICTION> pivots
 	if (anim_has(g, gy, kCharTurnRight)) gy.guy_flags |= 8;  // packet has more than 22 actions incl. TURN_RIGHT
 	const Type& t = *u.ptype;
 	if ((t.unit_flags2 & 4) == 0) {
@@ -758,7 +757,7 @@ void guy_move(Game& g, Unit& u, Guy& gy) {
 			} else {
 				if (h <= 1) guy_set_anim(g, u, gy, kCharAttack1, 0, 1);
 				else guy_set_anim(g, u, gy, h, 0, 0);
-				// Guy::set_all_pivots: turrets only (guy_flags 0x100, render data; TODO).
+				guy_set_all_pivots(g, u, gy);  // Guy::set_all_pivots (turrets only)
 				gy.hold_attack = 0;
 				gy.stopped = 1;
 			}
@@ -771,11 +770,13 @@ void guy_move(Game& g, Unit& u, Guy& gy) {
 				if (h == 0) {
 					if (gy.cur_anim != kCharTurnLeft && gy.cur_anim != kCharTurnRight && gy.cur_anim != kCharAttackWalk)
 						guy_set_anim(g, u, gy, kCharWalk, 0, 1);
-				} else if (gy.cur_anim != kCharTurnLeft && gy.cur_anim != kCharTurnRight) {
-					if (h > 1) guy_set_anim(g, u, gy, h, 0, 0);
-					else guy_set_anim(g, u, gy, kCharAttack1, 0, 1);
+				} else {
+					if (gy.cur_anim != kCharTurnLeft && gy.cur_anim != kCharTurnRight) {
+						if (h > 1) guy_set_anim(g, u, gy, h, 0, 0);
+						else guy_set_anim(g, u, gy, kCharAttack1, 0, 1);
+					}
+					guy_set_all_pivots(g, u, gy);  // every pending attack re-aims the turrets, a turn animation included
 				}
-				// set_all_pivots for the hold_attack cases (turrets; TODO).
 				gy.stopped = 0;
 			}
 			if (!(gy.guy_flags & 2)) guy_turn_towards(g, u, gy, gy.des_angle, 0, true);

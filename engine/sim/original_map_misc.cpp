@@ -469,7 +469,8 @@ const ClassMap& map_death() {
 		b.f("valid", &DeathObj::valid).f("first_frame", &DeathObj::first_frame).f("cur_anim", &DeathObj::anim).f("x", &DeathObj::x);
 		b.f("y", &DeathObj::y).f("z", &DeathObj::z).f("who", &DeathObj::who).f("o", &DeathObj::o).f("gpiece", &DeathObj::gpiece);
 		b.f("ammo_gpiece", &DeathObj::ammo_piece).f("ammo_angle", &DeathObj::deg).f("new_angle", &DeathObj::angle);
-		b.f("cur_frame", &DeathObj::cur_frame).f("skel_gpiece", &DeathObj::skeleton).f("unit_crew", &DeathObj::guy);
+		b.f("turret_angles", &DeathObj::turret_angles);
+		b.f("cur_frame", &DeathObj::cur_frame).f("skel_gpiece", &DeathObj::skeleton).f("node_flags", &DeathObj::node_flags).f("unit_crew", &DeathObj::guy);
 		m.audited = [](const Game& g, const Seg& s, const Entry& e) {
 			return e.off < 4 || (size_t(s.a) < g.deaths.size() && g.deaths[size_t(s.a)].valid != 0);
 		};

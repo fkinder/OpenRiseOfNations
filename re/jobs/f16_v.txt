@@ -1,0 +1,4 @@
+re/decomp/fid16/dis
+GraphicPieces::init_position
+GraphicPieces::place_hierarchy
+GraphicPieces::get_position
