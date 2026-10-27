@@ -585,7 +585,17 @@ New diagnostics (env-gated, `apps/sav`): `RON_CITY_DUMP=F0:F1`, `RON_DEATH_DUMP=
 `RON_TRACE_DIFF=part:B0:B1`, `RON_AT=off,..`, `RON_RANGE_OF=who,o`, `RON_SOLVE_DUMP=1` (with `--solve-at`; `--solve-at` now also traces `rules`, `scenario_data`, `script_run_time`), `RON_UT_FULL=1` (with `RON_UNIT_TRACE`: angles, order dest, path, guy 0), `RON_UEXP2/3` and the op `oflags^=hex`, `RON_RNG_SKIP=F:k`, `RON_DROP_N="F:n:m,.."` (+ `RON_RNG_QUICK=1`, profiling build),
 and `re/ghidra_scripts/ReadWords.java` (words of memory with the function they point to: vtable slots).
 
-**Not engine-driven**: the `scenario_data` part is the loaded shadow only (`last_razed`, `units_killed`, `builds_destroyed` are updated in `g.scen` but not hashed); `23'11'20` differs at 82,651 for that reason (the original's `last_razed[0]` = the razed Fortress 2,116).
+**Not engine-driven**: the `scenario_data` part is the loaded shadow only (`last_razed`, `units_killed`, `builds_destroyed` are updated in `g.scen` but not hashed); `23'11'20` differs at 82,651 for that reason (the original's `last_razed[0]` = the razed Fortress 2,116). (Twentieth pass, 6.20: `last_razed`, `units_killed`, `builds_destroyed` and `city_lost_to` are engine-driven now.)
+
+### 6.20 Twentieth pass (2026-10-26): ScenarioData in the hash, the missile ammo's B-spline, the twin and ship tools
+
+First differences of `21'23'34` before -> after: unchanged (`units` / `guys` 8,336 still open); fully equal boundaries over the 45 replays with a save 1,656 -> 1,666. Details and addresses: docs/sim-implementation.md, twentieth pass, items 128 - 134.
+
+- **`scenario_data` follows the simulation**: `last_razed[8]`, `units_killed[8][352]`, `builds_destroyed[8][129]`, `city_lost_to[8]` are loaded from the save and emitted from the engine's own values (the statics are separate globals of `ScenarioData::walk_data` @997ad0). The only writers of `last_razed` are `Object::take_damage` @652f69 and `Object::disband` @64592c (valid and active). `23'11'20` scenario_data (the razed Fortress 2,116) now matches to the end.
+- **Missile ammo have a path** (`AMMO` flag MISSILE: rockets, torpedoes, missile artillery): `Ammo::ammo_path` is a degree-2 B-spline through (start, launch control point, end) with one point per frame; `ammo` hashes the whole `SplineData`. The saves carry four of them (`22'45'30`, `22'28'15`), and the port regenerates all four bit for bit (points, tangents, length, depth, allocation 4 / 16 / 16 / 8). The rocket shot of `22'45'30` at 60,726 that the plain flight time made 109 frames long has 13 points.
+- **The corpus is made of OOS recoveries**: all 45 embedded saves are `OOS_RECOVERY.SVX`. A segment's first frames come from a state every player loaded; `RON_TWIN_STEPS` shows that a continued engine and a loaded one (with the prologue) differ at once and that the loaded one matches the rows.
+- New diagnostics (`apps/sav`, env-gated): `RON_SHIPS`, `RON_SPLINES`, `RON_SPLINE_CHECK`, `RON_FIELDS`, `RON_STREAM_OUT`, `RON_NEW_OBJECTS`, `RON_TWIN_STEPS` (+ `RON_TWIN_NOSTOP`, `RON_TWIN_SKIP_FIRST`).
+- Method note: a `--solve-at` single-byte candidate `e` is realisable only if the engine's byte can reach the original's (`e = -253` needs an engine byte >= 253); candidates that print `engine 0x00 -> original 0x03` for `e = -253` are aliases of the modular equation, not hits.
 
 ### 6.21 Random-map replays: the generated start (stage C, 2026-10-26)
 

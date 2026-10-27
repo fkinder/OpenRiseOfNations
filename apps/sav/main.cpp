@@ -973,6 +973,15 @@ void solve_single_byte(const PartTrace& tr, uint32_t want, const char* part_name
 			std::printf("      RANGE_OF %d/%d %s at %zu len %zu\n", rw, rob, fn >= 0 ? d.function_name(fn) : "?", r.begin, r.len);
 		}
 	}
+	if (const char* so = std::getenv("RON_STREAM_OUT")) {  // RON_STREAM_OUT=prefix: <prefix>.<part>.bin (the engine's stream), .ranges (begin len who o step function) and .want (the original's hash), for offline hypothesis tests
+		const std::string base = std::string(so) + "." + part_name;
+		if (FILE* f = std::fopen((base + ".bin").c_str(), "wb")) { std::fwrite(tr.bytes.data(), 1, tr.bytes.size(), f); std::fclose(f); }
+		if (FILE* f = std::fopen((base + ".ranges").c_str(), "w")) {
+			for (const auto& r : tr.ranges) { const int fn = d.step_function(r.step); std::fprintf(f, "%zu %zu %d %d %d %s\n", r.begin, r.len, r.who, r.o, r.step, fn >= 0 ? d.function_name(fn) : "?"); }
+			std::fclose(f);
+		}
+		if (FILE* f = std::fopen((base + ".want").c_str(), "w")) { std::fprintf(f, "%08x %08x\n", want, have); std::fclose(f); }
+	}
 	if (std::getenv("RON_SOLVE_DUMP") && N <= 20000) {  // the stream and the original's hash, for offline hypothesis tests
 		std::printf("    SOLVE_DUMP %s want %08x have %08x bytes ", part_name, want, have);
 		for (uint8_t c : tr.bytes) std::printf("%02x", c);
@@ -2543,7 +2552,7 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 							const sim::Ammo& a = game->ammo[ai];
 							if (!a.in_use()) continue;
 							const sim::Unit* u0 = game->unit(a.who, a.o);
-							std::printf("  AMMO f%d #%zu flags %02x piece %d from %d/%d (type %d) -> %d/%d time %u/%u acc %d idx %d gidx %d start (%d,%d,%d) end (%d,%d,%d)\n", int(f), ai, unsigned(a.flags), a.gpiece, a.who, a.o, u0 ? u0->type : -1, a.whom, a.ox, unsigned(a.cur_time), unsigned(a.total_time), int(a.accuracy), a.index, a.graph_index, a.sx, a.sy, a.sz, a.ex, a.ey, a.ez);
+							std::printf("  AMMO f%d #%zu flags %02x piece %d(gfx %02x) from %d/%d (type %d) -> %d/%d time %u/%u acc %d idx %d gidx %d start (%d,%d,%d) end (%d,%d,%d)\n", int(f), ai, unsigned(a.flags), a.gpiece, game->anims ? unsigned(game->anims->ammo_flags(a.gpiece)) : 0u, a.who, a.o, u0 ? u0->type : -1, a.whom, a.ox, unsigned(a.cur_time), unsigned(a.total_time), int(a.accuracy), a.index, a.graph_index, a.sx, a.sy, a.sz, a.ex, a.ey, a.ez);
 						}
 				}
 				if (const char* cd = std::getenv("RON_CITY_DUMP")) {  // RON_CITY_DUMP=F0:F1: every valid city's members before each frame of [F0, F1), only when they change
@@ -4000,6 +4009,32 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 					}
 				}
 			}
+			if (const char* nu = std::getenv("RON_NEW_OBJECTS")) {  // RON_NEW_OBJECTS=F0:F1: every frame, the units and buildings whose existence changed since the previous frame
+				int n0 = 0, n1 = 0;
+				static std::map<int, bool> prev_alive;
+				if (std::sscanf(nu, "%d:%d", &n0, &n1) == 2 && f >= n0 - 1 && f <= n1) {
+					for (int w = 0; w < 10; ++w) {
+						for (int o = 0; o < game->objects[size_t(w)].unit_mark; ++o) {
+							const sim::Unit* tu = game->unit(w, o);
+							const bool al = tu && tu->alive();
+							const int key = w * 100000 + o;
+							auto it = prev_alive.find(key);
+							const bool was = it != prev_alive.end() && it->second;
+							if (f >= n0 && al != was) std::printf("  NEWOBJ f%d unit %d/%d %s type %d at %d,%d\n", int(f), w, o, al ? "appeared" : "gone", al ? tu->type : -1, al ? tu->x : 0, al ? tu->y : 0);
+							prev_alive[key] = al;
+						}
+						for (int o = sim::kBuildBase; o < game->objects[size_t(w)].build_mark; ++o) {
+							const sim::Build* tb = game->build(w, o);
+							const bool al = tb && tb->alive();
+							const int key = w * 100000 + o;
+							auto it = prev_alive.find(key);
+							const bool was = it != prev_alive.end() && it->second;
+							if (f >= n0 && al != was) std::printf("  NEWOBJ f%d build %d/%d %s\n", int(f), w, o, al ? "appeared" : "gone");
+							prev_alive[key] = al;
+						}
+					}
+				}
+			}
 			if (const char* ut = std::getenv("RON_UNIT_TRACE")) {  // RON_UNIT_TRACE=who:o:F0:F1: one line per frame (before its do_frame): the unit's state and order list
 				int uw = 0, uo = 0, f0 = 0, f1 = 0;
 				if (std::sscanf(ut, "%d:%d:%d:%d", &uw, &uo, &f0, &f1) == 4 && f >= f0 && f <= f1 && uo < 0) {
@@ -4129,6 +4164,104 @@ int replay_run(const std::string& path, const std::vector<uint8_t>& save, const 
 		sim::OriginalLoadReport rn;
 		auto truth = sim::load_original_save(cache->files, rules, nullptr, next_save, &rn);
 		if (!truth) { std::printf("  next save: load failed: %s\n", rn.error.c_str()); return 1; }
+		if (const char* twin_steps = std::getenv("RON_TWIN_STEPS")) {
+			// RON_TWIN_STEPS=N (with --compare-next B): the engine that ran this replay up to B's save frame (`game`: it carries every engine-internal
+			// state) and the engine loaded from B's save (`truth`) both play B's commands for N more frames; the first frame at which their mapped
+			// members differ names what a load loses (or adds). Only meaningful when this replay matched all 15 parts at the end.
+			const int nsteps = std::atoi(twin_steps);
+			std::string jp2 = "/tmp/ron-sav-twin-" + std::to_string(::getpid()) + ".json";
+			auto quote2 = [](const std::string& x) {
+				std::string q = "'";
+				for (char ch : x) q += ch == '\'' ? std::string("'\\''") : std::string(1, ch);
+				return q + "'";
+			};
+			std::string cmd2 = "node re/tools/rcxdump.mjs " + quote2(next_path) + " --json " + quote2(jp2) + " > /dev/null 2>&1";
+			std::vector<uint8_t> jb2;
+			Json root2;
+			bool okj = std::system(cmd2.c_str()) == 0 && read_file(jp2, jb2);
+			std::remove(jp2.c_str());
+			std::string js2(jb2.begin(), jb2.end());
+			JsonParser jparse2(js2);
+			if (!okj || !jparse2.parse(root2)) { std::printf("  twin: cannot read the next replay's command stream\n"); return 1; }
+			const Json* recs2 = root2.get("records");
+			size_t rj = 0;
+			sim::CommandPackage pk1, pk2;
+			truth->anims = game->anims;
+			if (!std::getenv("RON_NO_LOAD_EFFECTS")) sim::original_post_load_effects(*truth);  // what a playback runs before its first frame (the loaded twin plays B as the main loop does)
+			if (hdr && !std::getenv("RON_NO_SCRIPTS")) {
+				const Json* hs = hdr->get("scenarioScript");
+				std::string serr;
+				if (hs && hs->t == Json::Str && !hs->s.empty()) sim::original_attach_game_script(*truth, cache->files, hs->s, &serr);
+			}
+			sim::Game* gs[2] = {game.get(), truth.get()};
+			sim::CommandPackage* pks[2] = {&pk1, &pk2};
+			bool reported = false;
+			// B's CHECK_SUMS rows by boundary (as in the main loop): both engines are scored against them
+			std::map<int64_t, std::vector<uint32_t>> expectB;
+			{
+				auto rowsB = all_check_sums(csv_path, next_path);
+				int64_t prevB = next_frame + 1;
+				bool firstB = true;
+				for (const auto& kv : rowsB) {
+					auto best = std::max_element(kv.second.begin(), kv.second.end(), [](const auto& x, const auto& y) { return x.second < y.second; });
+					expectB[firstB ? next_frame + 1 : prevB] = best->first;
+					prevB = kv.first;
+					firstB = false;
+				}
+			}
+			const bool no_stop = std::getenv("RON_TWIN_NOSTOP") != nullptr;
+			int64_t first_bad[2] = {-1, -1};
+			for (int k = 0; k < nsteps && (!reported || no_stop); ++k) {
+				const int64_t f = next_frame + k;
+				if (auto eb = expectB.find(f); eb != expectB.end()) {
+					for (int q = 0; q < 2; ++q) {
+						sim::EngineProvider epq(*gs[q]);
+						dw::CheckSumParts pq = dw::compute_check_sums(epq);
+						std::string bad;
+						for (int pi = 0; pi < dw::kCheckPartCount; ++pi) if (pq.v[pi] != eb->second[size_t(pi)]) bad += std::string(" ") + dw::kCheckPartNames[pi];
+						if (!bad.empty() && first_bad[q] < 0) first_bad[q] = f;
+						if (!bad.empty() || no_stop) std::printf("  twin boundary %lld: %s differs in:%s\n", (long long)f, q == 0 ? "continued" : "loaded   ", bad.empty() ? " (none)" : bad.c_str());
+					}
+				}
+				// the commands of this frame
+				while (recs2 && rj < recs2->a.size() && recs2->a[rj].num("frame") <= f) {
+					const Json& rec = recs2->a[rj++];
+					const int play = int(rec.num("play"));
+					const int who = seat_who.count(play) ? seat_who[play] : play;
+					pk1.group = pk2.group = -1;
+					const Json* cm = rec.get("cmds");
+					if (!cm) continue;
+					for (const Json& c : cm->a) {
+						ReplayCommand rc = to_command(c);
+						static const char* ignored[] = {"TURN_DATA", "CAMERA", "CHECK_SUMS", "PLAYER_SPEED", "PAUSE", "HOTKEY"};
+						bool skip = false;
+						for (const char* ig : ignored) skip = skip || rc.name == ig;
+						if (skip) continue;
+						for (int q = 0; q < 2; ++q) {
+							if (q == 0 && int64_t(rec.num("frame")) <= next_frame) continue;  // the first replay's loop already ran the commands of its last record frame
+							if (q == 1 && std::getenv("RON_TWIN_SKIP_FIRST") && int64_t(rec.num("frame")) <= next_frame) continue;  // experiment: the next save already contains the commands of its own frame
+							if (rc.name == "UNITMASK") { apply_unitmask(*gs[q], pks[q]->group, uint32_t(rc.mask_arg)); continue; }
+							if (!rc.supported) continue;
+							pks[q]->process(*gs[q], rc.cmd, play, who);
+						}
+					}
+				}
+				game->do_frame();
+				truth->do_frame();
+				if (no_stop) continue;
+				std::vector<sim::AuditLine> dl = sim::diff_mapped_state(*game, *truth);
+				std::sort(dl.begin(), dl.end(), [](const sim::AuditLine& x, const sim::AuditLine& y) { return x.mismatches > y.mismatches; });
+				int64_t total = 0;
+				for (const sim::AuditLine& l : dl) total += l.mismatches;
+				std::printf("  twin: after frame %lld the engines differ in %lld (member, object) pairs\n", (long long)f, (long long)total);
+				if (total) {
+					for (const sim::AuditLine& l : dl) if (l.mismatches) std::printf("    %-34s %6lld of %-7lld %s\n", l.member.c_str(), (long long)l.mismatches, (long long)l.objects, l.example.c_str());
+					reported = true;
+				}
+			}
+			if (!reported) std::printf("  twin: the two engines agree in every mapped member for %d frames\n", nsteps);
+			return 0;
+		}
 		if (fish_timeline) fish_timeline_report(*truth, next_frame, seed_load, frame_seeds, game->rng.seed());
 		// 15 parts of both states at the same frame
 		sim::EngineProvider e1(*game), e2(*truth);
@@ -4732,6 +4865,15 @@ int main(int argc, char** argv) {
 		std::printf("total: %d entries; walked members of the classes above %d, mapped %d, shadow %d\n", entries, total_walked, total_mapped, total_walked - total_mapped);
 		return 0;
 	}
+	if (const char* rf = std::getenv("RON_FIELDS")) {  // RON_FIELDS=Class: the PDB members of a class the walks know (name, offset, size, element size)
+		const dw::Description& dd = dw::Description::get();
+		const int n = dd.field_count(rf);
+		for (int i = 0; i < n; ++i) {
+			const dw::FieldInfo* f = dd.field_at(rf, i);
+			std::printf("%-28s +0x%04x size %4d elem %d type %d %s\n", f->name, unsigned(f->offset), f->size, f->elem_size, int(f->type), f->struct_class);
+		}
+		return 0;
+	}
 	std::vector<uint8_t> raw, buf;
 	bool gz = false;
 	if (!read_file(path, raw)) { std::fprintf(stderr, "cannot read %s\n", path.c_str()); return 66; }
@@ -4878,6 +5020,102 @@ int main(int argc, char** argv) {
 						if (a.cur_anim == b.cur_anim && a.end_time == b.end_time) continue;
 						std::printf("guy %d/%d/%zu %s anim %d t %u/%u -> anim %d t %u/%u (gpiece %d)\n", who, o, k, sim::to_utf8(u0->ptype->type_name).c_str(), a.cur_anim, a.cur_time, a.end_time, b.cur_anim, b.cur_time, b.end_time, b.gpiece);
 					}
+				}
+		}
+		if (std::getenv("RON_SPLINES")) {  // the embedded save's Ammo records that carry an ammo_path (SplineData): slot, piece, flight, and the spline's header and array lengths
+			const dw::Rec* objs = tree.find_global(desc.find_global("objects"));
+			int total = 0, withsp = 0;
+			if (objs) for (const dw::Event& ev : objs->ev) {
+				if (ev.type != 2 || !ev.cd) continue;
+				for (size_t i = 0; i < ev.cd->elems.size(); ++i) {
+					const dw::Rec* ar = ev.cd->elems[i];
+					if (!ar || std::string(ar->cls) != "Ammo") continue;
+					if (!(ar->read_int(4, 1, false) & 3)) continue;
+					++total;
+					for (const dw::Event& e2 : ar->ev) {
+						if (e2.type != 0 || !e2.child) continue;
+						++withsp;
+						const dw::Rec* sp = e2.child;
+						std::printf("ammo slot %zu flags %02x piece %d who %d/%d whom %d/%d cur %d total %d  spline: type %d flags %x degree %d depth %d len %g curr %g; events %zu\n", i,
+							unsigned(ar->read_int(4, 1, false)), int(ar->read_int(8, 4, true)), int(ar->read_int(0x3c, 4, true)), int(ar->read_int(0x40, 4, true)), int(ar->read_int(0x48, 4, true)), int(ar->read_int(0x4c, 4, true)),
+							int(ar->read_int(0x24, 4, true)), int(ar->read_int(0x28, 4, true)), int(sp->read_int(0x40, 4, true)), unsigned(sp->read_int(0x44, 4, false)), int(sp->read_int(0x60, 2, false)), int(sp->read_int(0x62, 2, false)),
+							double(*reinterpret_cast<const float*>(std::array<uint8_t, 4>{uint8_t(sp->read_int(0x4c, 1, false)), uint8_t(sp->read_int(0x4d, 1, false)), uint8_t(sp->read_int(0x4e, 1, false)), uint8_t(sp->read_int(0x4f, 1, false))}.data())), 0.0, sp->ev.size());
+					}
+				}
+			}
+			std::printf("ammo in use: %d, with a spline: %d\n", total, withsp);
+			if (std::getenv("RON_SPLINES")[0] == '2' && objs) {  // dump every spline in full: header ints / floats, then each container (header, then the elements as floats)
+				for (const dw::Event& ev : objs->ev) {
+					if (ev.type != 2 || !ev.cd) continue;
+					for (size_t i = 0; i < ev.cd->elems.size(); ++i) {
+						const dw::Rec* ar = ev.cd->elems[i];
+						if (!ar || std::string(ar->cls) != "Ammo" || !(ar->read_int(4, 1, false) & 3)) continue;
+						for (const dw::Event& e2 : ar->ev) {
+							if (e2.type != 0 || !e2.child) continue;
+							const dw::Rec* sp = e2.child;
+							std::printf("== ammo %zu: piece %d who %d/%d whom %d/%d  start %d,%d,%d end %d,%d,%d cur %d total %d angle %08x v1z %g dx %g\n", i, int(ar->read_int(8, 4, true)), int(ar->read_int(0x3c, 4, true)), int(ar->read_int(0x40, 4, true)),
+								int(ar->read_int(0x48, 4, true)), int(ar->read_int(0x4c, 4, true)), int(ar->read_int(0xc, 4, true)), int(ar->read_int(0x10, 4, true)), int(ar->read_int(0x14, 4, true)), int(ar->read_int(0x18, 4, true)), int(ar->read_int(0x1c, 4, true)), int(ar->read_int(0x20, 4, true)),
+								int(ar->read_int(0x24, 4, true)), int(ar->read_int(0x28, 4, true)), unsigned(ar->read_int(0x2c, 4, false)), 0.0, 0.0);
+							std::printf("   ammo bytes 4..0x68:");
+							for (int b = 4; b < 0x68; ++b) std::printf(" %02x", unsigned(ar->read_int(b, 1, false)));
+							std::printf("\n   spline header 0x40..0x64:");
+							for (int b = 0x40; b < 0x64; b += 4) { uint32_t w = uint32_t(sp->read_int(b, 4, false)); float fl; std::memcpy(&fl, &w, 4); std::printf(" [%x]=%08x(%g)", b, w, double(fl)); }
+							std::printf("\n");
+							for (const dw::Event& e3 : sp->ev) {
+								if (e3.type != 2 || !e3.cd) continue;
+								std::printf("   container step %d: length %d size %d incr %d flags %02x data %zu bytes elems %zu\n", e3.step, e3.cd->length, e3.cd->size, int(e3.cd->increment), unsigned(e3.cd->flags), e3.cd->data.size(), e3.cd->elems.size());
+								if (!e3.cd->data.empty()) { std::printf("     data:"); for (size_t b = 0; b + 4 <= e3.cd->data.size(); b += 4) { float fl; std::memcpy(&fl, &e3.cd->data[b], 4); std::printf(" %g", double(fl)); } std::printf("\n"); }
+								for (size_t k = 0; k < e3.cd->elems.size(); ++k) if (e3.cd->elems[k]) { const dw::Rec* er = e3.cd->elems[k]; std::printf("     [%zu]", k); for (int b = 0; b < 12; b += 4) { uint32_t w = uint32_t(er->read_int(b, 4, false)); float fl; std::memcpy(&fl, &w, 4); std::printf(" %.9g", double(fl)); } std::printf("\n"); }
+							}
+						}
+					}
+				}
+			}
+		}
+		if (std::getenv("RON_SPLINE_CHECK")) {  // regenerate every loaded missile spline from its three control points and its depth: the points, normals, length and allocation must be the save's
+			int checked = 0, bad = 0;
+			for (size_t i = 0; i < ga->ammo.size(); ++i) {
+				const sim::Ammo& am = ga->ammo[i];
+				if (!am.in_use() || !am.has_path || am.spline.control.size() < 3) continue;
+				sim::Spline t;
+				if (std::getenv("RON_SPLINE_CHECK")[0] != '2') {  // 2: start from empty arrays (the allocation a fresh Spline reaches by growth)
+					t.control_size = am.spline.control_size;
+					t.verts_size = am.spline.verts_size;
+					t.normals_size = am.spline.normals_size;
+					t.spline_knots_size = am.spline.spline_knots_size;
+				}
+				t.flags = 0x10;
+				const sim::Spline& o = am.spline;
+				float poly = 0.0f;
+				for (size_t k = 1; k < o.control.size(); ++k) {
+					const float dx = o.control[k].x - o.control[k - 1].x, dy = o.control[k].y - o.control[k - 1].y, dz = o.control[k].z - o.control[k - 1].z;
+					float n2 = dx * dx;
+					n2 = n2 + dy * dy;
+					n2 = n2 + dz * dz;
+					poly = float(std::sqrt(double(n2))) + poly;
+				}
+				const float minseg = o.depth > 0 ? poly / (float(o.depth) + 0.5f) : poly * 2.0f;
+				sim::spline_calc_from_dir(t, minseg, o.control[0], o.control[1], o.control.back(), sim::Vec3f());
+				bool same = t.depth == o.depth && t.verts.size() == o.verts.size() && t.normals.size() == o.normals.size() && t.total_length == o.total_length &&
+				            t.spline_knots == o.spline_knots && t.verts_size == o.verts_size && t.normals_size == o.normals_size;
+				for (size_t k = 0; same && k < o.verts.size(); ++k) same = std::memcmp(&t.verts[k], &o.verts[k], 12) == 0 && std::memcmp(&t.normals[k], &o.normals[k], 12) == 0;
+				++checked;
+				if (!same) ++bad;
+				std::printf("spline of ammo %zu: depth %d (regenerated %d), %zu points (%zu), length %g (%g), sizes ctl/verts/normals/knots %d/%d/%d/%d (%d/%d/%d/%d): %s\n", i, int(o.depth), int(t.depth), o.verts.size(), t.verts.size(), double(o.total_length), double(t.total_length), o.control_size, o.verts_size, o.normals_size, o.spline_knots_size, t.control_size, t.verts_size, t.normals_size, t.spline_knots_size, same ? "identical" : "DIFFERENT");
+			}
+			std::printf("splines checked: %d, different: %d\n", checked, bad);
+		}
+		if (std::getenv("RON_SHIPS")) {  // every water unit (domain 1) of the loaded save: position, orders, path stack, first guy
+			for (int who = 0; who < sim::kNumLeaders; ++who)
+				for (int o = 0; o < ga->objects[size_t(who)].unit_mark; ++o) {
+					sim::Unit* u = ga->unit(who, o);
+					if (!u || !u->alive() || !u->ptype || u->ptype->domain != 1) continue;
+					std::printf("ship %d/%d type %d %s pos %d,%d ang %08x idle %d masks %08x/%08x coll %d path %zu orders", who, o, u->type, sim::to_utf8(u->ptype->type_name).c_str(), u->x, u->y, u->angle, u->idle, u->unit_masks, u->unit_masks2, u->collide, u->path.size());
+					for (const sim::Order& od : u->orders) std::printf(" [t%d fl%02x %d,%d dest %d dxy %d,%d ang %08x]", int(od.type), unsigned(od.flags), od.x, od.y, od.dest, od.dest_x, od.dest_y, unsigned(od.angle));
+					std::printf(" path:");
+					for (const sim::PathData& pd : u->path) std::printf(" (%d,%d t%d f%x)", pd.x, pd.y, pd.tol, pd.flags);
+					if (!u->guys.empty()) { const sim::Guy& gy = u->guys[0]; std::printf(" | guy x %d y %d spd %d/%d des %d,%d ang %08x bank %g pitch %g tinc? anim %d t %u/%u", gy.x, gy.y, gy.last_speed, gy.avg_speed, gy.des_x, gy.des_y, unsigned(gy.angle), double(gy.bank), double(gy.pitch), int(gy.cur_anim), gy.cur_time, gy.end_time); }
+					std::printf("\n");
 				}
 		}
 		if (const char* sw = std::getenv("RON_SCAN_UNITS")) {

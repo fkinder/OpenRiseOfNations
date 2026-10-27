@@ -1,4 +1,4 @@
-# Save format (native, version 15)
+# Save format (native, version 16)
 
 The engine's own save format for its simulation state: `engine/sim/save.hpp` / `save.cpp` (API and the section walks),
 `save_archive.hpp` (the writer / reader), `save_walk.inc` (the member lists, generated). It is **not** the original game's
@@ -71,6 +71,8 @@ the build that wrote it, and only against the same rules tables: the hash in `ME
 Version 12: `Game::docks` (section `CITY`, after `forts`: `Dock` = dock, o, reg, dock_flags, who, gull_o; the dock records `Docks::init_dock` keeps, sim-implementation.md twelfth pass, item 58) and `Leader::dock_mark` (LeaderData +0x42c) / `reg_docks` (+0x135e, int16[64]) in the leader walk. The seagulls of the docks are gaia units of slot 9 (saved natively, not in the original's saves).
 
 Version 13: `Region::scouted` (uint8, bit `who` = the leader has scouted the region) and `Region::scout_mark` (int32) in the `Region` walk (`Region` +0x3c / +0x40 of the original, which `Region::walk_data` does not store; `Unit::think_scout` sets them, the ferry search of `Unit::think_civilian_transport` reads them, sim-implementation.md fourteenth pass, item 72). `sizeof(Region)` 80 -> 88.
+
+Version 16: `Ammo::has_path` (bool) and `Ammo::spline` (section `COMB`, after `crash_piece`: the missile ammo's B-spline, `Ammo::ammo_path` of the original: `type`, `flags`, `max_control_depth_ratio`, `total_length`, `last_knot`, `curr_dist`, `next_search_dist`, `search_scan`, `degree`, `depth`, the arrays `control`, `verts`, `normals` (`Vec3f`) and `knots`, `spline_knots`, `weights` (`float`), and the six allocation sizes `*_size` that the hash carries) and `Game::spline_pool` (the `Recycler<Spline>` LIFO pool of closed missiles' splines, whose array allocations survive; the end of the `COMB` section). `sizeof(Ammo)` 104 -> 104 + 8 + `sizeof(Spline)`, `sizeof(Game)` + 24; sim-implementation.md twentieth pass, item 129.
 
 Version 15: `City::vans_cap` (int32, the allocation of the `Array<CaravanLink>` at `CityData` +0x74, i.e. its hashed `size`: 10 after `City::init`, 4 / 8 / 16 ... after `ArrayBase::add` outgrows it, 0 after `City::close` and after a load of an empty array; sim-implementation.md nineteenth pass, item 116) and `Ammo::crash_piece` (int32, `Ammo +0x8` of a wreck: the dying plane's own piece, vslot +0x34 of the unit; `gpiece` stays `kCrashPiece` = -2 for the engine's own tests; item 122). `sizeof(City)` 160 -> 168, `sizeof(Ammo)` 100 -> 104.
 

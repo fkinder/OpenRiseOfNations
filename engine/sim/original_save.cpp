@@ -195,7 +195,9 @@ struct Loader {
 		struct GlobalMap { const char* name; const omap::ClassMap* map; };
 		for (const GlobalMap& gm : {GlobalMap{"game_random", &omap::map_game_random()}, GlobalMap{"ai_speed", &omap::map_ai_speed()},
 		                            GlobalMap{"ai_off", &omap::map_ai_off()}, GlobalMap{"armies_find_dist", &omap::map_armies_find_dist()},
-		                            GlobalMap{"build_queue_fail", &omap::map_queue_fail()}, GlobalMap{"game_daemon", &omap::map_game_daemon()}}) {
+		                            GlobalMap{"build_queue_fail", &omap::map_queue_fail()}, GlobalMap{"game_daemon", &omap::map_game_daemon()},
+		                            GlobalMap{"ScenarioData::last_razed", &omap::map_scen_last_razed()}, GlobalMap{"ScenarioData::units_killed", &omap::map_scen_units_killed()},
+		                            GlobalMap{"ScenarioData::builds_destroyed", &omap::map_scen_builds_destroyed()}, GlobalMap{"ScenarioData::city_lost_to", &omap::map_scen_city_lost_to()}}) {
 			const dw::Rec& r = global(gm.name);
 			bind_load(r, *gm.map);
 		}
@@ -458,11 +460,68 @@ struct Loader {
 			const dw::Rec& r = global("objects");
 			each_container(r, container_step("PtrArray<Ammo>::walk_data"), [&](int, const dw::ContainerData& cd) {
 				g.ammo.assign(size_t(cd.length), Ammo());
+				const int fn_ammo = d.find_function("AmmoData::walk_data");
+				const int step_has_path = d.find_step(fn_ammo, dw::StepKind::Local), step_path = d.find_step(fn_ammo, dw::StepKind::Deref);
 				for (size_t i = 0; i < cd.elems.size() && i < g.ammo.size(); ++i) {
 					if (!cd.elems[i] || !cd.present[i]) continue;
 					sh.bind(cd.elems[i], omap::map_ammo(), int32_t(i));
-					if (cd.elems[i]->read_int(4, 1, false) & 3) omap::map_ammo().load_from(&g.ammo[i], *cd.elems[i], 0);
-					else g.ammo[i].flags = uint8_t(cd.elems[i]->read_int(4, 1, false));
+					if (cd.elems[i]->read_int(4, 1, false) & 3) {
+						omap::map_ammo().load_from(&g.ammo[i], *cd.elems[i], 0);
+						// ammo_path: the missile's B-spline (SplineData: the scalars, then control_verts, knots, spline_knots, weights, spline_verts, spline_normals)
+						int64_t has = 0;
+						local_event(*cd.elems[i], step_has_path, has);
+						const dw::Rec* sp = nullptr;
+						each_child(*cd.elems[i], step_path, [&](int64_t, const dw::Rec* c) { sp = c; });
+						if (has && sp) {
+							Ammo& am = g.ammo[i];
+							am.has_path = true;
+							omap::map_spline().load_from(&am.spline, *sp, 0);
+							int ord = 0;
+							for (const dw::Event& ev : sp->ev) {
+								if (ev.type != 2 || !ev.cd) continue;
+								const dw::ContainerData& c = *ev.cd;
+								const int32_t size = c.length > 0 ? c.size : 0;
+								auto vec3 = [&](std::vector<Vec3f>& dst) {
+									dst.clear();
+									for (const dw::Rec* er : c.elems) {
+										Vec3f v;
+										uint8_t b[12] = {};
+										if (er) er->read(0, b, 12);
+										std::memcpy(&v.x, b, 4);
+										std::memcpy(&v.y, b + 4, 4);
+										std::memcpy(&v.z, b + 8, 4);
+										dst.push_back(v);
+									}
+								};
+								auto floats = [&](std::vector<float>& dst) {
+									dst.assign(c.data.size() / 4, 0.0f);
+									if (!c.data.empty()) std::memcpy(dst.data(), c.data.data(), dst.size() * 4);
+								};
+								switch (ord++) {
+								case 0: vec3(am.spline.control); am.spline.control_size = size; break;
+								case 1: floats(am.spline.knots); am.spline.knots_size = size; break;
+								case 2: floats(am.spline.spline_knots); am.spline.spline_knots_size = size; break;
+								case 3: floats(am.spline.weights); am.spline.weights_size = size; break;
+								case 4: vec3(am.spline.verts); am.spline.verts_size = size; break;
+								case 5: vec3(am.spline.normals); am.spline.normals_size = size; break;
+								default: break;
+								}
+							}
+						}
+					} else {
+						g.ammo[i].flags = uint8_t(cd.elems[i]->read_int(4, 1, false));
+					}
+				}
+				// Recycler<Spline>::temp_pool: the process that wrote the save had returned many splines grown by earlier long shots (a long shot has 13 points:
+				// 4 / 16 / 16 / 8 slots, and every short shot of the recorded saves holds those allocations); a game that is only a few frames old has none.
+				g.spline_pool.clear();
+				if (g.frame > 600) {
+					Spline grown;
+					grown.control_size = 4;
+					grown.verts_size = 16;
+					grown.normals_size = 16;
+					grown.spline_knots_size = 8;
+					g.spline_pool.assign(64, grown);
 				}
 			});
 			each_container(r, container_step("ObjectArray<DeathObj>::walk_data"), [&](int, const dw::ContainerData& cd) {

@@ -51,7 +51,7 @@ static_assert(sizeof(Regions) == 11272, "Regions changed: update the REGN sectio
 // + 120: World::roads (the road candidates and the Roads sweep cursor, sim/roadgraph.hpp), saved in the world section.
 // + 80: Game::nukes (sim/nukes.hpp), saved in section NUKE.
 // + 192 + 10 * 128: Game::docks (8 vectors of Dock) and Leader::reg_docks (+ dock_mark, which fits the padding) in each of the 10 leader slots, saved in the CITY and LEAD sections.
-static_assert(sizeof(Game) == 1657592 + 120 + 80 + 192 + 10 * 128 + 1024 + 1600, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
+static_assert(sizeof(Game) == 1657592 + 120 + 80 + 192 + 10 * 128 + 1024 + 1600 + 24, "Game gained or lost a member: save it in walk_core() / walk_body() or list it as derived in docs/save-format.md");
 // 1608 + 8 + 16 + 16: ScriptHost::ctw (the Conquer the World campaign the scripts run for, sim/ctw.hpp) is a run-time link, ctw_owned the loaded battle's
 // copy of that campaign and battle_token the campaign's liveness check of the battle; the native battle save writes the campaign as its own section (CTWB), not through the script walk.
 // + 24: ScriptHost::tileset (get_tileset), derived from the scenario by script_host_load on every load, not saved (docs/save-format.md 4).
@@ -621,7 +621,7 @@ void walk_body(Ar& top, Game& g, bool has_scripts, std::vector<uint8_t>* battle)
 	});
 	top.section("GRUP", [&](auto& ar) { walk_groups(ar, g); });
 	top.section("PATH", [&](auto& ar) { walk_pathfinder(ar, g.pathfinder); });
-	top.section("COMB", [&](auto& ar) { fields(ar, g.ammo, g.ammo_counter, g.deaths, g.range_swap_type, g.range_swap_value); });
+	top.section("COMB", [&](auto& ar) { fields(ar, g.ammo, g.ammo_counter, g.deaths, g.range_swap_type, g.range_swap_value, g.spline_pool); });
 	top.section("AIST", [&](auto& ar) { fields(ar, g.armies, g.armies_find_dist, g.find_dist, g.find_who); });
 	top.section("SCEN", [&](auto& ar) {
 		fields(ar, g.scen, g.scen_ally_mask, g.scen_diplomacy_setting, g.reveal_points, g.attrition_free_points);

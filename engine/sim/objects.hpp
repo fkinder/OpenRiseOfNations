@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "sim/rules.hpp"
+#include "sim/spline.hpp"
 
 namespace ron::sim {
 
@@ -409,6 +410,9 @@ struct Ammo {
 	int32_t traj = 0;
 	float v1z = 0.0f, dx = 0.0f, bank_dx = 0.0f, bank_dy = 0.0f;
 	int32_t start_roll_angle = 0;
+	// Ammo::ammo_path (+0x68, a Spline* from Recycler<Spline>): a missile ammo (AMMO flag MISSILE) flies a B-spline, one point per frame (sim/spline.hpp).
+	bool has_path = false;
+	Spline spline;
 	bool in_use() const { return (flags & 3) != 0; }
 };
 

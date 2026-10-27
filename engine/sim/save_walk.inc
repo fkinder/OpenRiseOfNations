@@ -142,9 +142,20 @@ template <class Ar> void walk(Ar& ar, Army& v) {
 	FIELDS(ar, v.list, v.who, v.num_groups);
 }
 
+template <class Ar> void walk(Ar& ar, Vec3f& v) {
+	FIELDS(ar, v.x, v.y, v.z);
+}
+
+template <class Ar> void walk(Ar& ar, Spline& v) {  // version 16
+	FIELDS(ar, v.type, v.flags, v.max_control_depth_ratio, v.total_length, v.last_knot, v.curr_dist, v.next_search_dist, v.search_scan, v.degree, v.depth);
+	FIELDS(ar, v.control, v.verts, v.normals, v.knots, v.spline_knots, v.weights);
+	FIELDS(ar, v.control_size, v.verts_size, v.normals_size, v.knots_size, v.spline_knots_size, v.weights_size);
+}
+
 template <class Ar> void walk(Ar& ar, Ammo& v) {
 	FIELDS(ar, v.flags, v.rolling, v.accuracy, v.gpiece, v.sx, v.sy, v.sz, v.ex, v.ey, v.ez, v.cur_time, v.total_time, v.angle, v.splash_area);
 	FIELDS(ar, v.index, v.graph_index, v.who, v.o, v.num_guys, v.whom, v.ox, v.traj, v.v1z, v.dx, v.bank_dx, v.bank_dy, v.start_roll_angle, v.crash_piece);
+	FIELDS(ar, v.has_path, v.spline);  // version 16: the missile's B-spline (Ammo::ammo_path)
 }
 
 template <class Ar> void walk(Ar& ar, DeathObj& v) {
@@ -375,7 +386,7 @@ static_assert(sizeof(GoodObj) == 16, "GoodObj changed: update its walk() in save
 static_assert(sizeof(Game::Supply) == 6, "Game::Supply changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Game::RevealPoint) == 12, "Game::RevealPoint changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Army) == 152, "Army changed: update its walk() in save_walk.inc");
-static_assert(sizeof(Ammo) == 104, "Ammo changed: update its walk() in save_walk.inc");
+static_assert(sizeof(Ammo) == 104 + 8 + sizeof(Spline), "Ammo changed: update its walk() in save_walk.inc");
 static_assert(sizeof(DeathObj) == 76, "DeathObj changed: update its walk() in save_walk.inc");
 static_assert(sizeof(Group) == 2504, "Group changed: update its walk() in save_walk.inc");
 static_assert(sizeof(FormData) == 3688, "FormData changed: update its walk() in save_walk.inc");

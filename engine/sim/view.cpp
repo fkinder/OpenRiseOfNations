@@ -183,6 +183,10 @@ GameView make_view(const Game& g, bool with_guys) {
 		p.o = a.o;
 		if (p.stuck || a.total_time == 0) {
 			p.x = a.ex, p.y = a.ey, p.z = a.ez;
+		} else if (a.has_path && a.cur_time < a.spline.verts.size()) {
+			// A missile ammo flies its B-spline, one point per frame (Ammo::inc_time).
+			const Vec3f& v = a.spline.verts[a.cur_time];
+			p.x = int32_t(v.x), p.y = int32_t(v.y), p.z = int32_t(v.z);
 		} else {
 			// The ballistic arc of Ammo::inc_time (presentation only; the sim tracks just the endpoints).
 			const float t = float(a.cur_time), k = t / float(a.total_time);

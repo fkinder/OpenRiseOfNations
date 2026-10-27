@@ -308,6 +308,8 @@ const ClassMap& map_order(int order_type);  // the walked fields of one order cl
 const ClassMap& map_leader();          // LeaderData (0x6eec)
 const ClassMap& map_site();            // Leader.sites[i]
 const ClassMap& map_make_object();     // Leader.make_list[i]
+const ClassMap& map_spline();          // SplineData of a missile ammo (Seg::a = the ammo slot)
+const ClassMap& map_spline_vec();      // one Vector<float> of its arrays (Seg{ammo, 0 control | 1 verts | 2 normals, index})
 const ClassMap& map_ammo();            // AmmoData
 const ClassMap& map_death();           // DeathObjData
 const ClassMap& map_leader_encrypt();  // LeaderDataEncrypt (the 62 plain u32 locals of an active leader)
@@ -344,6 +346,10 @@ const ClassMap& map_ai_off();
 const ClassMap& map_armies_find_dist();
 const ClassMap& map_queue_fail();
 const ClassMap& map_game_daemon();
+const ClassMap& map_scen_last_razed();       // ScenarioData statics the engine models (original_map_state.cpp)
+const ClassMap& map_scen_units_killed();
+const ClassMap& map_scen_builds_destroyed();
+const ClassMap& map_scen_city_lost_to();
 const ClassMap& map_constants();
 const ClassMap& map_leader_options();
 

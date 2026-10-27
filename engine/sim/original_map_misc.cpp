@@ -453,10 +453,99 @@ const ClassMap& map_ammo() {
 		b.f("index", &Ammo::index).f("graph_index", &Ammo::graph_index).f("who", &Ammo::who).f("o", &Ammo::o).f("num_guys", &Ammo::num_guys);
 		b.f("whom", &Ammo::whom).f("ox", &Ammo::ox).f("traj", &Ammo::traj).f("v1z", &Ammo::v1z).f("dx", &Ammo::dx);
 		b.f("bank_dx", &Ammo::bank_dx).f("bank_dy", &Ammo::bank_dy).f("start_roll_angle", &Ammo::start_roll_angle);
+		// ammo_path (+0x68): the has_path byte the writer stores and the SplineData it points to (a missile's B-spline).
+		const dw::Description& dd = dw::Description::get();
+		static const int step_path = dd.find_step(dd.find_function("AmmoData::walk_data"), dw::StepKind::Deref);
+		b.locals([](const Game& g, const Seg& s, const char* name, int, int64_t& v) {
+			if (std::strcmp(name, "has_path") != 0 || size_t(s.a) >= g.ammo.size()) return false;
+			v = g.ammo[size_t(s.a)].has_path ? 1 : 0;
+			return true;
+		});
+		b.children([](const Game&, const Seg& s, int step, int64_t, int64_t, ChildSpec& c) {
+			if (step != step_path) return false;
+			c.map = &map_spline();
+			c.id = Seg{s.a, 0, 0};
+			return true;
+		});
 		// A slot that is not in use (flags & 3 == 0) walks only its flags byte.
 		m.audited = [](const Game& g, const Seg& s, const Entry& e) {
 			return e.off < 5 || (size_t(s.a) < g.ammo.size() && g.ammo[size_t(s.a)].in_use());
 		};
+		m.finish();
+		return m;
+	}();
+	return m;
+}
+
+// SplineData (the walked part: +0x40 .. +0x64 and the six containers) of the ammo whose index is Seg::a.
+const ClassMap& map_spline() {
+	static const ClassMap m = [] {
+		ClassMap m;
+		Builder<Spline> b(m, "Spline", "SplineData");
+		b.walks({"SplineData::walk_data"}).resolve([](Game& g, const Seg& s) -> Spline* {
+			return size_t(s.a) < g.ammo.size() && g.ammo[size_t(s.a)].has_path ? &g.ammo[size_t(s.a)].spline : nullptr;
+		});
+		b.f("type", &Spline::type).fu("flags", &Spline::flags).f("max_control_depth_ratio", &Spline::max_control_depth_ratio);
+		b.f("total_spline_length", &Spline::total_length).f("last_knot", &Spline::last_knot).f("curr_dist", &Spline::curr_dist);
+		b.f("next_search_dist", &Spline::next_search_dist).f("search_scan", &Spline::search_scan).fu("degree", &Spline::degree).fu("depth", &Spline::depth);
+		const dw::Description& d = dw::Description::get();
+		static const int step_vec = d.find_step(d.find_function("Array<Vector<float>_>::walk_data"), dw::StepKind::Container);
+		static const int step_sf = d.find_step(d.find_function("SimpleArray<float>::walk_data"), dw::StepKind::Container);
+		b.arrays([](const Game& g, const Seg& s, int step, int64_t base, ArraySpec& spec) {
+			if (size_t(s.a) >= g.ammo.size() || !g.ammo[size_t(s.a)].has_path) return false;
+			const Spline& sp = g.ammo[size_t(s.a)].spline;
+			if (step == step_vec && (base == 0x64 || base == 0xd4 || base == 0xf0)) {
+				const int32_t which = base == 0x64 ? 0 : base == 0xd4 ? 1 : 2;
+				const std::vector<Vec3f>& v = which == 0 ? sp.control : which == 1 ? sp.verts : sp.normals;
+				spec.count = int32_t(v.size());
+				spec.fixed_size = which == 0 ? sp.control_size : which == 1 ? sp.verts_size : sp.normals_size;
+				spec.child = &map_spline_vec();
+				const int32_t a = s.a;
+				spec.child_id = [a, which](int32_t i) { return Seg{a, which, i}; };
+				return true;
+			}
+			if (step == step_sf && (base == 0x80 || base == 0x9c || base == 0xb8)) {
+				const std::vector<float>& v = base == 0x80 ? sp.knots : base == 0x9c ? sp.weights : sp.spline_knots;
+				spec.count = int32_t(v.size());
+				spec.fixed_size = base == 0x80 ? sp.knots_size : base == 0x9c ? sp.weights_size : sp.spline_knots_size;
+				spec.simple = true;
+				const std::vector<float>* vp = &v;
+				spec.block = [vp](std::vector<uint8_t>& out) {
+					out.resize(vp->size() * 4);
+					for (size_t i = 0; i < vp->size(); ++i) scalar_emit((*vp)[i], out.data() + 4 * i, 4);
+				};
+				return true;
+			}
+			return false;
+		});
+		m.finish();
+		return m;
+	}();
+	return m;
+}
+
+// One Vector<float> (12 bytes) of a spline: Seg{ammo, 0 control | 1 verts | 2 normals, index}.
+const ClassMap& map_spline_vec() {
+	static const ClassMap m = [] {
+		ClassMap m;
+		Builder<Vec3f> b(m, "Vec3f", "");
+		b.walks({}).resolve([](Game& g, const Seg& s) -> Vec3f* {
+			if (size_t(s.a) >= g.ammo.size() || !g.ammo[size_t(s.a)].has_path) return nullptr;
+			Spline& sp = g.ammo[size_t(s.a)].spline;
+			std::vector<Vec3f>& v = s.b == 0 ? sp.control : s.b == 1 ? sp.verts : sp.normals;
+			return size_t(s.c) < v.size() ? &v[size_t(s.c)] : nullptr;
+		});
+		b.raw(0, 12, "xyz",
+		      [](Vec3f& v, const uint8_t* p) {
+			      scalar_load(v.x, p, 4, true);
+			      scalar_load(v.y, p + 4, 4, true);
+			      scalar_load(v.z, p + 8, 4, true);
+		      },
+		      [](const Vec3f& v, uint8_t* p) {
+			      scalar_emit(v.x, p, 4);
+			      scalar_emit(v.y, p + 4, 4);
+			      scalar_emit(v.z, p + 8, 4);
+		      });
 		m.finish();
 		return m;
 	}();

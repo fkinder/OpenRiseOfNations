@@ -141,6 +141,34 @@ const ClassMap& map_game_daemon() {
 	return m;
 }
 
+// ScenarioData statics (each is its own global of the walk, ScenarioData::walk_data @997ad0). The members the engine models are
+// loaded from the save and emitted back, so a change the simulation makes (last_razed, the kill tallies) reaches the hashed
+// `scenario_data` part; the others stay in the shadow.
+const ClassMap& map_scen_last_razed() {
+	static const ClassMap m = scalar_global("ScenarioData::last_razed", 0, 32, [](Game& g, const uint8_t* p) { arr_load(g.scen.last_razed, p, 4); },
+	                                        [](const Game& g, uint8_t* p) { arr_emit(g.scen.last_razed, p, 4); });
+	return m;
+}
+const ClassMap& map_scen_units_killed() {  // units_killed[8][352] i16
+	static const ClassMap m = scalar_global(
+	    "ScenarioData::units_killed", 0, 8 * 0x2c0,
+	    [](Game& g, const uint8_t* p) { for (size_t k = 0; k < 8; ++k) arr_load(g.scen.units_killed[k], p + k * 0x2c0, 2); },
+	    [](const Game& g, uint8_t* p) { for (size_t k = 0; k < 8; ++k) arr_emit(g.scen.units_killed[k], p + k * 0x2c0, 2); });
+	return m;
+}
+const ClassMap& map_scen_builds_destroyed() {  // builds_destroyed[8][129] i16
+	static const ClassMap m = scalar_global(
+	    "ScenarioData::builds_destroyed", 0, 8 * 0x102,
+	    [](Game& g, const uint8_t* p) { for (size_t k = 0; k < 8; ++k) arr_load(g.scen.builds_destroyed[k], p + k * 0x102, 2); },
+	    [](const Game& g, uint8_t* p) { for (size_t k = 0; k < 8; ++k) arr_emit(g.scen.builds_destroyed[k], p + k * 0x102, 2); });
+	return m;
+}
+const ClassMap& map_scen_city_lost_to() {
+	static const ClassMap m = scalar_global("ScenarioData::city_lost_to", 0, 16, [](Game& g, const uint8_t* p) { arr_load(g.scen.city_lost_to, p, 2); },
+	                                        [](const Game& g, uint8_t* p) { arr_emit(g.scen.city_lost_to, p, 2); });
+	return m;
+}
+
 // Constants [0, 0xd40) and [0x804, 0x808): the engine's rules constants (an int32 table indexed by offset).
 const ClassMap& map_constants() {
 	static const ClassMap m = [] {
@@ -195,7 +223,7 @@ std::vector<const ClassMap*> all_maps() {
 	        &map_leader_encrypt(), &map_site(), &map_make_object(), &map_good(), &map_item(), &map_city(), &map_caravan_link(), &map_fort(), &map_dock(), &map_wonder(),
 	        &map_supply(), &map_caravan(), &map_caravan_road(), &map_army(), &map_group(), &map_groups_global(), &map_ammo(), &map_death(), &map_region(), &map_wcoord(),
 	        &map_regions_global(), &map_game_random(), &map_ai_speed(), &map_ai_off(), &map_armies_find_dist(), &map_queue_fail(), &map_game_daemon(),
-	        &map_constants(), &map_leader_options(), &map_order(1), &map_order(6), &map_order(7), &map_order(10), &map_order(11), &map_order(12), &map_order(14),
+	        &map_scen_last_razed(), &map_scen_units_killed(), &map_scen_builds_destroyed(), &map_scen_city_lost_to(), &map_constants(), &map_leader_options(), &map_order(1), &map_order(6), &map_order(7), &map_order(10), &map_order(11), &map_order(12), &map_order(14),
 	        &map_order(15), &map_order(16), &map_order(17), &map_order(18), &map_order(19), &map_order(20), &map_order(22), &map_order(23), &map_order(24),
 	        &map_order(25), &map_order(26), &map_order(27)};
 }

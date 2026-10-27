@@ -528,6 +528,8 @@ public:
 	// fired directly by fight; see combat.cpp init_combat_data).
 	std::vector<Ammo> ammo;
 	int32_t ammo_counter = 0;
+	// Recycler<Spline>::temp_pool: the Spline objects of closed missile ammo (LIFO); their array allocations survive (sim/spline.hpp).
+	std::vector<Spline> spline_pool;
 	std::array<DeathObj, 100> deaths{};
 	std::vector<int32_t> fire_proj;
 	// The temporary ptype.max_range swap of do_attack / cavarch_fight for MELEE_AND_RANGED types (the original

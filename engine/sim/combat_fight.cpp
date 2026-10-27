@@ -250,14 +250,31 @@ bool ammo_check_hit(Game& g, Ammo& a, int32_t domain) {
 	return false;
 }
 
-void ammo_close(Ammo& a) { a.flags = 0; }  // Ammo::close @6791a0 (the graphics side is presentation)
+// Recycler<Spline>::pop / push (@478360 / @478310): the pool is LIFO, the arrays of a returned Spline keep their allocation.
+Spline spline_pop(Game& g) {
+	if (g.spline_pool.empty()) return Spline();
+	Spline s = std::move(g.spline_pool.back());
+	g.spline_pool.pop_back();
+	return s;
+}
+void spline_release(Game& g, Ammo& a) {
+	if (!a.has_path) return;
+	spline_clear(a.spline);
+	g.spline_pool.push_back(std::move(a.spline));
+	a.spline = Spline();
+	a.has_path = false;
+}
+void ammo_close(Game& g, Ammo& a) {  // Ammo::close @6791a0 (the graphics side is presentation)
+	a.flags = 0;
+	spline_release(g, a);
+}
 
 void ammo_do_damage(Game& g, Ammo& a) {
 	// Ammo::do_damage @678060
 	if (!alive_at(g, a.ox, a.whom)) a.whom = a.ox = -1;
 	Object* sh = a.who >= 0 && a.o >= 0 ? g.object(a.who, a.o) : nullptr;
 	if (!sh) {
-		ammo_close(a);
+		ammo_close(g, a);
 		return;
 	}
 	const Object* orig = obj_at(g, a.ox, a.whom);
@@ -269,7 +286,7 @@ void ammo_do_damage(Game& g, Ammo& a) {
 		if (hit && t && t->alive() && !(a.ox == a.o && a.whom == a.who)) {
 			do_damage(g, *sh, a.ox, a.whom, find_angle(a.ex - a.sx, a.ey - a.sy), a.num_guys, a.index, 0x100, false,
 			          false);
-			ammo_close(a);
+			ammo_close(g, a);
 			return;
 		}
 		int32_t jx = a.ex + g.rng.get(0, 0xffff) % 41 - 20;  // @678ca7
@@ -284,14 +301,14 @@ void ammo_do_damage(Game& g, Ammo& a) {
 			a.cur_time = 0;
 			return;
 		}
-		ammo_close(a);
+		ammo_close(g, a);
 		return;
 	}
 	// ---- splash
 	if (has_objmask(*sh, objmask::kMissile)) {
 		// Cruise / nuclear missiles (combat-spec 4.11, docs/nukes-spec.md): missile defence, Nuke::add_nuke + Nuke::do_damage.
 		if (nuke_missile_impact(g, a, *sh)) {
-			ammo_close(a);
+			ammo_close(g, a);
 			return;
 		}
 	}
@@ -341,12 +358,13 @@ void ammo_do_damage(Game& g, Ammo& a) {
 			}
 		}
 	}
-	ammo_close(a);
+	ammo_close(g, a);
 }
 
 void ammo_init(Game& g, Ammo& a, const AmmoPackage& pkg, int32_t index, int32_t graph_index) {
 	// Ammo::init @67bbf0
 	a.flags &= 0xe3;
+	spline_release(g, a);  // a reused slot returns its old ammo_path to the pool first (@67bc4f)
 	a.who = pkg.who;
 	a.o = pkg.o;
 	a.whom = pkg.whom;
@@ -360,6 +378,9 @@ void ammo_init(Game& g, Ammo& a, const AmmoPackage& pkg, int32_t index, int32_t 
 	a.index = index;
 	a.graph_index = graph_index;
 	Unit* su = as_unit(sh);
+	// local_30 of the decompile: the AMMO piece is a MISSILE (flag 8) - the shot flies a B-spline (Spline::calc_from_dir). The branch reads the shooter's guy 0 (a unit).
+	static const bool old_spline = std::getenv("RON_OLD_SPLINE") != nullptr;  // developer aid: the pre-pass-20 plain flight time of a missile ammo (digest A/B runs)
+	const bool spline_shot = miss_gfx && su && !su->guys.empty() && !old_spline;
 	const Order* G = nullptr;
 	if (su && (su->order_type() == kAttackGround || su->order_type() == kAirAttackGround)) G = su->front();
 	Object* T = nullptr;
@@ -420,7 +441,7 @@ void ammo_init(Game& g, Ammo& a, const AmmoPackage& pkg, int32_t index, int32_t 
 			r = F;  // TODO(attack ground): g_exact gives 0
 		} else if (T->is_unit && T->ptype->domain == kDomainGround) {
 			r = F;
-			a.flags |= ammobits::kVerify;
+			if (old_spline || !miss_gfx) a.flags |= ammobits::kVerify;  // @67c5c5: `local_30 == 0` (the AMMO piece is not a MISSILE)
 			zb = !miss_gfx;
 		} else {
 			r = 192;
@@ -472,9 +493,26 @@ void ammo_init(Game& g, Ammo& a, const AmmoPackage& pkg, int32_t index, int32_t 
 	// ---- flight time
 	const int32_t U = ums(g);
 	uint32_t total;
-	if (miss_gfx) {
-		// TODO(combat-spec 4.18.1): rockets, torpedoes and missiles fly a Spline (Spline::calc_from_dir); they are
-		// given the plain unit flight time here (a known deviation).
+	if (spline_shot) {
+		// Ammo::init @67cb1f - @67cdd4 (the `local_30 != 0` side): rockets, torpedoes and missile artillery fly a degree-2 B-spline through the start, a control
+		// point `magnitude` ahead of the shooter (rotated by guy 0's pitch and heading) and the impact point; one spline point per frame, total_time = the
+		// number of points (depth = polyline length / min segment, clamped to 4 x the control points).
+		const Guy& g0 = su->guys[0];
+		a.angle = g0.angle;
+		const bool missile_shooter = has_objmask(*sh, objmask::kMissile);
+		const int32_t magnitude = missile_shooter ? 0x480 : U * sh->ptype->proj_speed * 5;
+		const int32_t min_seg = missile_shooter ? unit_speed(g, *su) : U * sh->ptype->proj_speed;
+		const Vec3f start{float(a.sx), float(a.sy), float(a.sz)};
+		const Vec3f mid = spline_launch_control(start, float(magnitude), g0.pitch, fast_angle_to_degrees_f(int32_t(a.angle)));
+		const Vec3f end{float(a.ex), float(a.ey), float(a.ez)};
+		a.spline = spline_pop(g);
+		a.has_path = true;
+		a.spline.flags = 0x10;
+		spline_calc_from_dir(a.spline, float(min_seg), start, mid, end, Vec3f());
+		total = uint32_t(a.spline.verts.size());
+		spline = true;
+	} else if (miss_gfx) {
+		// A missile ammo fired by a building: the plain unit flight time (the original reads a unit's guy array unconditionally).
 		const float D = std::sqrt(float((a.ex - a.sx) * (a.ex - a.sx) + (a.ey - a.sy) * (a.ey - a.sy)));
 		const int32_t sp = std::max(1, sh->ptype->proj_speed * U);
 		total = uint32_t(ftoi(D / float(sp)));
@@ -517,6 +555,44 @@ void ammo_init(Game& g, Ammo& a, const AmmoPackage& pkg, int32_t index, int32_t 
 	a.bank_dx = a.bank_dy = 0.0f;
 }
 
+// Ammo::inc_time @67d380, the ammo_path branch (@67d3e6 - @67d8c7): the missile follows its spline, one point per frame, and homes in on its target.
+// Returns true when the point has reached the target (the impact is now: total_time := cur_time - 1 and the loop runs once more), false when there is
+// nothing more to do this frame. Every fourth frame (cur_time % 4 == 0, not 0) a point that is still far from a UNIT target builds a new spline from here:
+// start = the (truncated) current point, control = twice the way to the next point, end = the target's position, minimum segment 200 * unit_move_speed.
+bool spline_step(Game& g, Ammo& a) {
+	if (a.ox < 0 || a.whom < 0) return false;
+	Object* T = obj_at(g, a.ox, a.whom);
+	if (!T || !T->alive()) return false;
+	if (a.spline.verts.size() <= size_t(a.cur_time) + 1) return false;
+	const Vec3f p = a.spline.verts[a.cur_time];
+	const int32_t ix = ftoi(p.x), iy = ftoi(p.y), iz = ftoi(p.z);
+	const int32_t tz = T->is_unit ? (static_cast<Unit*>(T)->guys.empty() ? T->z : static_cast<Unit*>(T)->guys[0].z) : T->z;
+	const int32_t thr = T->is_unit ? T->ptype->target_size : 0xc0;
+	const int32_t dist = vector_dist(iabs(ix - T->x), iabs(iy - T->y));
+	if (dist < thr && iabs(iz - tz) < 0xc0) {
+		a.ey = iy;
+		a.ex = ix;
+		a.ez = iz;
+		a.total_time = a.cur_time - 1;
+		return true;
+	}
+	if (a.cur_time == 0 || (a.cur_time & 3) != 0 || !T->is_unit) return false;
+	const Vec3f start{float(ix), float(iy), float(iz)};
+	a.ex = T->x;
+	a.ey = T->y;
+	a.ez = tz;
+	const Vec3f end{float(T->x), float(T->y), float(tz)};
+	const Vec3f& nx = a.spline.verts[a.cur_time + 1];
+	Vec3f mid;
+	mid.z = (nx.z - start.z) * 2.0f + start.z;
+	mid.x = (nx.x - start.x) * 2.0f + start.x;
+	mid.y = (nx.y - start.y) * 2.0f + start.y;
+	spline_calc_from_dir(a.spline, float(ums(g) * 200), start, mid, end, Vec3f());
+	a.total_time = uint32_t(a.spline.verts.size());
+	a.cur_time = 0;
+	return false;
+}
+
 void ammo_inc_time(Game& g, Ammo& a) {
 	// Ammo::inc_time @67d380
 	for (int guard = 0; guard < 4; guard++) {
@@ -524,11 +600,15 @@ void ammo_inc_time(Game& g, Ammo& a) {
 		if (Object* sh = (a.o >= 0 && a.who >= 0) ? g.object(a.who, a.o) : nullptr; sh && !sh->alive())
 			sh->hold_frames = uint16_t(sh->hold_frames + 1);
 		if (!(a.flags & ammobits::kFlying)) {
-			if (a.cur_time >= 200) ammo_close(a);
+			if (a.cur_time >= 200) ammo_close(g, a);
 			return;
 		}
 		if (a.cur_time < a.total_time) {
-			// (splines: TODO.) Real projectiles just fly; crash debris (Ammo::init_crash) drifts and tests the terrain.
+			// Crash debris (Ammo::init_crash) drifts and tests the terrain; a missile ammo follows its spline.
+			if (a.has_path) {
+				if (spline_step(g, a)) continue;
+				return;
+			}
 			if (a.traj != 1) return;
 			if (a.bank_dx != 0.0f || a.bank_dy != 0.0f) {
 				// The drift (@67d3e0): the impact point moves by the (truncated) bank every frame, and dx follows.
@@ -556,7 +636,7 @@ void ammo_inc_time(Game& g, Ammo& a) {
 		}
 		if (a.flags & ammobits::kMissed) {
 			if (a.cur_time > 3 * a.total_time) {
-				ammo_close(a);
+				ammo_close(g, a);
 				return;
 			}
 			const float t = itof(a.cur_time), k = t / itof(a.total_time);
@@ -564,7 +644,7 @@ void ammo_inc_time(Game& g, Ammo& a) {
 			const int32_t px = ftoi(float(a.ex - a.sx) * k + float(a.sx));
 			const int32_t py = ftoi(float(a.ey - a.sy) * k + float(a.sy));
 			if (!world_is_valid(g, px, py)) {
-				ammo_close(a);
+				ammo_close(g, a);
 				return;
 			}
 			const int32_t h = find_data_z(g, px, py, 0);
@@ -575,7 +655,7 @@ void ammo_inc_time(Game& g, Ammo& a) {
 			a.total_time = a.cur_time;
 		}
 		restrict_xy(g, &a.ex, &a.ey);
-		if (a.flags & ammobits::kNoDamage) ammo_close(a);
+		if (a.flags & ammobits::kNoDamage) ammo_close(g, a);
 		else ammo_do_damage(g, a);
 		return;
 	}
